@@ -926,14 +926,23 @@ pub(crate) fn session_concessions(session: &DraftSession) -> DraftSetConcessions
 /// other kind concedes nothing. Both `match`es are wildcard-free: a sixth
 /// `DraftKind`, or a third `DraftSource`, must state its answer.
 ///
-/// A set source names one set per booster. The concessions are per-set, and
-/// this returns a single set, so a draft whose boosters do NOT all share one
-/// set concedes nothing rather than granting pack 1's set to the whole event:
-/// the grants are set-specific cards, and extending one pack's to a booster
-/// that never contained them would permit a deck the rules do not. Conceding
-/// nothing only ever restricts. Unioning the grants of a genuinely mixed
-/// Commander draft needs `DraftSetConcessions` to carry more than one set and
-/// is deliberately out of scope here.
+/// A set source names one set per booster. The concessions are per-set and this
+/// returns a single set, so a draft whose boosters do NOT all share one set
+/// concedes nothing.
+///
+/// KNOWN GAP, deliberately conservative: CR 903.13e conditions the grant on
+/// what the draft CONTAINED ("If the draft contained draft boosters from
+/// Commander Legends or Commander Masters"), so a mixed CMM+CLB draft should
+/// concede BOTH The Prismatic Piper and Faceless One. Expressing that needs
+/// `DraftSetConcessions::filler` to hold more than one card — an engine-crate
+/// change to a published view field — so this returns `None` instead, which
+/// only ever restricts a deck rather than permitting one the rules do not.
+/// Granting pack 1's set to the whole event would be the permissive error and
+/// is refused. See `a_mixed_set_commander_draft_concedes_nothing` for the
+/// pinned behavior and the CR-correct target.
+///
+/// Unreachable today: `create_multiplayer_draft` is the only `CommanderDraft`
+/// entry point and always builds `DraftSource::single_set`.
 pub(crate) fn concession_set_code(session: &DraftSession) -> Option<&str> {
     match session.kind {
         DraftKind::CommanderDraft => match &session.config.source {
@@ -2896,6 +2905,52 @@ mod tests {
             session_concessions(&commander_draft_session("NEO")),
             DraftSetConcessions::default(),
             "CR 903.13e names no set outside its own list"
+        );
+    }
+
+    /// Multi-set sources, pinned on BOTH sides of the all-equal guard.
+    ///
+    /// A repeated granting code is still one set, so it concedes normally --
+    /// that half is the reach guard proving the guard reads set IDENTITY and
+    /// not sequence length, and it is the shape a multi-set selection produces
+    /// for an ordinary three-pack CMM draft.
+    ///
+    /// The mixed half pins a KNOWN GAP rather than the CR-correct answer.
+    /// CR 903.13e grants on what the draft CONTAINED, so a CMM+CLB draft should
+    /// concede The Prismatic Piper AND Faceless One; `DraftSetConcessions`
+    /// holds one filler, so the union cannot be expressed without an
+    /// engine-crate change. `None` is the restrictive error, chosen over
+    /// granting one pack's set-specific cards to boosters that never contained
+    /// them. Unreachable today -- `create_multiplayer_draft` always builds
+    /// `DraftSource::single_set` -- so this documents the boundary rather than
+    /// a live behavior. Widen `filler` to a collection and this assertion is
+    /// the one that must change.
+    #[test]
+    fn a_mixed_set_commander_draft_concedes_nothing() {
+        let mut repeated = commander_draft_session("CMM");
+        repeated.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "cmm".to_string(), "CMM".to_string()],
+        };
+        assert_eq!(
+            session_concessions(&repeated),
+            draft_set_concessions("CMM"),
+            "one set named three times is still one set, casing included"
+        );
+
+        let mut mixed = commander_draft_session("CMM");
+        mixed.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+        };
+        assert_eq!(
+            session_concessions(&mixed),
+            DraftSetConcessions::default(),
+            "KNOWN GAP: CR 903.13e would concede both sets' fillers; one-filler \
+             DraftSetConcessions cannot, so the restrictive answer is taken"
+        );
+        assert!(
+            draft_set_concessions("CLB").filler.is_some(),
+            "reach guard: CLB is itself a granting set, so the mixed result is \
+             the guard firing and not two non-granting codes"
         );
     }
 

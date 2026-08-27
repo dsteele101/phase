@@ -2339,4 +2339,63 @@ mod tests {
             8
         );
     }
+
+    /// CR 903.13b, per pack. `pack_pick_steps` is the per-pack counterpart of
+    /// the scalar above, and it exists because BOTH axes vary independently: a
+    /// multi-set draft's boosters differ in size, and the kind's procedure
+    /// decides how many cards one step takes.
+    ///
+    /// CommanderDraft is the discriminating kind. At two cards per step
+    /// (CR 903.13b), boosters of 20/14/16 cards are 10/7/8 steps — a triple
+    /// that no competing implementation reproduces:
+    ///   - publishing `pack_sizes` gives [20, 14, 16] (cards, not steps);
+    ///   - broadcasting the scalar `pick_steps_per_pack` gives [7, 7, 7]
+    ///     (the current pack's count, applied to every pack);
+    ///   - halving a session-wide `config.cards_per_pack` gives [7, 7, 7] too.
+    ///
+    /// Each of those reds here while passing every single-set fixture.
+    #[test]
+    fn the_published_per_pack_step_counts_track_each_boosters_own_size() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        session.config.pack_count = 3;
+        // A multi-set Commander draft: three boosters, three sizes.
+        session.pack_sizes = vec![20, 14, 16];
+
+        let player = filter_for_player(&session, 0);
+        assert_eq!(
+            player.pack_pick_steps,
+            vec![10, 7, 8],
+            "each booster is measured in its own pick steps, not its card count"
+        );
+        assert_eq!(
+            filter_for_spectator(&session, SpectatorVisibility::Public).pack_pick_steps,
+            vec![10, 7, 8],
+            "the spectator view publishes the same per-pack counts"
+        );
+
+        // The array and the scalar are one contract: the scalar is the entry
+        // for the booster in play, so a display reading either agrees.
+        for pack in 0..session.config.pack_count {
+            session.current_pack_number = pack;
+            let view = filter_for_player(&session, 0);
+            assert_eq!(
+                view.pick_steps_per_pack,
+                view.pack_pick_steps[usize::from(pack)],
+                "pack {pack}: the scalar must equal this pack's entry"
+            );
+        }
+
+        // Reach-guard for the CR 905.1a kinds: at one card per step the steps
+        // ARE the sizes, so the field still tracks per-pack shape rather than
+        // collapsing to a single number.
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::Premier;
+        assert_eq!(
+            filter_for_player(&session, 0).pack_pick_steps,
+            vec![20, 14, 16],
+            "one card per step means steps equal cards — still per pack"
+        );
+    }
 }
