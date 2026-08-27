@@ -730,22 +730,24 @@ pub(crate) fn restore_alternative_spell_normal_face(
     casting_variant: crate::types::game_state::CastingVariant,
 ) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
-        if let Some(normal_face) = obj.back_face.take() {
-            let mut alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
-            // CR 715.2a + CR 715.4: Restoring the creature face after an
-            // Adventure spell leaves the stack must retain the card's
-            // alternative-characteristics identity for later casts from exile.
-            alternative_snapshot.layout_kind = match casting_variant {
+        // #7565: the shared swap preserves the stored slot's layout_kind.
+        super::printed_cards::swap_object_faces(obj);
+        // CR 715.2a + CR 715.4 (#7714): restoring the creature face after an
+        // Adventure/Omen spell leaves the stack must retain the card's
+        // alternative-characteristics identity for later casts from exile —
+        // the cast's variant is authoritative over whatever the stored slot
+        // carried. Other variants keep the swap-preserved marker: forcing
+        // `None` here would erase a split/MDFC marker again (#7565).
+        if let Some(back) = obj.back_face.as_mut() {
+            match casting_variant {
                 crate::types::game_state::CastingVariant::Adventure => {
-                    Some(crate::types::card::LayoutKind::Adventure)
+                    back.layout_kind = Some(crate::types::card::LayoutKind::Adventure);
                 }
                 crate::types::game_state::CastingVariant::Omen => {
-                    Some(crate::types::card::LayoutKind::Omen)
+                    back.layout_kind = Some(crate::types::card::LayoutKind::Omen);
                 }
-                _ => None,
-            };
-            super::printed_cards::apply_back_face_to_object(obj, normal_face);
-            obj.back_face = Some(alternative_snapshot);
+                _ => {}
+            }
         }
     }
 }
@@ -5101,6 +5103,7 @@ mod tests {
         let mut card_types = crate::types::card_type::CardType::default();
         card_types.core_types.push(core_type);
         BackFaceData {
+            is_swap_snapshot: false,
             name: name.to_string(),
             power: None,
             toughness: None,
@@ -6483,6 +6486,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(2),
                     cast_transformed: false,
                     constraint: None,

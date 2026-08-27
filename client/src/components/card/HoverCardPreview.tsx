@@ -3,12 +3,20 @@ import { useEffect, useState } from "react";
 import { useShiftHeld } from "../../hooks/useShiftHeld.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { CardPreview, type CardHoverInfo } from "./CardPreview.tsx";
+import {
+  CardPreview,
+  type CardHoverInfo,
+  type CardPreviewDockPosition,
+} from "./CardPreview.tsx";
 
 interface HoverCardPreviewProps {
   card: CardHoverInfo | null;
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
+  /** Keep this surface's desktop preview at the side, independent of the
+   * global game-board hover preference. */
+  forceDockSide?: boolean;
+  dockPosition?: CardPreviewDockPosition;
 }
 
 /**
@@ -19,6 +27,8 @@ export function HoverCardPreview({
   card,
   onDismiss,
   mobileLayout,
+  forceDockSide = false,
+  dockPosition,
 }: HoverCardPreviewProps) {
   const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs);
@@ -50,12 +60,35 @@ export function HoverCardPreview({
 
   const previewCard = cardPreviewMode === "shift" && !shiftHeld ? null : visibleCard;
 
+  useEffect(() => {
+    if (visibleCard == null || onDismiss == null || typeof window === "undefined") {
+      return undefined;
+    }
+
+    // Grid/list rows can be replaced while the pointer is over them, so React
+    // never receives their pointerleave. Clear the deck-builder-owned state on
+    // the next mouse move outside every registered hover source.
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse") return;
+      if (
+        event.target instanceof Element
+        && event.target.closest("[data-card-preview]") != null
+      ) return;
+      if (document.querySelector("[data-deck-card-hover]:hover") == null) {
+        onDismiss();
+      }
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    return () => window.removeEventListener("pointermove", handlePointerMove);
+  }, [onDismiss, visibleCard]);
+
   return (
     <CardPreview
       cardName={previewCard?.name ?? null}
       scryfallId={previewCard?.scryfallId}
       sourcePrinting={previewCard?.sourcePrinting}
-      dockSide={cardPreviewMode === "side"}
+      dockSide={forceDockSide || cardPreviewMode === "side"}
+      dockPosition={dockPosition}
       onDismiss={onDismiss}
       mobileLayout={mobileLayout}
     />

@@ -4701,6 +4701,7 @@ fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> 
             QuantityRef::ControlledByEachPlayer {
                 filter,
                 aggregate: AggregateFunction::Min,
+                relation: PlayerRelation::All,
             },
             Comparator::EQ,
             0,
@@ -12691,6 +12692,7 @@ mod tests {
                             QuantityRef::ControlledByEachPlayer {
                                 filter,
                                 aggregate: AggregateFunction::Min,
+                                relation: PlayerRelation::All,
                             },
                     },
                 comparator: Comparator::EQ,

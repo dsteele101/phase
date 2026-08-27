@@ -5199,6 +5199,7 @@ pub(crate) fn parse_controls_permanent_object<'a>(
             qty: QuantityRef::ControlledByEachPlayer {
                 filter: filter.clone(),
                 aggregate: AggregateFunction::Max,
+                relation: crate::types::ability::PlayerRelation::All,
             },
         };
         return Some((Comparator::GE, count, filter, remainder));

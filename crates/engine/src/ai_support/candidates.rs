@@ -5895,6 +5895,7 @@ mod tests {
         let mut card_types = crate::types::card_type::CardType::default();
         card_types.core_types.push(CoreType::Sorcery);
         crate::game::game_object::BackFaceData {
+            is_swap_snapshot: false,
             name: "Prepared Spell Face".to_string(),
             power: None,
             toughness: None,

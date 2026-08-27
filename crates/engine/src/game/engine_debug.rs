@@ -1641,6 +1641,7 @@ mod tests {
         let mut card_types = crate::types::card_type::CardType::default();
         card_types.core_types.push(CoreType::Sorcery);
         BackFaceData {
+            is_swap_snapshot: false,
             name: "Test Prepare Face".to_string(),
             power: None,
             toughness: None,

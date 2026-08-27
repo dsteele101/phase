@@ -8837,28 +8837,22 @@ fn apply_action(
             }
             if let Some(obj) = state.objects.get_mut(object_id) {
                 if back_face {
-                    // Swap to back face using existing primitives
-                    let back = obj.back_face.take().expect("dual-faced card has back face");
-                    let front_snapshot = super::printed_cards::snapshot_object_face(obj);
-                    super::printed_cards::apply_back_face_to_object(obj, back);
-                    obj.back_face = Some(front_snapshot);
+                    // Swap to back face — the shared swap preserves the stored
+                    // slot's layout_kind (#7565).
+                    super::printed_cards::swap_object_faces(obj);
                     // CR 712.8a (MDFC) / CR 709.3 (split): non-front face showing;
                     // `apply_zone_exit_cleanup` reverts when leaving the stack.
                     obj.modal_back_face = true;
-                } else {
-                    // Front face chosen — clear layout_kind so the intercept
-                    // won't re-fire on re-entry into handle_play_land / handle_cast_spell.
-                    if let Some(ref mut bf) = obj.back_face {
-                        bf.layout_kind = None;
-                    }
                 }
-                // After choosing either face, clear layout on the stashed other
-                // half so cast/play re-entry does not re-prompt.
-                if back_face {
-                    if let Some(ref mut bf) = obj.back_face {
-                        bf.layout_kind = None;
-                    }
-                }
+                // CR 601.2b (#7565): remember that THIS cast's face choice is
+                // made so the handle_play_land / handle_cast_spell re-entry
+                // does not re-prompt. A transient flag, NOT
+                // `back_face.layout_kind = None`: that erasure was permanent,
+                // so a recast from hand (Rescue, bounce) silently auto-picked
+                // the front face and every other layout_kind consumer went
+                // blind. Cleared on any zone change off the stack and on
+                // cancel.
+                obj.cast_face_committed = true;
             }
             // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
             // type. A land face is put onto the battlefield via the play-land
@@ -13865,10 +13859,14 @@ fn handle_play_land(
 
     // CR 712.12: MDFC land face selection
     if let Some(obj) = state.objects.get(&object_id) {
-        let is_modal = obj
-            .back_face
-            .as_ref()
-            .is_some_and(|bf| bf.layout_kind == Some(crate::types::card::LayoutKind::Modal));
+        // CR 712.12 + CR 601.2b (#7565): the face prompt is offered only while
+        // this cast's choice is still open — `cast_face_committed` suppresses
+        // the re-entry re-prompt (layout_kind itself stays untouched).
+        let is_modal = !obj.cast_face_committed
+            && obj
+                .back_face
+                .as_ref()
+                .is_some_and(|bf| bf.layout_kind == Some(crate::types::card::LayoutKind::Modal));
         let front_is_land = obj
             .card_types
             .core_types
@@ -13894,10 +13892,7 @@ fn handle_play_land(
         if is_modal && !front_is_land && back_is_land {
             // CR 712.12: Only back face is a land — auto-swap (player already chose "play as land")
             let obj = state.objects.get_mut(&object_id).unwrap();
-            let back = obj.back_face.take().expect("MDFC has back face");
-            let front_snapshot = super::printed_cards::snapshot_object_face(obj);
-            super::printed_cards::apply_back_face_to_object(obj, back);
-            obj.back_face = Some(front_snapshot);
+            super::printed_cards::swap_object_faces(obj);
             // CR 712.8a: Mark back-face so apply_zone_exit_cleanup reverts to front face
             // when this land leaves the battlefield. Do NOT set obj.transformed — MDFC
             // face selection is not transformation.
@@ -15883,6 +15878,7 @@ mod priority_principal_tests {
             .get_mut(&object_id)
             .unwrap()
             .back_face = Some(BackFaceData {
+            is_swap_snapshot: false,
             name: "Blow Off Steam".to_string(),
             power: None,
             toughness: None,

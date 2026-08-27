@@ -6275,6 +6275,7 @@ mod effect_driven_transformed_entry_tests {
             };
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "MDFC Back".to_string(),
                 power: None,
                 toughness: None,

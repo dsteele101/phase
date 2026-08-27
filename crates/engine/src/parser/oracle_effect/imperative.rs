@@ -2540,6 +2540,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Airbend { target, cost } => Effect::GrantCastingPermission {
             permission: crate::types::ability::CastingPermission::ExileWithAltCost {
                 cost,
+                // CR 118.9a: the airbend cost substitutes the mana cost.
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cast_transformed: false,
                 constraint: None,
                 // CR 611.2a: airbend grants cast permission to each exiled

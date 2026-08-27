@@ -51,6 +51,8 @@ fn attach_back_face(runner: &mut GameRunner, smithy: ObjectId) {
         casting_options: vec![],
         layout_kind: Some(LayoutKind::Transform),
         parse_warnings: vec![],
+        // A printed back face, not a swap snapshot (#7568 provenance).
+        is_swap_snapshot: false,
     });
 }
 

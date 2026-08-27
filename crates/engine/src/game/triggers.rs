@@ -30990,6 +30990,7 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "Ajani, Nacatl Avenger".to_string(),
                 power: None,
                 toughness: None,

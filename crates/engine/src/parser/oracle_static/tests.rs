@@ -5852,6 +5852,40 @@ fn ghalta_self_cost_reduction_is_active_from_command_zone() {
 }
 
 #[test]
+fn cavern_hoard_dragon_reduction_uses_greatest_opponent_artifact_count() {
+    let def = parse_static_line(
+        "This spell costs {X} less to cast, where X is the greatest number of artifacts an opponent controls.",
+    )
+    .expect("Cavern-Hoard Dragon cost reduction must parse");
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        dynamic_count:
+            Some(QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(filter),
+                aggregate: AggregateFunction::Max,
+                relation: PlayerRelation::Opponent,
+            }),
+        ..
+    } = def.mode
+    else {
+        panic!(
+            "expected opponent-scoped dynamic self-cost reduction, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(amount, ManaCost::generic(1));
+    assert_eq!(filter.type_filters, vec![TypeFilter::Artifact]);
+    assert_eq!(filter.controller, None);
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+#[test]
 fn self_cost_reduction_where_x_distinct_named_lands_uses_static_cost_seam() {
     let def = parse_static_line(
         "This spell costs {X} less to cast, where X is the number of differently named lands you control.",

@@ -54594,6 +54594,7 @@ fn assert_uneven_land_search_shape(
             qty: QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(lands),
                 aggregate: AggregateFunction::Max,
+                relation: PlayerRelation::All,
             },
         } if lands == &TypedFilter::land()
     ));

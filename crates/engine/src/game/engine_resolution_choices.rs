@@ -314,6 +314,7 @@ pub(crate) fn grant_search_found_permission_after_delivery(
     let mut ability = ResolvedAbility::new(
         Effect::GrantCastingPermission {
             permission: crate::types::ability::CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: grant.grantee,
                 frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -8458,6 +8459,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                     duration: Duration::Permanent,
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,

@@ -3785,6 +3785,7 @@ fn junk_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -3862,6 +3863,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         // no parse to have gone wrong.
         parse_warnings: vec![],
         layout_kind: None,
+        is_swap_snapshot: false,
     }
 }
 
