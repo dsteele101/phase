@@ -264,7 +264,6 @@ export interface InitOutput {
     readonly get_view: () => [number, number, number];
     readonly get_view_for_seat: (a: number) => [number, number, number];
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
-    readonly init_panic_hook: () => void;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly pool_filter_options: (a: number, b: number) => [number, number, number];
     readonly set_seat_connected: (a: number, b: number) => [number, number, number];
@@ -279,6 +278,7 @@ export interface InitOutput {
     readonly submit_pick_with_draft_effect_for_seat: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
+    readonly init_panic_hook: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

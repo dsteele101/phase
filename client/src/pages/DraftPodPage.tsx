@@ -32,6 +32,7 @@ import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
 import { StandingsTable } from "../components/draft/StandingsTable";
 import { COMMANDER_DRAFT_ENTRY, type DraftKind } from "../components/draft/draftKind";
+import { distinctJoined } from "../adapter/draft-adapter";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import {
@@ -47,11 +48,6 @@ import { useDraftPodStore } from "../stores/draftPodStore";
 
 type SetupMode = "choose" | "host" | "join";
 
-/**
- * Boosters a pod opens. Fixed by `create_multiplayer_draft`, which sets the
- * pack count from the draft kind rather than from the host's set choice.
- */
-const POD_PACK_COUNT = 3;
 
 function PodSetup() {
   const { t } = useTranslation("draft");
@@ -72,6 +68,17 @@ function PodSetup() {
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
   const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
+  const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
+  const refreshProcedure = useDraftPodStore((s) => s.refreshProcedure);
+
+  // The kind radios record intent (`setConfig`) but publish nothing, so the
+  // ENGINE's per-kind axes — booster count and seat floor — are re-read here
+  // whenever the selected kind changes. Without this the set selector would
+  // have no booster count to build a pack list against on the default entry,
+  // which reaches this page with no `?kind=` deep link to load one.
+  useEffect(() => {
+    void refreshProcedure();
+  }, [refreshProcedure, config.kind]);
   // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than a
   // blank line under the radios. Values are already-resolved strings because
   // `react-i18next.d.ts` types `t`'s key against the `en` catalog, so a `t(variable)`
@@ -338,17 +345,32 @@ function PodSetup() {
             <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
               {t("podSetup.setSelectorHint")}
             </div>
-            {/* Pods ship one pool to the host, so the selector runs in its
-                single-set mode — one click picks the set for every pack. */}
-            <SetSelector
-              singleSet
-              defaultPackCount={POD_PACK_COUNT}
-              onStartDraft={([pack]) => {
-                if (!pack) return;
-                setConfig({ setCode: pack.code });
-                void createPod();
-              }}
-            />
+            {/* A pod carries a pack-ordered SEQUENCE to the host, so the host
+                arranges one set per booster exactly as a local draft does.
+                `packsPerPlayer` is the ENGINE's per-kind booster count, so a
+                Sealed pod asks for six and a draft pod for three without this
+                page knowing either number; until it loads the list is locked
+                at zero rather than guessing one. Deliberately NOT
+                `fixedPackCount`: naming one set still fills every booster (a
+                short sequence repeats its last entry), so the old one-click
+                single-set pod survives alongside the arranged one. */}
+            {packsPerPlayer === null ? (
+              <div className="text-sm text-white/50">{t("podSetup.loadingPool")}</div>
+            ) : (
+              <SetSelector
+                defaultPackCount={packsPerPlayer}
+                startLabel={t("podSetup.createPod")}
+                onStartDraft={(packs) => {
+                  if (packs.length === 0) return;
+                  setConfig({
+                    packs,
+                    setCode: distinctJoined(packs.map((pack) => pack.code), "+"),
+                    setName: distinctJoined(packs.map((pack) => pack.name), " · "),
+                  });
+                  void createPod();
+                }}
+              />
+            )}
           </>
         ) : (
           <CubeSetupPanel

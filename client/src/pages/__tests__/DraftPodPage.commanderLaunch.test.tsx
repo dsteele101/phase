@@ -133,7 +133,7 @@ function payloadForSeats(seatOrder: number[]): DraftMatchDeckPayload {
 
 async function installCompletedPod(seatCount: number, localSeat = 0) {
   await useMultiplayerDraftStore.getState().hostDraft({
-    poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+    poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     kind: "CommanderDraft",
     podSize: seatCount,
     hostDisplayName: "Host",

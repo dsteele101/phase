@@ -318,7 +318,17 @@ pub enum ClientMessage {
     },
     CreateDraftWithSettings {
         display_name: String,
-        set_code: String,
+        /// The set filling each booster, in pack order — one entry per pack the
+        /// pod opens, duplicates allowed. Deserialized by the engine's own
+        /// [`draft_core::types::deserialize_set_codes`], so the single
+        /// `"set_code": "blb"` string a pre-multi-set client sends still
+        /// arrives as the one-element sequence it meant. The server resolves
+        /// this into `DraftSource::Set`; it never re-derives a per-pack set.
+        #[serde(
+            alias = "set_code",
+            deserialize_with = "draft_core::types::deserialize_set_codes"
+        )]
+        set_codes: Vec<String>,
         /// The string encoding of the draft kind. `DraftKind` carries no
         /// `#[serde(other)]`, no `#[serde(default)]` and no `Default`, so an
         /// unrecognized kind name fails deserialization of the WHOLE frame
@@ -2075,11 +2085,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_message_create_sealed_draft_with_settings_roundtrips() {
-        let msg = ClientMessage::CreateDraftWithSettings {
+    fn create_draft_frame(set_codes: Vec<String>) -> ClientMessage {
+        ClientMessage::CreateDraftWithSettings {
             display_name: "Alice".to_string(),
-            set_code: "MKM".to_string(),
+            set_codes,
             kind: draft_core::types::DraftKind::Sealed,
             public: true,
             password: Some("secret".to_string()),
@@ -2087,13 +2096,31 @@ mod tests {
             tournament_format: draft_core::types::TournamentFormat::Swiss,
             pod_policy: draft_core::types::PodPolicy::Competitive,
             pod_size: 8,
-        };
+        }
+    }
+
+    fn roundtripped_set_codes(msg: &ClientMessage) -> Vec<String> {
+        let json = serde_json::to_string(msg).unwrap();
+        parsed_set_codes(&json)
+    }
+
+    fn parsed_set_codes(json: &str) -> Vec<String> {
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateDraftWithSettings { set_codes, .. } => set_codes,
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_message_create_sealed_draft_with_settings_roundtrips() {
+        let msg = create_draft_frame(vec!["MKM".to_string()]);
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::CreateDraftWithSettings {
                 display_name,
-                set_code,
+                set_codes,
                 kind,
                 public,
                 password,
@@ -2102,7 +2129,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(display_name, "Alice");
-                assert_eq!(set_code, "MKM");
+                assert_eq!(set_codes, vec!["MKM".to_string()]);
                 assert_eq!(kind, draft_core::types::DraftKind::Sealed);
                 assert!(public);
                 assert_eq!(password, Some("secret".to_string()));
@@ -2111,6 +2138,61 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// The multi-set claim at the wire: a pod's ORDER is what the frame carries,
+    /// so a repeated set and a reordering must both survive the round trip.
+    /// Deduping or sorting here would silently rewrite which set fills which
+    /// booster.
+    #[test]
+    fn create_draft_frame_preserves_pack_order_and_repeats() {
+        let ordered = vec![
+            "ISD".to_string(),
+            "DKA".to_string(),
+            "ISD".to_string(),
+            "AVR".to_string(),
+        ];
+        assert_eq!(
+            roundtripped_set_codes(&create_draft_frame(ordered.clone())),
+            ordered
+        );
+
+        let reversed: Vec<String> = ordered.iter().rev().cloned().collect();
+        assert_ne!(
+            roundtripped_set_codes(&create_draft_frame(reversed.clone())),
+            ordered
+        );
+        assert_eq!(
+            roundtripped_set_codes(&create_draft_frame(reversed.clone())),
+            reversed
+        );
+    }
+
+    /// A client that predates multi-set pods sends the single `"set_code"`
+    /// string. It must arrive as the one-element sequence it always meant
+    /// rather than failing the whole frame — the same contract
+    /// `DraftSource`'s `code`/`codes` alias gives snapshots.
+    #[test]
+    fn create_draft_frame_accepts_the_legacy_single_set_code() {
+        let legacy = r#"{"type":"CreateDraftWithSettings","data":{
+            "display_name":"Alice","set_code":"MKM","kind":"Sealed","public":true,
+            "password":null,"timer_seconds":null,"tournament_format":"Swiss",
+            "pod_policy":"Competitive","pod_size":8}}"#;
+        assert_eq!(parsed_set_codes(legacy), vec!["MKM".to_string()]);
+    }
+
+    /// The frame SERIALIZES the sequence spelling. A new host must not emit the
+    /// legacy key, or a multi-set pod would reach an older server as a
+    /// single-set one.
+    #[test]
+    fn create_draft_frame_serializes_the_sequence_spelling() {
+        let json = serde_json::to_string(&create_draft_frame(vec![
+            "ISD".to_string(),
+            "DKA".to_string(),
+        ]))
+        .unwrap();
+        assert!(json.contains(r#""set_codes":["ISD","DKA"]"#), "{json}");
+        assert!(!json.contains(r#""set_code":"#), "{json}");
     }
 
     #[test]
@@ -2267,8 +2349,8 @@ mod tests {
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
-            grantable_commander_filler: None,
-            draft_set_code: None,
+            grantable_commander_fillers: Vec::new(),
+            draft_set_codes: Vec::new(),
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
@@ -2430,7 +2512,7 @@ mod tests {
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
-            grantable_commander_filler: None,
+            grantable_commander_fillers: Vec::new(),
             standings: Vec::new(),
             current_round: 0,
             tournament_format: TournamentFormat::Swiss,

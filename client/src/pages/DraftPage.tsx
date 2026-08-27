@@ -5,6 +5,7 @@ import { useNavigate, useSearchParams } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
 import type { DraftPackChoice } from "../stores/draftStore";
+import { setPackSequence } from "../adapter/draft-adapter";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
@@ -365,11 +366,7 @@ export function DraftPage() {
       // One pool per distinct set — a set drafted in several packs still
       // crosses the WASM boundary once. `sequence` (built in the store from
       // `packs`) is what repeats.
-      const pools = [...new Set(packs.map((pack) => pack.code))].map((code) => {
-        const pool = allPools[code.toLowerCase()] ?? allPools[code.toUpperCase()];
-        if (!pool) throw new Error(`No pool data for set: ${code}`);
-        return pool;
-      });
+      const { pools } = setPackSequence(packs, allPools);
 
       const selection = { packs, pools };
       if (setupMode === "sealed") {

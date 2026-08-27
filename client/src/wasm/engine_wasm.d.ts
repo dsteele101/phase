@@ -47,18 +47,24 @@ export function clear_replay_playback(): void;
  * frontend must not re-derive partner-pairing rules — it filters its candidate
  * list through this. Returns an empty array if the database isn't loaded.
  *
- * `draft_set_code` is the set code of the draft boosters this deck is being
- * built from, or `null` for constructed play. CR 903.13f(3) conditions its
- * partner grant on what the DRAFT contained, which is a session property no
- * pair of card names can express — so the caller supplies the set code and the
- * ENGINE maps it to a grant. The client never learns which sets grant what.
+ * `draft_set_codes` is every set whose draft boosters this deck's draft
+ * CONTAINED, as an array — or `null`/`undefined`, which is read as the empty
+ * array, i.e. constructed play. CR 903.13f(3)
+ * conditions its partner grant on what the DRAFT contained, which is a session
+ * property no pair of card names can express — so the caller supplies the set
+ * codes and the ENGINE maps them to a grant. The client never learns which
+ * sets grant what.
+ *
+ * A LIST rather than one code, because CR 903.13f(3) asks about containment: a
+ * mixed draft that opened Commander Masters and other boosters contained
+ * Commander Masters, and the grant is in force. The engine takes the union.
  *
  * It is a REQUIRED third parameter, and `JsValue` rather than
- * `Option<String>`, on purpose: that matches this file's existing convention
+ * `Vec<String>`, on purpose: that matches this file's existing convention
  * for engine-typed arguments and makes a stale caller a compile error rather
  * than a silent `undefined`.
  */
-export function commanderPartnerCandidates(first_commander: string, candidates: any, draft_set_code: any): any;
+export function commanderPartnerCandidates(first_commander: string, candidates: any, draft_set_codes: any): any;
 
 /**
  * Returns legal Commander-family companion candidates from the main deck.
@@ -373,9 +379,8 @@ export function ping(): string;
  * `filter_state_for_viewer` snapshots (so any identity the viewer can't see is
  * already redacted), AND a transition is surfaced only when at least one
  * endpoint is a public zone (see `engine::game::preview`), so a fully-hidden
- * hand↔library draw is elided even for the acting player's opponents. Expected
- * engine rejections, including malformed action payloads, return a tagged
- * `{ status: "rejected", rejection }` outcome; runtime faults remain raw.
+ * hand↔library draw is elided even for the acting player's opponents. Returns
+ * an error string when `action` is malformed or illegal in the current state.
  */
 export function preview_action_js(actor: number, action: any): any;
 
@@ -384,8 +389,6 @@ export function preview_action_js(actor: number, action: any): any;
  * exact, currently legal `CastSpell` action and returns the permanent ids that
  * produced mana before that spell was committed to the stack. It returns an
  * empty array when the cast needs another choice before payment can be final.
- * Expected engine rejections return a tagged `{ status: "rejected",
- * rejection }` outcome.
  */
 export function preview_mana_payment_js(actor: number, action: any): any;
 
@@ -433,8 +436,6 @@ export function replay_seek_js(target: number): any;
  * count of items resolved. The Resolve All UI does not animate individual
  * events, so the WASM boundary intentionally returns empty event/log arrays
  * instead of serializing thousands of records for pathological stacks.
- * Expected engine rejections return a tagged `{ status: "rejected",
- * rejection }` outcome.
  */
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
@@ -533,8 +534,7 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * It must *never* come from UI or wire payload data. The engine rejects any
  * action whose `actor` does not match `authorized_submitter(state)`, so
  * passing a spoofed value here will fail cleanly rather than silently
- * applying the action as another player. Expected engine rejections return a
- * tagged `{ status: "rejected", rejection }` outcome.
+ * applying the action as another player.
  */
 export function submit_action(actor: number, action: any): any;
 
@@ -550,8 +550,7 @@ export function submit_ai_action_proposal(token: string, actor: number, action: 
 /**
  * Submit one opaque, engine-authored interaction response. The browser never
  * materializes a `GameAction`; only a successful engine reducer result exposes
- * the exact action to the replay recorder. Expected engine rejections return a
- * tagged `{ status: "rejected", rejection }` outcome.
+ * the exact action to the replay recorder.
  */
 export function submit_interaction_js(actor: number, submission: any): any;
 

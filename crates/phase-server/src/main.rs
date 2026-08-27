@@ -3898,18 +3898,25 @@ async fn draft_pack_generator_for_start(
     draft_pools: &SharedDraftPools,
     draft_code: &str,
 ) -> Result<draft_core::pack_generator::PackGenerator, String> {
-    let set_code = {
+    // The SOURCE, not `config.set_code`. `set_code` is the whole-source display
+    // label, which a multi-set pod joins into `"ISD+DKA+AVR"` — a string no pool
+    // map can key on. The per-pack sequence lives on `DraftSource::Set`, and it
+    // is what decides which set fills each booster.
+    let set_codes = {
         let mgr = draft_state.lock().await;
         let session = mgr
             .sessions
             .get(draft_code)
             .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
-        session.config.set_code.clone()
+        match &session.config.source {
+            draft_core::types::DraftSource::Set { codes } => codes.clone(),
+            draft_core::types::DraftSource::Cube { .. } => {
+                return Err("Server-hosted drafts require a set pool".to_string());
+            }
+        }
     };
 
-    draft_pools
-        .generator_for_set(&set_code)
-        .ok_or_else(|| format!("No draft pool data for set: {set_code}"))
+    draft_pools.generator_for_sequence(&set_codes)
 }
 
 /// Per-AI-result fan-out for a batch of `run_ai` results.
@@ -5777,9 +5784,9 @@ async fn handle_client_message(
                     return;
                 }
                 // Server-hosted constructed play has no draft behind it, so
-                // `None` is the accurate draft set code here, and it means
-                // constructed play — not a placeholder for a value this path
-                // could have supplied.
+                // the EMPTY set-code list is the accurate answer here, and it
+                // means constructed play — not a placeholder for a value this
+                // path could have supplied.
                 if let Err(reasons) = validate_name_deck_for_format_full(
                     db,
                     &deck.main_deck,
@@ -5789,7 +5796,7 @@ async fn handle_client_message(
                     &deck.planar_deck,
                     &deck.scheme_deck,
                     &deck.signature_spell,
-                    None,
+                    &[],
                     fc.format,
                     Some(match_config.match_type),
                     usize::from(pc),
@@ -5841,7 +5848,8 @@ async fn handle_client_message(
                         &ai_deck_data.planar_deck,
                         &ai_deck_data.scheme_deck,
                         &ai_deck_data.signature_spell,
-                        None,
+                        // Constructed play, as above: no draft, no concession.
+                        &[],
                         fc.format,
                         Some(match_config.match_type),
                         usize::from(pc),
@@ -7746,7 +7754,7 @@ async fn handle_client_message(
 
         ClientMessage::CreateDraftWithSettings {
             display_name,
-            set_code,
+            set_codes,
             kind,
             public,
             password,
@@ -7757,7 +7765,7 @@ async fn handle_client_message(
         } => {
             info!(
                 display_name = %display_name,
-                set_code = %set_code,
+                set_codes = ?set_codes,
                 kind = ?kind,
                 public,
                 pod_size,
@@ -7766,7 +7774,7 @@ async fn handle_client_message(
 
             if let Err(reason) = guard_create_draft_with_settings(
                 &display_name,
-                &set_code,
+                &set_codes,
                 &password,
                 timer_seconds,
                 pod_size,
@@ -7779,15 +7787,59 @@ async fn handle_client_message(
                 return;
             }
 
-            if !draft_pools.contains_set(&set_code) {
+            // Resolve the WHOLE sequence up front: a pod whose second pack
+            // names a set with no pool data must be refused at creation, not
+            // discovered when that booster fails to open mid-draft. The
+            // generator this proves out is rebuilt at StartDraft from the same
+            // source, so the two can never disagree.
+            //
+            // A sequence SHORTER than the kind's pack count repeats its last
+            // entry (`entry_for_pack`), which is how a single-set pod stays a
+            // one-element sequence; a LONGER one names boosters the event never
+            // opens, so it is the host's error rather than a silent truncation.
+            let procedure = kind.procedure();
+            if set_codes.len() > usize::from(procedure.packs_per_player) {
                 let msg = ServerMessage::DraftActionRejected {
-                    reason: format!("No draft pool data for set: {set_code}"),
+                    reason: format!(
+                        "{kind:?} opens {} packs, but {} sets were named",
+                        procedure.packs_per_player,
+                        set_codes.len()
+                    ),
                 };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
                 return;
             }
+            //
+            // Booster size follows pack 1's set, matching the single-player
+            // boundary (`ResolvedSetSelection`); per-pack sizes are recorded on
+            // the session from the packs the generator produces.
+            let resolved = draft_pools
+                .generator_for_sequence(&set_codes)
+                .and_then(|_| {
+                    let first = set_codes
+                        .first()
+                        .ok_or_else(|| "A pod must name at least one set".to_string())?;
+                    draft_pools
+                        .pool_for_set(first)
+                        .and_then(|pool| pool.cards_per_pack())
+                        .ok_or_else(|| {
+                            format!(
+                                "Set {first} has no single MTGJSON pack size across its booster variants"
+                            )
+                        })
+                });
+            let cards_per_pack = match resolved {
+                Ok(cards_per_pack) => cards_per_pack,
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
 
             // CR 903.13a: a Commander Draft pod plays one multiplayer game, not
             // a bracket, so the single-elimination seat requirement does not
@@ -7814,17 +7866,21 @@ async fn handle_client_message(
                 return;
             }
 
-            let procedure = kind.procedure();
+            let source = draft_core::types::DraftSource::Set { codes: set_codes };
+            // One label naming the whole source, deduped in first-appearance
+            // order by the engine ("ISD+DKA+AVR"). The lobby listing and the
+            // session share it, so a listing can never describe a pod the
+            // session does not.
+            let set_label = source.set_code();
             let config = draft_core::types::DraftConfig {
-                source: draft_core::types::DraftSource::single_set(set_code.clone()),
-                set_code: set_code.clone(),
+                set_code: set_label.clone(),
+                source,
                 kind,
                 pod_size,
-                // A SET-POOL property, not a `DraftProcedure` axis — the
-                // struct carries no pack-size field, so this is wrong for all
-                // five kinds equally rather than wrong for CommanderDraft. Not
-                // a missed kind-derived hardcode.
-                cards_per_pack: 14,
+                // A SET-POOL property, not a `DraftProcedure` axis, and now read
+                // off the pool itself rather than hardcoded to 14 — the pods
+                // this creates open boosters of the size MTGJSON declares.
+                cards_per_pack,
                 pack_count: procedure.packs_per_player,
                 min_deck_size: procedure.min_deck_size,
                 addable_cards: draft_core::types::DeckAddableCards::standard_basics(),
@@ -7888,7 +7944,7 @@ async fn handle_client_message(
                         room_name: None,
                         host_peer_id: String::new(),
                         draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
-                            set_code,
+                            set_code: set_label,
                             draft_kind: format!("{kind:?}"),
                             cube_name: None,
                         }),
@@ -9132,7 +9188,7 @@ mod single_elimination_seat_rule_tests {
 #[cfg(test)]
 mod full_create_guard_tests {
     use super::*;
-    use lobby_broker::validation::{MAX_DRAFT_SET_CODE_LEN, MAX_TOKEN_LEN};
+    use lobby_broker::validation::{MAX_DRAFT_SET_LABEL_LEN, MAX_TOKEN_LEN};
     use server_core::protocol::{AiSeatRequest, DeckData, DraftLobbyMetadata};
 
     fn deck() -> DeckData {
@@ -9194,7 +9250,7 @@ mod full_create_guard_tests {
     fn full_create_guard_rejects_oversized_draft_metadata() {
         let deck = deck();
         let draft = DraftLobbyMetadata {
-            set_code: "s".repeat(MAX_DRAFT_SET_CODE_LEN + 1),
+            set_code: "s".repeat(MAX_DRAFT_SET_LABEL_LEN + 1),
             draft_kind: "Premier".to_string(),
             cube_name: None,
         };
@@ -10052,7 +10108,7 @@ mod mode_gate_tests {
             },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_code: "TST".into(),
+                set_codes: vec!["TST".into()],
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,
@@ -10205,7 +10261,7 @@ mod mode_gate_tests {
             ClientMessage::Ping { timestamp: 0 },
             ClientMessage::CreateDraftWithSettings {
                 display_name: "A".into(),
-                set_code: "TST".into(),
+                set_codes: vec!["TST".into()],
                 kind: draft_core::types::DraftKind::Premier,
                 public: true,
                 password: None,

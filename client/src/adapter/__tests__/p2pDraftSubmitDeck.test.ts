@@ -30,7 +30,7 @@ function newHost(kind: "CommanderDraft" | "Premier" = "CommanderDraft") {
   return new P2PDraftHost(
     { id: "host" } as never,
     () => () => {},
-    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
     kind,
     4,
     "Host",
@@ -273,11 +273,11 @@ describe("P2P deck-submission channel", () => {
  */
 describe("P2PDraftHost.podCommanderDeckPayload", () => {
   /** Seat 0 is the human host; seats 1..3 are bots. */
-  function commanderPodView(seatCount: number, draftSetCode?: string) {
+  function commanderPodView(seatCount: number, draftSetCodes: string[] = []) {
     return {
       kind: "CommanderDraft",
       status: "Complete",
-      draft_set_code: draftSetCode ?? null,
+      draft_set_codes: draftSetCodes,
       seats: Array.from({ length: seatCount }, (_, i) => ({
         seat_index: i,
         is_bot: i !== 0,
@@ -372,25 +372,30 @@ describe("P2PDraftHost.podCommanderDeckPayload", () => {
   });
 
   /**
-   * U22. The draft's set code reaches the launch payload.
+   * U22. The draft's set codes reach the launch payload.
    *
    * CR 903.13f(3): a draft that contained Commander Masters boosters grants the
    * partner ability, for deckbuilding purposes, to any card that can be a
    * commander by itself whose color identity is one or fewer colors. The engine
-   * decides that from `DeckList.draft_set_code`, and this is the client hop
-   * that supplies it — read off the SAME view the assembler already builds the
-   * decks from (`draft-core/src/view.rs:302`, populated at `:569`).
+   * decides that from `DeckList.draft_set_codes`, and this is the client hop
+   * that supplies them — read off the SAME view the assembler already builds
+   * the decks from.
    *
-   * REVERT-PROBE: drop `draft_set_code: view.draft_set_code` from
-   * `podCommanderDeckPayload`'s return and `payload.draft_set_code` is
+   * The MIXED half is what makes the plural load-bearing: a CMM+CLB draft
+   * contained Commander Masters, so the grant is in force, and an assembler
+   * that forwarded one representative code would drop whichever set it did not
+   * pick. The engine takes the union; this hop must hand it every code.
+   *
+   * REVERT-PROBE: drop `draft_set_codes: view.draft_set_codes` from
+   * `podCommanderDeckPayload`'s return and `payload.draft_set_codes` is
    * `undefined` here.
    */
-  it("carries the view's draft set code into the launch payload", async () => {
+  it("carries the view's draft set codes into the launch payload", async () => {
     const host = newHost();
     asPrivate(host).adapter = launchAdapter();
 
     const payload = await host.podCommanderDeckPayload(
-      commanderPodView(4, "CMM"),
+      commanderPodView(4, ["CMM"]),
       0,
     );
 
@@ -399,10 +404,16 @@ describe("P2PDraftHost.podCommanderDeckPayload", () => {
     // absence rather than a dead harness.
     expect(payload.player.commander).toEqual(["Human Legend"]);
     // REVERT-FAILING: `undefined` at base.
-    expect(payload.draft_set_code).toBe("CMM");
+    expect(payload.draft_set_codes).toEqual(["CMM"]);
+
+    const mixed = await host.podCommanderDeckPayload(
+      commanderPodView(4, ["CMM", "CLB"]),
+      0,
+    );
+    expect(mixed.draft_set_codes).toEqual(["CMM", "CLB"]);
   });
 
-  it("leaves the launch payload's set code absent when the view carries none", async () => {
+  it("leaves the launch payload's set codes empty when the view carries none", async () => {
     const host = newHost();
     asPrivate(host).adapter = launchAdapter();
 
@@ -411,7 +422,7 @@ describe("P2PDraftHost.podCommanderDeckPayload", () => {
     expect(payload.player.commander).toEqual(["Human Legend"]);
     // Paired negative: the assembler forwards the view's value verbatim rather
     // than manufacturing a set code, so constructed-shaped views stay grantless.
-    expect(payload.draft_set_code ?? null).toBeNull();
+    expect(payload.draft_set_codes ?? []).toEqual([]);
   });
 
   it("propagates a draft-wasm refusal rather than shipping an unjudged deck", async () => {

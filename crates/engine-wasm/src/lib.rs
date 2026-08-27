@@ -25,7 +25,7 @@ use engine::game::preview::{
 };
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
-use engine::game::deck_validation::draft_set_concessions;
+use engine::game::deck_validation::draft_set_concessions_for;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -897,32 +897,41 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
 /// frontend must not re-derive partner-pairing rules — it filters its candidate
 /// list through this. Returns an empty array if the database isn't loaded.
 ///
-/// `draft_set_code` is the set code of the draft boosters this deck is being
-/// built from, or `null` for constructed play. CR 903.13f(3) conditions its
-/// partner grant on what the DRAFT contained, which is a session property no
-/// pair of card names can express — so the caller supplies the set code and the
-/// ENGINE maps it to a grant. The client never learns which sets grant what.
+/// `draft_set_codes` is every set whose draft boosters this deck's draft
+/// CONTAINED, as an array — or `null`/`undefined`, which is read as the empty
+/// array, i.e. constructed play. CR 903.13f(3)
+/// conditions its partner grant on what the DRAFT contained, which is a session
+/// property no pair of card names can express — so the caller supplies the set
+/// codes and the ENGINE maps them to a grant. The client never learns which
+/// sets grant what.
+///
+/// A LIST rather than one code, because CR 903.13f(3) asks about containment: a
+/// mixed draft that opened Commander Masters and other boosters contained
+/// Commander Masters, and the grant is in force. The engine takes the union.
 ///
 /// It is a REQUIRED third parameter, and `JsValue` rather than
-/// `Option<String>`, on purpose: that matches this file's existing convention
+/// `Vec<String>`, on purpose: that matches this file's existing convention
 /// for engine-typed arguments and makes a stale caller a compile error rather
 /// than a silent `undefined`.
 #[wasm_bindgen(js_name = commanderPartnerCandidates)]
 pub fn commander_partner_candidates(
     first_commander: String,
     candidates: JsValue,
-    draft_set_code: JsValue,
+    draft_set_codes: JsValue,
 ) -> Result<JsValue, JsValue> {
     let candidates: Vec<String> = serde_wasm_bindgen::from_value(candidates)
         .map_err(|e| JsValue::from_str(&format!("Invalid candidate list: {e}")))?;
-    let draft_set_code: Option<String> = serde_wasm_bindgen::from_value(draft_set_code)
-        .map_err(|e| JsValue::from_str(&format!("Invalid draft set code: {e}")))?;
-    // CR 903.13f(3): `None` means constructed play, which grants nothing.
-    let grant = draft_set_code
-        .as_deref()
-        .map(draft_set_concessions)
-        .unwrap_or_default()
-        .partner_grant;
+    // `Option`, not a bare `Vec`, so a caller with no draft behind the deck can
+    // say so as `null` rather than having to construct an empty array — and so
+    // a JS `undefined` degrades to constructed play instead of throwing. This
+    // boundary is an in-process call with one typed TS caller, so it does not
+    // need `deck_loading::deserialize_draft_set_codes`' legacy single-string
+    // arm: no stored or wire payload reaches it.
+    let draft_set_codes: Option<Vec<String>> = serde_wasm_bindgen::from_value(draft_set_codes)
+        .map_err(|e| JsValue::from_str(&format!("Invalid draft set codes: {e}")))?;
+    let draft_set_codes = draft_set_codes.unwrap_or_default();
+    // CR 903.13f(3): an empty list means constructed play, which grants nothing.
+    let grant = draft_set_concessions_for(draft_set_codes.iter().map(String::as_str)).partner_grant;
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
@@ -1296,7 +1305,7 @@ fn validate_deck_list_seats(
                 &deck.planar_deck,
                 &deck.scheme_deck,
                 &deck.signature_spell,
-                deck_list.draft_set_code.as_deref(),
+                &deck_list.draft_set_codes,
                 game_format,
                 match_type,
                 player_count,
@@ -1320,7 +1329,7 @@ fn validate_deck_list_seats(
                 &deck.planar_deck,
                 &deck.scheme_deck,
                 &deck.signature_spell,
-                deck_list.draft_set_code.as_deref(),
+                &deck_list.draft_set_codes,
                 game_format,
                 match_type,
                 player_count,
@@ -5945,24 +5954,24 @@ mod deck_list_seat_validation_tests {
     /// Three seats — `player`, `opponent` and one `ai_decks` entry — all
     /// carrying the SAME grant-dependent pair, so a seat the loop skips is a
     /// seat that reds.
-    fn three_seat_list(draft_set_code: Option<&str>) -> DeckList {
+    fn three_seat_list(draft_set_codes: &[&str]) -> DeckList {
         DeckList {
             player: grant_dependent_seat(),
             opponent: grant_dependent_seat(),
             ai_decks: vec![grant_dependent_seat()],
-            draft_set_code: draft_set_code.map(str::to_string),
+            draft_set_codes: draft_set_codes.iter().map(|c| (*c).to_string()).collect(),
             ..Default::default()
         }
     }
 
-    /// REVERT-PROBE for this row: pass `deck_list.draft_set_code.as_deref()` in
+    /// REVERT-PROBE for this row: pass `&deck_list.draft_set_codes` in
     /// the `player`/`opponent` loop of `validate_deck_list_seats` but leave the
-    /// `ai_decks` loop on `None` — the realistic partial-implementation defect.
+    /// `ai_decks` loop on `&[]` — the realistic partial-implementation defect.
     /// The first two seats are then accepted and `ai_decks[0]` is refused, so
     /// the returned value is `Some(["AI player 2 deck: Invalid partner
     /// pairing: …"])` instead of `None`.
     #[test]
-    fn every_seat_gets_the_draft_set_code_not_just_the_first_two() {
+    fn every_seat_gets_the_draft_set_codes_not_just_the_first_two() {
         let db = test_db();
 
         // NEGATIVE CONTROL FIRST, and it is the reach guard: without the set
@@ -5973,7 +5982,7 @@ mod deck_list_seat_validation_tests {
         // short-circuit-at-first-refusal shape.
         let refused = validate_deck_list_seats(
             &db,
-            &three_seat_list(None),
+            &three_seat_list(&[]),
             GameFormat::CommanderDraft,
             None,
             4,
@@ -5994,7 +6003,7 @@ mod deck_list_seat_validation_tests {
         assert_eq!(
             validate_deck_list_seats(
                 &db,
-                &three_seat_list(Some("CMM")),
+                &three_seat_list(&["CMM"]),
                 GameFormat::CommanderDraft,
                 None,
                 4,
@@ -6014,7 +6023,7 @@ mod deck_list_seat_validation_tests {
     fn a_fixed_deck_format_skips_seat_validation_entirely() {
         let db = test_db();
         assert_eq!(
-            validate_deck_list_seats(&db, &three_seat_list(None), GameFormat::Momir, None, 4),
+            validate_deck_list_seats(&db, &three_seat_list(&[]), GameFormat::Momir, None, 4),
             None,
         );
     }

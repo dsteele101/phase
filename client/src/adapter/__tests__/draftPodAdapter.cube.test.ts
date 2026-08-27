@@ -113,7 +113,7 @@ describe("DraftPodHostAdapter cube-mode initialize", () => {
 
   it("populates CARD_DB for a Set-pool Commander pod", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "CommanderDraft",
       podSize: 2,
       hostDisplayName: "Host",
@@ -134,7 +134,7 @@ describe("DraftPodHostAdapter cube-mode initialize", () => {
   // unconditional widening to all Set pools would turn it red.
   it("skips the CARD_DB fetch for Set pods", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 2,
       hostDisplayName: "Host",

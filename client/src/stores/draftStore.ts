@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import {
   DraftAdapter,
+  distinctJoined,
   type CubeDraftSettings,
   type DraftPlayerView,
   type SetPackSequence,
@@ -44,15 +45,6 @@ export interface DraftPackChoice {
 export interface DraftSetSelection {
   packs: DraftPackChoice[];
   pools: unknown[];
-}
-
-/**
- * Join the distinct entries of a pack sequence for display and persistence
- * metadata, in first-appearance order. Mirrors the engine's own source label
- * (`DraftSource::set_code`), which dedupes the same way.
- */
-function distinctJoined(values: string[], separator: string): string {
-  return [...new Set(values)].join(separator);
 }
 
 /** The WASM-boundary payload for a set selection. */

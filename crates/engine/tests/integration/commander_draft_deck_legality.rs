@@ -363,22 +363,26 @@ fn constructed_commander_keeps_its_own_axes() {
 // The rows below call `validate_name_deck_for_format_full` DIRECTLY, because
 // that — not `evaluate_deck_compatibility` — is the function `engine-wasm` and
 // `phase-server` call to decide whether the pod's game may begin, and before
-// U22 it hardcoded `draft_set_code: None` so the grant could never be in force
+// U22 it hardcoded `draft_set_codes: none` so the grant could never be in force
 // at game start. `request()` is not on this path at all: it builds a
 // `DeckCompatibilityRequest`, and this function takes twelve positional
 // parameters.
 
-/// The launch validator, with the draft set code the only value that varies.
+/// The launch validator, with the draft's contained set codes the only value
+/// that varies. Takes a slice because CR 903.13's conditions are about set
+/// CONTAINMENT: an empty slice is constructed play, one code is a single-set
+/// draft, and several are a mixed one.
 ///
 /// Parameter order mirrors the signature: db, main_deck, sideboard, commander,
-/// companion, planar_deck, scheme_deck, signature_spell, draft_set_code,
+/// companion, planar_deck, scheme_deck, signature_spell, draft_set_codes,
 /// selected_format, selected_match_type, player_count.
 fn launch_verdict(
     db: &CardDatabase,
     main_deck: &[String],
     commanders: &[String],
-    draft_set_code: Option<&str>,
+    draft_set_codes: &[&str],
 ) -> Result<(), Vec<String>> {
+    let draft_set_codes: Vec<String> = draft_set_codes.iter().map(|c| (*c).to_string()).collect();
     validate_name_deck_for_format_full(
         db,
         main_deck,
@@ -388,7 +392,7 @@ fn launch_verdict(
         &[],
         &[],
         &[],
-        draft_set_code,
+        &draft_set_codes,
         GameFormat::CommanderDraft,
         None,
         4,
@@ -422,7 +426,7 @@ fn paired_deck(a: &str, b: &str) -> Vec<String> {
 /// database is fully synthetic.
 ///
 /// REVERT-PROBE, and it must keep the test COMPILING: restore
-/// `draft_set_code: None` in the BODY of `validate_name_deck_for_format_full`
+/// `draft_set_codes: Vec::new()` in the BODY of `validate_name_deck_for_format_full`
 /// (`deck_validation.rs`) while KEEPING the new parameter. The grant is then
 /// empty in both directions and the accepted half below reds. (A revert that
 /// also removes the parameter is an `E0061` — a compile failure, which is
@@ -439,7 +443,7 @@ fn commander_masters_draft_set_code_grants_the_partner_ability_at_launch() {
     // partner rule" from "refused for deck size / colour identity / an
     // unresolvable name", and a fixture refused by an earlier gate would be
     // refused-then-accepted for reasons unrelated to the grant.
-    let reasons = launch_verdict(&db, &main, &pair, None)
+    let reasons = launch_verdict(&db, &main, &pair, &[])
         .expect_err("no grant: two ordinary legends do not pair (CR 702.124)");
     assert!(
         reasons.iter().any(|r| r.contains("partner")),
@@ -450,7 +454,7 @@ fn commander_masters_draft_set_code_grants_the_partner_ability_at_launch() {
     // Asserting `Ok(())` — i.e. ZERO reasons — rather than "no partner reason",
     // so the accepted half cannot pass while some other gate quietly fails.
     assert_eq!(
-        launch_verdict(&db, &main, &pair, Some("CMM")),
+        launch_verdict(&db, &main, &pair, &["CMM"]),
         Ok(()),
         "CR 903.13f(3): a CMM draft grants both mono-colour legends Partner"
     );
@@ -469,7 +473,7 @@ fn a_non_conceding_draft_set_code_grants_nothing() {
     let main = paired_deck(COMMANDER, "Unpairable Legend");
     let pair = vec![COMMANDER.to_string(), "Unpairable Legend".to_string()];
 
-    let reasons = launch_verdict(&db, &main, &pair, Some("NOT_A_SET"))
+    let reasons = launch_verdict(&db, &main, &pair, &["NOT_A_SET"])
         .expect_err("an unknown set code concedes nothing");
     assert!(
         reasons.iter().any(|r| r.contains("partner")),
@@ -477,9 +481,52 @@ fn a_non_conceding_draft_set_code_grants_nothing() {
     );
 
     // Fourth: the lookup is `eq_ignore_ascii_case`, and the client forwards
-    // `draft_set_code` verbatim off the view, so casing must not decide a
+    // `draft_set_codes` verbatim off the view, so casing must not decide a
     // rules question.
-    assert_eq!(launch_verdict(&db, &main, &pair, Some("cmm")), Ok(()));
+    assert_eq!(launch_verdict(&db, &main, &pair, &["cmm"]), Ok(()));
+}
+
+/// PF2 row 6, mixed-set half — CR 903.13f(3) conditions the grant on whether
+/// the draft CONTAINED Commander Masters boosters, not on whether it contained
+/// ONLY them. A draft that opened CMM and CLB boosters contained CMM, so the
+/// grant is in force at launch.
+///
+/// This is the launch-validator end of the concession union: the draft
+/// publishes every set it contained and this function takes the union over
+/// them. Collapsing the list to a single representative — or refusing to answer
+/// because the sets disagree — reds the second assertion, which is exactly the
+/// silent drop this row exists to catch.
+///
+/// Paired with a non-granting neighbour so "any second set at all" cannot pass:
+/// NEO concedes nothing, and CMM+NEO must still grant.
+#[test]
+fn a_mixed_draft_that_contained_commander_masters_still_grants_the_partner_ability() {
+    let db = test_db();
+    let main = paired_deck(COMMANDER, "Unpairable Legend");
+    let pair = vec![COMMANDER.to_string(), "Unpairable Legend".to_string()];
+
+    // Reach guard: neither companion set grants on its own, so an accepted
+    // pairing below can only have come from CMM's presence in the union.
+    for lone in [&["CLB"][..], &["NEO"][..]] {
+        let reasons = launch_verdict(&db, &main, &pair, lone)
+            .expect_err("CR 903.13f(3) names Commander Masters and nothing else");
+        assert!(
+            reasons.iter().any(|r| r.contains("partner")),
+            "expected the pairing reason, got {reasons:?}"
+        );
+    }
+
+    for mixed in [
+        &["CMM", "CLB"][..],
+        &["CLB", "CMM"][..],
+        &["CMM", "NEO"][..],
+    ] {
+        assert_eq!(
+            launch_verdict(&db, &main, &pair, mixed),
+            Ok(()),
+            "CR 903.13f(3): the draft contained CMM boosters, so the grant stands for {mixed:?}"
+        );
+    }
 }
 
 /// PF2 row 7 — hostile: the grant WIDENS the pairing rule, it does not disable
@@ -501,7 +548,7 @@ fn the_grant_does_not_legalise_a_two_colour_legend() {
     let main = paired_deck(COMMANDER, "Two Color Legend");
     let pair = vec![COMMANDER.to_string(), "Two Color Legend".to_string()];
 
-    let reasons = launch_verdict(&db, &main, &pair, Some("CMM"))
+    let reasons = launch_verdict(&db, &main, &pair, &["CMM"])
         .expect_err("CR 903.13f(3) bounds the grant at one or fewer colours");
     // Reach guard: it is refused BY THE PAIRING CHECK, not by deck size or by
     // an unresolvable name.

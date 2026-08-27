@@ -2,7 +2,7 @@ use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 use crate::pick_pass::required_pick_count;
-use crate::session::{concession_set_code, session_concessions};
+use crate::session::{concession_set_codes, session_concessions};
 use crate::types::*;
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
@@ -305,28 +305,37 @@ pub struct DraftPlayerView {
     pub min_deck_size: usize,
     /// Cards available in unlimited quantity during deck construction.
     pub addable_cards: Vec<String>,
-    /// CR 903.13e: the commander filler this draft's booster set grants, and
-    /// its cap. `None` when the set grants none.
+    /// CR 903.13e: every commander filler this draft's booster sets grant, and
+    /// each one's cap. EMPTY when no contained set grants one.
+    ///
+    /// Plural because CR 903.13e states its grants per contained set: a draft
+    /// that opened Commander Masters and Battle for Baldur's Gate boosters
+    /// satisfies both conditions and concedes both cards.
     ///
     /// Deliberately NOT folded into `addable_cards`, whose contract is
     /// *unlimited quantity* -- the exact property CR 903.13e denies. Engine-
-    /// derived: the client must never re-derive it from the set code.
-    /// Rendered by `PoolPanel` (the grant line) and by `LimitedDeckBuilder`
-    /// (the addable list); the cap and the CR 903.13e commander-condition stay
+    /// derived: the client must never re-derive it from the set codes.
+    /// Rendered by `PoolPanel` (the grant lines) and by `LimitedDeckBuilder`
+    /// (the addable list); the caps and the CR 903.13e commander-condition stay
     /// engine-enforced in `validate_limited_deck`.
-    pub grantable_commander_filler: Option<GrantableCommanderFiller>,
-    /// CR 903.13f(3): the set code this draft was latched to, as an OPAQUE
-    /// courier token for the engine functions that map a set code to a
-    /// deck-construction concession (`commanderPartnerCandidates`). `None` for
+    pub grantable_commander_fillers: Vec<GrantableCommanderFiller>,
+    /// CR 903.13f(3): every set this draft was latched to, as OPAQUE courier
+    /// tokens for the engine functions that map contained sets to a
+    /// deck-construction concession (`commanderPartnerCandidates`). EMPTY for
     /// a cube and for every kind outside CR 903.13's scope.
     ///
-    /// The display layer passes it back to the engine and NEVER interprets it:
-    /// which sets grant what is engine knowledge, tabled once in
-    /// `deck_validation::DRAFT_SET_CONCESSIONS`. In particular it must never be
-    /// reconstructed from a pool card's `set_code` -- the filler cards are
+    /// Plural for the same reason as `grantable_commander_fillers`: both rules
+    /// ask what the draft CONTAINED, and a mixed-set draft contained all of
+    /// them. Publishing one representative would silently drop the grants the
+    /// others make.
+    ///
+    /// The display layer passes them back to the engine and NEVER interprets
+    /// them: which sets grant what is engine knowledge, tabled once in
+    /// `deck_validation::DRAFT_SET_CONCESSIONS`. In particular they must never
+    /// be reconstructed from a pool card's `set_code` -- the filler cards are
     /// printed in the granting sets' own boosters, so a card's printing is
     /// evidence of the grant in neither direction.
-    pub draft_set_code: Option<String>,
+    pub draft_set_codes: Vec<String>,
     /// Milliseconds remaining on the pick timer. Always None from the reducer;
     /// the P2P host injects the authoritative value on the wire.
     pub timer_remaining_ms: Option<u32>,
@@ -382,10 +391,10 @@ pub struct SpectatorDraftView {
     pub pack_count: u8,
     pub min_deck_size: usize,
     pub addable_cards: Vec<String>,
-    /// CR 903.13e: the commander filler this draft's booster set grants, and
-    /// its cap. Mirrors `DraftPlayerView`'s field; see that one for why it is
-    /// separate from `addable_cards`.
-    pub grantable_commander_filler: Option<GrantableCommanderFiller>,
+    /// CR 903.13e: every commander filler this draft's booster sets grant, and
+    /// each one's cap. Mirrors `DraftPlayerView`'s field; see that one for why
+    /// it is separate from `addable_cards` and why it is plural.
+    pub grantable_commander_fillers: Vec<GrantableCommanderFiller>,
     pub standings: Vec<StandingEntry>,
     pub current_round: u8,
     pub tournament_format: TournamentFormat,
@@ -491,7 +500,7 @@ pub fn filter_for_spectator(
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_filler: session_concessions(session).filler,
+        grantable_commander_fillers: session_concessions(session).fillers,
         standings,
         current_round: session.current_round,
         tournament_format: session.config.tournament_format,
@@ -641,10 +650,13 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_filler: session_concessions(session).filler,
+        grantable_commander_fillers: session_concessions(session).fillers,
         // CR 903.13f(3): the same latch, published for the engine's partner
-        // query. `map(str::to_string)` because the view is owned.
-        draft_set_code: concession_set_code(session).map(str::to_string),
+        // query. Owned strings because the view is owned.
+        draft_set_codes: concession_set_codes(session)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
@@ -2200,46 +2212,71 @@ mod tests {
         }
 
         let granting = commander_draft_session("CMM");
-        let expected = engine::game::deck_validation::draft_set_concessions("CMM").filler;
+        let expected = engine::game::deck_validation::draft_set_concessions("CMM").fillers;
         assert!(
-            expected.is_some(),
+            !expected.is_empty(),
             "reach guard: CR 903.13e names Commander Masters as a granting set"
         );
 
         assert_eq!(
-            filter_for_player(&granting, 0).grantable_commander_filler,
+            filter_for_player(&granting, 0).grantable_commander_fillers,
             expected
         );
         assert_eq!(
             filter_for_spectator(&granting, SpectatorVisibility::default())
-                .grantable_commander_filler,
+                .grantable_commander_fillers,
             expected
         );
 
         let non_granting = commander_draft_session("NEO");
+        assert!(filter_for_player(&non_granting, 0)
+            .grantable_commander_fillers
+            .is_empty());
+        assert!(
+            filter_for_spectator(&non_granting, SpectatorVisibility::default())
+                .grantable_commander_fillers
+                .is_empty()
+        );
+
+        // CR 903.13e: a mixed-set draft publishes EVERY contained set's grant.
+        // Both builders read one latch, so both must carry the union -- a
+        // builder that published only the first would red on this pair.
+        let mut mixed = commander_draft_session("CMM");
+        mixed.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "CLB".to_string()],
+        };
+        let union =
+            engine::game::deck_validation::draft_set_concessions_for(["CMM", "CLB"]).fillers;
         assert_eq!(
-            filter_for_player(&non_granting, 0).grantable_commander_filler,
-            None
+            union.len(),
+            2,
+            "reach guard: CR 903.13e names DIFFERENT cards for CMM and CLB"
         );
         assert_eq!(
-            filter_for_spectator(&non_granting, SpectatorVisibility::default())
-                .grantable_commander_filler,
-            None
+            filter_for_player(&mixed, 0).grantable_commander_fillers,
+            union
+        );
+        assert_eq!(
+            filter_for_spectator(&mixed, SpectatorVisibility::default())
+                .grantable_commander_fillers,
+            union
         );
     }
 
-    /// V4 -- CR 903.13f(3): `DraftPlayerView.draft_set_code` publishes the
-    /// LATCHED concession set code, and publishes it only for a Commander
+    /// V4 -- CR 903.13f(3): `DraftPlayerView.draft_set_codes` publishes the
+    /// LATCHED concession set codes, and publishes them only for a Commander
     /// Draft whose source is a set.
     ///
-    /// Three rows on one axis, because a single `Some` row is satisfied by
+    /// Four rows on one axis, because a single non-empty row is satisfied by
     /// `session.config.source.set_code()` -- which returns the CUBE ID for a
-    /// cube and a code for every kind -- and would publish a grant CR 903.13
-    /// does not make. Row (i) carries a reach guard (`grantable_commander_filler`
-    /// is `Some`) so the two `None` rows cannot be vacuous greens from a
-    /// fixture that concedes nothing in the first place.
+    /// cube, a code for every kind, and the JOINED `"CMM+CLB"` label for a
+    /// mixed draft -- and would publish a grant CR 903.13 does not make, or a
+    /// token no set-code lookup can match. Row (i) carries a reach guard
+    /// (`grantable_commander_fillers` is non-empty) so the two empty rows
+    /// cannot be vacuous greens from a fixture that concedes nothing in the
+    /// first place.
     #[test]
-    fn publishes_the_latched_concession_set_code_only_for_a_commander_draft_from_a_set() {
+    fn publishes_the_latched_concession_set_codes_only_for_a_commander_draft_from_a_set() {
         fn session_with(kind: DraftKind, source: DraftSource) -> DraftSession {
             let (mut session, _) = test_session(4);
             session.kind = kind;
@@ -2252,11 +2289,27 @@ mod tests {
         let from_set = session_with(DraftKind::CommanderDraft, DraftSource::single_set("CMM"));
         let from_set_view = filter_for_player(&from_set, 0);
         assert!(
-            from_set_view.grantable_commander_filler.is_some(),
+            !from_set_view.grantable_commander_fillers.is_empty(),
             "reach guard: CR 903.13e names Commander Masters as a granting set, \
              so this fixture really is a conceding session"
         );
-        assert_eq!(from_set_view.draft_set_code, Some("CMM".to_string()));
+        assert_eq!(from_set_view.draft_set_codes, vec!["CMM".to_string()]);
+
+        // (i-b) A mixed Commander Draft publishes EVERY set it contained, as
+        // separate codes. The `"CMM+CLB"` label `DraftSource::set_code()`
+        // builds is a DISPLAY string that no concession lookup can match, so
+        // publishing it here would silently disable both grants.
+        let mixed = session_with(
+            DraftKind::CommanderDraft,
+            DraftSource::Set {
+                codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+            },
+        );
+        assert_eq!(
+            filter_for_player(&mixed, 0).draft_set_codes,
+            vec!["CMM".to_string(), "CLB".to_string()],
+            "CR 903.13e/f ask what the draft CONTAINED, and it contained both"
+        );
 
         // (ii) A cube contains no draft boosters from any set. `set_code()`
         // would answer with the cube ID here, which is the wrong answer.
@@ -2267,11 +2320,11 @@ mod tests {
                 name: "Test Cube".to_string(),
             },
         );
-        assert_eq!(filter_for_player(&from_cube, 0).draft_set_code, None);
+        assert!(filter_for_player(&from_cube, 0).draft_set_codes.is_empty());
 
         // (iii) CR 903.13 scopes both concessions to Commander Draft.
         let sealed = session_with(DraftKind::Sealed, DraftSource::single_set("CMM"));
-        assert_eq!(filter_for_player(&sealed, 0).draft_set_code, None);
+        assert!(filter_for_player(&sealed, 0).draft_set_codes.is_empty());
     }
     /// VM row 3 — PF3 / U25. CR 903.13b: the published pick-step count, folded
     /// over every kind in the procedure table.

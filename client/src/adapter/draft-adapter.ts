@@ -336,19 +336,23 @@ export interface DraftPlayerView {
   min_deck_size: number;
   addable_cards: string[];
   /**
-   * CR 903.13e: the granted commander filler, or absent/null when the draft's
-   * set grants none. Deliberately NOT folded into `addable_cards`, whose
-   * contract is *unlimited quantity* — the exact property CR 903.13e denies.
-   * The cap and the commander-only condition are enforced by the engine at
-   * submission, never here.
+   * CR 903.13e: every granted commander filler, or absent/empty when no set the
+   * draft contained grants one. Plural because CR 903.13e states its grants per
+   * contained set — a draft that opened Commander Masters and Battle for
+   * Baldur's Gate boosters concedes both cards. Deliberately NOT folded into
+   * `addable_cards`, whose contract is *unlimited quantity* — the exact
+   * property CR 903.13e denies. The caps and the commander-only condition are
+   * enforced by the engine at submission, never here.
    */
-  grantable_commander_filler?: GrantableCommanderFiller | null;
+  grantable_commander_fillers?: GrantableCommanderFiller[] | null;
   /**
-   * CR 903.13f(3): an OPAQUE courier token for `commanderPartnerCandidates`.
-   * Pass it through; never interpret it, and never reconstruct it from a pool
-   * card's `set_code`.
+   * CR 903.13f(3): OPAQUE courier tokens for `commanderPartnerCandidates`.
+   * Pass them through; never interpret them, and never reconstruct them from a
+   * pool card's `set_code`. Plural for the same reason as
+   * `grantable_commander_fillers`: the rule asks what the draft CONTAINED, and
+   * a mixed-set draft contained all of them.
    */
-  draft_set_code?: string | null;
+  draft_set_codes?: string[] | null;
   timer_remaining_ms: number | null;
   standings: StandingEntry[];
   current_round: number;
@@ -372,9 +376,15 @@ export type MultiplayerSeatDescriptor =
  * Pool source for multiplayer draft creation. Mirrors the Rust `PoolInput`
  * enum in draft-wasm. Snake_case fields match the existing `CubeDraftSettings`
  * TS↔Rust mirror convention (no `rename_all` machinery on the Rust side).
+ *
+ * A Set pod carries the same `SetPackSequence` a local draft does, so both
+ * boundaries describe a pack sequence identically and a pod can mix sets.
+ * Hosts that predate multi-set pods persisted `{ set_pool_json }` instead;
+ * draft-wasm still accepts that spelling, so an in-flight pod survives the
+ * upgrade — nothing new should ever write it.
  */
 export type PoolInput =
-  | { type: "Set"; data: { set_pool_json: string } }
+  | { type: "Set"; data: SetPackSequence }
   | {
       type: "Cube";
       data: {
@@ -396,6 +406,38 @@ export type PoolInput =
 export interface SetPackSequence {
   pools: unknown[];
   sequence: string[];
+}
+
+/**
+ * Join the distinct entries of a pack sequence for display, in first-appearance
+ * order. Mirrors the engine's own source label (`DraftSource::set_code`), which
+ * dedupes the same way, so a mixed draft reads as "ISD+DKA+AVR" on both sides
+ * of the boundary. Codes join with `+`; names read better with `" · "`.
+ */
+export function distinctJoined(values: string[], separator: string): string {
+  return [...new Set(values)].join(separator);
+}
+
+/**
+ * Pair an ordered pack list with the `draft-pools.json` entry for each distinct
+ * set it names — the payload every set-backed entry point takes, local and pod
+ * alike.
+ *
+ * One pool per DISTINCT set: a set drafted in several packs still crosses the
+ * boundary once, and `sequence` is what repeats. Throws on the first set with
+ * no pool data rather than shipping a sequence draft-wasm will refuse by name.
+ */
+export function setPackSequence(
+  packs: readonly { code: string }[],
+  allPools: Record<string, unknown>,
+): SetPackSequence {
+  const sequence = packs.map((pack) => pack.code);
+  const pools = [...new Set(sequence)].map((code) => {
+    const pool = allPools[code.toLowerCase()] ?? allPools[code.toUpperCase()];
+    if (!pool) throw new Error(`No pool data for set: ${code}`);
+    return pool;
+  });
+  return { pools, sequence };
 }
 
 export interface SuggestedDeck {

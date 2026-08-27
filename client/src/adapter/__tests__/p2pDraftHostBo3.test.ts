@@ -35,7 +35,7 @@ describe("P2PDraftHost Bo3", () => {
     it("authorizes both Traditional sideboards only after both held commands arrive", async () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const sent = new Map<number, DraftP2PMessage[]>([[1, []], [2, []]]);
@@ -72,7 +72,7 @@ describe("P2PDraftHost Bo3", () => {
     it("rejects forged and stale held commands before authorization", () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const privateHost = host as unknown as {
@@ -98,7 +98,7 @@ describe("P2PDraftHost Bo3", () => {
     it("rejects a sideboard submission that changes the registered deck pool", () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const sent: DraftP2PMessage[] = [];
@@ -142,7 +142,7 @@ describe("P2PDraftHost Bo3", () => {
       try {
         const host = new P2PDraftHost(
           { id: "host" } as never, () => () => {},
-          { type: "Set", data: { set_pool_json: "{}" } } as never,
+          { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
           "Traditional", 8, "Host", "Swiss", "Competitive",
         );
         const sent = new Map<number, DraftP2PMessage[]>([[1, []], [2, []]]);
@@ -222,7 +222,7 @@ describe("P2PDraftHost Bo3", () => {
       try {
         const host = new P2PDraftHost(
           { id: "host" } as never, () => () => {},
-          { type: "Set", data: { set_pool_json: "{}" } } as never,
+          { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
           "Traditional", 8, "Host", "Swiss", "Competitive",
         );
         const launch = {
@@ -272,7 +272,7 @@ describe("P2PDraftHost Bo3", () => {
     it("publishes an untimed sideboard prompt without arming the production timer", async () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const events: unknown[] = [];
@@ -380,7 +380,7 @@ describe("P2PDraftHost Bo3", () => {
       host = new P2PDraftHost(
         { id: "host" } as never,
         () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Premier",
         8,
         "Host",

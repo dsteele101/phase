@@ -124,7 +124,7 @@ vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
 // per-test controllable fakes. Every other engineRuntime export stays real.
 const engineEligible = vi.fn(async (_name: string, _format: string) => false);
 const enginePartnerCandidates = vi.fn(
-  async (_first: string, _candidates: string[], _draftSetCode: string | null) =>
+  async (_first: string, _candidates: string[], _draftSetCodes: readonly string[]) =>
     [] as string[],
 );
 vi.mock("../../../services/engineRuntime", async (importOriginal) => {
@@ -136,8 +136,8 @@ vi.mock("../../../services/engineRuntime", async (importOriginal) => {
     commanderPartnerCandidates: (
       first: string,
       candidates: string[],
-      draftSetCode: string | null,
-    ) => enginePartnerCandidates(first, candidates, draftSetCode),
+      draftSetCodes: readonly string[],
+    ) => enginePartnerCandidates(first, candidates, draftSetCodes),
   };
 });
 
@@ -749,9 +749,9 @@ const COMMANDER_VIEW: BuilderView = {
   ...TEST_VIEW,
   kind: "CommanderDraft",
   min_deck_size: 60,
-  // CR 903.13f(3): the ENGINE-latched token. Every pool card below is printed
+  // CR 903.13f(3): the ENGINE-latched tokens. Every pool card below is printed
   // in "dmu", so an implementation reading a card's printing gets "dmu" here.
-  draft_set_code: "CMM",
+  draft_set_codes: ["CMM"],
   pool: [
     ...TEST_VIEW.pool,
     VEHICLE_COMMANDER,
@@ -928,17 +928,17 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
   });
 
   /**
-   * V5 — CR 903.13f(3): the partner query receives the VIEW's latched set code,
-   * never a pool card's printing. Every pool card is printed in "dmu" while the
-   * view says "CMM", so the two authorities disagree on purpose.
+   * V5 — CR 903.13f(3): the partner query receives the VIEW's latched set
+   * codes, never a pool card's printing. Every pool card is printed in "dmu"
+   * while the view says "CMM", so the two authorities disagree on purpose.
    */
   it("pairs a second commander under the drafted set's CR 903.13f(3) grant", async () => {
     engineEligible.mockImplementation(
       async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
     );
     enginePartnerCandidates.mockImplementation(
-      async (_first: string, candidates: string[], draftSetCode: string | null) =>
-        draftSetCode === "CMM" ? candidates : [],
+      async (_first: string, candidates: string[], draftSetCodes: readonly string[]) =>
+        draftSetCodes.includes("CMM") ? candidates : [],
     );
 
     render(
@@ -963,27 +963,27 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(enginePartnerCandidates).toHaveBeenCalledWith(
       "Vehicle Commander",
       ["Second Commander"],
-      "CMM",
+      ["CMM"],
     );
   });
 
   /**
-   * V5's paired sibling. With no latched set code the engine grants no partner,
-   * so the second designation SWAPS. Neither row discriminates alone: without
-   * this one a hard-coded "CMM" passes the row above.
+   * V5's paired sibling. With no latched set codes the engine grants no
+   * partner, so the second designation SWAPS. Neither row discriminates alone:
+   * without this one a hard-coded `["CMM"]` passes the row above.
    */
   it("swaps rather than pairs when the draft grants no partner ability", async () => {
     engineEligible.mockImplementation(
       async (name: string) => name === "Vehicle Commander" || name === "Second Commander",
     );
     enginePartnerCandidates.mockImplementation(
-      async (_first: string, candidates: string[], draftSetCode: string | null) =>
-        draftSetCode === "CMM" ? candidates : [],
+      async (_first: string, candidates: string[], draftSetCodes: readonly string[]) =>
+        draftSetCodes.includes("CMM") ? candidates : [],
     );
 
     render(
       <LimitedDeckBuilder
-        view={{ ...COMMANDER_VIEW, draft_set_code: null }}
+        view={{ ...COMMANDER_VIEW, draft_set_codes: [] }}
         mainDeck={["Vehicle Commander", "Second Commander"]}
         landCounts={NO_LANDS}
         onAddToDeck={() => {}}
@@ -1004,7 +1004,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     expect(enginePartnerCandidates).toHaveBeenCalledWith(
       "Vehicle Commander",
       ["Second Commander"],
-      null,
+      [],
     );
   });
 
@@ -1050,7 +1050,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       <LimitedDeckBuilder
         view={{
           ...COMMANDER_VIEW,
-          grantable_commander_filler: { card_name: "Faceless One", max_copies: 2 },
+          grantable_commander_fillers: [{ card_name: "Faceless One", max_copies: 2 }],
         }}
         mainDeck={["Vehicle Commander"]}
         landCounts={NO_LANDS}
@@ -1329,7 +1329,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
       <LimitedDeckBuilder
         view={{
           ...COMMANDER_VIEW,
-          grantable_commander_filler: { card_name: "The Prismatic Piper", max_copies: 1 },
+          grantable_commander_fillers: [{ card_name: "The Prismatic Piper", max_copies: 1 }],
         }}
         mainDeck={["Vehicle Commander", "The Prismatic Piper"]}
         // The granted copy, taken: the same name from the OTHER source.

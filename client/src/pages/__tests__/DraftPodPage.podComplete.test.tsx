@@ -271,7 +271,7 @@ const POD_ID = "pod-under-test";
 
 function commanderPodConfig(seatCount: number) {
   return {
-    poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
+    poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     kind: "CommanderDraft" as const,
     podSize: seatCount,
     hostDisplayName: "Host",

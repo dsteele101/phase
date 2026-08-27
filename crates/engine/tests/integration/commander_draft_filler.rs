@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 
 use engine::database::synthesis::{commander_qualification, CommanderQualification};
 use engine::database::CardDatabase;
-use engine::game::deck_validation::{can_pair_commanders, draft_set_concessions, PartnerGrant};
+use engine::game::deck_validation::{
+    can_pair_commanders, draft_set_concessions, draft_set_concessions_for,
+    GrantableCommanderFiller, PartnerGrant,
+};
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType, Supertype};
 use engine::types::keywords::{Keyword, PartnerType};
@@ -33,17 +36,25 @@ use engine::types::mana::ManaColor;
 /// CMR/CMM fillers must be equal to each other and the CLB filler must not
 /// equal either. That single relation catches a table keyed to the wrong set,
 /// a row copy-pasted onto the wrong card, and a collapsed two-set row.
+/// The concession a SINGLE set makes, as one filler. Every row of
+/// `DRAFT_SET_CONCESSIONS` names exactly one card, so a one-set lookup that
+/// returned two would be a table defect rather than a union — this helper
+/// asserts that shape once instead of at every call site below.
+fn sole_filler(set_code: &str) -> Option<GrantableCommanderFiller> {
+    let mut fillers = draft_set_concessions(set_code).fillers;
+    assert!(
+        fillers.len() <= 1,
+        "each CR 903.13e row names one card, so one set concedes at most one filler"
+    );
+    fillers.pop()
+}
+
 #[test]
 fn the_filler_table_matches_the_sets_cr_903_13e_names() {
-    let cmr = draft_set_concessions("CMR")
-        .filler
-        .expect("CR 903.13e names Commander Legends");
-    let cmm = draft_set_concessions("CMM")
-        .filler
-        .expect("CR 903.13e names Commander Masters");
-    let clb = draft_set_concessions("CLB")
-        .filler
-        .expect("CR 903.13e names Commander Legends: Battle for Baldur's Gate");
+    let cmr = sole_filler("CMR").expect("CR 903.13e names Commander Legends");
+    let cmm = sole_filler("CMM").expect("CR 903.13e names Commander Masters");
+    let clb =
+        sole_filler("CLB").expect("CR 903.13e names Commander Legends: Battle for Baldur's Gate");
 
     assert_eq!(cmr, cmm, "CR 903.13e names ONE card for both CMR and CMM");
     assert_ne!(clb, cmr, "CR 903.13e names a DIFFERENT card for CLB");
@@ -75,13 +86,73 @@ fn only_commander_masters_carries_the_partner_grant() {
 #[test]
 fn an_unnamed_set_concedes_nothing_and_lookup_is_case_insensitive() {
     let neo = draft_set_concessions("NEO");
-    assert_eq!(neo.filler, None);
+    assert!(neo.fillers.is_empty());
     assert_eq!(neo.partner_grant, None);
 
     // Reach guard: the same instrument returns something for a named set.
-    assert!(draft_set_concessions("CMM").filler.is_some());
+    assert!(sole_filler("CMM").is_some());
 
     assert_eq!(draft_set_concessions("cmm"), draft_set_concessions("CMM"));
+}
+
+/// U7 row 3 — CR 903.13e conditions each grant on what the draft CONTAINED,
+/// and states the two conditions independently, so a draft containing both
+/// Commander Masters and Battle for Baldur's Gate boosters concedes BOTH of the
+/// cards those sets name. Asserted through the relation between the union and
+/// its parts, so no card name is retyped.
+#[test]
+fn a_draft_containing_two_granting_sets_concedes_both_of_their_fillers() {
+    let mixed = draft_set_concessions_for(["CMM", "CLB"]);
+
+    assert_eq!(
+        mixed.fillers,
+        [
+            sole_filler("CMM").expect("reach guard: CMM is a granting set"),
+            sole_filler("CLB").expect("reach guard: CLB is a granting set"),
+        ],
+        "CR 903.13e's two conditions are satisfied independently, so both grants stand"
+    );
+
+    // CR 903.13f(3) names Commander Masters, and the draft contained it — the
+    // grant does not lapse because a set the rule is silent about was present.
+    assert_eq!(
+        mixed.partner_grant,
+        draft_set_concessions("CMM").partner_grant
+    );
+}
+
+/// U7 row 4 — containment, not sequence: the union is a function of WHICH
+/// named sets the draft contained. Order, repetition, casing, and unnamed
+/// neighbours must not move the answer.
+#[test]
+fn the_union_reads_set_containment_and_not_the_order_or_count_named() {
+    let canonical = draft_set_concessions_for(["CMM", "CLB"]);
+
+    assert_eq!(
+        draft_set_concessions_for(["clb", "CMM", "CLB"]),
+        canonical,
+        "reversed, repeated and differently-cased names describe the same draft"
+    );
+    assert_eq!(
+        draft_set_concessions_for(["CMM", "NEO", "CLB"]),
+        canonical,
+        "a set CR 903.13e does not name concedes nothing rather than suppressing its neighbours"
+    );
+
+    // CR 903.13e grants "up to two cards named The Prismatic Piper" once, not
+    // once per naming set: CMR and CMM name the same card, so the union of the
+    // two is still the one allowance either makes alone.
+    assert_eq!(
+        draft_set_concessions_for(["CMR", "CMM"]).fillers,
+        draft_set_concessions("CMM").fillers,
+        "two sets naming one card concede one allowance, not a stacked pair"
+    );
+
+    // A draft with no sets behind it is constructed play.
+    assert_eq!(
+        draft_set_concessions_for([]),
+        engine::game::deck_validation::DraftSetConcessions::default()
+    );
 }
 
 // ---------------------------------------------------------------------------

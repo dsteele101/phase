@@ -150,7 +150,14 @@ describe("DraftPodPage ?kind= mode entry", () => {
     // First production branch reached: `searchParams.get("kind") !== COMMANDER_DRAFT_ENTRY`.
     expect(useDraftPodStore.getState().config.kind).toBe("Premier");
     expect(screen.getByRole("radio", { name: "Commander" })).not.toBeChecked();
-    expect(mocks.draftProcedure).not.toHaveBeenCalled();
+    // The witness for "the kind-intent effect did not fire" is `podSize`, not
+    // whether `draftProcedure` was called: setup re-reads the engine's per-kind
+    // axes on every kind change, so the CALL is no longer specific to
+    // `enterKind`. Adopting the kind's `pod_size` still is, and the fixture
+    // publishes 6 against the store's 8 default precisely so a stray
+    // `enterKind` cannot hide behind a coincidence.
+    await waitFor(() => expect(mocks.draftProcedure).toHaveBeenCalledWith("Premier"));
+    expect(useDraftPodStore.getState().config.podSize).toBe(8);
   });
 
   it("lets the persisted session win over a URL kind intent", async () => {
@@ -164,7 +171,10 @@ describe("DraftPodPage ?kind= mode entry", () => {
     // this route.
     await waitFor(() => expect(mocks.inspectActiveDraftPod).toHaveBeenCalled());
     expect(useDraftPodStore.getState().config.kind).toBe("Premier");
-    expect(mocks.draftProcedure).not.toHaveBeenCalled();
+    // As above: `enterKind` is witnessed by the pod size it would have adopted
+    // (6), not by `draftProcedure` going uncalled — the setup screen re-reads
+    // the engine's axes for whatever kind is selected.
+    expect(useDraftPodStore.getState().config.podSize).toBe(8);
   });
 
   it("picks the intro variant from the ENGINE-published kind", () => {

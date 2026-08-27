@@ -114,18 +114,23 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
 
       {poolPanelOpen && (
         <>
-          {/* CR 903.13e: the filler this draft's set lets the player ADD to their
-              card pool, usable only as a commander. Engine-derived and merely
-              displayed — the cap and the commander-only condition are enforced
-              at submission. */}
-          {view?.grantable_commander_filler && (
-            <div className="border-b border-white/8 px-3 py-2 text-[11px] text-white/45">
+          {/* CR 903.13e: the fillers this draft's sets let the player ADD to
+              their card pool, each usable only as a commander. One line per
+              grant — a mixed-set draft concedes one card per contained set, and
+              each carries its own cap. Engine-derived and merely displayed —
+              the caps and the commander-only condition are enforced at
+              submission. */}
+          {view?.grantable_commander_fillers?.map((granted) => (
+            <div
+              key={granted.card_name}
+              className="border-b border-white/8 px-3 py-2 text-[11px] text-white/45"
+            >
               {t("pool.grantedFiller", {
-                name: view.grantable_commander_filler.card_name,
-                maximum: view.grantable_commander_filler.max_copies,
+                name: granted.card_name,
+                maximum: granted.max_copies,
               })}
             </div>
-          )}
+          ))}
           {/* WUBRG color-count strip (design mockup): how deep the pool is in
               each color. */}
           <div className="grid grid-cols-5 gap-1.5 border-b border-white/8 px-3 py-2">

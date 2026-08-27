@@ -299,8 +299,11 @@ export function LimitedDeckBuilder({
   // CR 903.3: the command zone is what makes a designation necessary. Engine-
   // mirrored, never a client-side list of "commander-ish" formats.
   const designationRequired = deckFormatConfig?.command_zone ?? false;
-  const draftSetCode = view?.draft_set_code ?? null;
-  const filler = view?.grantable_commander_filler ?? null;
+  const draftSetCodes = useMemo(() => view?.draft_set_codes ?? [], [view?.draft_set_codes]);
+  const fillers = useMemo(
+    () => view?.grantable_commander_fillers ?? [],
+    [view?.grantable_commander_fillers],
+  );
 
   const [commanders, setCommanders] = useState<string[]>([]);
   // `null` = not loaded yet or not applicable; an empty Set = loaded, nothing eligible.
@@ -479,12 +482,12 @@ export function LimitedDeckBuilder({
           try {
             // CR 702.124 + CR 903.13f(3): the engine decides whether a second
             // designation pairs or replaces. Queried at CLICK time so a stale
-            // precomputed value can never misclassify an add as a swap. The set
-            // code is the ENGINE-latched token from the view — never a pool
-            // card's printing.
+            // precomputed value can never misclassify an add as a swap. The
+            // set codes are the ENGINE-latched tokens from the view — never a
+            // pool card's printing.
             const first = commanders[0];
             pairsWith = (
-              await commanderPartnerCandidates(first, [cardName], draftSetCode)
+              await commanderPartnerCandidates(first, [cardName], draftSetCodes)
             ).includes(cardName)
               ? first
               : null;
@@ -526,7 +529,7 @@ export function LimitedDeckBuilder({
         });
       })();
     },
-    [commanderEligibleNames, commanders, draftSetCode],
+    [commanderEligibleNames, commanders, draftSetCodes],
   );
 
   const handleRemoveCommander = useCallback((cardName: string) => {
@@ -575,7 +578,7 @@ export function LimitedDeckBuilder({
   const minDeckSize = view?.min_deck_size ?? 40;
   const addableCards = useMemo(() => {
     const base = view?.addable_cards ?? BASIC_LANDS.map((land) => land.name);
-    // CR 903.13e: the filler is NOT `addable_cards` (which means unlimited) — it
+    // CR 903.13e: a filler is NOT `addable_cards` (which means unlimited) — it
     // is capped and commander-conditioned, and BOTH halves are the engine's:
     // `FillerExceedsGrant` fires on `added > max_copies` (commanders-independent,
     // so it already fires today) and `FillerNotUsedAsCommander` fires on
@@ -587,8 +590,11 @@ export function LimitedDeckBuilder({
     // copies and they are accepted, leave them undesignated and
     // `FillerNotUsedAsCommander` refuses them. Capping or hiding it
     // client-side instead would be client legality, which the engine owns.
-    return filler ? [...base, filler.card_name] : base;
-  }, [view?.addable_cards, filler]);
+    //
+    // Every granted name is offered: a mixed-set draft concedes one per
+    // contained set, and the engine caps each on its own name.
+    return [...base, ...fillers.map((granted) => granted.card_name)];
+  }, [view?.addable_cards, fillers]);
   const filteredAddableCards = useMemo(() => {
     const query = addableQuery.trim().toLowerCase();
     return query
@@ -785,14 +791,14 @@ export function LimitedDeckBuilder({
                   {t("limitedDeck.commanderUnavailable")}
                 </p>
               )}
-              {filler && (
-                <p className="text-xs text-white/45">
+              {fillers.map((granted) => (
+                <p key={granted.card_name} className="text-xs text-white/45">
                   {t("limitedDeck.grantedFiller", {
-                    name: filler.card_name,
-                    maximum: filler.max_copies,
+                    name: granted.card_name,
+                    maximum: granted.max_copies,
                   })}
                 </p>
-              )}
+              ))}
               {/* CR 903.5a: `commanderDeckEntries` still contains every designated
                   card — the designation is a label on a deck card, not an extra
                   card beside the deck — so the panel is told not to add the

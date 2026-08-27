@@ -139,7 +139,7 @@ describe("ServerDraftAdapter", () => {
     // Start a createDraft flow — this triggers attachSocket.
     const createPromise = adapter.createDraft({
       displayName: "Alice",
-      setCode: "MKM",
+      setCodes: ["MKM"],
       kind: "Premier",
       public: true,
       tournamentFormat: "Swiss",
@@ -193,7 +193,7 @@ describe("ServerDraftAdapter", () => {
     const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
     const createPromise = setupFailingAdapter.createDraft({
       displayName: "Alice",
-      setCode: "MKM",
+      setCodes: ["MKM"],
       kind: "Premier",
       public: true,
       tournamentFormat: "Swiss",

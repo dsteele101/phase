@@ -1660,7 +1660,12 @@ export class P2PDraftHost {
     }
 
     const [opponent, ...aiDecks] = decks;
-    return { player, opponent, ai_decks: aiDecks, draft_set_code: view.draft_set_code };
+    return {
+      player,
+      opponent,
+      ai_decks: aiDecks,
+      draft_set_codes: view.draft_set_codes,
+    };
   }
 
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {

@@ -51,7 +51,7 @@ function newHost(kind: "CommanderDraft" | "Premier" = "CommanderDraft") {
   return new P2PDraftHost(
     { id: "host" } as never,
     () => () => {},
-    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
     kind,
     4,
     "Host",

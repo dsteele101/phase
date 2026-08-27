@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
 use crate::game::companion::{companion_starting_deck, is_eligible_companion};
-use crate::game::deck_loading::DeckEntry;
+use crate::game::deck_loading::{deserialize_draft_set_codes, DeckEntry};
 use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
@@ -42,12 +42,20 @@ pub struct DeckCompatibilityRequest {
     pub player_count: usize,
     #[serde(default)]
     pub summary_only: bool,
-    /// CR 903.13e / CR 903.13f(3): the set code of the draft boosters this deck
-    /// was built from. `None` for constructed play, which is why a constructed
+    /// CR 903.13e / CR 903.13f(3): every set whose draft boosters this deck's
+    /// draft CONTAINED. EMPTY for constructed play, which is why a constructed
     /// Commander deck is unaffected by the Commander Draft concessions.
     /// Latched by the draft session; never derived from a card's printing.
-    #[serde(default)]
-    pub draft_set_code: Option<String>,
+    ///
+    /// Plural because both rules condition on containment, so a mixed-set draft
+    /// carries every set it contained and `commander_draft_partner_grant` takes
+    /// the union. Accepts the legacy single `draft_set_code` string.
+    #[serde(
+        default,
+        alias = "draft_set_code",
+        deserialize_with = "deserialize_draft_set_codes"
+    )]
+    pub draft_set_codes: Vec<String>,
 }
 
 /// Engine-authored deck-builder state for selecting an Oathbreaker's signature
@@ -361,7 +369,9 @@ pub fn validate_name_deck_for_format_with_sig(
         &[],
         &[],
         signature_spell,
-        None,
+        // CR 903.13e/f: no draft behind this deck — every caller of this
+        // variant is constructed play, which concedes nothing.
+        &[],
         selected_format,
         selected_match_type,
         default_player_count(),
@@ -378,7 +388,7 @@ pub fn validate_name_deck_for_format_full(
     planar_deck: &[String],
     scheme_deck: &[String],
     signature_spell: &[String],
-    draft_set_code: Option<&str>,
+    draft_set_codes: &[String],
     selected_format: GameFormat,
     selected_match_type: Option<MatchType>,
     player_count: usize,
@@ -395,7 +405,7 @@ pub fn validate_name_deck_for_format_full(
         selected_match_type,
         player_count,
         summary_only: false,
-        draft_set_code: draft_set_code.map(str::to_string),
+        draft_set_codes: draft_set_codes.to_vec(),
     };
     validate_deck_for_format(db, &request)
 }
@@ -3039,11 +3049,58 @@ pub struct PartnerGrant {
 }
 
 /// CR 903.13e + CR 903.13f(3): the deck-construction concessions a Commander
-/// Draft's booster set makes.
+/// Draft's booster sets make, as a UNION.
+///
+/// Every grant in CR 903.13 is conditioned on what the draft CONTAINED ("If the
+/// draft contained draft boosters from ..."), and each of the three conditions
+/// is stated independently. A draft whose boosters came from several named sets
+/// therefore satisfies several conditions at once and carries every grant they
+/// make — which is why `fillers` is a collection and not a single card. A draft
+/// containing both Commander Masters and Battle for Baldur's Gate boosters
+/// concedes The Prismatic Piper AND Faceless One.
+///
+/// The empty value (`Default`) is "no concession", the rules-correct answer for
+/// a deck with no Commander Draft behind it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftSetConcessions {
-    pub filler: Option<GrantableCommanderFiller>,
+    /// CR 903.13e: every filler card the draft's sets concede, deduplicated by
+    /// card name. Order follows [`DRAFT_SET_CONCESSIONS`] — see
+    /// [`draft_set_concessions_for`] — so the value is a function of WHICH sets
+    /// the draft contained and not of the order the host named them.
+    pub fillers: Vec<GrantableCommanderFiller>,
     pub partner_grant: Option<PartnerGrant>,
+}
+
+impl DraftSetConcessions {
+    /// CR 903.13e + CR 903.13f(3): merge the concessions of two of a draft's
+    /// sets. Each rule's condition is satisfied independently, so the merge is
+    /// a union and never an override.
+    ///
+    /// Neither axis STACKS. CR 903.13e reads "each player may add up to two
+    /// cards named The Prismatic Piper" — one allowance for that name, however
+    /// many of the sets naming it the draft contained (Commander Legends and
+    /// Commander Masters both do). So a filler already present keeps the
+    /// larger cap rather than gaining a second one. CR 903.13f(3)'s colour
+    /// bound merges the same way: the widest bound any contained set grants.
+    fn union(mut self, other: Self) -> Self {
+        for filler in other.fillers {
+            match self
+                .fillers
+                .iter_mut()
+                .find(|held| held.card_name == filler.card_name)
+            {
+                Some(held) => held.max_copies = held.max_copies.max(filler.max_copies),
+                None => self.fillers.push(filler),
+            }
+        }
+        self.partner_grant = match (self.partner_grant, other.partner_grant) {
+            (Some(held), Some(added)) => Some(PartnerGrant {
+                max_colors: held.max_colors.max(added.max_colors),
+            }),
+            (held, added) => held.or(added),
+        };
+        self
+    }
 }
 
 /// CR 903.13e + CR 903.13f(3): the complete set of booster sets the
@@ -3077,18 +3134,17 @@ const GRANTABLE_FILLER_MAX_COPIES: u32 = 2;
 /// CR 903.13f(3): the partner grant in force for a Commander Draft request.
 ///
 /// The grant is a property of WHAT THE DRAFT CONTAINED, so it is read from the
-/// request's latched set code and never from a card's printing. `None` — which
-/// is constructed play and the server-hosted path — yields
+/// request's latched set codes and never from a card's printing. An EMPTY list
+/// — which is constructed play and the server-hosted path — yields
 /// `DraftSetConcessions::default()`, i.e. no grant, which is the rules-correct
 /// answer for a deck with no draft behind it, and the same value the
 /// `DraftSource::Cube` arm of draft-core's latch produces.
+///
+/// A mixed-set draft names every set it contained, and the union is taken over
+/// all of them: a CMM+CLB draft grants partner because it contained Commander
+/// Masters boosters, regardless of which pack CMM filled.
 fn commander_draft_partner_grant(request: &DeckCompatibilityRequest) -> Option<PartnerGrant> {
-    request
-        .draft_set_code
-        .as_deref()
-        .map(draft_set_concessions)
-        .unwrap_or_default()
-        .partner_grant
+    draft_set_concessions_for(request.draft_set_codes.iter().map(String::as_str)).partner_grant
 }
 
 /// CR 903.13e / CR 903.13f(3): what a draft from `set_code` concedes at deck
@@ -3103,16 +3159,55 @@ pub fn draft_set_concessions(set_code: &str) -> DraftSetConcessions {
     DRAFT_SET_CONCESSIONS
         .iter()
         .find(|(code, _, _)| code.eq_ignore_ascii_case(set_code))
-        .map_or_else(
-            DraftSetConcessions::default,
-            |(_, card_name, max_colors)| DraftSetConcessions {
-                filler: Some(GrantableCommanderFiller {
-                    card_name: (*card_name).to_string(),
-                    max_copies: GRANTABLE_FILLER_MAX_COPIES,
-                }),
-                partner_grant: max_colors.map(|max_colors| PartnerGrant { max_colors }),
-            },
-        )
+        .map_or_else(DraftSetConcessions::default, row_concessions)
+}
+
+/// One [`DRAFT_SET_CONCESSIONS`] row as the concession it names. The single
+/// place a row becomes a value, so the one-set and union lookups below can
+/// never disagree about what a row means.
+fn row_concessions((_, card_name, max_colors): &(&str, &str, Option<u8>)) -> DraftSetConcessions {
+    DraftSetConcessions {
+        fillers: vec![GrantableCommanderFiller {
+            card_name: (*card_name).to_string(),
+            max_copies: GRANTABLE_FILLER_MAX_COPIES,
+        }],
+        partner_grant: max_colors.map(|max_colors| PartnerGrant { max_colors }),
+    }
+}
+
+/// CR 903.13e / CR 903.13f(3): what a draft that CONTAINED boosters from every
+/// one of `set_codes` concedes at deck construction.
+///
+/// The single authority for a draft's concessions, and the one every caller
+/// outside this module's own table test should use — `draft_set_concessions`
+/// above answers for ONE set, which is only ever a row of this answer.
+///
+/// Both rules condition their grant on set CONTAINMENT, not on a pack index or
+/// a majority, so this is order-insensitive and repetition-insensitive: naming
+/// CMM three times, or once, concedes the same thing, and so does CMM+CLB in
+/// either order. Sets the rules do not name contribute nothing rather than
+/// suppressing what their neighbours concede, which is what makes an
+/// ISD+CMM chaos draft still grant Commander Masters' partner ability.
+///
+/// An empty iterator yields `DraftSetConcessions::default()` — no draft, no
+/// concession.
+pub fn draft_set_concessions_for<'a>(
+    set_codes: impl IntoIterator<Item = &'a str>,
+) -> DraftSetConcessions {
+    let contained: Vec<&str> = set_codes.into_iter().collect();
+    // Driven by the TABLE, not by the caller's sequence, so the result is a
+    // function of WHICH named sets the draft contained and nothing else: a
+    // repeated code contributes once, and two codes concede the same whichever
+    // order the host named them in.
+    DRAFT_SET_CONCESSIONS
+        .iter()
+        .filter(|(code, _, _)| {
+            contained
+                .iter()
+                .any(|named| named.eq_ignore_ascii_case(code))
+        })
+        .map(row_concessions)
+        .fold(DraftSetConcessions::default(), DraftSetConcessions::union)
 }
 
 /// Resolves a card name to the key used in the database. For DFC names like "Front // Back",
@@ -3877,7 +3972,7 @@ mod tests {
             selected_match_type: None,
             player_count,
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         }
     }
 
@@ -3926,7 +4021,7 @@ mod tests {
             selected_match_type: None,
             player_count: 4,
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         }
     }
 
@@ -4241,7 +4336,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4269,7 +4364,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4479,7 +4574,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let counts = combined_copy_counts(&db, &request);
@@ -4504,7 +4599,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4532,7 +4627,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: true,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4554,7 +4649,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -4597,7 +4692,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -4643,7 +4738,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4675,7 +4770,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let with_sideboard = DeckCompatibilityRequest {
             sideboard: vec!["Legal Standard".to_string()],
@@ -4709,7 +4804,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4738,7 +4833,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4813,7 +4908,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4889,7 +4984,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4964,7 +5059,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4994,7 +5089,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5021,7 +5116,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let thg_request = DeckCompatibilityRequest {
             signature_spell: Vec::new(),
@@ -5054,7 +5149,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let commander_request = DeckCompatibilityRequest {
             main_deck: expand("Legal Standard", 99),
@@ -5068,7 +5163,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo1),
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let standard_result = evaluate_deck_compatibility(&db, &standard_request);
@@ -5107,7 +5202,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5128,7 +5223,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5151,7 +5246,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5178,7 +5273,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5206,7 +5301,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &commander_request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5227,7 +5322,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5250,7 +5345,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &copy_limit);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5287,7 +5382,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &illegal_request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5314,7 +5409,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let check = evaluate_constructed(
             &db,
@@ -5347,7 +5442,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5368,7 +5463,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -5389,7 +5484,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5417,7 +5512,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5442,7 +5537,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5467,7 +5562,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -5492,7 +5587,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5533,7 +5628,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5564,7 +5659,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -5596,7 +5691,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -6015,7 +6110,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
@@ -6049,7 +6144,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -6069,7 +6164,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let full = evaluate_deck_compatibility(&db, &request);
@@ -6108,7 +6203,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -6128,7 +6223,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -6163,7 +6258,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
     }
@@ -6185,7 +6280,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6211,7 +6306,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6239,7 +6334,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6265,7 +6360,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -6291,7 +6386,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6345,7 +6440,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(true));
@@ -6372,7 +6467,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(!result.commander.compatible);
@@ -6400,7 +6495,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
 
         let result = evaluate_deck_compatibility(&db, &request);
@@ -6465,7 +6560,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6529,7 +6624,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6558,7 +6653,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6587,7 +6682,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let err = validate_deck_for_format(&db, &request)
             .expect_err("16-card sideboard must be rejected at registration");
@@ -6612,7 +6707,7 @@ mod tests {
             selected_match_type: Some(MatchType::Bo3),
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &no_sideboard);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6644,7 +6739,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = validate_deck_for_format(&db, &request);
         assert!(result.is_err());
@@ -6749,7 +6844,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6776,7 +6871,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6803,7 +6898,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6834,7 +6929,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert!(
@@ -6896,7 +6991,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(
@@ -6927,7 +7022,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         };
         let result = evaluate_deck_compatibility(&db, &request);
         assert_eq!(result.selected_format_compatible, Some(false));
@@ -6963,7 +7058,7 @@ mod tests {
             selected_match_type: None,
             player_count: default_player_count(),
             summary_only: false,
-            draft_set_code: None,
+            draft_set_codes: Vec::new(),
         }
     }
 

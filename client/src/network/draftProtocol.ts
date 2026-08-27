@@ -53,7 +53,8 @@ import type {
  *  15 — two-card pick steps: `draft_pick` carries `cardInstanceIds` (CR 903.13b)
  *  16 — commander-designation inputs on the player view, shipped together:
  *       `grantable_commander_filler` (CR 903.13e) and `draft_set_code`
- *       (CR 903.13f(3)). Both are capability, not parseability: a v15 host
+ *       (CR 903.13f(3)) — both since replaced by their plural forms in v20.
+ *       Both were capability, not parseability: a v15 host
  *       omits `draft_set_code`, and a v16 guest reading it as absent asks the
  *       engine for partners under the DEFAULT grant. Under that grant an
  *       ordinary mono-colored Commander Masters legend is not pairable, so a
@@ -96,8 +97,30 @@ import type {
  *       for the single-set drafts a v18 host can run and wrong only for the
  *       multi-set drafts it cannot, so the degradation is bounded. Only this
  *       version number refuses the pairing.
+ *  20 — CR 903.13's deck-construction concessions became PLURAL on the player
+ *       and spectator views, shipped together because both describe one
+ *       question: `grantable_commander_fillers` replaces v16's
+ *       `grantable_commander_filler` (CR 903.13e) and `draft_set_codes`
+ *       replaces its `draft_set_code` (CR 903.13f(3)).
+ *
+ *       A RENAME, so a parseability break in both directions rather than a
+ *       capability addition: a v19 host sends only the singular spellings and a
+ *       v20 guest reads BOTH new fields as absent — no filler offered in the
+ *       deckbuilder and no partner grant queried — while a v19 guest reading a
+ *       v20 host's view does the same. Silently losing a grant the rules make
+ *       is precisely the defect this version exists to fix, so it is refused at
+ *       the pairing gate instead.
+ *
+ *       Plural because CR 903.13e/f condition each grant on what the draft
+ *       CONTAINED and state their conditions independently: a draft opening
+ *       Commander Masters and Battle for Baldur's Gate boosters concedes The
+ *       Prismatic Piper AND Faceless One, and keeps the CR 903.13f(3) partner
+ *       grant. Multi-set selection (v19) is what made that draft reachable, so
+ *       the singular fields could no longer name the answer. The engine takes
+ *       the union in `draft_set_concessions_for`; the client still never learns
+ *       which sets grant what.
  */
-export const DRAFT_PROTOCOL_VERSION = 19 as const;
+export const DRAFT_PROTOCOL_VERSION = 20 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {
@@ -145,15 +168,17 @@ export interface DraftMatchDeckPayload {
   opponent: DraftDeckPayload;
   ai_decks: DraftDeckPayload[];
   /**
-   * Set code of the draft these decks were built from, supplied verbatim from
-   * `DraftPlayerView.draft_set_code` (draft-core/src/view.rs:302, populated by
-   * `filter_for_player` at :569).  CR 903.13f(3): a draft that contained
-   * Commander Masters boosters grants the partner ability, for deckbuilding
-   * purposes, to any card that can be a commander by itself whose color
-   * identity is one or fewer colors.  Optional: absent means no draft set code
-   * is known, which the engine reads as constructed play (no grant).
+   * Every set whose draft boosters these decks' draft CONTAINED, supplied
+   * verbatim from `DraftPlayerView.draft_set_codes`, populated by
+   * `filter_for_player`.  CR 903.13f(3): a draft that contained Commander
+   * Masters boosters grants the partner ability, for deckbuilding purposes, to
+   * any card that can be a commander by itself whose color identity is one or
+   * fewer colors.  A LIST because that rule asks about CONTAINMENT, so a
+   * mixed-set draft must carry every set it contained rather than one chosen
+   * representative.  Optional: absent or empty means no draft set is known,
+   * which the engine reads as constructed play (no grant).
    */
-  draft_set_code?: string | null;
+  draft_set_codes?: string[] | null;
 }
 
 /**

@@ -93,7 +93,7 @@ function persistedSession(): PersistedDraftHostSession {
     draftStarted: true,
     draftCode: "draft-12345678",
     draftSessionJson: '{"status":"Pairing"}',
-    poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+    poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
   };
 }
 
@@ -101,7 +101,7 @@ function makeHost(restoredView: DraftPlayerView) {
   const host = new P2PDraftHost(
     { id: "host" } as never,
     () => () => {},
-    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
     "Premier",
     8,
     "Host",

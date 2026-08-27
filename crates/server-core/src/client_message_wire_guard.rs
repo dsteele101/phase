@@ -177,7 +177,7 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::UnregisterLobby { game_code } => validate_unregister_lobby_fields(game_code),
         ClientMessage::CreateDraftWithSettings {
             display_name,
-            set_code,
+            set_codes,
             password,
             timer_seconds,
             pod_size,
@@ -185,7 +185,7 @@ pub fn guard_client_message_before_dispatch(
             ..
         } => guard_create_draft_with_settings(
             display_name,
-            set_code,
+            set_codes,
             password,
             *timer_seconds,
             *pod_size,

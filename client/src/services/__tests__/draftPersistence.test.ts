@@ -64,7 +64,7 @@ describe("draftPersistence", () => {
       draftStarted: true,
       draftCode: "draft-12345678",
       draftSessionJson: '{"status":"Drafting"}',
-      poolInput: { type: "Set", data: { set_pool_json: '{"code":"TST"}' } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     };
 
     it("saves and loads a host session", async () => {
@@ -160,6 +160,50 @@ describe("draftPersistence", () => {
 
       await expect(loadDraftHostSession("bad-set")).resolves.toBeNull();
       await expect(loadDraftHostSession("bad-cube")).resolves.toBeNull();
+    });
+
+    /**
+     * The guard admits both spellings a Set pod may be stored in: the live
+     * `SetPackSequence`, and the single serialized pool a pre-multi-set host
+     * wrote. Rejecting either would discard a resumable pod as corrupt.
+     */
+    it("accepts both the pack-sequence and legacy single-pool Set snapshots", async () => {
+      mockStore.set("phase-draft-host:sequence", {
+        ...testSession,
+        poolInput: {
+          type: "Set",
+          data: { pools: [{ code: "ISD" }, { code: "DKA" }], sequence: ["ISD", "DKA", "ISD"] },
+        },
+      });
+      mockStore.set("phase-draft-host:legacy", {
+        ...testSession,
+        poolInput: { type: "Set", data: { set_pool_json: '{"code":"TST"}' } },
+      });
+
+      const sequence = await loadDraftHostSession("sequence");
+      expect(sequence?.poolInput).toEqual({
+        type: "Set",
+        data: { pools: [{ code: "ISD" }, { code: "DKA" }], sequence: ["ISD", "DKA", "ISD"] },
+      });
+      await expect(loadDraftHostSession("legacy")).resolves.not.toBeNull();
+    });
+
+    /**
+     * A sequence that names no booster, or whose entries are not set codes, has
+     * no pod to restore — draft-wasm would refuse it, so the snapshot is junk.
+     */
+    it("rejects a Set snapshot whose pack sequence is empty or mistyped", async () => {
+      mockStore.set("phase-draft-host:empty-seq", {
+        ...testSession,
+        poolInput: { type: "Set", data: { pools: [{ code: "ISD" }], sequence: [] } },
+      });
+      mockStore.set("phase-draft-host:bad-seq", {
+        ...testSession,
+        poolInput: { type: "Set", data: { pools: [{ code: "ISD" }], sequence: [7] } },
+      });
+
+      await expect(loadDraftHostSession("empty-seq")).resolves.toBeNull();
+      await expect(loadDraftHostSession("bad-seq")).resolves.toBeNull();
     });
 
     it("saves and loads active host resume metadata", () => {

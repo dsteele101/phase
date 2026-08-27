@@ -44,7 +44,7 @@ describe("P2PDraftHost pre-draft lobby view", () => {
     const host = new P2PDraftHost(
       { id: "host" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       kind,
       podSize,
       "Host",
@@ -119,7 +119,7 @@ describe("P2PDraftHost pre-draft lobby view", () => {
     const host = new P2PDraftHost(
       { id: "host" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       "CommanderDraft",
       4,
       "Host",

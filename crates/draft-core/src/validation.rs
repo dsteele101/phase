@@ -98,16 +98,17 @@ pub enum LimitedDeckError {
 /// - All non-basic cards must be present in the pool with sufficient copies
 /// - Basic lands (from `basic_land_names`) are available in unlimited quantity
 /// - No constructed legality check, no 4-copy limit
-/// - CR 903.13e: a `granted_filler` name may be used up to `max_copies` times
+/// - CR 903.13e: a `granted_fillers` name may be used up to `max_copies` times
 ///   ABOVE the pool count, and only if those added copies are designated as
-///   commanders
+///   commanders. The list is plural because the rule states its conditions
+///   per-set and a draft may have contained several granting sets.
 /// - CR 702.124h: every name in `commanders` must be backed by at least as many
 ///   copies in `main_deck` as it is designated times
 /// - CR 903.3: at least `commanders_required` names must be designated
 ///
 /// Name comparison is exact `==` throughout. Every key here -- the pool
 /// multiset, the deck multiset, the designation multiset and the
-/// `granted_filler` match -- is the raw submitted string, and draft-core's
+/// `granted_fillers` match -- is the raw submitted string, and draft-core's
 /// strings all originate from `DraftCardInstance.name`, so casing is uniform
 /// within a session and exact equality is achievable rather than merely strict.
 /// A case-insensitive filler match against a case-sensitive pool lookup would
@@ -120,8 +121,11 @@ pub fn validate_limited_deck(
     pool: &[String],
     addable_cards: &DeckAddableCards,
     min_deck_size: usize,
-    // CR 903.13e: the filler this session's booster set grants, if any.
-    granted_filler: Option<&GrantableCommanderFiller>,
+    // CR 903.13e: every filler this session's booster sets grant. Empty when
+    // the draft contained no set the rule names. A mixed-set Commander Draft
+    // satisfies each contained set's condition independently, so this carries
+    // the union rather than one chosen representative.
+    granted_fillers: &[GrantableCommanderFiller],
     // CR 903.13e: "but only if those cards are used as the player's commander(s)".
     commanders: &[String],
     // CR 903.3: how many commanders a deck built from this pool must designate.
@@ -162,7 +166,10 @@ pub fn validate_limited_deck(
         // in the granting sets' own draft boosters, so only the copies ABOVE
         // the pool count are "added", and only those are capped and
         // commander-conditioned.
-        if let Some(filler) = granted_filler.filter(|f| f.card_name.as_str() == *card_name) {
+        if let Some(filler) = granted_fillers
+            .iter()
+            .find(|f| f.card_name.as_str() == *card_name)
+        {
             let pooled = pool_counts.get(card_name).copied().unwrap_or(0);
             let added = requested.saturating_sub(pooled);
             if added > filler.max_copies {
@@ -287,14 +294,14 @@ mod tests {
     fn valid_40_card_deck() {
         let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
         let deck: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0).is_ok());
     }
 
     #[test]
     fn too_few_cards() {
         let pool = pool_of(&["A", "B", "C"]);
         let deck = pool_of(&["A", "B", "C"]); // 3 cards, need 40
-        let result = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0);
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| matches!(
             e,
@@ -310,7 +317,7 @@ mod tests {
         let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
         let mut deck: Vec<String> = (0..39).map(|i| format!("Card {i}")).collect();
         deck.push(s("Not In Pool"));
-        let result = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0);
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| matches!(
             e,
@@ -326,7 +333,7 @@ mod tests {
         pool.push(s("Rare Card"));
         let mut deck: Vec<String> = (0..37).map(|i| format!("Card {i}")).collect();
         deck.extend([s("Rare Card"), s("Rare Card"), s("Rare Card")]);
-        let result = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0);
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| matches!(
             e,
@@ -343,7 +350,7 @@ mod tests {
         deck.extend(std::iter::repeat_n(s("Plains"), 10));
         deck.extend(std::iter::repeat_n(s("Island"), 7));
         assert_eq!(deck.len(), 40);
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0).is_ok());
     }
 
     #[test]
@@ -352,14 +359,14 @@ mod tests {
         let mut deck: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
         deck.extend(std::iter::repeat_n(s("Wastes"), 17));
         assert_eq!(deck.len(), 40);
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0).is_ok());
     }
 
     #[test]
     fn accumulates_multiple_errors() {
         let pool = pool_of(&["A"]);
         let deck = pool_of(&["A", "Not In Pool"]); // too few + not in pool
-        let result = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0);
         let errors = result.unwrap_err();
         assert!(
             errors.len() >= 2,
@@ -380,7 +387,7 @@ mod tests {
         pool.extend([s("Dupe"), s("Dupe")]);
         let mut deck: Vec<String> = (0..38).map(|i| format!("Card {i}")).collect();
         deck.extend([s("Dupe"), s("Dupe")]);
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0).is_ok());
     }
 
     // ---------------------------------------------------------------------
@@ -405,9 +412,13 @@ mod tests {
     /// stops granting a filler for a set CR 903.13e names, which is itself the
     /// assertion that the two layers agree.
     fn cmm_filler() -> GrantableCommanderFiller {
-        engine::game::deck_validation::draft_set_concessions("CMM")
-            .filler
-            .expect("CR 903.13e names Commander Masters as a granting set")
+        let mut fillers = engine::game::deck_validation::draft_set_concessions("CMM").fillers;
+        assert_eq!(
+            fillers.len(),
+            1,
+            "CR 903.13e names Commander Masters as a granting set, for one card"
+        );
+        fillers.remove(0)
     }
 
     /// A 60-card deck: `extra` copies of the filler plus filler-free padding.
@@ -435,10 +446,16 @@ mod tests {
         let deck = deck_with_filler(&filler, 2);
         let pool = pool_with_filler(&filler, 0);
         let commanders = vec![filler.card_name.clone(), filler.card_name.clone()];
-        assert!(
-            validate_limited_deck(&deck, &pool, &addable(), 60, Some(&filler), &commanders, 0)
-                .is_ok()
-        );
+        assert!(validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            60,
+            std::slice::from_ref(&filler),
+            &commanders,
+            0
+        )
+        .is_ok());
     }
 
     /// U7 row 3b -- CR 702.124h, paired to row 3 on ONE axis. Same deck size,
@@ -458,9 +475,16 @@ mod tests {
         let deck = deck_with_filler(&filler, 1);
         let pool = pool_with_filler(&filler, 0);
         let commanders = vec![filler.card_name.clone(), filler.card_name.clone()];
-        let errors =
-            validate_limited_deck(&deck, &pool, &addable(), 60, Some(&filler), &commanders, 0)
-                .unwrap_err();
+        let errors = validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            60,
+            std::slice::from_ref(&filler),
+            &commanders,
+            0,
+        )
+        .unwrap_err();
         assert!(
             errors.iter().any(|e| matches!(
                 e,
@@ -494,7 +518,7 @@ mod tests {
         let deck: Vec<String> = (0..60).map(|i| format!("Card {i}")).collect();
         let commanders = vec![s("Never Drafted")];
         let errors =
-            validate_limited_deck(&deck, &pool, &addable(), 60, None, &commanders, 0).unwrap_err();
+            validate_limited_deck(&deck, &pool, &addable(), 60, &[], &commanders, 0).unwrap_err();
         assert!(
             errors.iter().any(|e| matches!(
                 e,
@@ -513,9 +537,16 @@ mod tests {
         let deck = deck_with_filler(&filler, 3);
         let pool = pool_with_filler(&filler, 0);
         let commanders = vec![filler.card_name.clone(), filler.card_name.clone()];
-        let errors =
-            validate_limited_deck(&deck, &pool, &addable(), 60, Some(&filler), &commanders, 0)
-                .unwrap_err();
+        let errors = validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            60,
+            std::slice::from_ref(&filler),
+            &commanders,
+            0,
+        )
+        .unwrap_err();
         assert!(
             errors.iter().any(|e| matches!(
                 e,
@@ -537,8 +568,16 @@ mod tests {
         let filler = cmm_filler();
         let deck = deck_with_filler(&filler, 2);
         let pool = pool_with_filler(&filler, 0);
-        let errors =
-            validate_limited_deck(&deck, &pool, &addable(), 60, Some(&filler), &[], 0).unwrap_err();
+        let errors = validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            60,
+            std::slice::from_ref(&filler),
+            &[],
+            0,
+        )
+        .unwrap_err();
         assert!(
             errors.iter().any(|e| matches!(
                 e,
@@ -564,7 +603,16 @@ mod tests {
         let filler = cmm_filler();
         let deck = deck_with_filler(&filler, 1);
         let pool = pool_with_filler(&filler, 1);
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 60, Some(&filler), &[], 0).is_ok());
+        assert!(validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            60,
+            std::slice::from_ref(&filler),
+            &[],
+            0
+        )
+        .is_ok());
     }
 
     /// U7 row 7 -- legal deck beta: drafted one, ADDED two. `added = 2 <= 2`
@@ -578,9 +626,68 @@ mod tests {
         let deck = deck_with_filler(&filler, 3);
         let pool = pool_with_filler(&filler, 1);
         let commanders = vec![filler.card_name.clone(), filler.card_name.clone()];
+        assert!(validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            60,
+            std::slice::from_ref(&filler),
+            &commanders,
+            0
+        )
+        .is_ok());
+    }
+
+    /// U7 row 7b -- a MIXED-set Commander Draft grants every contained set's
+    /// filler, and each is capped and commander-conditioned on its OWN name.
+    ///
+    /// CR 903.13e states its two conditions independently ("If the draft
+    /// contained ... Commander Legends or Commander Masters" / "If the draft
+    /// contained ... Battle for Baldur's Gate"), so a CMM+CLB draft may add up
+    /// to two of EACH named card. A validator that took only the first entry
+    /// -- or that matched any granted filler against any name -- reds here:
+    /// the second name would be refused as `NotInPool`, and the per-name cap
+    /// would let four added copies through as one four-copy grant.
+    #[test]
+    fn a_mixed_set_draft_grants_each_contained_sets_filler_independently() {
+        let fillers =
+            engine::game::deck_validation::draft_set_concessions_for(["CMM", "CLB"]).fillers;
+        assert_eq!(
+            fillers.len(),
+            2,
+            "reach guard: CR 903.13e names DIFFERENT cards for CMM and CLB"
+        );
+
+        // Two added copies of EACH granted name, all four designated... except
+        // CR 702.124g bounds designations at two, so this row drives the pool
+        // and cap axes with one added copy of each name.
+        let mut deck: Vec<String> = (0..58).map(|i| format!("Card {i}")).collect();
+        deck.extend(fillers.iter().map(|f| f.card_name.clone()));
+        let pool: Vec<String> = (0..58).map(|i| format!("Card {i}")).collect();
+        let commanders: Vec<String> = fillers.iter().map(|f| f.card_name.clone()).collect();
+
         assert!(
-            validate_limited_deck(&deck, &pool, &addable(), 60, Some(&filler), &commanders, 0)
-                .is_ok()
+            validate_limited_deck(&deck, &pool, &addable(), 60, &fillers, &commanders, 0).is_ok(),
+            "both contained sets' fillers may be added and designated"
+        );
+
+        // The cap is PER NAME, not pooled across the union: three copies of one
+        // granted name exceed that name's own grant of two even though the
+        // union's total allowance is four.
+        let mut over: Vec<String> = (0..57).map(|i| format!("Card {i}")).collect();
+        over.extend(std::iter::repeat_n(fillers[0].card_name.clone(), 3));
+        let errors = validate_limited_deck(&over, &pool, &addable(), 60, &fillers, &commanders, 0)
+            .unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                LimitedDeckError::FillerExceedsGrant {
+                    added: 3,
+                    granted: 2,
+                    ..
+                }
+            )),
+            "expected the per-name cap to bind, got {errors:?}"
         );
     }
 
@@ -594,7 +701,7 @@ mod tests {
 
         let deck = deck_with_filler(&filler, 2);
         let pool = pool_with_filler(&filler, 0);
-        let errors = validate_limited_deck(&deck, &pool, &addable(), 60, None, &[], 0).unwrap_err();
+        let errors = validate_limited_deck(&deck, &pool, &addable(), 60, &[], &[], 0).unwrap_err();
         assert!(
             errors.iter().any(
                 |e| matches!(e, LimitedDeckError::NotInPool { name } if *name == filler.card_name)
@@ -603,7 +710,7 @@ mod tests {
         );
 
         let pool = pool_with_filler(&filler, 1);
-        let errors = validate_limited_deck(&deck, &pool, &addable(), 60, None, &[], 0).unwrap_err();
+        let errors = validate_limited_deck(&deck, &pool, &addable(), 60, &[], &[], 0).unwrap_err();
         assert!(
             errors.iter().any(|e| matches!(
                 e,
@@ -626,9 +733,16 @@ mod tests {
         deck.extend(std::iter::repeat_n(filler.card_name.clone(), 3));
         let pool: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
         let commanders = vec![filler.card_name.clone(), filler.card_name.clone()];
-        let errors =
-            validate_limited_deck(&deck, &pool, &addable(), 40, Some(&filler), &commanders, 0)
-                .unwrap_err();
+        let errors = validate_limited_deck(
+            &deck,
+            &pool,
+            &addable(),
+            40,
+            std::slice::from_ref(&filler),
+            &commanders,
+            0,
+        )
+        .unwrap_err();
         // The filler is capped ...
         assert!(errors
             .iter()
@@ -657,7 +771,7 @@ mod tests {
         let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
         let deck: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
 
-        let errors = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 1)
+        let errors = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 1)
             .expect_err("CR 903.3: a deck that must designate one, designates none");
         assert!(
             errors.contains(&LimitedDeckError::TooFewCommanders {
@@ -671,7 +785,7 @@ mod tests {
         // designation passes. Without it, a validator that refused every
         // Commander-shaped call would satisfy the negative above.
         assert!(
-            validate_limited_deck(&deck, &pool, &addable(), 40, None, &[s("Card 0")], 1).is_ok(),
+            validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[s("Card 0")], 1).is_ok(),
             "one backed designation satisfies the floor"
         );
 
@@ -680,7 +794,7 @@ mod tests {
         // working, and it is the reach-guard proving the floor is READ rather
         // than assumed: a guard that ignored the parameter would red here.
         assert!(
-            validate_limited_deck(&deck, &pool, &addable(), 40, None, &[], 0).is_ok(),
+            validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[], 0).is_ok(),
             "CR 905.1a kinds designate no commander"
         );
     }
@@ -702,7 +816,7 @@ mod tests {
         // "Card 44" is in the POOL but not in the DECK, so CR 702.124h's
         // multiset rule fires. The floor is SATISFIED here (1 >= 1): this half
         // proves the new guard did not displace the existing one.
-        let errors = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[s("Card 44")], 1)
+        let errors = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[s("Card 44")], 1)
             .expect_err("CR 702.124h: the designation must be backed by a copy in the deck");
         assert!(
             errors.contains(&LimitedDeckError::CommanderNotInDeck {
@@ -716,7 +830,7 @@ mod tests {
         // BOTH authorities fail: one designation against a CR 702.124h partner
         // floor of two, and that one designation is itself unbacked. The
         // function reports ALL failures into ONE `Vec`, so both must be present.
-        let errors = validate_limited_deck(&deck, &pool, &addable(), 40, None, &[s("Card 44")], 2)
+        let errors = validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[s("Card 44")], 2)
             .expect_err("both the floor and the multiset rule are violated");
         assert!(
             errors.contains(&LimitedDeckError::TooFewCommanders {
@@ -734,7 +848,7 @@ mod tests {
         // floor satisfied yields neither error, so the assertions above
         // discriminate rather than firing on any input at all.
         assert!(
-            validate_limited_deck(&deck, &pool, &addable(), 40, None, &[s("Card 0")], 1).is_ok(),
+            validate_limited_deck(&deck, &pool, &addable(), 40, &[], &[s("Card 0")], 1).is_ok(),
             "a backed designation raises neither error"
         );
     }

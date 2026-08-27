@@ -43,7 +43,13 @@ export type DraftPhase =
 /** Settings for creating a new server-hosted draft pod. */
 export interface CreateDraftSettings {
   displayName: string;
-  setCode: string;
+  /**
+   * The set filling each booster, in pack order. One entry per pack the pod
+   * opens; the same set may fill several, and a one-element list fills every
+   * booster (the server repeats the last entry). Mirrors the wire field
+   * `set_codes` on `CreateDraftWithSettings`.
+   */
+  setCodes: string[];
   kind: Exclude<DraftKind, "Quick">;
   public: boolean;
   password?: string;
@@ -298,7 +304,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         type: "CreateDraftWithSettings",
         data: {
           display_name: settings.displayName,
-          set_code: settings.setCode,
+          set_codes: settings.setCodes,
           kind: settings.kind,
           public: settings.public,
           password: settings.password ?? null,

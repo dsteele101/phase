@@ -167,6 +167,32 @@ describe("SetSelector", () => {
     expect(screen.getByRole("button", { name: "Add a pack of Innistrad" })).toBeDisabled();
   });
 
+  it("holds a variable-length event to its own pack count", async () => {
+    // A Quick Draft's list is not fixed-length — one set is a legal selection,
+    // because a short sequence repeats its last entry to fill every booster.
+    // The event's booster count is still the ceiling: naming a fourth pack
+    // builds a selection the engine refuses (`ResolvedSetSelection`), so the
+    // grid must stop at three rather than offering a start that cannot run.
+    const onStartDraft = vi.fn();
+    render(<SetSelector onStartDraft={onStartDraft} defaultPackCount={3} />);
+
+    await addPack("Innistrad");
+    // One set is already a startable draft, unlike a fixed-length event.
+    expect(screen.getByRole("button", { name: "Start Draft" })).toBeEnabled();
+
+    await addPack("Dark Ascension");
+    await addPack("Innistrad");
+    expect(await packEntries()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Add a pack of Innistrad" })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Start Draft" }));
+    expect(onStartDraft).toHaveBeenCalledWith([
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+      { code: "ISD", name: "Innistrad" },
+    ]);
+  });
+
   it("holds the set grid still when the pack list resizes above it", async () => {
     // The grid sits below the pack list, so a list that grows by N pixels
     // slides the tile under the pointer down by N unless the scroll follows.

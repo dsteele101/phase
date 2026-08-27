@@ -12,7 +12,7 @@ use crate::types::*;
 use crate::validation::{validate_limited_deck, LimitedDeckError};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
-use engine::game::deck_validation::{draft_set_concessions, DraftSetConcessions};
+use engine::game::deck_validation::{draft_set_concessions_for, DraftSetConcessions};
 
 impl DraftSession {
     /// The round that pairings may next be generated for.
@@ -895,7 +895,7 @@ fn apply_start_draft(
 }
 
 /// CR 903.13e + CR 903.13f(3): the deck-construction concessions this session's
-/// booster set makes, LATCHED from `config.source` at session creation and
+/// booster sets make, LATCHED from `config.source` at session creation and
 /// never re-derived from pool contents.
 ///
 /// Pool contents are not evidence of the grant IN EITHER DIRECTION: the
@@ -908,54 +908,56 @@ fn apply_start_draft(
 /// become `pub` -- outside draft-core the concessions are consumed from the
 /// published view field, never re-derived.
 pub(crate) fn session_concessions(session: &DraftSession) -> DraftSetConcessions {
-    concession_set_code(session)
-        .map(draft_set_concessions)
-        .unwrap_or_default()
+    draft_set_concessions_for(concession_set_codes(session))
 }
 
-/// CR 903.13e + CR 903.13f(3): the set code whose concessions this session
-/// carries, LATCHED from `config.source` at session creation. `None` when the
+/// CR 903.13e + CR 903.13f(3): every set whose draft boosters this session
+/// CONTAINED, LATCHED from `config.source` at session creation. EMPTY when the
 /// rules concede nothing -- a cube (which contains no draft boosters from any
 /// set) and every kind outside CR 903.13's scope.
 ///
-/// The single authority for "which set did this draft contain". Both
+/// The single authority for "which sets did this draft contain". Both
 /// `session_concessions` above and `view::filter_for_player`'s published
-/// `draft_set_code` read it, so the two can never disagree about a cube.
+/// `draft_set_codes` read it, so the two can never disagree about a cube.
 ///
 /// Both rules live in CR 903.13, which scopes them to Commander Draft, so every
 /// other kind concedes nothing. Both `match`es are wildcard-free: a sixth
 /// `DraftKind`, or a third `DraftSource`, must state its answer.
 ///
-/// A set source names one set per booster. The concessions are per-set and this
-/// returns a single set, so a draft whose boosters do NOT all share one set
-/// concedes nothing.
+/// PLURAL, and that is the rules-correct shape rather than a convenience.
+/// CR 903.13e/f condition each grant on whether "the draft contained draft
+/// boosters from" a named set, so a multi-set Commander Draft satisfies each
+/// named set's condition independently: a CMM+CLB draft concedes The Prismatic
+/// Piper AND Faceless One, and grants the CR 903.13f(3) partner ability because
+/// it contained Commander Masters boosters. Returning one representative code
+/// would drop the other set's grant; returning none would drop both. The union
+/// is taken by `draft_set_concessions_for`, which reads containment only -- so
+/// pack ORDER, repetition and casing cannot move the answer.
 ///
-/// KNOWN GAP, deliberately conservative: CR 903.13e conditions the grant on
-/// what the draft CONTAINED ("If the draft contained draft boosters from
-/// Commander Legends or Commander Masters"), so a mixed CMM+CLB draft should
-/// concede BOTH The Prismatic Piper and Faceless One. Expressing that needs
-/// `DraftSetConcessions::filler` to hold more than one card — an engine-crate
-/// change to a published view field — so this returns `None` instead, which
-/// only ever restricts a deck rather than permitting one the rules do not.
-/// Granting pack 1's set to the whole event would be the permissive error and
-/// is refused. See `a_mixed_set_commander_draft_concedes_nothing` for the
-/// pinned behavior and the CR-correct target.
-///
-/// Unreachable today: `create_multiplayer_draft` is the only `CommanderDraft`
-/// entry point and always builds `DraftSource::single_set`.
-pub(crate) fn concession_set_code(session: &DraftSession) -> Option<&str> {
+/// Distinct, in first-appearance order: a set names its condition once however
+/// many boosters it filled. This is a latched list of what the draft contained,
+/// not a per-pack sequence -- `DraftSource::set_code_for_pack` owns that axis.
+pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
     match session.kind {
         DraftKind::CommanderDraft => match &session.config.source {
             DraftSource::Set { codes } => {
-                let mut rest = codes.iter();
-                let first = rest.next()?;
-                rest.all(|code| code.eq_ignore_ascii_case(first))
-                    .then_some(first.as_str())
+                let mut distinct: Vec<&str> = Vec::with_capacity(codes.len());
+                for code in codes {
+                    if !distinct
+                        .iter()
+                        .any(|held| held.eq_ignore_ascii_case(code.as_str()))
+                    {
+                        distinct.push(code.as_str());
+                    }
+                }
+                distinct
             }
             // A cube contains no draft boosters from any set.
-            DraftSource::Cube { .. } => None,
+            DraftSource::Cube { .. } => Vec::new(),
         },
-        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => None,
+        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => {
+            Vec::new()
+        }
     }
 }
 
@@ -1007,7 +1009,7 @@ fn apply_submit_deck(
         &pool_names,
         &session.config.addable_cards,
         session.config.min_deck_size,
-        concessions.filler.as_ref(),
+        &concessions.fillers,
         &commanders,
         // CR 903.3: the floor is the kind's, read from the procedure table.
         // This is the line that makes the value kind-derived rather than
@@ -1080,6 +1082,10 @@ fn apply_submit_deck(
 mod tests {
     use super::*;
     use crate::pack_source::FixturePackSource;
+    // The one-set row of the concession table. The production latch reads the
+    // UNION (`draft_set_concessions_for`); these rows assert the union against
+    // its parts, so they need the per-set answer too.
+    use engine::game::deck_validation::draft_set_concessions;
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
@@ -2896,9 +2902,9 @@ mod tests {
             "a CMM Commander Draft must concede exactly what CR 903.13e/f say CMM concedes"
         );
         assert!(
-            session_concessions(&commander_draft_session("CMM"))
-                .filler
-                .is_some(),
+            !session_concessions(&commander_draft_session("CMM"))
+                .fillers
+                .is_empty(),
             "reach guard: CR 903.13e names Commander Masters as a granting set"
         );
         assert_eq!(
@@ -2908,25 +2914,26 @@ mod tests {
         );
     }
 
-    /// Multi-set sources, pinned on BOTH sides of the all-equal guard.
+    /// Multi-set sources -- CR 903.13e/f condition each grant on what the draft
+    /// CONTAINED, so a Commander Draft whose boosters came from several sets
+    /// carries every grant those sets make.
     ///
-    /// A repeated granting code is still one set, so it concedes normally --
-    /// that half is the reach guard proving the guard reads set IDENTITY and
-    /// not sequence length, and it is the shape a multi-set selection produces
-    /// for an ordinary three-pack CMM draft.
+    /// A repeated granting code is still one set, so it concedes exactly what
+    /// the single-set draft does -- that half proves the latch reads set
+    /// IDENTITY and not sequence length, and it is the shape a multi-set
+    /// selection produces for an ordinary three-pack CMM draft.
     ///
-    /// The mixed half pins a KNOWN GAP rather than the CR-correct answer.
-    /// CR 903.13e grants on what the draft CONTAINED, so a CMM+CLB draft should
-    /// concede The Prismatic Piper AND Faceless One; `DraftSetConcessions`
-    /// holds one filler, so the union cannot be expressed without an
-    /// engine-crate change. `None` is the restrictive error, chosen over
-    /// granting one pack's set-specific cards to boosters that never contained
-    /// them. Unreachable today -- `create_multiplayer_draft` always builds
-    /// `DraftSource::single_set` -- so this documents the boundary rather than
-    /// a live behavior. Widen `filler` to a collection and this assertion is
-    /// the one that must change.
+    /// The mixed half is the rules-correct union: a CMM+CLB draft concedes The
+    /// Prismatic Piper AND Faceless One, and keeps CR 903.13f(3)'s partner
+    /// grant because it contained Commander Masters boosters. Both a latch that
+    /// answers with pack 1's set (dropping CLB's filler) and one that refuses
+    /// to answer when the sets disagree (dropping both) red here.
+    ///
+    /// Reachable: `create_multiplayer_draft` resolves its Commander pool input
+    /// through `ResolvedSetSelection`, which builds `DraftSource::Set` from the
+    /// host's whole pack sequence.
     #[test]
-    fn a_mixed_set_commander_draft_concedes_nothing() {
+    fn a_mixed_set_commander_draft_concedes_every_contained_sets_grants() {
         let mut repeated = commander_draft_session("CMM");
         repeated.config.source = DraftSource::Set {
             codes: vec!["CMM".to_string(), "cmm".to_string(), "CMM".to_string()],
@@ -2943,14 +2950,52 @@ mod tests {
         };
         assert_eq!(
             session_concessions(&mixed),
-            DraftSetConcessions::default(),
-            "KNOWN GAP: CR 903.13e would concede both sets' fillers; one-filler \
-             DraftSetConcessions cannot, so the restrictive answer is taken"
+            draft_set_concessions_for(["CMM", "CLB"]),
+            "CR 903.13e: the draft contained both sets, so both grants stand"
         );
+        assert_eq!(
+            session_concessions(&mixed).fillers.len(),
+            2,
+            "reach guard: CMM and CLB name DIFFERENT cards, so the union holds two"
+        );
+        assert_eq!(
+            session_concessions(&mixed).partner_grant,
+            draft_set_concessions("CMM").partner_grant,
+            "CR 903.13f(3): the draft contained Commander Masters boosters"
+        );
+    }
+
+    /// The latched set codes are what the draft CONTAINED -- distinct, and
+    /// scoped to Commander Draft. This is the value `filter_for_player`
+    /// publishes, so it is asserted at its own seam rather than only through
+    /// the concessions it feeds.
+    #[test]
+    fn the_latched_set_codes_are_the_distinct_sets_a_commander_draft_contained() {
+        let mut mixed = commander_draft_session("CMM");
+        mixed.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "CLB".to_string(), "cmm".to_string()],
+        };
+        assert_eq!(
+            concession_set_codes(&mixed),
+            vec!["CMM", "CLB"],
+            "a set names its CR 903.13e condition once however many boosters it filled"
+        );
+
+        let mut cube = commander_draft_session("CMM");
+        cube.config.source = DraftSource::Cube {
+            id: "cube-1".to_string(),
+            name: "Cube".to_string(),
+        };
         assert!(
-            draft_set_concessions("CLB").filler.is_some(),
-            "reach guard: CLB is itself a granting set, so the mixed result is \
-             the guard firing and not two non-granting codes"
+            concession_set_codes(&cube).is_empty(),
+            "a cube contains no draft boosters from any set"
+        );
+
+        let mut premier = commander_draft_session("CMM");
+        premier.kind = DraftKind::Premier;
+        assert!(
+            concession_set_codes(&premier).is_empty(),
+            "CR 903.13 scopes both rules to Commander Draft"
         );
     }
 
@@ -3012,7 +3057,7 @@ mod tests {
     /// a latch that never reached the validator would accept both.
     #[test]
     fn submit_deck_applies_the_latched_filler_grant() {
-        let filler = draft_set_concessions("CMM").filler.unwrap();
+        let filler = draft_set_concessions("CMM").fillers.remove(0);
 
         let deck_with = |copies: usize| {
             let mut deck: Vec<String> = (0..60 - copies).map(|i| format!("Card {i}")).collect();
@@ -3057,7 +3102,7 @@ mod tests {
     /// the P9 handoff received an empty list.
     #[test]
     fn submit_deck_snapshots_the_designation_onto_the_submission() {
-        let filler = draft_set_concessions("CMM").filler.unwrap();
+        let filler = draft_set_concessions("CMM").fillers.remove(0);
         let mut session = deckbuilding_commander_draft("CMM", 60);
         let mut main_deck: Vec<String> = (0..59).map(|i| format!("Card {i}")).collect();
         main_deck.push(filler.card_name.clone());

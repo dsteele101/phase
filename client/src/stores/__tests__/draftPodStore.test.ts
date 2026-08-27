@@ -34,7 +34,11 @@ vi.mock("../multiplayerDraftStore", () => ({
 // `enterKind` reads the ENGINE's per-kind `DraftProcedure` through the adapter.
 // Mocking the adapter is what lets the hostile fixture below return a pod size
 // the client could not have guessed.
-vi.mock("../../adapter/draft-adapter", () => ({
+vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
+  // The pure helpers (`distinctJoined`, `setPackSequence`) are the real ones:
+  // they are the boundary's own shape logic, and stubbing them would let a
+  // wrong pack sequence pass these tests. Only the adapter CLASS is replaced.
+  ...(await importOriginal<typeof import("../../adapter/draft-adapter")>()),
   DraftAdapter: class {
     draftProcedure = mocks.draftProcedure;
   },
@@ -69,7 +73,7 @@ const persistedSession = {
   draftStarted: true,
   draftCode: "ABCDE",
   draftSessionJson: "{}",
-  poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
+  poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
 };
 
 describe("draftPodStore", () => {
@@ -234,6 +238,55 @@ describe("draftPodStore", () => {
       expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
     });
 
+    /**
+     * A host who refreshes mid-lobby must land back on the pack sequence they
+     * arranged — order included — not on an unlabelled pod they have to
+     * rebuild.
+     */
+    it("restores the pack sequence from a persisted multi-set snapshot", async () => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue({
+        ...persistedSession,
+        poolInput: {
+          type: "Set" as const,
+          data: {
+            pools: [{ code: "ISD" }, { code: "DKA" }],
+            sequence: ["ISD", "DKA", "ISD"],
+          },
+        },
+      });
+
+      await useDraftPodStore.getState().resumeHostedPod();
+
+      const state = useDraftPodStore.getState();
+      expect(state.poolMode).toBe("set");
+      expect(state.config.packs.map((pack) => pack.code)).toEqual(["ISD", "DKA", "ISD"]);
+      // The label dedupes, mirroring the engine's own `DraftSource::set_code`.
+      expect(state.config.setCode).toBe("ISD+DKA");
+    });
+
+    /**
+     * A pod persisted before multi-set pods existed carries one serialized pool
+     * and no sequence. It must still resume — draft-wasm promotes that spelling
+     * to the single-set pod it always meant — rather than being discarded.
+     */
+    it("resumes a pre-multi-set snapshot with no pack sequence", async () => {
+      mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+      mocks.loadDraftHostSession.mockResolvedValue({
+        ...persistedSession,
+        poolInput: { type: "Set" as const, data: { set_pool_json: '{"code":"TST"}' } },
+      });
+
+      const outcome = await useDraftPodStore.getState().resumeHostedPod();
+
+      expect(outcome).toBe("resumed");
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      const state = useDraftPodStore.getState();
+      expect(state.poolMode).toBe("set");
+      expect(state.config.packs).toEqual([]);
+      expect(state.config.setName).toBe("Draft Pod");
+    });
+
     it("restores cube poolMode + setName from a persisted cube snapshot", async () => {
       const cubeSession = {
         ...persistedSession,
@@ -332,6 +385,92 @@ describe("draftPodStore", () => {
       vi.unstubAllGlobals();
     });
 
+    /** Stub the pool fetch with a `draft-pools.json` carrying `codes`. */
+    function stubPools(codes: string[]): void {
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      const pools = Object.fromEntries(codes.map((code) => [code.toLowerCase(), { code }]));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true, status: 200, json: async () => pools })),
+      );
+    }
+
+    function hostedPoolInput(): { type: string; data: { pools: unknown[]; sequence: string[] } } {
+      const [config] = mocks.multiplayerState.hostDraft.mock.calls[0] as [
+        { poolInput: { type: string; data: { pools: unknown[]; sequence: string[] } } },
+      ];
+      return config.poolInput;
+    }
+
+    /**
+     * THE multiplayer multi-set claim at the store: the ORDER the host arranged
+     * reaches the host adapter intact, and each distinct set's pool crosses the
+     * boundary exactly once no matter how many boosters it fills.
+     */
+    it("ships the host's pack order and one pool per distinct set", async () => {
+      stubPools(["ISD", "DKA"]);
+      mocks.draftProcedure.mockResolvedValue({ min_pod_size: 8, packs_per_player: 3, pod_size: 8 });
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [
+            { code: "ISD", name: "Innistrad" },
+            { code: "DKA", name: "Dark Ascension" },
+            { code: "ISD", name: "Innistrad" },
+          ],
+          setCode: "ISD+DKA",
+        },
+        hostDisplayName: "Host",
+      }));
+
+      await useDraftPodStore.getState().createPod();
+
+      const poolInput = hostedPoolInput();
+      expect(poolInput.type).toBe("Set");
+      expect(poolInput.data.sequence).toEqual(["ISD", "DKA", "ISD"]);
+      // Deduped, and in first-appearance order — the sequence is what repeats.
+      expect(poolInput.data.pools).toEqual([{ code: "ISD" }, { code: "DKA" }]);
+    });
+
+    /**
+     * A set the host named with no pool data must fail creation by name rather
+     * than shipping a sequence the engine will refuse mid-draft. Checked on a
+     * LATER entry, since resolving only the first code would still pass.
+     */
+    it("refuses a pack list naming a set with no pool data", async () => {
+      stubPools(["ISD"]);
+      mocks.draftProcedure.mockResolvedValue({ min_pod_size: 8, packs_per_player: 3, pod_size: 8 });
+      useDraftPodStore.setState((prev) => ({
+        config: {
+          ...prev.config,
+          packs: [
+            { code: "ISD", name: "Innistrad" },
+            { code: "NOPE", name: "Missing" },
+          ],
+          setCode: "ISD+NOPE",
+        },
+        hostDisplayName: "Host",
+      }));
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("No pool data for set: NOPE");
+    });
+
+    it("refuses an empty pack list", async () => {
+      stubPools(["ISD"]);
+      useDraftPodStore.setState((prev) => ({
+        config: { ...prev.config, packs: [], setCode: "" },
+        hostDisplayName: "Host",
+      }));
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      expect(useDraftPodStore.getState().configError).toBe("Select a set first");
+    });
+
     it("keeps the loadProcedure failure visible past the pool fetch", async () => {
       // `__DRAFT_POOLS_URL__` is a vite define that `vitest.config.ts` does not
       // declare, so it is a free identifier here and must be supplied, or the
@@ -344,7 +483,11 @@ describe("draftPodStore", () => {
       );
       mocks.draftProcedure.mockRejectedValue(new Error("wasm unavailable"));
       useDraftPodStore.setState((prev) => ({
-        config: { ...prev.config, setCode: "EOE" },
+        config: {
+          ...prev.config,
+          packs: [{ code: "EOE", name: "Edge of Eternities" }],
+          setCode: "EOE",
+        },
         hostDisplayName: "Host",
       }));
 

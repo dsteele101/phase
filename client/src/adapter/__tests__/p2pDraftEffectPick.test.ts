@@ -27,7 +27,7 @@ describe("P2P draft-effect picks", () => {
     const host = new P2PDraftHost(
       { id: "host" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       "Premier",
       8,
       "Host",
@@ -61,7 +61,7 @@ describe("P2P draft-effect picks", () => {
     const host = new P2PDraftHost(
       { id: "host" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       "Premier",
       8,
       "Host",
@@ -107,7 +107,7 @@ describe("P2P draft-effect picks", () => {
     const host = new P2PDraftHost(
       { id: "host" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       "Premier",
       8,
       "Host",

@@ -431,6 +431,13 @@ function isDraftKind(value: unknown): value is Exclude<DraftKind, "Quick"> {
 function isPoolInput(value: unknown): value is PoolInput {
   if (!isRecord(value) || !isRecord(value.data)) return false;
   if (value.type === "Set") {
+    // Two spellings reach here. The live one is a `SetPackSequence`: the
+    // distinct pools plus the pack-ordered sequence naming which fills each
+    // booster. A pod persisted before multi-set pods existed carries one
+    // serialized pool under `set_pool_json`; draft-wasm still promotes that to
+    // the one-element sequence it meant, so a host mid-lobby across the upgrade
+    // resumes instead of having its snapshot discarded as corrupt.
+    if (isSetPackSequence(value.data)) return true;
     return typeof value.data.set_pool_json === "string" && isJsonRecord(value.data.set_pool_json);
   }
   if (value.type !== "Cube") return false;
@@ -449,6 +456,22 @@ function isPoolInput(value: unknown): value is PoolInput {
       settings.addable_cards.policy === "StandardBasicsPlusCustom") &&
     Array.isArray(settings.addable_cards.custom) &&
     settings.addable_cards.custom.every((card) => typeof card === "string")
+  );
+}
+
+/**
+ * A pack sequence carries one pool object per distinct set and one set code per
+ * booster. The sequence must be non-empty — a pod that named no booster has no
+ * pool at all — and every entry a string, since draft-wasm resolves each
+ * against the supplied pools by name.
+ */
+function isSetPackSequence(data: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(data.pools) &&
+    data.pools.every(isRecord) &&
+    Array.isArray(data.sequence) &&
+    data.sequence.length > 0 &&
+    data.sequence.every((code) => typeof code === "string")
   );
 }
 

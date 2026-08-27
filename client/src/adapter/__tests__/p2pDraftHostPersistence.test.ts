@@ -41,7 +41,7 @@ function recoveredHost(hostDisplayName: string): P2PDraftHost {
   return new P2PDraftHost(
     { id: hostDisplayName } as never,
     () => () => {},
-    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
     "Premier",
     8,
     hostDisplayName,
@@ -57,7 +57,7 @@ function ephemeralHost(hostDisplayName: string): P2PDraftHost {
   return new P2PDraftHost(
     { id: hostDisplayName } as never,
     () => () => {},
-    { type: "Set", data: { set_pool_json: "{}" } } as never,
+    { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
     "Premier",
     8,
     hostDisplayName,

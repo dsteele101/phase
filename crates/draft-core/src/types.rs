@@ -345,6 +345,14 @@ impl DraftKind {
 /// not by the player's set selection — the reducer rejects any other count.
 pub const SEALED_PACK_COUNT: u8 = 6;
 
+/// Upper bound on the length of a draft's pack sequence.
+///
+/// A sequence names one set per booster, and every entry costs a distinct pool
+/// to load and ship. No `DraftKind` opens more than [`SEALED_PACK_COUNT`]
+/// boosters, so this leaves headroom for a future kind while keeping an
+/// untrusted wire sequence bounded before any pool lookup runs.
+pub const MAX_PACK_COUNT: u8 = 8;
+
 /// Resolve the entry of a pack-ordered sequence that describes pack
 /// `pack_number`.
 ///
@@ -377,8 +385,15 @@ pub enum DraftSource {
 }
 
 /// Accept both the pack-ordered `codes` array and the single `code` string that
-/// pre-multi-set snapshots wrote, so an in-flight draft survives the upgrade.
-fn deserialize_set_codes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+/// pre-multi-set snapshots and wire frames wrote, so an in-flight draft — and a
+/// peer that predates multi-set drafts — survives the upgrade.
+///
+/// Public because the same two shapes reach the engine from a second boundary:
+/// `server_core::protocol::ClientMessage::CreateDraftWithSettings` carries the
+/// host's chosen sequence, and a pre-multi-set client sends the single string
+/// there. One deserializer owns both spellings for every boundary that sees
+/// them, rather than each re-deciding what a legacy frame means.
+pub fn deserialize_set_codes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

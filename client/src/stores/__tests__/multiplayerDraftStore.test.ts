@@ -159,7 +159,7 @@ describe("multiplayerDraftStore", () => {
   describe("hostDraft", () => {
     it("hands a completed host session off before joining and gates its late events", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -177,7 +177,7 @@ describe("multiplayerDraftStore", () => {
 
     it("waits for a cancelled recovery's same-ID host cleanup before starting its replacement", async () => {
       const config = {
-        poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier" as const,
         podSize: 8,
         hostDisplayName: "Host",
@@ -208,7 +208,7 @@ describe("multiplayerDraftStore", () => {
       }));
 
       const first = useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -230,7 +230,7 @@ describe("multiplayerDraftStore", () => {
       }));
       const controller = new AbortController();
       const hosting = useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -251,7 +251,7 @@ describe("multiplayerDraftStore", () => {
     it("releases an initialized host when its owning route later aborts", async () => {
       const controller = new AbortController();
       await expect(useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -269,7 +269,7 @@ describe("multiplayerDraftStore", () => {
 
     it("sets role to host and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -284,7 +284,7 @@ describe("multiplayerDraftStore", () => {
 
     it("updates roomCode on roomCreated event", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -299,7 +299,7 @@ describe("multiplayerDraftStore", () => {
 
     it("updates view on draftStarted event", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -317,7 +317,7 @@ describe("multiplayerDraftStore", () => {
 
     it("tracks lobby state from lobbyUpdate events", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -340,7 +340,7 @@ describe("multiplayerDraftStore", () => {
 
     it("projects restored MatchInProgress views into match phase", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -358,7 +358,7 @@ describe("multiplayerDraftStore", () => {
 
     it("pairingsGenerated advances currentRound, leaves nextPairingRound to viewUpdated, and the phase change retires the error", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -410,7 +410,7 @@ describe("multiplayerDraftStore", () => {
 
     it("handles host-seat Bo3 prompt messages", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Traditional",
         podSize: 8,
         hostDisplayName: "Host",
@@ -450,7 +450,7 @@ describe("multiplayerDraftStore", () => {
 
     it("reports active bot match results back to the pod host", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -489,7 +489,7 @@ describe("multiplayerDraftStore", () => {
 
     it("reports active match concessions as opponent wins", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -761,7 +761,7 @@ describe("multiplayerDraftStore", () => {
   describe("shared actions", () => {
     it("submits a draft-effect pick through the host adapter", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -782,7 +782,7 @@ describe("multiplayerDraftStore", () => {
 
     it("forwards the commander designation through the host adapter", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -803,7 +803,7 @@ describe("multiplayerDraftStore", () => {
 
     it("selectCard and confirmPick work together", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -825,7 +825,7 @@ describe("multiplayerDraftStore", () => {
 
     it("autoPickCard submits from the visible pack without manual selection", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -984,7 +984,7 @@ describe("multiplayerDraftStore", () => {
   describe("leave", () => {
     it("resets state to initial", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -1026,7 +1026,7 @@ describe("multiplayerDraftStore", () => {
 
     async function hostInMatch(): Promise<void> {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Traditional",
         podSize: 8,
         hostDisplayName: "Host",

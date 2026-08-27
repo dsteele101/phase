@@ -50,15 +50,13 @@ interface SetSelectorProps {
   /**
    * Draft every pack from one set, chosen with a single click and no pack list.
    *
-   * Pods take this path: their host boundary (`PoolInput::Set`) carries one
-   * pool for the whole event, so a per-pack set sequence has nowhere to go.
-   * Local drafts leave it off and arrange their own pack order.
+   * No in-tree caller takes this path any more — pods carry a per-pack sequence
+   * like every other set-backed event since multi-set drafts landed. Kept for a
+   * surface that wants a one-click set picker; the same result is reachable from
+   * the normal path by naming one set, which then fills every booster.
    */
   singleSet?: boolean;
 }
-
-/** Upper bound on a draft's pack list — keeps pools and the UI list sane. */
-const MAX_PACKS = 8;
 
 /**
  * Hold the content below a resizing block still while the block changes height.
@@ -163,7 +161,12 @@ export function SetSelector({
   const packListRef = useRef<HTMLDivElement | null>(null);
   useStableScrollBelow(packListRef, packs.length);
 
-  const packLimit = fixedPackCount ? defaultPackCount : MAX_PACKS;
+  // The event's own booster count is the ceiling, fixed-length or not. Naming
+  // MORE sets than the event opens is refused by the engine
+  // (`ResolvedSetSelection`), so offering a longer list would only build a
+  // selection that cannot start. Naming FEWER is fine: a short sequence repeats
+  // its last entry, which is how one click still fills every pack.
+  const packLimit = defaultPackCount;
   const isFull = !singleSet && packs.length >= packLimit;
   const canStart = fixedPackCount ? packs.length === defaultPackCount : packs.length > 0;
 

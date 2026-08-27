@@ -645,16 +645,16 @@ export function useDeckBuilder({
         let isPartnerAdd = false;
         if (commanders.length === 1) {
           try {
-            // CR 903.13f(3): `null` = constructed play, which grants no extra
-            // partner ability — so every existing caller keeps today's
+            // CR 903.13f(3): an EMPTY list = constructed play, which grants no
+            // extra partner ability — so every existing caller keeps today's
             // behaviour and a constructed Commander deck is unaffected.
             // Discharged in phase 8 where it belongs: the DRAFT deckbuilder
             // (`LimitedDeckBuilder`) passes the engine-latched
-            // `DraftPlayerView.draft_set_code`. This call is constructed play,
-            // which has no draft behind it, so `null` is the rules-correct
+            // `DraftPlayerView.draft_set_codes`. This call is constructed play,
+            // which has no draft behind it, so `[]` is the rules-correct
             // argument here and must stay.
             isPartnerAdd = (
-              await commanderPartnerCandidates(commanders[0], [cardName], null)
+              await commanderPartnerCandidates(commanders[0], [cardName], [])
             ).includes(cardName);
           } catch {
             return;
