@@ -66,6 +66,10 @@ pub(crate) struct ParseContext {
     /// the trigger machinery, not a target-source capture, so the branch must
     /// not claim trigger-body text (Ria Ivor keeps its fall-through shapes).
     pub in_trigger: bool,
+    /// Contextual source for the exact bare aggregate surface "those cards".
+    /// Set per effect-chain chunk from the nearest typed producer, or from a
+    /// proven trigger subject batch when no compatible chain producer wins.
+    pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,

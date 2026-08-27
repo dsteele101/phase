@@ -15,6 +15,7 @@ const VIEW: DraftPlayerView = {
   pick_number: 0,
   pass_direction: "Left",
   current_pack: null,
+  required_pick_count: 0,
   pool: [
     {
       instance_id: "creature",
@@ -73,6 +74,8 @@ const VIEW: DraftPlayerView = {
   cards_per_pack: 1,
   pack_sizes: [1, 1, 1],
   pack_set_codes: ["TST", "TST", "TST"],
+  pack_pick_steps: [1, 1, 1],
+  pick_steps_per_pack: 1,
   pack_count: 2,
   min_deck_size: 40,
   addable_cards: ["Plains"],

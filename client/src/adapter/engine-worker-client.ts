@@ -18,7 +18,12 @@ import type {
   SubmitResult,
   ViewerSnapshot,
 } from "./types";
-import { AdapterError, AdapterErrorCode } from "./types";
+import {
+  actionRejectionError,
+  AdapterError,
+  AdapterErrorCode,
+  isActionRejection,
+} from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
@@ -32,6 +37,7 @@ type EngineResponse =
       message: string;
       bracketViolation?: true;
       engineOccupied?: true;
+      actionRejection?: unknown;
     };
 
 /**
@@ -51,6 +57,7 @@ const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
  * WasmAdapter dispose the stalled worker and activate its main-thread fallback.
  */
 const ENGINE_INITIALIZATION_TIMEOUT_MS = 30_000;
+const MALFORMED_ACTION_REJECTION_MESSAGE = "The engine rejected that action.";
 
 type RequestTimeoutBehavior = "notify" | "reject";
 
@@ -105,7 +112,21 @@ export class EngineWorkerClient {
             // rejections so the caller can match by code rather than by string
             // substring on the error message.
             let err: Error;
-            if (msg.bracketViolation) {
+            if ("actionRejection" in msg && isActionRejection(msg.actionRejection)) {
+              err = actionRejectionError(msg.actionRejection);
+            } else if (
+              msg.actionRejection !== undefined
+              || (
+                "actionRejection" in msg
+                && msg.message === MALFORMED_ACTION_REJECTION_MESSAGE
+              )
+            ) {
+              err = new AdapterError(
+                AdapterErrorCode.ACTION_REJECTED,
+                MALFORMED_ACTION_REJECTION_MESSAGE,
+                true,
+              );
+            } else if (msg.bracketViolation) {
               err = new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false);
             } else if (msg.engineOccupied) {
               err = new AdapterError(AdapterErrorCode.ENGINE_OCCUPIED, msg.message, false);

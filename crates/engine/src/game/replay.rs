@@ -14,12 +14,15 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::database::CardDatabase;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
 use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
 
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
-use super::engine::{apply, start_game, start_game_with_starting_player};
+use super::engine::{
+    apply, resolve_all_ready_access, resolve_all_ready_prefix, start_game,
+    start_game_with_starting_player, ResolveAllReadyAccess,
+};
 
 /// Checkpoints are cached every `CHECKPOINT_INTERVAL` actions, bounding cache
 /// size to roughly `len / CHECKPOINT_INTERVAL` snapshots while keeping any
@@ -33,7 +36,7 @@ const CHECKPOINT_INTERVAL: u32 = 20;
 pub enum ReplayError {
     #[error("replay is missing its format version")]
     MissingFormatVersion,
-    #[error("unsupported replay format version {version}; this engine supports version 2")]
+    #[error("unsupported replay format version {version}; this engine supports versions 2 and 3")]
     UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
     /// during reconstruction. This means the recording and the engine version
@@ -133,10 +136,11 @@ impl ReplayPlayer {
     /// is `Some` and `db` is `None` — see that function's doc comment.
     pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Result<Self, ReplayError> {
         match log.format_version {
-            Some(REPLAY_FORMAT_VERSION) => {}
+            Some(2 | REPLAY_FORMAT_VERSION) => {}
             Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
             None => return Err(ReplayError::MissingFormatVersion),
         }
+        validate_resolve_all_boundaries(&log)?;
         let initial = reconstruct_initial_state(&log.header, db)?;
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
@@ -191,30 +195,96 @@ impl ReplayPlayer {
             .next_back()
             .expect("index 0 checkpoint is always present");
         let mut state = base.clone();
-        for recorded in &self.log.actions[start_idx as usize..target as usize] {
+        for (offset, recorded) in self.log.actions[start_idx as usize..target as usize]
+            .iter()
+            .enumerate()
+        {
             apply(&mut state, recorded.actor, recorded.action.clone()).map_err(|e| {
                 ReplayError::Desync {
                     index: recorded.seq,
                     message: e.to_string(),
                 }
             })?;
+            let after_action_count = start_idx + offset as u32 + 1;
+            for boundary in self
+                .log
+                .resolve_all_boundaries
+                .iter()
+                .filter(|boundary| boundary.after_action_count == after_action_count)
+            {
+                if !matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
+                    return Err(ReplayError::Desync {
+                        index: recorded.seq,
+                        message: "Resolve All boundary was due without a Ready latch".to_string(),
+                    });
+                }
+                if resolve_all_ready_access(&state, boundary.requester)
+                    != ResolveAllReadyAccess::Admitted
+                {
+                    return Err(ReplayError::Desync {
+                        index: recorded.seq,
+                        message:
+                            "Resolve All boundary requester is not entitled to the Ready latch"
+                                .to_string(),
+                    });
+                }
+                resolve_all_ready_prefix(&mut state, boundary.requester);
+            }
         }
         Ok(state)
     }
 }
 
+fn validate_resolve_all_boundaries(log: &ReplayLog) -> Result<(), ReplayError> {
+    let boundary_error = |after_action_count: u32, message: &str| ReplayError::Desync {
+        index: after_action_count.saturating_sub(1),
+        message: message.to_string(),
+    };
+
+    if log.format_version == Some(2) && !log.resolve_all_boundaries.is_empty() {
+        return Err(boundary_error(
+            log.resolve_all_boundaries[0].after_action_count,
+            "version 2 replay cannot contain Resolve All boundaries",
+        ));
+    }
+
+    let action_count = log.actions.len() as u32;
+    let mut previous = 0;
+    for boundary in &log.resolve_all_boundaries {
+        if boundary.after_action_count == 0 || boundary.after_action_count > action_count {
+            return Err(boundary_error(
+                boundary.after_action_count,
+                "Resolve All boundary anchor is outside the action sequence",
+            ));
+        }
+        if boundary.after_action_count <= previous {
+            return Err(boundary_error(
+                boundary.after_action_count,
+                "Resolve All boundaries must be unique and strictly ordered",
+            ));
+        }
+        previous = boundary.after_action_count;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
-    use crate::types::actions::GameAction;
+    use crate::types::ability::{
+        Effect, ResolvedAbility, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+    };
+    use crate::types::actions::{GameAction, ResolveAllConsentDecision};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{ProductionOverride, WaitingFor};
+    use crate::types::game_state::{
+        AutoPassMode, ProductionOverride, StackEntry, StackEntryKind, TurnBoundary,
+    };
     use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use crate::types::mana::{
         ManaSourceOutput, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use crate::types::match_config::MatchConfig;
+    use crate::types::replay::RecordedResolveAll;
 
     fn two_player_header(seed: u64) -> ReplayHeader {
         ReplayHeader {
@@ -235,6 +305,24 @@ mod tests {
         match state.waiting_for {
             WaitingFor::Priority { player } => Some((player, GameAction::PassPriority)),
             _ => None,
+        }
+    }
+
+    fn no_op_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    object_id,
+                    controller,
+                )),
+            },
         }
     }
 
@@ -259,7 +347,127 @@ mod tests {
     }
 
     #[test]
-    fn version_two_roundtrips_semantic_mana_source_selections() {
+    fn version_two_rejects_resolve_all_boundaries() {
+        let mut legacy = ReplayLog::new(two_player_header(2));
+        legacy.format_version = Some(2);
+        ReplayPlayer::load(legacy.clone(), None)
+            .expect("v2 replay without Resolve All boundaries remains readable");
+
+        legacy.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: 1,
+            requester: PlayerId(0),
+        });
+        let error = ReplayPlayer::load(legacy, None)
+            .expect_err("v2 cannot represent an atomic Resolve All boundary");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { message, .. }
+                if message == "version 2 replay cannot contain Resolve All boundaries"
+        ));
+    }
+
+    #[test]
+    fn version_three_rejects_invalid_resolve_all_boundary_anchors() {
+        let mut base = ReplayLog::new(two_player_header(3));
+        base.push_action(PlayerId(0), GameAction::PassPriority);
+        base.push_action(PlayerId(1), GameAction::PassPriority);
+
+        let mut zero = base.clone();
+        zero.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: 0,
+            requester: PlayerId(0),
+        });
+        let mut past_end = base.clone();
+        past_end.resolve_all_boundaries.push(RecordedResolveAll {
+            after_action_count: 3,
+            requester: PlayerId(0),
+        });
+        let mut unordered = base.clone();
+        unordered.resolve_all_boundaries = vec![
+            RecordedResolveAll {
+                after_action_count: 2,
+                requester: PlayerId(0),
+            },
+            RecordedResolveAll {
+                after_action_count: 1,
+                requester: PlayerId(1),
+            },
+        ];
+        let mut duplicate = base;
+        duplicate.resolve_all_boundaries = vec![
+            RecordedResolveAll {
+                after_action_count: 1,
+                requester: PlayerId(0),
+            },
+            RecordedResolveAll {
+                after_action_count: 1,
+                requester: PlayerId(1),
+            },
+        ];
+
+        for malformed in [zero, past_end, unordered, duplicate] {
+            let error = ReplayPlayer::load(malformed, None)
+                .expect_err("v3 boundary anchors must be in-range, unique, and ordered");
+            assert!(matches!(error, ReplayError::Desync { .. }));
+        }
+    }
+
+    #[test]
+    fn due_resolve_all_boundary_requires_a_ready_latch() {
+        let mut log = ReplayLog::new(two_player_header(4));
+        log.push_action(PlayerId(0), GameAction::PassPriority);
+        log.push_resolve_all_boundary(PlayerId(0));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("boundary shape is valid");
+        let error = replay
+            .seek(1)
+            .expect_err("a due Resolve All boundary must not be silently ignored");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { message, .. }
+                if message == "Resolve All boundary was due without a Ready latch"
+        ));
+    }
+
+    #[test]
+    fn due_resolve_all_boundary_rejects_an_unentitled_requester() {
+        let header = two_player_header(5);
+        let mut initial = GameState::new_two_player(header.seed);
+        initial.stack.push_back(no_op_entry(1, PlayerId(0)));
+        let mut log = ReplayLog::new(header);
+
+        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
+        let mut consent = initial.clone();
+        apply(&mut consent, PlayerId(0), begin.clone())
+            .expect("P0 can begin Resolve All from priority");
+        log.push_action(PlayerId(0), begin);
+        let WaitingFor::ResolveAllConsent { epoch, .. } = consent.waiting_for else {
+            panic!(
+                "P1 should be asked for consent, got {:?}",
+                consent.waiting_for
+            );
+        };
+        let grant = GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        };
+        log.push_action(PlayerId(1), grant);
+        log.push_resolve_all_boundary(PlayerId(2));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("boundary shape is valid");
+        replay.checkpoints.insert(0, initial);
+        let error = replay
+            .seek(2)
+            .expect_err("a non-participant cannot consume Resolve All Ready");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { message, .. }
+                if message == "Resolve All boundary requester is not entitled to the Ready latch"
+        ));
+    }
+
+    #[test]
+    fn version_three_roundtrips_semantic_mana_source_selections() {
         let source = ObjectIncarnationRef::of(ObjectId(7), 3);
         let aura = ObjectIncarnationRef::of(ObjectId(9), 2);
         let action = GameAction::TapLandForMana {
@@ -370,6 +578,53 @@ mod tests {
                 "waiting_for at {index}"
             );
         }
+    }
+
+    #[test]
+    fn replay_player_reconstructs_atomic_resolve_all_with_two_retained_auto_passes() {
+        let header = two_player_header(101);
+        let mut initial = GameState::new_two_player(header.seed);
+        initial.stack.push_back(no_op_entry(1, PlayerId(0)));
+        for player in [PlayerId(0), PlayerId(1)] {
+            initial.auto_pass.insert(
+                player,
+                AutoPassMode::UntilTurnBoundary {
+                    until: TurnBoundary::EndOfCurrentTurn,
+                },
+            );
+        }
+
+        let mut live = initial.clone();
+        let mut log = ReplayLog::new(header);
+        let begin = GameAction::BeginResolveAll { max_resolutions: 0 };
+        apply(&mut live, PlayerId(0), begin.clone()).expect("P0 begins Resolve All consent");
+        log.push_action(PlayerId(0), begin);
+        let WaitingFor::ResolveAllConsent { epoch, .. } = live.waiting_for else {
+            panic!("P1 should be asked for consent, got {:?}", live.waiting_for);
+        };
+        let grant = GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        };
+        apply(&mut live, PlayerId(1), grant.clone()).expect("P1 grants Resolve All consent");
+        log.push_action(PlayerId(1), grant);
+        assert!(matches!(
+            live.waiting_for,
+            WaitingFor::ResolveAllReady { .. }
+        ));
+
+        resolve_all_ready_prefix(&mut live, PlayerId(0));
+        log.push_resolve_all_boundary(PlayerId(0));
+
+        let mut replay = ReplayPlayer::load(log, None).expect("the atomic boundary is replayable");
+        replay.checkpoints.insert(0, initial);
+        let replay_len = replay.len();
+        let reconstructed = replay
+            .seek(replay_len)
+            .expect("ReplayPlayer applies the Resolve All boundary")
+            .clone();
+
+        assert_eq!(reconstructed, live);
     }
 
     #[test]

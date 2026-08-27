@@ -24,6 +24,95 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
+/// CR 608.2c + CR 119.3: Palantir's final life loss reduces the exact cards
+/// milled by its preceding clause and applies to the opponent targeted when the
+/// trigger was put on the stack.
+#[test]
+fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, put an influence counter on Palantir of Orthanc and \
+         scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill \
+         X cards, where X is the number of influence counters on Palantir of Orthanc, and that \
+         player loses life equal to the total mana value of those cards.",
+        "Palantir of Orthanc",
+        &[],
+        &["Legendary".to_string(), "Artifact".to_string()],
+        &[],
+    );
+
+    let trigger = parsed.triggers.first().expect("Palantir end-step trigger");
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    let put = trigger.execute.as_deref().expect("counter effect");
+    assert!(matches!(put.effect.as_ref(), Effect::PutCounter { .. }));
+    let scry = put.sub_ability.as_deref().expect("scry continuation");
+    assert!(matches!(scry.effect.as_ref(), Effect::Scry { .. }));
+    let draw = scry.sub_ability.as_deref().expect("opponent draw choice");
+    assert!(draw.optional);
+    assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    let mill = draw.sub_ability.as_deref().expect("decline mill branch");
+    assert!(matches!(
+        mill.effect.as_ref(),
+        Effect::Mill {
+            target: TargetFilter::OriginalController,
+            ..
+        }
+    ));
+    let lose = mill.sub_ability.as_deref().expect("life-loss continuation");
+    let Effect::LoseLife { amount, target } = lose.effect.as_ref() else {
+        panic!("expected LoseLife, got {:?}", lose.effect);
+    };
+    assert_eq!(target.as_ref(), Some(&TargetFilter::ScopedPlayer));
+    assert_eq!(
+        *amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            },
+        }
+    );
+    assert!(
+        matches!(lose.condition, Some(AbilityCondition::Not { .. })),
+        "life loss must remain gated on the opponent declining the draw"
+    );
+}
+
+#[test]
+fn combustible_gearhulk_damage_uses_milled_chain_set() {
+    let parsed = parse_oracle_text(
+        "First strike\nWhen Combustible Gearhulk enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then Combustible Gearhulk deals damage to that player equal to the total mana value of those cards.",
+        "Combustible Gearhulk",
+        &["First strike".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Construct".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::ChangesZone)
+        .expect("Gearhulk enters trigger");
+    let draw = trigger.execute.as_deref().expect("draw choice");
+    let mill = draw.sub_ability.as_deref().expect("decline mill");
+    let damage = mill.sub_ability.as_deref().expect("damage continuation");
+    let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert!(matches!(
+        amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            }
+        }
+    ));
+    assert!(matches!(target, TargetFilter::ScopedPlayer));
+}
+
 #[test]
 fn extract_hand_cast_battlefield_threshold_leaves_effect_text() {
     let (cleaned, condition) = extract_if_condition(

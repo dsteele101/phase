@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
+use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
     TriggerOrderTemplateOp,
@@ -90,8 +91,26 @@ pub enum EngineError {
     WrongPlayer,
     #[error("Not your priority")]
     NotYourPriority,
+    #[error("Action is stale")]
+    StaleAction,
     #[error("Action not allowed: {0}")]
     ActionNotAllowed(String),
+}
+
+/// Converts an engine error into stable client-facing metadata without ever
+/// copying its diagnostic payload into the serialized response.
+pub(crate) fn action_rejection_for_engine_error(
+    error: &EngineError,
+    related_object_ids: Vec<ObjectId>,
+) -> ActionRejection {
+    let code = match error {
+        EngineError::InvalidAction(_) => ActionRejectionCode::InvalidAction,
+        EngineError::WrongPlayer => ActionRejectionCode::WrongPlayer,
+        EngineError::NotYourPriority => ActionRejectionCode::NotYourPriority,
+        EngineError::StaleAction => ActionRejectionCode::StaleAction,
+        EngineError::ActionNotAllowed(_) => ActionRejectionCode::ActionNotAllowed,
+    };
+    ActionRejection::from_code(code, related_object_ids)
 }
 
 /// The three non-interchangeable authorities carried by a live Priority
@@ -863,6 +882,111 @@ pub fn apply(
     apply_action_boundary(state, actor, action, PublicFinalizeMode::Immediate)
 }
 
+/// Applies an action while returning stable, safe rejection metadata instead
+/// of a diagnostic engine error. The legacy [`apply`] API remains the raw
+/// engine-error authority for callers that need internal diagnostics.
+pub fn apply_with_rejection(
+    state: &mut GameState,
+    actor: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, ActionRejection> {
+    let related_object_ids = action.related_object_ids();
+    if matches!(&action, GameAction::Debug(_)) {
+        if let Some(rejection) =
+            explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+        {
+            return Err(rejection);
+        }
+    }
+    apply(state, actor, action).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
+}
+
+/// Checks a debug action without exposing diagnostic preflight errors.
+pub fn preflight_debug_action_with_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    action: &DebugAction,
+) -> Result<(), ActionRejection> {
+    let related_object_ids = GameAction::Debug(action.clone()).related_object_ids();
+    if let Some(rejection) =
+        explicit_debug_permission_rejection(state, actor, related_object_ids.clone())
+    {
+        return Err(rejection);
+    }
+    preflight_debug_action(state, actor, action).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
+}
+
+/// Returns the viewer-filtered permission rejection for a debug action when
+/// debug mode is enabled. Disabled debug mode continues through the ordinary
+/// preflight path so it remains an invalid action rather than an authorization
+/// failure.
+pub(crate) fn explicit_debug_permission_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    related_object_ids: Vec<ObjectId>,
+) -> Option<ActionRejection> {
+    if !state.debug_mode {
+        return None;
+    }
+
+    require_explicit_debug_permission(state, actor)
+        .err()
+        .map(|rejection| {
+            super::visibility::filter_action_rejection_for_viewer(
+                state,
+                actor,
+                &ActionRejection::from_code(rejection.code, related_object_ids),
+            )
+        })
+}
+
+/// Checks the transport-level explicit debug permission policy without
+/// evaluating whether a particular debug action is otherwise valid.
+///
+/// An empty permission set leaves debug authority unrestricted; once the set
+/// has members, only listed players have explicit debug permission.
+pub fn require_explicit_debug_permission(
+    state: &GameState,
+    actor: PlayerId,
+) -> Result<(), ActionRejection> {
+    if state.debug_permitted.is_empty() || state.debug_permitted.contains(&actor) {
+        Ok(())
+    } else {
+        Err(ActionRejection::new(
+            ActionRejectionCode::DebugPermissionDenied,
+        ))
+    }
+}
+
+/// Runs a Ready Resolve All batch only for an admitted requester.
+pub fn resolve_all_ready_prefix_with_rejection(
+    state: &mut GameState,
+    requester: PlayerId,
+) -> Result<ResolveAllFastForwardResult, ActionRejection> {
+    if !matches!(
+        resolve_all_ready_access(state, requester),
+        ResolveAllReadyAccess::Admitted
+    ) {
+        return Err(ActionRejection::from_code(
+            ActionRejectionCode::ResolveAllNotReady,
+            vec![],
+        ));
+    }
+    Ok(resolve_all_ready_prefix(state, requester))
+}
+
 /// Explicit-actor simulation apply: [`apply`] for throwaway forward-projection
 /// clones the caller never renders (the AI velocity-policy `project_to`
 /// look-ahead). Identical rules resolution to [`apply`], but in
@@ -897,6 +1021,26 @@ pub fn apply_interaction(
         action,
         PublicFinalizeMode::Immediate,
     )
+}
+
+/// Applies an interaction-materialized action while returning stable, safe
+/// rejection metadata. The interaction projection remains the only authority
+/// that may materialize the action; this wrapper only preserves its actor and
+/// semantic-owner boundary when converting a reducer failure for the client.
+pub fn apply_interaction_with_rejection(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, ActionRejection> {
+    let related_object_ids = action.related_object_ids();
+    apply_interaction(state, authenticated_actor, semantic_owner, action).map_err(|error| {
+        super::visibility::filter_action_rejection_for_viewer(
+            state,
+            authenticated_actor,
+            &action_rejection_for_engine_error(&error, related_object_ids),
+        )
+    })
 }
 
 pub(crate) fn apply_interaction_for_simulation(
@@ -7452,7 +7596,9 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 }
             }
 
-            // Auto-submit empty blockers only when there's nothing to choose.
+            // Auto-submit empty blockers when nothing can be chosen, and submit
+            // an empty declaration for a live turn-boundary preference just as
+            // Declare Attackers does above.
             // CR 509.1 says the turn-based action still runs when no legal blocks
             // are available, and CR 117.1c requires the active player to receive
             // priority during the step (instants and Ninjutsu-family activations
@@ -7466,7 +7612,8 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 ..
             } if !state.phase_stop_hit(*player)
                 && (valid_blocker_ids.is_empty()
-                    || !super::combat::has_attackers_in_play(state)) =>
+                    || !super::combat::has_attackers_in_play(state)
+                    || end_of_turn_active(state, *player)) =>
             {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
@@ -7485,6 +7632,41 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
         }
     }
     advanced
+}
+
+/// CR 117.3d + CR 117.4: continues a live auto-pass preference after Resolve
+/// All has discharged its one-run consent. Resolve All is not an ordinary
+/// action boundary, so it owns the aggregation while this seam owns the normal
+/// priority progression.
+pub(crate) fn resume_auto_pass_after_resolve_all(
+    state: &mut GameState,
+    batch: &mut super::engine_resolve_batch::ResolveAllFastForwardResult,
+) {
+    let before = state.clone();
+    let mut result = ActionResult {
+        events: Vec::new(),
+        waiting_for: state.waiting_for.clone(),
+        log_entries: Vec::new(),
+    };
+    // CR 704.3: mirror the ordinary action-boundary reconciliation on both
+    // sides of the internal auto-pass drive. The resume seam bypasses
+    // `finish_action_boundary`, so without this a loss created by its final
+    // resolution could remain at Priority instead of becoming GameOver.
+    reconcile_terminal_result(state, &mut result);
+    run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
+
+    let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
+    batch.items_resolved = batch.items_resolved.saturating_add(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+            .count() as u32,
+    );
+    batch.events.extend(result.events);
+    batch.log_entries.extend(log_entries);
+    batch.waiting_for = state.waiting_for.clone();
 }
 
 /// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
@@ -7602,10 +7784,6 @@ fn begin_resolve_all_consent(
     max_resolutions: u32,
 ) -> Result<WaitingFor, EngineError> {
     super::priority::pass_priority_legality(state, priority_player)?;
-    // Resolve All consent supersedes this representative's standing yield. A
-    // Ready run must be free of auto-pass state so its one-resolution proof
-    // cannot advance beyond the consented boundary.
-    state.auto_pass.remove(&priority_player);
     let current_representative =
         super::topology::priority_pass_representative(state, priority_player);
     let mut representatives = super::topology::priority_pass_participants(state);
@@ -7784,6 +7962,16 @@ fn decline_resolve_all_consent_with_auto_pass(
     // from this state. Install the captured Priority window before reusing the
     // normal SetAutoPass path, rather than passing from the consent prompt.
     state.waiting_for = WaitingFor::Priority { player };
+    // The outer action boundary drives an existing preference immediately.
+    // Replacing it here would turn a retained time-boundary request into a
+    // stack-bound fallback before that normal progression can observe it.
+    if state.auto_pass.contains_key(&player) {
+        return Ok(ActionResult {
+            events: std::mem::take(events),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
     install_until_stack_empty_auto_pass_and_pass_priority(state, player, events)
 }
 
@@ -7815,9 +8003,6 @@ fn respond_resolve_all_consent(
                 .find(|participant| participant.representative == representative)
                 .expect("pending Resolve All representative must be a participant");
             participant.granted = true;
-            // A grant replaces this representative's standing auto-pass with
-            // the consented, bounded Resolve All sequence.
-            state.auto_pass.remove(&representative);
         }
     }
     if matches!(decision, ResolveAllConsentDecision::Decline) {
@@ -8057,11 +8242,7 @@ fn apply_action(
         let player = &mut state.players[actor.0 as usize];
 
         if order.len() != player.hand.len() {
-            return Err(EngineError::InvalidAction(format!(
-                "ReorderHand: expected {} ids, got {}",
-                player.hand.len(),
-                order.len()
-            )));
+            return Err(EngineError::StaleAction);
         }
 
         // Permutation check: same multiset. Sort copies and compare — O(n log n)
@@ -8073,9 +8254,7 @@ fn apply_action(
         current.sort_unstable_by_key(|id| id.0);
         requested.sort_unstable_by_key(|id| id.0);
         if current != requested {
-            return Err(EngineError::InvalidAction(
-                "ReorderHand: order is not a permutation of the current hand".into(),
-            ));
+            return Err(EngineError::StaleAction);
         }
 
         player.hand = order.iter().copied().collect();
@@ -10865,11 +11044,47 @@ fn apply_action(
             engine_combat::handle_declare_attackers(state, *player, &attacks, &bands, &mut events)?
         }
         (
+            WaitingFor::DeclareAttackers { player, .. },
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary { until },
+            },
+        ) => {
+            store_auto_pass_request(
+                state,
+                *player,
+                AutoPassRequest::UntilTurnBoundary { until },
+            );
+            state.waiting_for.clone()
+        }
+        (WaitingFor::DeclareAttackers { .. }, GameAction::SetAutoPass { .. }) => {
+            return Err(EngineError::ActionNotAllowed(
+                "UntilStackEmpty auto-pass is unavailable while declaring attackers".to_string(),
+            ));
+        }
+        (
             WaitingFor::DeclareBlockers { player, .. },
             GameAction::DeclareBlockers { assignments },
         ) => {
             triggers_processed_inline = true;
             engine_combat::handle_declare_blockers(state, *player, &assignments, &mut events)?
+        }
+        (
+            WaitingFor::DeclareBlockers { player, .. },
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilTurnBoundary { until },
+            },
+        ) => {
+            store_auto_pass_request(
+                state,
+                *player,
+                AutoPassRequest::UntilTurnBoundary { until },
+            );
+            state.waiting_for.clone()
+        }
+        (WaitingFor::DeclareBlockers { .. }, GameAction::SetAutoPass { .. }) => {
+            return Err(EngineError::ActionNotAllowed(
+                "UntilStackEmpty auto-pass is unavailable while declaring blockers".to_string(),
+            ));
         }
         (
             WaitingFor::UntapChoice {

@@ -7,20 +7,20 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
-    apply, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
-    resolve_all_ready_access, resolve_all_ready_prefix, start_game, ResolveAllReadyAccess,
+    apply_with_rejection, pending_resolve_all_ready_requester, recover_orphaned_resolve_all,
+    resolve_all_ready_prefix, resolve_all_ready_prefix_with_rejection, start_game,
 };
-use engine::game::interaction::{bind_interaction_authority, submit_interaction};
+use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::layers::flush_layers;
 use engine::game::match_flow::apply_trusted_match_forfeit;
-use engine::game::preview::preview_auto_payment_sources;
 use engine::game::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
 use engine::game::{
-    create_debug_cards, debug_card_entry_source, load_and_hydrate_decks, preflight_debug_action,
+    create_debug_cards_with_rejection, debug_card_entry_source, load_and_hydrate_decks,
     rehydrate_game_from_card_db, DebugCardCreateRequest,
 };
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -98,6 +98,34 @@ pub type ActionResult = (
 /// allocated while the session lock was held. The transport must keep this
 /// pairing intact when it fans a snapshot out to multiple viewers.
 pub type RevisionedActionResult = (u64, ActionResult);
+
+/// Distinguishes an engine-owned, viewer-safe action refusal from an
+/// operational session failure. Only the former is eligible for a structured
+/// `ActionRejected` frame at the WebSocket boundary.
+#[derive(Debug)]
+pub enum SessionActionError {
+    Operational(String),
+    /// A request-only lifecycle operation cannot proceed. Game-action-shaped
+    /// attempts use [`Self::Rejected`] so their pending client promises settle
+    /// on correlated action-response frames.
+    RequestRejected(String),
+    Rejected(ActionRejection),
+}
+
+impl From<String> for SessionActionError {
+    fn from(value: String) -> Self {
+        Self::Operational(value)
+    }
+}
+
+impl SessionActionError {
+    fn into_legacy_reason(self) -> String {
+        match self {
+            Self::Operational(reason) | Self::RequestRejected(reason) => reason,
+            Self::Rejected(rejection) => rejection.message,
+        }
+    }
+}
 
 /// The server-visible result of driving the native AI after an authoritative
 /// transition. A non-empty `failure` is terminal for the AI driver, but does
@@ -685,7 +713,7 @@ impl GameSession {
             // `debug_mode` unconditionally for single-player. The sandbox
             // *format* flag stays false, so own-library name exposure
             // (`engine::game::visibility`) and the host grant/revoke flow
-            // (rejected above with "Sandbox mode is not enabled") remain
+            // (rejected above as ActionNotAllowed) remain
             // closed — this grants the debug panel, not a shared sandbox.
             //
             // Human seats only. An AI seat has no client and never submits a
@@ -1765,6 +1793,17 @@ impl SessionManager {
         player_token: &str,
         action: &GameAction,
     ) -> Result<Vec<ObjectId>, String> {
+        self.preview_mana_payment_with_rejection(game_code, player_token, action)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Viewer-safe preview form for the Full transport.
+    pub fn preview_mana_payment_with_rejection(
+        &self,
+        game_code: &str,
+        player_token: &str,
+        action: &GameAction,
+    ) -> Result<Vec<ObjectId>, SessionActionError> {
         let session = self
             .sessions
             .get(game_code)
@@ -1774,8 +1813,12 @@ impl SessionManager {
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
-        preview_auto_payment_sources(&session.state, player, action)
-            .map_err(|error| format!("Engine error: {error}"))
+        engine::game::preview::preview_auto_payment_sources_with_rejection(
+            &session.state,
+            player,
+            action,
+        )
+        .map_err(SessionActionError::Rejected)
     }
 
     /// Handle a game action from a player.
@@ -1801,6 +1844,21 @@ impl SessionManager {
         action: GameAction,
         card_db: Option<&CardDatabase>,
     ) -> Result<ActionResult, String> {
+        self.handle_action_with_card_db_outcome(game_code, player_token, action, card_db)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Rich form used by the Full WebSocket transport. Engine rejection DTOs
+    /// remain distinct from session/database failures so the transport never
+    /// has to infer meaning from a diagnostic string.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_action_with_card_db_outcome(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
+    ) -> Result<ActionResult, SessionActionError> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -1818,10 +1876,9 @@ impl SessionManager {
         // voting on or silently discard the action once the rollback lands.
         // Require the table to resolve (approve/decline/cancel) first.
         if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            );
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+            )));
         }
 
         // Debug capability gate. `debug_permitted` is the single authority:
@@ -1833,10 +1890,13 @@ impl SessionManager {
         // `RevokeDebugPermission` (sandbox games only). Naming a mode in the
         // refusal would be wrong for the single-user source, so the message
         // stays on the seat, which is what was actually checked.
-        if matches!(action, GameAction::Debug(_))
-            && !session.state.debug_permitted.contains(&player)
-        {
-            return Err("Debug actions are not permitted for this seat".to_string());
+        if let GameAction::Debug(debug_action) = &action {
+            engine::game::preflight_debug_action_with_rejection(
+                &session.state,
+                player,
+                debug_action,
+            )
+            .map_err(SessionActionError::Rejected)?;
         }
 
         // Grant/Revoke debug permission: host-only, and only meaningful in a
@@ -1846,17 +1906,23 @@ impl SessionManager {
         match &action {
             GameAction::GrantDebugPermission { .. } | GameAction::RevokeDebugPermission { .. } => {
                 if !session.state.format_config.allow_debug_actions {
-                    return Err("Sandbox mode is not enabled for this game".to_string());
+                    return Err(SessionActionError::Rejected(ActionRejection::new(
+                        engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+                    )));
                 }
                 if player != HOST_PLAYER {
-                    return Err("Only the host can grant or revoke debug permission".to_string());
+                    return Err(SessionActionError::Rejected(ActionRejection::new(
+                        engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+                    )));
                 }
                 if let GameAction::RevokeDebugPermission {
                     player_id: target, ..
                 } = &action
                 {
                     if *target == HOST_PLAYER {
-                        return Err("The host cannot revoke their own debug permission".to_string());
+                        return Err(SessionActionError::Rejected(ActionRejection::new(
+                            engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+                        )));
                     }
                 }
             }
@@ -1868,10 +1934,6 @@ impl SessionManager {
         // access; the engine validates actor authorization and action shape.
         // Candidate enumeration is advisory for clients and AI, not a second
         // legality gate: several legal action classes are combinatorial.
-        if let GameAction::Debug(debug_action) = &action {
-            preflight_debug_action(&session.state, player, debug_action)
-                .map_err(|error| format!("Engine error: {error}"))?;
-        }
         if matches!(&action, GameAction::Debug(debug_action) if debug_action.is_zero_count_create())
         {
             let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
@@ -1922,7 +1984,7 @@ impl SessionManager {
                 nonlegendary,
                 ..
             }) => {
-                let result = create_debug_cards(
+                let result = create_debug_cards_with_rejection(
                     &mut session.state,
                     DebugCardCreateRequest {
                         actor: player,
@@ -1936,16 +1998,14 @@ impl SessionManager {
                         nonlegendary,
                     },
                 )
-                .map_err(|error| format!("Engine error: {error}"))?;
+                .map_err(SessionActionError::Rejected)?;
                 bump_state_revision(&mut session.state);
                 mark_public_state_all_dirty(&mut session.state);
                 finalize_public_state(&mut session.state);
                 result
             }
-            action => apply(&mut session.state, player, action).map_err(|e| {
-                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-                format!("Engine error: {}", e)
-            })?,
+            action => apply_with_rejection(&mut session.state, player, action)
+                .map_err(SessionActionError::Rejected)?,
         };
         if let Some(snapshot) = pre_action_state {
             session.push_takeback_state(player, snapshot);
@@ -1994,10 +2054,21 @@ impl SessionManager {
         player_token: &str,
         max_resolutions: u32,
     ) -> Result<ResolveAllActionResult, String> {
+        self.resolve_all_for_player_with_rejection(game_code, player_token, max_resolutions)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Rich Resolve All form for the Full transport.
+    pub fn resolve_all_for_player_with_rejection(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+        max_resolutions: u32,
+    ) -> Result<ResolveAllActionResult, SessionActionError> {
         if max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
-            return Err(format!(
-                "Resolve All maximum must not exceed {MAX_RESOLVE_ALL_RESOLUTIONS}"
-            ));
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::InvalidAction,
+            )));
         }
 
         let session = self
@@ -2010,10 +2081,9 @@ impl SessionManager {
             .ok_or_else(|| "Invalid player token".to_string())?;
 
         if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            );
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+            )));
         }
 
         // Reject only an unentitled caller. A latch whose frozen run has gone
@@ -2023,13 +2093,6 @@ impl SessionManager {
         // nothing any client offers the player to press.
         // Exhaustive rather than an equality test: a future variant must be
         // classified here instead of silently defaulting to allowed.
-        match resolve_all_ready_access(&session.state, requester) {
-            ResolveAllReadyAccess::Refused => {
-                return Err("Resolve All consent is not ready".to_string());
-            }
-            ResolveAllReadyAccess::Admitted => {}
-        }
-
         session.state.log_player_names = session.display_names.clone();
         flush_layers(&mut session.state);
         let pre_action_state = session.state.clone();
@@ -2037,7 +2100,8 @@ impl SessionManager {
         // argument remains range-checked above for transport compatibility but
         // cannot enlarge or replace that explicit authorization.
         let _ = max_resolutions;
-        let batch = resolve_all_ready_prefix(&mut session.state, requester);
+        let batch = resolve_all_ready_prefix_with_rejection(&mut session.state, requester)
+            .map_err(SessionActionError::Rejected)?;
         let summary = ResolveAllSummary {
             items_resolved: batch.items_resolved,
             total: batch.total,
@@ -2099,6 +2163,18 @@ impl SessionManager {
         player_token: &str,
         submission: InteractionSubmission,
     ) -> Result<ActionResult, String> {
+        self.handle_interaction_with_rejection(game_code, player_token, submission)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Rich interaction form for the authenticated Full transport.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_interaction_with_rejection(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+        submission: InteractionSubmission,
+    ) -> Result<ActionResult, SessionActionError> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -2113,10 +2189,9 @@ impl SessionManager {
         // GH #1507: the authoritative state must not move while the table is
         // voting on a rollback. Same interlock, same reason, as `handle_action`.
         if session.pending_takeback.is_some() {
-            return Err(
-                "A takeback request is pending — resolve it before taking further actions"
-                    .to_string(),
-            );
+            return Err(SessionActionError::Rejected(ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed,
+            )));
         }
 
         // Snapshot BEFORE `log_player_names` is written, matching
@@ -2136,22 +2211,8 @@ impl SessionManager {
         // Set player names for log resolution.
         session.state.log_player_names = session.display_names.clone();
 
-        let applied =
-            submit_interaction(&mut session.state, player, submission).map_err(|error| {
-                warn!(
-                    game = %game_code,
-                    player = ?player,
-                    code = ?error.code,
-                    reason = "interaction_rejected",
-                    "interaction rejected"
-                );
-                // Byte-identical to the WASM transport
-                // (`engine-wasm/src/lib.rs`) and to
-                // `interaction_payload_guard`, so every layer that reports an
-                // engine reason code, on both transports, classifies the same
-                // rejection identically.
-                format!("Engine error: {:?}", error.code)
-            })?;
+        let applied = submit_interaction_with_rejection(&mut session.state, player, submission)
+            .map_err(SessionActionError::Rejected)?;
 
         if !applied.action.is_actor_scoped_preference() {
             session.push_takeback_state(player, pre_action_state);
@@ -2191,6 +2252,20 @@ impl SessionManager {
         game_code: &str,
         player_token: &str,
     ) -> Result<RevisionedActionResult, String> {
+        self.handle_match_concede_outcome(game_code, player_token)
+            .map_err(SessionActionError::into_legacy_reason)
+    }
+
+    /// Three-way result for the transport-owned match-concede request.
+    ///
+    /// Authentication/session availability remains operational. A request that
+    /// is validly authenticated but cannot forfeit the current match is a
+    /// requester-visible lifecycle refusal instead.
+    pub fn handle_match_concede_outcome(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+    ) -> Result<RevisionedActionResult, SessionActionError> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -2200,16 +2275,17 @@ impl SessionManager {
             .ok_or_else(|| "Invalid player token".to_string())?;
         session.reject_if_ai_driver_faulted()?;
         if session.pending_takeback.is_some() {
-            return Err(
+            return Err(SessionActionError::RequestRejected(
                 "A takeback request is pending — resolve it before conceding the match".to_string(),
-            );
+            ));
         }
 
         let events = apply_trusted_match_forfeit(
             &mut session.state,
             player,
             MatchForfeitCause::MatchConcede,
-        )?;
+        )
+        .map_err(SessionActionError::RequestRejected)?;
         let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&session.state);
         let auto_pass = auto_pass_recommended(&session.state, &legal_actions);
         let revision = session.advance_state_revision();
@@ -3589,11 +3665,15 @@ mod tests {
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
 
-        let result = mgr.handle_action(&code, &other_token, GameAction::PassPriority);
-        assert!(
-            result.is_err(),
-            "action should be rejected while a takeback is pending"
-        );
+        let result = mgr
+            .handle_action_with_card_db_outcome(&code, &other_token, GameAction::PassPriority, None)
+            .expect_err("action should be rejected while a takeback is pending");
+        assert!(matches!(
+            result,
+            SessionActionError::Rejected(rejection)
+                if rejection.code
+                    == engine::types::action_rejection::ActionRejectionCode::ActionNotAllowed
+        ));
     }
 
     /// A solo human vs. AI seats auto-resolves their own takeback request —
@@ -4451,6 +4531,25 @@ mod tests {
         assert!(err.contains("Native AI driver fault"));
     }
 
+    #[test]
+    fn match_concede_distinguishes_lifecycle_refusal_from_operational_failure() {
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+
+        let lifecycle = mgr
+            .handle_match_concede_outcome(&code, &token0)
+            .expect_err("a non-Bo3 match cannot be conceded as a match");
+        assert!(matches!(
+            lifecycle,
+            SessionActionError::RequestRejected(reason)
+                if reason == "Match forfeits require a best-of-three match"
+        ));
+
+        let operational = mgr
+            .handle_match_concede_outcome("missing", &token0)
+            .expect_err("an absent session is operational");
+        assert!(matches!(operational, SessionActionError::Operational(_)));
+    }
+
     /// Drives the fixture until **`run_ai` itself** publishes a turn boundary
     /// whose active player is the AI seat, and returns that turn number.
     ///
@@ -4797,7 +4896,10 @@ mod tests {
                 }),
             )
             .expect_err("an invalid owner must fail before database lookup");
-        assert!(owner_error.contains("invalid owner player id"));
+        assert_eq!(
+            owner_error,
+            "That action is not valid in the current game state."
+        );
         assert!(!owner_error.contains("card database"));
 
         let session = &mgr.sessions[&code];
@@ -4847,7 +4949,10 @@ mod tests {
                 }),
             )
             .expect_err("a real entry off Priority must fail before database lookup");
-        assert!(priority_error.contains("Priority window"));
+        assert_eq!(
+            priority_error,
+            "That action is not valid in the current game state."
+        );
         assert!(!priority_error.contains("card database"));
     }
 
@@ -4905,10 +5010,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            err.contains("not permitted") || err.contains("permission"),
-            "{err}"
-        );
+        assert_eq!(err, "That action is not valid in the current game state.");
     }
 
     /// Fixture shape for the `HostingMode` tests below, matching the existing
@@ -5552,7 +5654,7 @@ mod tests {
                 None,
             )
             .expect_err("revoked guests cannot reach the server CreateCard path");
-        assert_eq!(err, "Debug actions are not permitted for this seat");
+        assert_eq!(err, "You are not authorized to use debug actions.");
     }
 
     #[test]
@@ -5620,7 +5722,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("host"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -5636,7 +5738,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("own"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -5652,7 +5754,7 @@ mod tests {
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("Sandbox"), "{err}");
+        assert_eq!(err, "That action is not allowed right now.");
     }
 
     #[test]
@@ -6300,7 +6402,7 @@ mod tests {
         // Illegal division first: wrong total (4 != 5). It reaches apply() and
         // is rejected by the engine, proving candidate removal does not weaken
         // structural validation.
-        let illegal = mgr.handle_action(
+        let illegal = mgr.handle_action_with_card_db_outcome(
             &code,
             &token,
             GameAction::AssignCombatDamage {
@@ -6309,11 +6411,16 @@ mod tests {
                 trample_damage: 0,
                 controller_damage: 0,
             },
+            None,
         );
         match illegal {
-            Err(e) => assert!(
-                e.starts_with("Engine error:"),
-                "wrong-total division must be rejected by apply(), not the gate, got: {e}"
+            Err(SessionActionError::Rejected(rejection)) => assert_eq!(
+                rejection.code,
+                engine::types::action_rejection::ActionRejectionCode::InvalidAction,
+                "wrong-total division must be rejected by apply(), not the gate"
+            ),
+            Err(error) => panic!(
+                "wrong-total division must be rejected by apply(), not the gate, got: {error:?}"
             ),
             Ok(_) => panic!("wrong-total combat damage division must be rejected"),
         }
@@ -6424,7 +6531,7 @@ mod tests {
 
         // The bypass must not weaken validation: a malformed freeform declaration
         // reaches the engine and is rejected there rather than by candidate lookup.
-        let duplicate = mgr.handle_action(
+        let duplicate = mgr.handle_action_with_card_db_outcome(
             &code,
             &token0,
             GameAction::DeclareAttackers {
@@ -6434,9 +6541,15 @@ mod tests {
                 ],
                 bands: vec![],
             },
+            None,
         );
         assert!(
-            matches!(duplicate, Err(ref error) if error.starts_with("Engine error:")),
+            matches!(
+                duplicate,
+                Err(SessionActionError::Rejected(ref rejection))
+                    if rejection.code
+                        == engine::types::action_rejection::ActionRejectionCode::InvalidAction
+            ),
             "a duplicate attacker must be rejected by the engine, got: {duplicate:?}"
         );
 
@@ -6504,10 +6617,7 @@ mod tests {
 
         let forged = mgr.handle_interaction(&code, other_token, witness.clone());
         let error = forged.expect_err("a valid token for another seat must not spend this slot");
-        assert!(
-            error.contains("NotAuthorized"),
-            "unexpected reason: {error}"
-        );
+        assert_eq!(error, "You are not authorized to answer that interaction.");
         assert_eq!(
             mgr.sessions[&code].state.active_interaction_slots, before,
             "a refused submission must not consume the capability"
@@ -6556,7 +6666,7 @@ mod tests {
         let error = mgr
             .handle_interaction(&code, acting_token, witness)
             .expect_err("an interaction id is single-use");
-        assert!(error.contains("StaleInteraction"), "unexpected: {error}");
+        assert_eq!(error, "That interaction has already changed.");
     }
 
     #[test]
@@ -6575,7 +6685,7 @@ mod tests {
         let error = mgr
             .handle_interaction(&code, acting_token, oversized)
             .expect_err("an oversized response is refused");
-        assert_eq!(error, "Engine error: PayloadTooLarge");
+        assert_eq!(error, "That interaction response is too large.");
 
         // Negative sibling: the boundary sits at the constant, not at "any
         // large list". The same shape at exactly the limit is still refused,
@@ -6590,7 +6700,7 @@ mod tests {
             .handle_interaction(&code, acting_token, at_limit)
             .expect_err("unknown choices are still refused");
         assert!(
-            !error.contains("PayloadTooLarge"),
+            error != "That interaction response is too large.",
             "the bound must be the constant, not list size in general: {error}"
         );
     }
@@ -6612,10 +6722,7 @@ mod tests {
         let error = mgr
             .handle_interaction(&code, acting_token, witness.clone())
             .expect_err("the table is voting; the state must not move");
-        assert!(
-            error.contains("takeback request is pending"),
-            "unexpected: {error}"
-        );
+        assert_eq!(error, "That action is not allowed right now.");
         assert_eq!(
             mgr.sessions[&code].state.active_interaction_slots,
             before_slots
@@ -6668,18 +6775,11 @@ mod tests {
         (mgr, game_code, ai_player)
     }
 
-    /// An AI-granted latch whose run is INCOHERENT is the one with no exit at
-    /// all, so it is the one the hand-off must not decline.
-    ///
-    /// `ready_consent_run` requires `auto_pass.is_empty()`, so a single seat
-    /// holding an End Turn auto-pass makes every latch minted that turn
-    /// incoherent. The hand-off previously read its requester through
-    /// `pending_resolve_all_ready_requester`, whose `?` propagates exactly that
-    /// coherence test — so it returned `None` here and left the latch standing:
-    /// no acting player, and no client that renders `ResolveAllReady`. This is
-    /// the reported hang, reachable from the ordinary End Turn button.
+    /// A retained End Turn auto-pass remains coherent with an AI-granted Ready
+    /// latch. The Resolve All proof temporarily suppresses it only on its
+    /// private one-entry clone, then restores it before committing the proof.
     #[test]
-    fn run_ai_repairs_its_own_grant_when_the_frozen_run_is_incoherent() {
+    fn run_ai_consumes_its_own_grant_with_a_retained_end_turn_auto_pass() {
         let (mut mgr, game_code, _ai_player) = ai_table_awaiting_one_consent();
         let session = mgr
             .sessions
@@ -6692,10 +6792,7 @@ mod tests {
             GameAction::BeginResolveAll { max_resolutions: 1 },
         )
         .expect("the priority holder may start Resolve All consent");
-        // Freeze the run first, THEN make the live game disagree with the
-        // snapshot it froze. `BeginResolveAll` has no auto-pass precondition,
-        // and `apply` exempts consent actions from clearing the actor's entry,
-        // so this is the ordinary End Turn shape and not a contrived state.
+        // A live End Turn preference must stay coherent through the AI's grant.
         session.state.auto_pass.insert(
             PlayerId(0),
             AutoPassMode::UntilTurnBoundary {
@@ -6732,12 +6829,12 @@ mod tests {
                 session.state.waiting_for,
                 WaitingFor::ResolveAllReady { .. }
             ),
-            "an incoherent AI-granted latch must not survive its own hand-off, got {:?}",
+            "an AI-granted latch must not survive its own hand-off, got {:?}",
             session.state.waiting_for
         );
         assert!(
             session.state.resolve_all_consent_run.is_none(),
-            "the repair discards the run it could not honor"
+            "consuming the ready run clears its one-shot consent record"
         );
     }
 

@@ -46,8 +46,19 @@ export function clear_replay_playback(): void;
  * Background) via the engine's single-authority `can_pair_commanders`. The
  * frontend must not re-derive partner-pairing rules — it filters its candidate
  * list through this. Returns an empty array if the database isn't loaded.
+ *
+ * `draft_set_code` is the set code of the draft boosters this deck is being
+ * built from, or `null` for constructed play. CR 903.13f(3) conditions its
+ * partner grant on what the DRAFT contained, which is a session property no
+ * pair of card names can express — so the caller supplies the set code and the
+ * ENGINE maps it to a grant. The client never learns which sets grant what.
+ *
+ * It is a REQUIRED third parameter, and `JsValue` rather than
+ * `Option<String>`, on purpose: that matches this file's existing convention
+ * for engine-typed arguments and makes a stale caller a compile error rather
+ * than a silent `undefined`.
  */
-export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
+export function commanderPartnerCandidates(first_commander: string, candidates: any, draft_set_code: any): any;
 
 /**
  * Returns legal Commander-family companion candidates from the main deck.
@@ -362,8 +373,9 @@ export function ping(): string;
  * `filter_state_for_viewer` snapshots (so any identity the viewer can't see is
  * already redacted), AND a transition is surfaced only when at least one
  * endpoint is a public zone (see `engine::game::preview`), so a fully-hidden
- * hand↔library draw is elided even for the acting player's opponents. Returns
- * an error string when `action` is malformed or illegal in the current state.
+ * hand↔library draw is elided even for the acting player's opponents. Expected
+ * engine rejections, including malformed action payloads, return a tagged
+ * `{ status: "rejected", rejection }` outcome; runtime faults remain raw.
  */
 export function preview_action_js(actor: number, action: any): any;
 
@@ -372,6 +384,8 @@ export function preview_action_js(actor: number, action: any): any;
  * exact, currently legal `CastSpell` action and returns the permanent ids that
  * produced mana before that spell was committed to the stack. It returns an
  * empty array when the cast needs another choice before payment can be final.
+ * Expected engine rejections return a tagged `{ status: "rejected",
+ * rejection }` outcome.
  */
 export function preview_mana_payment_js(actor: number, action: any): any;
 
@@ -419,6 +433,8 @@ export function replay_seek_js(target: number): any;
  * count of items resolved. The Resolve All UI does not animate individual
  * events, so the WASM boundary intentionally returns empty event/log arrays
  * instead of serializing thousands of records for pathological stacks.
+ * Expected engine rejections return a tagged `{ status: "rejected",
+ * rejection }` outcome.
  */
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
@@ -517,7 +533,8 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * It must *never* come from UI or wire payload data. The engine rejects any
  * action whose `actor` does not match `authorized_submitter(state)`, so
  * passing a spoofed value here will fail cleanly rather than silently
- * applying the action as another player.
+ * applying the action as another player. Expected engine rejections return a
+ * tagged `{ status: "rejected", rejection }` outcome.
  */
 export function submit_action(actor: number, action: any): any;
 
@@ -533,7 +550,8 @@ export function submit_ai_action_proposal(token: string, actor: number, action: 
 /**
  * Submit one opaque, engine-authored interaction response. The browser never
  * materializes a `GameAction`; only a successful engine reducer result exposes
- * the exact action to the replay recorder.
+ * the exact action to the replay recorder. Expected engine rejections return a
+ * tagged `{ status: "rejected", rejection }` outcome.
  */
 export function submit_interaction_js(actor: number, submission: any): any;
 
@@ -554,7 +572,7 @@ export interface InitOutput {
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
-    readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -318,6 +319,13 @@ pub enum ClientMessage {
     CreateDraftWithSettings {
         display_name: String,
         set_code: String,
+        /// The string encoding of the draft kind. `DraftKind` carries no
+        /// `#[serde(other)]`, no `#[serde(default)]` and no `Default`, so an
+        /// unrecognized kind name fails deserialization of the WHOLE frame
+        /// rather than resolving to a fallback variant. That is what makes a
+        /// version-skewed peer loud instead of silently creating the wrong
+        /// kind of draft; do not add any of those three attributes to
+        /// `DraftKind`.
         kind: draft_core::types::DraftKind,
         public: bool,
         password: Option<String>,
@@ -520,6 +528,17 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
+        rejection: ActionRejection,
+    },
+    /// An operational failure while processing one submitted game action or
+    /// interaction. This deliberately carries no engine-rejection DTO.
+    ActionFailed {
+        message: String,
+    },
+    /// A request outside the engine game-action boundary was refused. This is
+    /// deliberately prose: takeback and match-lifecycle requests have no
+    /// engine action/rejection provenance to expose.
+    RequestRejected {
         reason: String,
     },
     /// Confirms an authenticated action that intentionally produced no state
@@ -530,7 +549,14 @@ pub enum ServerMessage {
     /// identifier prevents unrelated action failures from settling this promise.
     ResolveAllRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a native Resolve All batch.
+    /// The request identifier prevents unrelated failures from settling this
+    /// promise.
+    ResolveAllFailed {
+        request_id: u64,
+        message: String,
     },
     /// Requester-only acknowledgement for a native Resolve All batch. The
     /// matching StateUpdate is sent first and carries the authoritative state.
@@ -551,7 +577,12 @@ pub enum ServerMessage {
     },
     ManaPaymentPreviewRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a mana-payment preview.
+    ManaPaymentPreviewFailed {
+        request_id: u64,
+        message: String,
     },
     OpponentDisconnected {
         grace_seconds: u32,
@@ -2111,10 +2142,19 @@ mod tests {
             draft_code: "ABCD12".to_string(),
             action: draft_core::types::DraftAction::Pick {
                 seat: 3,
-                card_instance_id: "card-001".to_string(),
+                card_instance_ids: vec!["card-001".to_string()],
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
+        // Pin the wire KEY, not just the Rust round-trip: a round-trip alone
+        // passes for any field name, since both sides move together. The
+        // client emits this exact literal (`server-draft-adapter.test.ts`), and
+        // `DraftAction` carries no `serde(rename)`/`alias` on this field, so
+        // this assertion is what ties the two halves of the contract together.
+        assert!(
+            json.contains(r#""card_instance_ids":["card-001"]"#),
+            "unexpected wire shape: {json}"
+        );
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::DraftAction { draft_code, action } => {
@@ -2123,7 +2163,7 @@ mod tests {
                     action,
                     draft_core::types::DraftAction::Pick {
                         seat: 3,
-                        card_instance_id: "card-001".to_string(),
+                        card_instance_ids: vec!["card-001".to_string()],
                     }
                 );
             }
@@ -2210,6 +2250,7 @@ mod tests {
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
+            required_pick_count: 0,
             pool,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
@@ -2218,9 +2259,16 @@ mod tests {
             cards_per_pack: 14,
             pack_sizes: vec![14, 14, 14],
             pack_set_codes: vec!["TST".to_string(); 3],
+            pack_pick_steps: vec![14, 14, 14],
+            // `cards_per_pack.div_ceil(cards_per_pick)` with Sealed's
+            // `cards_per_pick: 1` -- a degenerate axis value under
+            // `PackDistribution::AllAtOnce`, which has no pick step at all.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_filler: None,
+            draft_set_code: None,
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
@@ -2376,9 +2424,13 @@ mod tests {
             cards_per_pack: 14,
             pack_sizes: vec![14, 14, 14],
             pack_set_codes: vec!["TST".to_string(); 3],
+            pack_pick_steps: vec![14, 14, 14],
+            // CR 905.1a: Premier takes one card per step.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_filler: None,
             standings: Vec::new(),
             current_round: 0,
             tournament_format: TournamentFormat::Swiss,
@@ -2402,8 +2454,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_39() {
-        assert_eq!(PROTOCOL_VERSION, 39);
+    fn protocol_version_is_42() {
+        assert_eq!(PROTOCOL_VERSION, 42);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2413,7 +2465,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_39` stays
+    /// this guards — and this test reds while `protocol_version_is_42` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2460,11 +2512,37 @@ mod tests {
 
         let rejected = ServerMessage::ResolveAllRejected {
             request_id: 7,
-            reason: "Resolve All requires your priority".to_string(),
+            rejection: ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ResolveAllNotReady,
+            ),
         };
         assert_eq!(
             serde_json::to_string(&rejected).unwrap(),
-            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"rejection":{"code":"resolve_all_not_ready","disposition":"unavailable","message":"Resolve All is not ready to run.","related_object_ids":[]}}}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ActionFailed {
+                message: "session storage failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ActionFailed","data":{"message":"session storage failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ResolveAllFailed {
+                request_id: 7,
+                message: "batch persistence failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ResolveAllFailed","data":{"request_id":7,"message":"batch persistence failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ManaPaymentPreviewFailed {
+                request_id: 7,
+                message: "preview lookup failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ManaPaymentPreviewFailed","data":{"request_id":7,"message":"preview lookup failed"}}"#
         );
     }
 

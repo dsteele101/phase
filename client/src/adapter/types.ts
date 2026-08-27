@@ -87,7 +87,8 @@ export type GameFormat =
   | "Archenemy"
   | "Planechase"
   | "Limited"
-  | "Momir";
+  | "Momir"
+  | "CommanderDraft";
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
@@ -99,6 +100,16 @@ export type SideboardPolicy =
   | { type: "Forbidden" }
   | { type: "Limited"; data: number }
   | { type: "Unlimited" };
+
+/**
+ * CR 100.5 / CR 903.5a: a format's deck-size rule as a discriminated union,
+ * mirroring the engine's `DeckSizeRule`. Serde tag/content format matches the
+ * engine. Always exhaustive-switch on `type` — never assume a minimum.
+ */
+export type DeckSizeRule =
+  | { type: "Minimum"; data: number }
+  | { type: "Exactly"; data: number };
+
 export interface RangeOfInfluenceConfig {
   default_range: number;
   player_overrides: Record<string, number>;
@@ -109,7 +120,7 @@ export interface FormatConfig {
   starting_life: number;
   min_players: number;
   max_players: number;
-  deck_size: number;
+  deck_size: DeckSizeRule;
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
@@ -121,7 +132,7 @@ export interface FormatConfig {
   sideboard_policy: SideboardPolicy;
   /**
    * Engine-derived predicate: true when the format uses a commander card
-   * and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+   * and the commander-damage state-based action (CR 903.10a / CR 704.6c).
    * The frontend must consume this directly rather than re-listing
    * commander-style format strings client-side.
    */
@@ -3132,6 +3143,8 @@ export type TargetChoiceKind =
  */
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
+  visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**
    * Explicit debug-only identities for the viewing player's library. Normal
    * library objects remain hidden in `GameState.objects`; only the debug
@@ -3654,6 +3667,103 @@ export type ContinuousModification =
  * Error type for adapter operations. Wraps WASM/transport errors
  * with structured metadata for error handling in the UI layer.
  */
+export type ActionRejectionCode =
+  | "invalid_action"
+  | "wrong_player"
+  | "not_your_priority"
+  | "action_not_allowed"
+  | "interaction_unavailable"
+  | "interaction_not_authorized"
+  | "stale_interaction"
+  | "stale_action"
+  | "invalid_interaction_response"
+  | "interaction_payload_too_large"
+  | "interaction_constraint_unsatisfied"
+  | "interaction_cancel_only"
+  | "interaction_reducer_rejected"
+  | "unsupported_interaction_response"
+  | "resolve_all_not_ready"
+  | "debug_permission_denied";
+
+export type ActionRejectionDisposition =
+  | "invalid"
+  | "unauthorized"
+  | "unavailable"
+  | "stale"
+  | "unsupported";
+
+/** Engine-owned, viewer-filtered explanation of an action not applied. */
+export interface ActionRejection {
+  code: ActionRejectionCode;
+  disposition: ActionRejectionDisposition;
+  message: string;
+  related_object_ids: ObjectId[];
+}
+
+const ACTION_REJECTION_DISPOSITIONS: Record<
+  ActionRejectionCode,
+  ActionRejectionDisposition
+> = {
+  invalid_action: "invalid",
+  wrong_player: "unauthorized",
+  not_your_priority: "unavailable",
+  action_not_allowed: "unavailable",
+  interaction_unavailable: "unavailable",
+  interaction_not_authorized: "unauthorized",
+  stale_interaction: "stale",
+  stale_action: "stale",
+  invalid_interaction_response: "invalid",
+  interaction_payload_too_large: "invalid",
+  interaction_constraint_unsatisfied: "invalid",
+  interaction_cancel_only: "unavailable",
+  interaction_reducer_rejected: "invalid",
+  unsupported_interaction_response: "unsupported",
+  resolve_all_not_ready: "unavailable",
+  debug_permission_denied: "unauthorized",
+};
+
+/** Validates the complete viewer-safe rejection DTO at an untyped boundary. */
+export function isActionRejection(value: unknown): value is ActionRejection {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 4 || !keys.every((key) => (
+    key === "code"
+    || key === "disposition"
+    || key === "message"
+    || key === "related_object_ids"
+  ))) return false;
+  if (typeof record.code !== "string" || !(record.code in ACTION_REJECTION_DISPOSITIONS)) {
+    return false;
+  }
+  const code = record.code as ActionRejectionCode;
+  return record.disposition === ACTION_REJECTION_DISPOSITIONS[code]
+    && typeof record.message === "string"
+    && Array.isArray(record.related_object_ids)
+    && record.related_object_ids.every((id) => (
+      typeof id === "number" && Number.isSafeInteger(id) && id >= 0
+    ));
+}
+
+export type ActionOutcome<T> =
+  | { status: "applied"; result: T }
+  | { status: "rejected"; rejection: ActionRejection };
+
+/** Validates the exact tagged WASM outcome shape before its result is trusted. */
+export function isActionOutcome(value: unknown): value is ActionOutcome<unknown> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record.status === "applied") {
+    return keys.length === 2 && keys.includes("status") && keys.includes("result");
+  }
+  return record.status === "rejected"
+    && keys.length === 2
+    && keys.includes("status")
+    && keys.includes("rejection")
+    && isActionRejection(record.rejection);
+}
+
 export class AdapterError extends Error {
   readonly code: string;
   readonly recoverable: boolean;
@@ -3664,13 +3774,22 @@ export class AdapterError extends Error {
    * diagnostic without the recovery layer needing to thread it back.
    */
   readonly panic?: string;
+  /** Present only when the engine returned a typed action rejection. */
+  readonly rejection?: ActionRejection;
 
-  constructor(code: string, message: string, recoverable: boolean, panic?: string) {
+  constructor(
+    code: string,
+    message: string,
+    recoverable: boolean,
+    panic?: string,
+    rejection?: ActionRejection,
+  ) {
     super(message);
     this.name = "AdapterError";
     this.code = code;
     this.recoverable = recoverable;
     this.panic = panic;
+    this.rejection = rejection;
   }
 }
 
@@ -3752,24 +3871,12 @@ export function isStateLostMessage(message: string): boolean {
 }
 
 /**
- * Detect the engine's actor-authorization rejections. `submit_action` in
- * `engine-wasm/src/lib.rs` formats `EngineError::WrongPlayer` (Display: "Wrong
- * player") and `EngineError::NotYourPriority` (Display: "Not your priority")
- * as `Engine error: <display>`. Match the exact strings — these are the benign
- * stale-action race (see `AdapterErrorCode.STALE_ACTION`), never a state-loss
- * or panic.
- */
-export function isStaleActionMessage(message: string): boolean {
-  return message === "Engine error: Wrong player" || message === "Engine error: Not your priority";
-}
-
-/**
- * Transport-neutral test for "the engine rejected this action, but nothing
- * changed and nothing needs recovering". Single authority for what counts as a
- * benign stale rejection, so every transport agrees.
+ * Legacy transport-only detection for the one pre-structured ReorderHand
+ * rejection that can be safely dropped. All structured rejections use the
+ * engine-provided disposition instead.
  */
 export function isStaleRejectionMessage(message: string): boolean {
-  return isStaleActionMessage(message) || isStaleReorderMessage(message);
+  return isStaleReorderMessage(message);
 }
 
 /**
@@ -3786,10 +3893,17 @@ export function isStaleRejectionMessage(message: string): boolean {
  * caller should drop it, not re-submit. Every other rejection stays a
  * recoverable `ACTION_REJECTED` so existing retry/surface behavior is unchanged.
  */
-export function actionRejectionError(reason: string): AdapterError {
-  return isStaleRejectionMessage(reason)
-    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
-    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, reason, true);
+export function actionRejectionError(rejection: ActionRejection): AdapterError;
+export function actionRejectionError(reason: string): AdapterError;
+export function actionRejectionError(rejection: ActionRejection | string): AdapterError {
+  if (typeof rejection === "string") {
+    return isStaleRejectionMessage(rejection)
+      ? new AdapterError(AdapterErrorCode.STALE_ACTION, rejection, false)
+      : new AdapterError(AdapterErrorCode.ACTION_REJECTED, rejection, true);
+  }
+  return rejection.disposition === "stale"
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, rejection.message, false, undefined, rejection)
+    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, rejection.message, true, undefined, rejection);
 }
 
 /**
@@ -3808,12 +3922,10 @@ export function resolveAllRejectionError(reason: string): AdapterError {
 }
 
 /**
- * Detect the engine's rejection of a `ReorderHand` whose order no longer names
- * the current hand. `apply_action` formats
- * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as
- * `Engine error: ReorderHand: expected ...` and returns it BEFORE mutating any
- * player state, so — exactly like the actor-authorization rejections above —
- * nothing changed and there is nothing to recover.
+ * Detect the legacy string representation of a `ReorderHand` rejection from
+ * a pre-structured remote engine. Local WASM now emits `stale_action` with a
+ * typed disposition instead; this helper remains only until every remote
+ * transport has adopted the same DTO.
  *
  * This is the benign client/engine desync behind issue #5913: a drag computes
  * its order against the hand as displayed, but a draw or discard can land in
@@ -3825,8 +3937,8 @@ export function resolveAllRejectionError(reason: string): AdapterError {
  * Hand order carries no game-rules meaning (CR 402.3), so a dropped reorder
  * costs the player nothing beyond re-dragging.
  *
- * Covers BOTH staleness rejections `apply_action` can raise, because a hand can
- * go stale two ways in the same window:
+ * Covers both legacy string shapes because a hand can go stale two ways in the
+ * same window:
  *   - the count changed (a draw or a discard alone) — "expected {n} ids, got
  *     {m}", a prefix match since the message embeds the counts;
  *   - the count held but the ids moved (a discard AND a draw) — "order is not a
@@ -4042,7 +4154,7 @@ export type AiCardSubsetResult =
 export type AiProposalSubmission =
   | { status: "applied"; result: SubmitResult }
   | { status: "stale"; reason: string }
-  | { status: "rejected"; reason: string };
+  | { status: "rejected"; rejection: ActionRejection };
 
 export interface EngineAdapter {
   initialize(): Promise<void>;

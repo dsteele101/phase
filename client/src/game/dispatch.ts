@@ -1,6 +1,7 @@
 import type { AiActionProposal, BatchResolveResult, EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameLogEntry, GameState, RewindOption, WaitingFor } from "../adapter/types";
 import type { InteractionSubmission } from "../adapter/generated/interaction";
-import { AdapterError, AdapterErrorCode } from "../adapter/types";
+import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter/types";
+import { reportStructuredActionRejection } from "./actionRejectionReporter";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
@@ -261,6 +262,7 @@ function isStaleAction(err: unknown): boolean {
 }
 
 function actionErrorMessage(err: unknown): string {
+  if (err instanceof AdapterError && err.rejection) return err.rejection.message;
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string" && err.length > 0) return err;
   return i18n.t("actionError.unknownEngineError");
@@ -277,10 +279,14 @@ function shouldShowActionError(err: unknown): boolean {
   return !isStateLost(err) && !isEnginePanic(err) && !isEngineUnresponsive(err) && !isStaleAction(err);
 }
 
-function showActionError(action: GameAction, err: unknown): void {
+function reportActionError(err: unknown, action?: GameAction): void {
   if (!shouldShowActionError(err)) return;
+  const title = i18n.t("actionError.title", {
+    action: action ? actionLabel(action) : i18n.t("actionError.genericAction"),
+  });
+  if (reportStructuredActionRejection(err, title) !== "not-structured") return;
   useAppNotificationStore.getState().showNotification({
-    title: i18n.t("actionError.title", { action: actionLabel(action) }),
+    title,
     description: actionErrorMessage(err),
   });
 }
@@ -333,7 +339,7 @@ async function processAction(
     }
     const outcome = await adapter.submitAiActionProposal(proposal);
     if (outcome.status === "stale") return null;
-    if (outcome.status === "rejected") throw new Error(`AI proposal rejected: ${outcome.reason}`);
+    if (outcome.status === "rejected") throw actionRejectionError(outcome.rejection);
     return outcome.result;
   };
   let result;
@@ -623,7 +629,7 @@ async function processQueue(generation: number): Promise<void> {
       }
       debugLog(`processQueue error (${next.kind}): ${err instanceof Error ? err.message : String(err)}`);
       if (next.kind === "local") {
-        showActionError(next.action, err);
+        reportActionError(err, next.action);
       }
       next.reject(err);
       // If processAction escalated to Layer 3 (notifyEngineLost already
@@ -742,7 +748,7 @@ async function dispatchActionInternal(
   } catch (e) {
     if (!isDispatchContextCurrent(generation, session)) return;
     debugLog(`dispatch error for ${submittedAction.type}: ${e instanceof Error ? e.message : String(e)}`);
-    showActionError(submittedAction, e);
+    reportActionError(e, submittedAction);
     throw e;
   } finally {
     if (isCurrentDispatchGeneration(generation)) inFlightLocalAction = null;
@@ -787,12 +793,17 @@ export async function dispatchInteraction(
     );
   }
 
-  const result = await adapter.submitInteraction(submission, actor);
-  const snapshot = await adapter.getSnapshot();
-  useGameStore.getState().commitEngineSnapshot(snapshot, {
-    events: result.events,
-    logEntries: result.log_entries ?? [],
-  });
+  try {
+    const result = await adapter.submitInteraction(submission, actor);
+    const snapshot = await adapter.getSnapshot();
+    useGameStore.getState().commitEngineSnapshot(snapshot, {
+      events: result.events,
+      logEntries: result.log_entries ?? [],
+    });
+  } catch (err) {
+    reportActionError(err);
+    throw err;
+  }
 }
 
 /** Dispatch a standing preference only while its captured game lifecycle is
@@ -1066,7 +1077,7 @@ export async function dispatchResolveAll(
   } catch (err) {
     if (isStaleAction(err)) return;
     debugLog(`Resolve All error: ${err instanceof Error ? err.message : String(err)}`);
-    showActionError({ type: "PassPriority" }, err);
+    reportActionError(err, { type: "PassPriority" });
   } finally {
     batchResolveInProgress = false;
     setIsResolvingAll(false);

@@ -14,7 +14,15 @@ import {
 } from "../multiplayerDraftStore";
 import { DraftPodHostAdapter } from "../../adapter/draftPodHostAdapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import type { ActionRejection, EngineAdapter } from "../../adapter/types";
+import { actionRejectionError } from "../../adapter/types";
 import { DraftPauseReason, type DraftMatchLaunch } from "../../network/draftProtocol";
+import {
+  commandAcknowledgement,
+  draftIntergameDigest,
+  type DraftIntergameCommand,
+} from "../../services/intergameCommandLedger";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -86,6 +94,11 @@ function mockView(status: string): DraftPlayerView {
     pick_number: 1,
     pass_direction: "Left",
     current_pack: null,
+    // `filter_for_player` derives both fields from the same
+    // `session.current_pack`, so a null pack publishes 0 — the engine cannot
+    // produce a null pack alongside a positive count. The one test that
+    // supplies a real pack overrides this field alongside it.
+    required_pick_count: 0,
     pool: [],
     draft_effects: [],
     pool_groups: {
@@ -101,6 +114,8 @@ function mockView(status: string): DraftPlayerView {
     cards_per_pack: 14,
     pack_sizes: [14, 14, 14],
     pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
+    pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
     addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
@@ -123,6 +138,7 @@ describe("multiplayerDraftStore", () => {
     capturedHostEventHandler = null;
     capturedGuestEventHandler = null;
     useMultiplayerDraftStore.getState().reset();
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
   });
 
   afterEach(async () => {
@@ -764,6 +780,27 @@ describe("multiplayerDraftStore", () => {
       );
     });
 
+    it("forwards the commander designation through the host adapter", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      // CR 903.3. The designation is deliberately NOT derivable from anything
+      // else this test sets — the deck is empty here — so a body that dropped
+      // the argument, or re-derived it from the deck, cannot satisfy this.
+      await useMultiplayerDraftStore.getState().submitDeck(["Kenrith, the Returned King"]);
+
+      expect(mockHostAdapter.submitDeck).toHaveBeenCalledWith(
+        [],
+        ["Kenrith, the Returned King"],
+      );
+    });
+
     it("selectCard and confirmPick work together", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
@@ -777,7 +814,12 @@ describe("multiplayerDraftStore", () => {
       useMultiplayerDraftStore.getState().selectCard("card-123");
       expect(useMultiplayerDraftStore.getState().selectedCard).toBe("card-123");
 
-      await useMultiplayerDraftStore.getState().confirmPick();
+      // NOT "card-123": that is what `selectCard` above set, and passing it back
+      // in would let the UNWIDENED body (`if (!selectedCard) return;
+      // await submitPick([selectedCard]);`) satisfy every assertion here. A
+      // different id is what makes this a revert-probe rather than a tautology.
+      await useMultiplayerDraftStore.getState().confirmPick(["card-456"]);
+      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-456"]);
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
@@ -806,12 +848,15 @@ describe("multiplayerDraftStore", () => {
               type_line: "Instant",
             },
           ],
+          // Premier (CR 905.1a): one card per pick step. Paired with the real
+          // pack above, exactly as `filter_for_player` publishes the two.
+          required_pick_count: 1,
         },
       });
 
       await useMultiplayerDraftStore.getState().autoPickCard();
 
-      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith("card-123");
+      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-123"]);
     });
 
     it("addToDeck and removeFromDeck manage mainDeck", () => {
@@ -840,6 +885,99 @@ describe("multiplayerDraftStore", () => {
 
       useMultiplayerDraftStore.getState().setLandCount("Plains", -2);
       expect(useMultiplayerDraftStore.getState().landCounts).toEqual({ Plains: 0 });
+    });
+  });
+
+  describe("authorized intergame actions", () => {
+    it("reports structured rejections without leaking either sideboard or play-draw submission", async () => {
+      const launch: DraftMatchLaunch = {
+        type: "HumanHost",
+        matchId: "action-rejection-match",
+        matchRoomCode: "MATCH",
+        round: 1,
+        localSeat: 0,
+        opponentSeat: 1,
+        opponentName: "Alice",
+        matchHostPeerId: "peer-0",
+        deckPayload: {
+          player: { main_deck: [], sideboard: [], commander: [] },
+          opponent: { main_deck: [], sideboard: [], commander: [] },
+          ai_decks: [],
+        },
+        matchConfig: { match_type: "Bo3" },
+        binding: {
+          podId: "pod-1", matchId: "action-rejection-match", round: 1,
+          sessionKey: "session", lease: "lease", nonce: "nonce",
+          revision: 1, matchAuthoritySeat: 0,
+        },
+      };
+      const rejection: ActionRejection = {
+        code: "invalid_action",
+        disposition: "invalid",
+        message: "Engine error: ObjectId(199) cannot change deck partitions",
+        related_object_ids: [199],
+      };
+      const adapter = {
+        submitAction: vi.fn()
+          .mockRejectedValueOnce(actionRejectionError(rejection))
+          .mockRejectedValueOnce(actionRejectionError({
+            code: "stale_action",
+            disposition: "stale",
+            message: "This action is no longer current",
+            related_object_ids: [199],
+          })),
+      } as unknown as EngineAdapter;
+      useMultiplayerDraftStore.setState({
+        role: "host",
+        seatIndex: 0,
+        matchPairing: launch,
+        matchAdapter: adapter,
+      });
+      const command = (
+        commandId: string,
+        payload: DraftIntergameCommand["payload"],
+      ): DraftIntergameCommand => ({
+        commandId,
+        matchId: launch.matchId,
+        gameNumber: 2,
+        seat: 0,
+        payload,
+        launchPayload: launch,
+        launchDigest: draftIntergameDigest(launch),
+        payloadDigest: draftIntergameDigest(payload),
+        status: "Authorized",
+      });
+      const sideboard = command("sideboard-rejection", {
+        type: "SubmitSideboard", main: [], sideboard: [],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitAuthorized(
+        sideboard,
+        commandAcknowledgement(sideboard),
+      )).resolves.toBeUndefined();
+
+      expect(adapter.submitAction).toHaveBeenCalledWith({
+        type: "SubmitSideboard",
+        data: { main: [], sideboard: [] },
+      }, 0);
+      expect(useAppNotificationStore.getState().notification).toEqual({
+        title: "Action failed",
+        description: rejection.message,
+      });
+
+      useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+      const playDraw = command("play-draw-stale", { type: "ChoosePlayDraw", playFirst: true });
+
+      await expect(useMultiplayerDraftStore.getState().submitAuthorized(
+        playDraw,
+        commandAcknowledgement(playDraw),
+      )).resolves.toBeUndefined();
+
+      expect(adapter.submitAction).toHaveBeenLastCalledWith({
+        type: "ChoosePlayDraw",
+        data: { play_first: true },
+      }, 0);
+      expect(useAppNotificationStore.getState().notification).toBeNull();
     });
   });
 

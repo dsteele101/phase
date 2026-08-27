@@ -1592,6 +1592,68 @@ fn parse_tracked_set_anaphor(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 608.2c: Parse the surface-only card-set anaphor "those cards".
+///
+/// Shared by contextual quantity consumers and effect-chain assembly so the
+/// surface grammar and antecedent decision cannot drift. The context-free
+/// quantity leaf deliberately does not assign this ambiguous anaphor a source.
+pub(crate) fn parse_bare_card_set_anaphor(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("those cards").parse(input)?;
+    match rest.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '\'' => Err(nom::Err::Error(
+            nom::error::Error::new(input, nom::error::ErrorKind::Fail),
+        )),
+        _ => Ok((rest, ())),
+    }
+}
+
+fn parse_object_property_aggregate_head(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    // The aggregate axis and the object-property axis are independent, so they
+    // are composed rather than enumerated: three properties x N extremum
+    // adjectives would otherwise be a permutation table.
+    alt((
+        // "the {greatest|highest|largest} <property> among "
+        map(
+            (
+                tag("the "),
+                parse_max_extremum_adjective,
+                tag(" "),
+                parse_aggregate_property,
+                tag(" among "),
+            ),
+            |(_, (), _, property, _)| (AggregateFunction::Max, property),
+        ),
+        // "the total <property> of "
+        map(
+            (tag("the total "), parse_aggregate_property, tag(" of ")),
+            |(_, property, _)| (AggregateFunction::Sum, property),
+        ),
+    ))
+    .parse(input)
+}
+
+/// Parse an object-property aggregate whose exact surface referent is bare
+/// "those cards", using a source proven by the caller's typed chain/trigger
+/// context. This is intentionally unavailable to the context-free quantity
+/// entry points.
+pub(crate) fn parse_contextual_bare_card_aggregate_ref(
+    input: &str,
+    source: crate::types::ability::TrackedAnaphorSource,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
+    let (rest, _) = parse_bare_card_set_anaphor(rest)?;
+    Ok((
+        rest,
+        QuantityRef::TrackedSetAggregate {
+            function,
+            property,
+            source,
+        },
+    ))
+}
+
 /// CR 208.1 + CR 202.3: Parse object-property aggregate quantities such as
 /// "the greatest power among <filter>" and "the total mana value of <filter>".
 /// The aggregate axis and object-property axis are independent typed choices,
@@ -1632,28 +1694,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
         }
     }
 
-    // The aggregate axis and the object-property axis are independent, so they
-    // are composed rather than enumerated: three properties x N extremum
-    // adjectives would otherwise be a permutation table.
-    let (rest, (function, property)) = alt((
-        // "the {greatest|highest|largest} <property> among "
-        map(
-            (
-                tag("the "),
-                parse_max_extremum_adjective,
-                tag(" "),
-                parse_aggregate_property,
-                tag(" among "),
-            ),
-            |(_, (), _, property, _)| (AggregateFunction::Max, property),
-        ),
-        // "the total <property> of "
-        map(
-            (tag("the total "), parse_aggregate_property, tag(" of ")),
-            |(_, property, _)| (AggregateFunction::Sum, property),
-        ),
-    ))
-    .parse(input)?;
+    let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
     // CR 702.167c: "the total power of the exiled cards used to craft it" — the
     // craft-material aggregate (Mastercraft Raptor). Tried before the bare
     // "the exiled cards" tracked-set anaphor because the craft form shares that

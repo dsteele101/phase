@@ -4128,6 +4128,26 @@ pub struct PendingPlayerScopeSacrificeChoice {
     pub completion: PendingPlayerScopeSacrificeCompletion,
 }
 
+/// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
+/// token instruction whose declining players receive one aggregate token
+/// creation after every payer has answered. Kept independently of the current
+/// `UnlessPayment`/`WardSacrificeChoice`, which represent only one seat's
+/// decision and may be replaced mid-payment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeUnlessPayment {
+    /// The unscoped token instruction to resolve exactly once at the terminal
+    /// poll boundary. Its count is replaced with the number of decliners.
+    pub pending_effect: Box<ResolvedAbility>,
+    /// Seats still to answer in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Seats that declined the sacrifice payment.
+    pub declining_players: Vec<PlayerId>,
+    /// The seat whose `UnlessPayment` or `WardSacrificeChoice` is live.
+    pub current_player: PlayerId,
+    /// The typed sacrifice cost is retained to re-emit the next existing prompt.
+    pub cost: AbilityCost,
+}
+
 /// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
 /// player-scope sacrifice action that may span one or more CR 616.1 choices.
 /// The individual choice queue can become empty while the final proposed
@@ -11090,6 +11110,34 @@ impl GameState {
         });
     }
 
+    /// CR 903.3 + CR 111.6 + CR 704.3 + CR 704.5d: a token cannot be the
+    /// commander card named by a command-zone return choice. Older snapshots
+    /// can retain such an impossible choice after a copied commander spell left
+    /// the battlefield, so resume at the normal SBA boundary and let the token
+    /// cease-to-exist sweep remove it.
+    ///
+    /// This is intentionally limited to token-backed choices. A real commander
+    /// card in a graveyard or exile retains its owner-facing CR 903.9a choice.
+    pub fn resume_stale_token_commander_zone_choice(&mut self) {
+        let WaitingFor::CommanderZoneChoice { commander_id, .. } = &self.waiting_for else {
+            return;
+        };
+        if !self
+            .objects
+            .get(commander_id)
+            .is_some_and(|object| object.is_token)
+        {
+            return;
+        }
+
+        crate::game::priority::reset_priority(self);
+        let waiting_for = WaitingFor::Priority {
+            player: self.active_player,
+        };
+        crate::game::public_state::sync_waiting_for(self, &waiting_for);
+        crate::game::sba::check_state_based_actions(self, &mut Vec::new());
+    }
+
     /// CR 732.2a: the seat whose driving period `last_loop_action_sequence` currently records.
     ///
     /// CR 732.2a lets "the player with priority … suggest a shortcut by describing a sequence of
@@ -11250,6 +11298,7 @@ impl PersistedGameState {
         //     <saved>, so the next `capture_rng_word_pos` `.expect`-panicked `HighWaterRegression`.
         // Offline tooling (`phase-ai`'s `load_saved_game_state`) simply inherits the repair.
         state.rehydrate_rng();
+        state.resume_stale_token_commander_zone_choice();
         state
     }
 }
@@ -12063,8 +12112,9 @@ pub enum WaitingFor {
         game_number: u8,
         score: MatchScore,
         /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
-        /// when they submit. `deck_size` is a *minimum* — there is no maximum
-        /// deck size — so sideboarding need not be a one-for-one swap.
+        /// when they submit — `deck_size.min_cards()`, the floor of the
+        /// format's `DeckSizeRule`. Under a `Minimum` rule there is no maximum
+        /// deck size, so sideboarding need not be a one-for-one swap.
         ///
         /// Published here (rather than left for the UI to derive) so the
         /// submit gate is the engine's own acceptance predicate. Computed by
@@ -17426,6 +17476,10 @@ declare_game_state! {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 101.4 + CR 118.12a: player-scoped unless-payment poll retained
+    /// across one-seat sacrifice choices and replacement pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -22220,6 +22274,7 @@ impl GameState {
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -24309,6 +24364,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     value is correctly not a fixed-point repeat and COMPARING it can never suppress a
         //     legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -24523,6 +24579,8 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_player_scope_unless_payment
+                == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice

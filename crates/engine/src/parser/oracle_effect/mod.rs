@@ -7635,7 +7635,13 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         UnlessSuffixStrip::Absent => (None, clause_text),
         UnlessSuffixStrip::Parsed(c) => (Some(c), clause_text),
         UnlessSuffixStrip::Unrecognized { rider } => {
-            let (stripped, unless_pay) = extract_resolution_unless_pay_modifier(&clause_text, None);
+            // The clause shell owns player-scope recognition. The unless-payment
+            // modifier is extracted before the main shell pass below, so consult
+            // the same shell here to bind an anaphoric "they" to a prepositional
+            // scope such as "for each opponent, you … unless they …".
+            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(&clause_text);
+            let (stripped, unless_pay) =
+                extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -27627,6 +27633,72 @@ fn publishes_aggregate_set_from_resolution(effect: &Effect) -> bool {
     publishes_tracked_set_from_resolution(effect) || matches!(effect, Effect::Sacrifice { .. })
 }
 
+/// CR 608.2c: Classification used only for the bare card-set surface "those
+/// cards". Mill and discard establish the cards that surface names. Any nearer
+/// producer from the existing aggregate-set authority blocks an older mill or
+/// discard without changing the broad binding rules for other anaphora.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BareCardAggregatePublisher {
+    ChainSetCompatible,
+    EventFallbackBarrier,
+    TerminalUnsupported,
+}
+
+pub(super) fn classify_bare_card_aggregate_publisher(
+    effect: &Effect,
+) -> Option<BareCardAggregatePublisher> {
+    if matches!(
+        effect,
+        Effect::Mill { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        Some(BareCardAggregatePublisher::ChainSetCompatible)
+    } else if is_token_creating_effect(effect) {
+        Some(BareCardAggregatePublisher::EventFallbackBarrier)
+    } else if publishes_aggregate_set_from_resolution(effect)
+        || matches!(
+            effect,
+            Effect::TargetOnly { .. } | Effect::ChooseObjectsIntoTrackedSet { .. }
+        )
+    {
+        Some(BareCardAggregatePublisher::TerminalUnsupported)
+    } else {
+        None
+    }
+}
+
+fn classify_latest_bare_card_publisher_in_ability(
+    def: &AbilityDefinition,
+) -> Option<BareCardAggregatePublisher> {
+    let primary = def
+        .sub_ability
+        .as_deref()
+        .and_then(classify_latest_bare_card_publisher_in_ability)
+        .or_else(|| classify_bare_card_aggregate_publisher(&def.effect));
+    let Some(alternate) = def.else_ability.as_deref() else {
+        return primary;
+    };
+    match (
+        primary,
+        classify_latest_bare_card_publisher_in_ability(alternate),
+    ) {
+        (None, None) => None,
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(_), None) | (None, Some(_)) | (Some(_), Some(_)) => {
+            Some(BareCardAggregatePublisher::TerminalUnsupported)
+        }
+    }
+}
+
+fn classify_latest_bare_card_publisher_in_clause(
+    clause: &ParsedEffectClause,
+) -> Option<BareCardAggregatePublisher> {
+    clause
+        .sub_ability
+        .as_deref()
+        .and_then(classify_latest_bare_card_publisher_in_ability)
+        .or_else(|| classify_bare_card_aggregate_publisher(&clause.effect))
+}
+
 /// CR 608.2c: Re-anchor a batched set-anaphor aggregate to the CHAIN-published
 /// set.
 ///
@@ -28772,6 +28844,16 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    // CR 109.5: Explicit All scopes retain Controller for their ScopedPlayer rewrite;
+    // inherited opponent-decline nodes have no local scope and still rebind here.
+    if !matches!(def.player_scope, Some(PlayerFilter::All))
+        && def
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+    {
+        rebind_decline_body_recipient(&mut def.effect);
+    }
     // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
     // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
     // keep `You` so optional opponent-choice sacrifices ("permanent of their
@@ -32968,6 +33050,17 @@ pub(crate) fn parse_effect_chain_ir(
             (None, Some(unless_cond)) => Some(unless_cond),
             (existing, None) => existing,
         };
+        // Player-scoped prepositional imperatives must be peeled before the
+        // generic "for each" repeat parser. Otherwise "for each opponent, you
+        // create …" is lowered as a quantity repeat and loses the opponent
+        // scope that binds an anaphoric "they" in its unless-payment clause.
+        let text_lower = text.to_lowercase();
+        let (early_player_scope, text) =
+            if nom_primitives::scan_contains(&text_lower, "unless they ") {
+                lower::strip_prepositional_player_scope_subject(&text)
+            } else {
+                (None, text)
+            };
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
         if prior_typed_referent
             && has_bare_recipient_counter_gate
@@ -33031,7 +33124,10 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
+        let (player_scope, text) = match early_player_scope {
+            Some(scope) => (Some(scope), text),
+            None => super::clause_shell::peel_player_scope_subject(&text),
+        };
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -33372,6 +33468,19 @@ pub(crate) fn parse_effect_chain_ir(
                 sequence::parse_token_source_power_toughness_followup(next_text)
             })
             .map(|(power, toughness)| TokenPtFollowup::PowerToughness { power, toughness });
+        let nearest_bare_card_publisher = builder
+            .clauses()
+            .iter()
+            .rev()
+            .find_map(|clause| classify_latest_bare_card_publisher_in_clause(&clause.parsed));
+        let bare_card_aggregate_source = match nearest_bare_card_publisher {
+            Some(BareCardAggregatePublisher::ChainSetCompatible) => {
+                Some(TrackedAnaphorSource::ChainSet)
+            }
+            Some(BareCardAggregatePublisher::EventFallbackBarrier)
+            | Some(BareCardAggregatePublisher::TerminalUnsupported)
+            | None => None,
+        };
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -33510,6 +33619,7 @@ pub(crate) fn parse_effect_chain_ir(
             // player" on Ghyrson) bind to the triggering event instead of being
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
+            bare_card_aggregate_source,
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single
@@ -36051,13 +36161,16 @@ fn extract_resolution_unless_pay_modifier(
                 // preceding word. The mask preserves byte length, so `.len()` indexes
                 // the original text exactly.
                 let cleaned = text[..before_unless.len()].trim().to_string();
-                return (
-                    cleaned,
-                    Some(UnlessPayModifier {
-                        cost,
-                        payer: TargetFilter::Controller,
-                    }),
-                );
+                let payer = if player_scope.is_some()
+                    && tag::<_, _, OracleError<'_>>("they ")
+                        .parse(after_unless_lower)
+                        .is_ok()
+                {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Controller
+                };
+                return (cleaned, Some(UnlessPayModifier { cost, payer }));
             }
         }
         if let Some((cost, payer)) = parse_unless_have_deal_damage_cost(after_unless_lower) {

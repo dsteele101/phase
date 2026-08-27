@@ -18,6 +18,203 @@ use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
 
+fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
+    let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
+        panic!("expected LoseLife, got {:?}", def.effect);
+    };
+    assert!(matches!(
+        amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                source,
+            }
+        } if *source == expected
+    ));
+}
+
+#[test]
+fn mill_and_discard_bind_bare_cards_aggregate_to_chain_set() {
+    for (text, continued) in [
+        ("mill three cards, then lose life equal to the total mana value of those cards", false),
+        ("discard a card, then lose life equal to the total mana value of those cards, then draw a card", true),
+    ] {
+        let def = parse_effect_chain(
+            text,
+            AbilityKind::Spell,
+        );
+        let life_loss = def.sub_ability.as_deref().expect("life-loss continuation");
+        assert_tracked_mana_value_source(life_loss, TrackedAnaphorSource::ChainSet);
+        assert_eq!(life_loss.sub_ability.is_some(), continued);
+    }
+}
+
+#[test]
+fn conditional_publishers_require_the_same_source_on_both_branches() {
+    let ability = |text| AbilityDefinition::new(AbilityKind::Spell, parse_effect(text));
+    for (def, expected) in [
+        (
+            ability("discard a card").with_else_ability(ability("discard two cards")),
+            Some(BareCardAggregatePublisher::ChainSetCompatible),
+        ),
+        (
+            ability("gain 1 life").with_else_ability(ability("draw a card")),
+            None,
+        ),
+        (
+            ability("discard a card").with_else_ability(ability("draw a card")),
+            Some(BareCardAggregatePublisher::TerminalUnsupported),
+        ),
+    ] {
+        assert_eq!(
+            classify_latest_bare_card_publisher_in_ability(&def),
+            expected
+        );
+    }
+}
+
+#[test]
+fn nearer_token_blocks_bare_cards_rebind_from_older_mill() {
+    let def = parse_effect_chain(
+        "mill three cards, then create a 1/1 green Insect creature token, then lose life equal to the total mana value of those cards",
+        AbilityKind::Spell,
+    );
+    let token = def.sub_ability.as_deref().expect("token continuation");
+    let aggregate = token
+        .sub_ability
+        .as_deref()
+        .expect("aggregate continuation");
+    assert!(matches!(
+        aggregate.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn nontrigger_bare_cards_without_publisher_stays_honest_gap() {
+    let def = parse_effect_chain(
+        "lose life equal to the total mana value of those cards",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
+}
+
+#[test]
+fn scoped_reflexive_decline_preserves_controller_and_opponent_recipients() {
+    let decline_condition = || AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::effect_performed()),
+    };
+    let lose = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::TriggeringPlayer),
+        },
+    )
+    .condition(decline_condition());
+    let mill = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        },
+    )
+    .condition(decline_condition())
+    .sub_ability(lose);
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ScopedPlayer,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(mill);
+
+    apply_player_scope_rewrites(&mut def);
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Draw {
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let mill = def.sub_ability.as_deref().expect("decline mill");
+    assert!(matches!(
+        mill.effect.as_ref(),
+        Effect::Mill {
+            target: TargetFilter::OriginalController,
+            ..
+        }
+    ));
+    assert!(matches!(
+        mill.sub_ability
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::LoseLife {
+            target: Some(TargetFilter::ScopedPlayer),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn all_player_decline_keeps_controller_for_the_all_scope_rewrite() {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .condition(AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::effect_performed()),
+    })
+    .player_scope(PlayerFilter::All);
+
+    apply_player_scope_rewrites(&mut def);
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Draw {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn decline_damage_rebinds_only_inside_opponent_scope() {
+    let damage = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            },
+        )
+        .condition(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        })
+    };
+    let scoped = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(damage());
+    for (mut def, expected) in [
+        (scoped, TargetFilter::ScopedPlayer),
+        (damage(), TargetFilter::TriggeringPlayer),
+    ] {
+        apply_player_scope_rewrites(&mut def);
+        let effect = def.sub_ability.as_deref().unwrap_or(&def).effect.as_ref();
+        assert!(matches!(effect, Effect::DealDamage { target, .. } if *target == expected));
+    }
+}
+
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
 /// `ParentTarget` (exactly the refs a `Shuffle` carries); visiting `Shuffle`
@@ -7948,6 +8145,33 @@ fn effect_unless_each_opponent_sacrifice_or_discard_binds_scoped_player() {
     assert_eq!(tf.controller, Some(ControllerRef::You));
 }
 
+/// CR 101.4 + CR 118.12a: the prepositional player scope used by the
+/// aggregate token grammar must bind "they" to its iterated opponent just as
+/// the subject-form scope above does. The spell controller creates every token;
+/// the opponents only decide whether to pay the sacrifice cost.
+#[test]
+fn effect_for_each_opponent_token_unless_sacrifice_binds_scoped_player() {
+    let def = parse_effect_chain(
+        "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    assert!(matches!(
+        *def.effect,
+        Effect::Token {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    let unless_pay = def.unless_pay.expect("should attach unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    assert!(matches!(
+        unless_pay.cost,
+        AbilityCost::Sacrifice(ref cost) if cost.requirement.fixed_count() == Some(1)
+    ));
+}
+
 #[test]
 fn effect_draw_for_each_player_counter_uses_dynamic_count() {
     let e = parse_effect("Draw a card for each experience counter you have");
@@ -13024,6 +13248,20 @@ fn dark_deal_draw_uses_each_players_discard_count_minus_one() {
     ));
 }
 
+#[test]
+fn brass_tunnel_grinder_draw_uses_discard_count_plus_one() {
+    let def = parse_effect_chain(
+        "Discard any number of cards, then draw that many cards plus one.",
+        AbilityKind::Spell,
+    );
+    let draw = def
+        .sub_ability
+        .as_ref()
+        .expect("expected draw continuation");
+    assert!(matches!(&*draw.effect, Effect::Draw {
+        count: QuantityExpr::Offset { inner, offset: 1 }, ..
+    } if matches!(inner.as_ref(), QuantityExpr::Ref { qty: QuantityRef::EventContextAmount })));
+}
 #[test]
 fn effect_chain_then_conjugated_sacrifices() {
     // "then sacrifices the rest" — conjugated verb after ", then"

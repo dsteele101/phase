@@ -782,7 +782,10 @@ fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<Quantit
     Some(QuantityExpr::Ref { qty })
 }
 
-fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
+fn parse_life_equal_quantity(
+    after_verb_lower: &str,
+    bare_card_source: Option<crate::types::ability::TrackedAnaphorSource>,
+) -> Option<QuantityExpr> {
     let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
         .parse(after_verb_lower)
         .ok()?;
@@ -796,8 +799,13 @@ fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
     if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
         return Some(qty);
     }
-    crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
-        .map(|qty| QuantityExpr::Ref { qty })
+    if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+    let source = bare_card_source?;
+    let (rest, qty) =
+        nom_quantity::parse_contextual_bare_card_aggregate_ref(qty_text, source).ok()?;
+    rest.trim().is_empty().then_some(QuantityExpr::Ref { qty })
 }
 
 /// CR 119.3 + CR 102.1: "gain 1 life for each player" (a/an/1) → the count of
@@ -830,6 +838,22 @@ fn parse_gain_life_per_player(after_gain_lower: &str) -> Option<QuantityExpr> {
 pub(super) fn parse_numeric_imperative_ast(
     text: &str,
     lower: &str,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, None)
+}
+
+fn parse_numeric_imperative_ast_with_context(
+    text: &str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx.bare_card_aggregate_source)
+}
+
+fn parse_numeric_imperative_ast_with_bare_card_source(
+    text: &str,
+    lower: &str,
+    bare_card_source: Option<crate::types::ability::TrackedAnaphorSource>,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
         .or_else(|| {
@@ -919,7 +943,7 @@ pub(super) fn parse_numeric_imperative_ast(
         // CR 119.3: target-relative quantity refs ("target creature's
         // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
         // Heron's Grace Champion, Lifeblood Hydra, etc.
-        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str(), bare_card_source) {
             return Some(NumericImperativeAst::GainLife { amount });
         }
         // CR 119.3: "gain that much life" / "gain that many life" —
@@ -979,7 +1003,7 @@ pub(super) fn parse_numeric_imperative_ast(
         // power/toughness/mana value", etc.) — Final Punishment, Tomb
         // Blade-class drain, Genesis of the Daleks. Delegates to the
         // shared `parse_quantity_ref` building block.
-        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str(), bare_card_source) {
             return Some(NumericImperativeAst::LoseLife { amount });
         }
         // CR 119.3: "lose that much life" / "lose that many life" —
@@ -10766,9 +10790,11 @@ pub(super) fn parse_imperative_family_ast(
                 target: TargetFilter::Controller,
             }))
         }
-        "draw" => parse_numeric_imperative_ast(text, lower)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast))),
-        "scry" | "surveil" | "mill" => parse_numeric_imperative_ast(text, lower)
+        _ if nom_on_lower(text, lower, |input| parse_word_bounded(input, "draw")).is_some() => {
+            parse_numeric_imperative_ast_with_context(text, lower, ctx)
+                .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
+        }
+        "scry" | "surveil" | "mill" => parse_numeric_imperative_ast_with_context(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast))),
 
         // Targeted action verbs (CR 701)
@@ -11435,7 +11461,7 @@ pub(super) fn parse_imperative_family_ast(
                 // life-gain clauses ("gain 3 life") still fall through below.
                 Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
-                parse_numeric_imperative_ast(text, lower)
+                parse_numeric_imperative_ast_with_context(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else {
                 None
@@ -11457,7 +11483,7 @@ pub(super) fn parse_imperative_family_ast(
                 // its target for the parse_target call below.
                 Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
-                parse_numeric_imperative_ast(text, lower)
+                parse_numeric_imperative_ast_with_context(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else if !nom_primitives::scan_contains(lower, "mana") {
                 try_parse_gain_keyword(text).map(ImperativeFamilyAst::LoseKeyword)
@@ -11490,7 +11516,7 @@ pub(super) fn parse_imperative_family_ast(
         "gets" | "get" => try_parse_player_counter(lower)
             .or_else(|| coalesce_pump_with_modifications(text).map(ImperativeFamilyAst::GainKeyword))
             .or_else(|| {
-                parse_numeric_imperative_ast(text, lower)
+                parse_numeric_imperative_ast_with_context(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             }),
 
@@ -11531,7 +11557,7 @@ pub(super) fn parse_imperative_family_ast(
                 return Some(ImperativeFamilyAst::GainKeyword(effect));
             }
             // Numeric: contains("gain")+contains("life"), contains("gets +"), etc.
-            if let Some(ast) = parse_numeric_imperative_ast(text, lower) {
+            if let Some(ast) = parse_numeric_imperative_ast_with_context(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)));
             }
             // Shuffle: "that player shuffles" / "target player shuffles" have
