@@ -193,6 +193,26 @@ describe("SetSelector", () => {
     ]);
   });
 
+  it("trims a flexible selection when the event pack count decreases", async () => {
+    const onStartDraft = vi.fn();
+    const { rerender } = render(
+      <SetSelector onStartDraft={onStartDraft} defaultPackCount={3} />,
+    );
+
+    await addPack("Innistrad");
+    await addPack("Dark Ascension");
+    await addPack("Innistrad");
+
+    rerender(<SetSelector onStartDraft={onStartDraft} defaultPackCount={2} />);
+
+    await waitFor(async () => expect(await packEntries()).toHaveLength(2));
+    await userEvent.click(screen.getByRole("button", { name: "Start Draft" }));
+    expect(onStartDraft).toHaveBeenCalledWith([
+      { code: "ISD", name: "Innistrad" },
+      { code: "DKA", name: "Dark Ascension" },
+    ]);
+  });
+
   it("holds the set grid still when the pack list resizes above it", async () => {
     // The grid sits below the pack list, so a list that grows by N pixels
     // slides the tile under the pointer down by N unless the scroll follows.

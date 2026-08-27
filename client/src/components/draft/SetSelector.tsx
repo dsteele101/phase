@@ -150,12 +150,12 @@ export function SetSelector({
     return () => { cancelled = true; };
   }, []);
 
-  // A locked-length event (Sealed) may not carry a list from a previous mode
-  // that is longer than it can open.
+  // An event may not carry a list from a previous mode that is longer than it
+  // can open. This also applies to flexible drafts: a short list repeats its
+  // last set, but a longer list is rejected by the selection authority.
   useEffect(() => {
-    if (!fixedPackCount) return;
     setPacks((current) => current.slice(0, defaultPackCount));
-  }, [fixedPackCount, defaultPackCount]);
+  }, [defaultPackCount]);
 
   // The pack list grows and shrinks above the set grid; keep the grid still.
   const packListRef = useRef<HTMLDivElement | null>(null);
