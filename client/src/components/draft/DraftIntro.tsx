@@ -11,6 +11,11 @@ interface DraftIntroProps {
   podSize?: number;
   packCount?: number;
   cardsPerPack?: number;
+  /**
+   * Engine-provided size of each booster, in pack order. A multi-set draft
+   * mixes sizes, so the "packs of N cards" line only holds when they agree.
+   */
+  packSizes?: number[];
   onContinue: () => void;
 }
 
@@ -28,12 +33,24 @@ export function DraftIntro({
   podSize = 8,
   packCount = 3,
   cardsPerPack = 14,
+  packSizes,
   onContinue,
 }: DraftIntroProps) {
   const { t } = useTranslation("draft");
 
+  const mixedPackSizes = (packSizes?.length ?? 0) > 1
+    && new Set(packSizes).size > 1;
+
   const quickSteps: Step[] = [
-    { icon: "1", text: t("intro.quick.step1", { packCount, cardsPerPack }) },
+    {
+      icon: "1",
+      text: mixedPackSizes
+        ? t("intro.quick.step1Mixed", {
+            packCount,
+            packSizes: (packSizes ?? []).join(", "),
+          })
+        : t("intro.quick.step1", { packCount, cardsPerPack }),
+    },
     { icon: "2", text: t("intro.quick.step2") },
     { icon: "3", text: t("intro.quick.step3") },
     { icon: "4", text: t("intro.quick.step4") },

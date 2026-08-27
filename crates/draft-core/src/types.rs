@@ -93,18 +93,94 @@ impl DraftKind {
     }
 }
 
+/// Boosters a Sealed event opens per player. Fixed by the event format itself,
+/// not by the player's set selection — the reducer rejects any other count.
+pub const SEALED_PACK_COUNT: u8 = 6;
+
+/// Resolve the entry of a pack-ordered sequence that describes pack
+/// `pack_number`.
+///
+/// Sequences shorter than the session's pack count repeat their last entry, so
+/// a single-source draft is a one-element sequence rather than the same value
+/// copied once per pack. Returns `None` only for an empty sequence.
+pub fn entry_for_pack<T>(sequence: &[T], pack_number: u8) -> Option<&T> {
+    sequence.get(usize::from(pack_number).min(sequence.len().checked_sub(1)?))
+}
+
 /// Origin of the draft card pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DraftSource {
-    Set { code: String },
-    Cube { id: String, name: String },
+    /// The set filling each booster, in pack order. One entry per pack the
+    /// session opens; duplicates are allowed, so a block draft names each of
+    /// its sets once and a chaos draft may repeat one. A sequence shorter than
+    /// the pack count repeats its last entry ([`entry_for_pack`]), which is how
+    /// a single-set draft stays a one-element sequence — and how snapshots
+    /// written before multi-set drafts existed (`{"code": "blb"}`) restore with
+    /// their original meaning.
+    Set {
+        #[serde(alias = "code", deserialize_with = "deserialize_set_codes")]
+        codes: Vec<String>,
+    },
+    Cube {
+        id: String,
+        name: String,
+    },
+}
+
+/// Accept both the pack-ordered `codes` array and the single `code` string that
+/// pre-multi-set snapshots wrote, so an in-flight draft survives the upgrade.
+fn deserialize_set_codes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SetCodes {
+        Single(String),
+        Sequence(Vec<String>),
+    }
+
+    Ok(match SetCodes::deserialize(deserializer)? {
+        SetCodes::Single(code) => vec![code],
+        SetCodes::Sequence(codes) => codes,
+    })
 }
 
 impl DraftSource {
+    /// A set-backed source whose every booster comes from one set.
+    pub fn single_set(code: impl Into<String>) -> Self {
+        DraftSource::Set {
+            codes: vec![code.into()],
+        }
+    }
+
+    /// Identifier for the source as a whole, used as the session's `set_code`
+    /// label and for display. Multi-set drafts join their distinct set codes in
+    /// first-appearance order (`"ISD+DKA+AVR"`) so one string still names the
+    /// whole source; per-pack identity lives in [`DraftSource::set_code_for_pack`].
     pub fn set_code(&self) -> String {
         match self {
-            DraftSource::Set { code } => code.clone(),
+            DraftSource::Set { codes } => {
+                let mut distinct: Vec<&str> = Vec::with_capacity(codes.len());
+                for code in codes {
+                    if !distinct.contains(&code.as_str()) {
+                        distinct.push(code);
+                    }
+                }
+                distinct.join("+")
+            }
+            DraftSource::Cube { id, .. } => id.clone(),
+        }
+    }
+
+    /// The set filling booster `pack_number`. Cube sources have no per-pack
+    /// set, so every pack reports the cube id.
+    pub fn set_code_for_pack(&self, pack_number: u8) -> String {
+        match self {
+            DraftSource::Set { codes } => entry_for_pack(codes, pack_number)
+                .cloned()
+                .unwrap_or_default(),
             DraftSource::Cube { id, .. } => id.clone(),
         }
     }
@@ -112,9 +188,7 @@ impl DraftSource {
 
 impl Default for DraftSource {
     fn default() -> Self {
-        DraftSource::Set {
-            code: "UNKNOWN".to_string(),
-        }
+        DraftSource::single_set("UNKNOWN")
     }
 }
 
@@ -459,6 +533,8 @@ pub enum DraftError {
     SeatIsBot { seat: u8 },
     #[error("sealed events require a set source")]
     SealedRequiresSetSource,
+    #[error("invalid pack sequence: {reason}")]
+    InvalidPackSequence { reason: String },
     #[error("invalid sealed configuration: {reason}")]
     InvalidSealedConfiguration { reason: String },
     #[error("invalid sealed snapshot: {reason}")]
@@ -474,6 +550,11 @@ pub struct DraftConfig {
     pub kind: DraftKind,
     #[serde(default = "default_pod_size")]
     pub pod_size: u8,
+    /// Nominal booster size, used by sources that generate uniform packs (cube)
+    /// and as the fallback for snapshots written before per-pack sizes were
+    /// recorded. A multi-set draft mixes MTGJSON booster sizes, so the
+    /// authority for how many cards a given booster holds is
+    /// [`DraftSession::cards_in_pack`] — never this field.
     pub cards_per_pack: u8,
     pub pack_count: u8,
     #[serde(default = "default_min_deck_size")]
@@ -570,6 +651,16 @@ pub struct DraftSession {
     pub config: DraftConfig,
     pub seats: Vec<DraftSeat>,
     pub current_pack_number: u8,
+    /// Cards each booster held when it was opened, in pack order. Recorded at
+    /// [`DraftAction::StartDraft`] from the packs the source actually
+    /// generated: a multi-set draft mixes booster sizes, and picking consumes
+    /// the packs themselves, so neither a session-wide scalar nor the live
+    /// packs can answer "how big was pack 2?". Empty on snapshots written
+    /// before this field existed — read through
+    /// [`DraftSession::cards_in_pack`], which falls back to the uniform
+    /// `config.cards_per_pack`.
+    #[serde(default)]
+    pub pack_sizes: Vec<u8>,
     pub pick_number: u8,
     /// Per-seat flag, `true` once that seat has submitted a pick for the
     /// current pick number. Cleared when the round advances. Replaces the
@@ -758,6 +849,66 @@ mod tests {
             );
             assert_eq!(addable_cards.is_addable(custom), should_display_custom);
         }
+    }
+
+    #[test]
+    fn a_pre_multi_set_source_snapshot_restores_as_a_one_element_sequence() {
+        // Snapshots written before multi-set drafts carried a single `code`.
+        // A one-element sequence repeats for every pack, which is exactly what
+        // that snapshot meant.
+        let json = r#"{"type":"Set","data":{"code":"blb"}}"#;
+        let source: DraftSource = serde_json::from_str(json).unwrap();
+
+        assert_eq!(source, DraftSource::single_set("blb"));
+        for pack in [0u8, 1, 2, 5] {
+            assert_eq!(source.set_code_for_pack(pack), "blb");
+        }
+    }
+
+    #[test]
+    fn a_pack_sequence_source_reports_the_set_filling_each_pack() {
+        let source = DraftSource::Set {
+            codes: vec!["ISD".to_string(), "DKA".to_string(), "ISD".to_string()],
+        };
+
+        assert_eq!(source.set_code_for_pack(0), "ISD");
+        assert_eq!(source.set_code_for_pack(1), "DKA");
+        assert_eq!(source.set_code_for_pack(2), "ISD");
+        // Past the sequence, the last entry repeats.
+        assert_eq!(source.set_code_for_pack(3), "ISD");
+    }
+
+    #[test]
+    fn a_multi_set_source_label_lists_its_distinct_sets_in_pack_order() {
+        let source = DraftSource::Set {
+            codes: vec![
+                "ISD".to_string(),
+                "DKA".to_string(),
+                "ISD".to_string(),
+                "AVR".to_string(),
+            ],
+        };
+
+        assert_eq!(source.set_code(), "ISD+DKA+AVR");
+        assert_eq!(DraftSource::single_set("BLB").set_code(), "BLB");
+    }
+
+    #[test]
+    fn serde_roundtrip_multi_set_source() {
+        let source = DraftSource::Set {
+            codes: vec!["ISD".to_string(), "DKA".to_string(), "ISD".to_string()],
+        };
+        let json = serde_json::to_string(&source).unwrap();
+        let back: DraftSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(source, back);
+    }
+
+    #[test]
+    fn entry_for_pack_repeats_the_last_entry_and_rejects_an_empty_sequence() {
+        assert_eq!(entry_for_pack(&[10, 20], 0), Some(&10));
+        assert_eq!(entry_for_pack(&[10, 20], 1), Some(&20));
+        assert_eq!(entry_for_pack(&[10, 20], 9), Some(&20));
+        assert_eq!(entry_for_pack::<u8>(&[], 0), None);
     }
 
     #[test]

@@ -46,6 +46,12 @@ import { useDraftPodStore } from "../stores/draftPodStore";
 
 type SetupMode = "choose" | "host" | "join";
 
+/**
+ * Boosters a pod opens. Fixed by `create_multiplayer_draft`, which sets the
+ * pack count from the draft kind rather than from the host's set choice.
+ */
+const POD_PACK_COUNT = 3;
+
 function PodSetup() {
   const { t } = useTranslation("draft");
   const [mode, setMode] = useState<SetupMode>("choose");
@@ -316,9 +322,14 @@ function PodSetup() {
             <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
               {t("podSetup.setSelectorHint")}
             </div>
+            {/* Pods ship one pool to the host, so the selector runs in its
+                single-set mode — one click picks the set for every pack. */}
             <SetSelector
-              onStartDraft={(setCode) => {
-                setConfig({ setCode });
+              singleSet
+              defaultPackCount={POD_PACK_COUNT}
+              onStartDraft={([pack]) => {
+                if (!pack) return;
+                setConfig({ setCode: pack.code });
                 void createPod();
               }}
             />

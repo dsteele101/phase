@@ -71,6 +71,8 @@ const VIEW: DraftPlayerView = {
   sealed_packs: [],
   seats: [],
   cards_per_pack: 1,
+  pack_sizes: [1, 1, 1],
+  pack_set_codes: ["TST", "TST", "TST"],
   pack_count: 2,
   min_deck_size: 40,
   addable_cards: ["Plains"],

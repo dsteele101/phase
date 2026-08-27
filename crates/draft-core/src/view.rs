@@ -256,8 +256,17 @@ pub struct DraftPlayerView {
     pub sealed_packs: Option<Vec<Vec<DraftCardInstance>>>,
     /// Public info for all seats
     pub seats: Vec<SeatPublicView>,
-    /// Total cards per pack (for UI progress display)
+    /// Cards in the booster currently being drafted (for UI progress display).
+    /// Multi-set drafts mix booster sizes, so this tracks `current_pack_number`
+    /// rather than describing the session as a whole — see `pack_sizes`.
     pub cards_per_pack: u8,
+    /// Cards in each booster of the session, in pack order. Engine-derived so
+    /// clients render per-pack progress without reconstructing pack shape.
+    pub pack_sizes: Vec<u8>,
+    /// The set filling each booster, in pack order. Multi-set drafts open a
+    /// different set each round; single-set drafts repeat one code. Cube
+    /// sources report the cube id for every pack.
+    pub pack_set_codes: Vec<String>,
     /// Total pack count (for UI progress display)
     pub pack_count: u8,
     /// Minimum main deck size for this draft.
@@ -303,7 +312,13 @@ pub struct SpectatorDraftView {
     pub pick_number: u8,
     pub pass_direction: PassDirection,
     pub seats: Vec<SeatPublicView>,
+    /// Cards in the booster currently being drafted. See
+    /// [`DraftPlayerView::cards_per_pack`].
     pub cards_per_pack: u8,
+    /// Cards in each booster of the session, in pack order.
+    pub pack_sizes: Vec<u8>,
+    /// The set filling each booster, in pack order.
+    pub pack_set_codes: Vec<String>,
     pub pack_count: u8,
     pub min_deck_size: usize,
     pub addable_cards: Vec<String>,
@@ -400,7 +415,9 @@ pub fn filter_for_spectator(
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
         seats,
-        cards_per_pack: session.config.cards_per_pack,
+        cards_per_pack: session.cards_in_pack(session.current_pack_number),
+        pack_sizes: session.pack_size_sequence(),
+        pack_set_codes: session.pack_set_code_sequence(),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
@@ -413,6 +430,33 @@ pub fn filter_for_spectator(
         pools,
         current_packs,
     }
+}
+
+/// Split a sealed pool back into the boosters it was opened from.
+///
+/// Sealed pools are stored flat, in opening order. A multi-set sealed event
+/// mixes booster sizes, so the split follows the per-pack sizes the session
+/// recorded rather than a single chunk width. Any remainder (a pool that does
+/// not match the recorded sizes) is returned as a final pack so no card is
+/// silently dropped from the display.
+fn split_by_pack_size(
+    pool: &[DraftCardInstance],
+    session: &DraftSession,
+) -> Vec<Vec<DraftCardInstance>> {
+    let mut packs = Vec::with_capacity(usize::from(session.config.pack_count));
+    let mut rest = pool;
+    for size in session.pack_size_sequence() {
+        if rest.is_empty() {
+            break;
+        }
+        let (pack, remainder) = rest.split_at(usize::from(size).min(rest.len()));
+        packs.push(pack.to_vec());
+        rest = remainder;
+    }
+    if !rest.is_empty() {
+        packs.push(rest.to_vec());
+    }
+    packs
 }
 
 /// Produce a filtered view of the draft session for a specific seat.
@@ -439,11 +483,8 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
     let draft_effects = face_up_draft_cards(&pool);
-    let sealed_packs = (session.kind == DraftKind::Sealed).then(|| {
-        pool.chunks(usize::from(session.config.cards_per_pack))
-            .map(ToOwned::to_owned)
-            .collect()
-    });
+    let sealed_packs =
+        (session.kind == DraftKind::Sealed).then(|| split_by_pack_size(&pool, session));
     let pool_groups = DraftPoolGroups::from_pool(&pool);
 
     let is_drafting = session.status == DraftStatus::Drafting;
@@ -510,7 +551,9 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pool_groups,
         sealed_packs,
         seats,
-        cards_per_pack: session.config.cards_per_pack,
+        cards_per_pack: session.cards_in_pack(session.current_pack_number),
+        pack_sizes: session.pack_size_sequence(),
+        pack_set_codes: session.pack_set_code_sequence(),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
@@ -935,9 +978,7 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size,
@@ -1490,6 +1531,50 @@ mod tests {
     }
 
     #[test]
+    fn the_player_view_publishes_the_shape_and_set_of_every_booster() {
+        let (mut session, source) = test_session(2);
+        session.config.source = DraftSource::Set {
+            codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+        };
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        // Pretend the table has moved on to the second booster.
+        session.pack_sizes = vec![15, 14, 15];
+        session.current_pack_number = 1;
+
+        let view = filter_for_player(&session, 0);
+
+        assert_eq!(view.pack_sizes, vec![15, 14, 15]);
+        assert_eq!(
+            view.pack_set_codes,
+            vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()]
+        );
+        // `cards_per_pack` tracks the booster in play, not a session-wide size.
+        assert_eq!(view.cards_per_pack, 14);
+    }
+
+    #[test]
+    fn a_mixed_size_sealed_pool_splits_back_into_the_boosters_it_came_from() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = SEALED_PACK_COUNT;
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        // Sealed pools are stored flat; only the recorded sizes say where one
+        // booster ended and the next began.
+        session.pack_sizes = vec![20, 20, 20, 8, 8, 8];
+
+        let view = filter_for_player(&session, 0);
+
+        let packs = view
+            .sealed_packs
+            .expect("sealed events publish their packs");
+        assert_eq!(
+            packs.iter().map(Vec::len).collect::<Vec<_>>(),
+            [20, 20, 20, 8, 8, 8]
+        );
+    }
+
+    #[test]
     fn rarity_group_kinds_match_the_wire_contract() {
         let values = [
             (DraftPoolGroupKind::Mythic, "mythic"),
@@ -1690,9 +1775,7 @@ mod tests {
     #[test]
     fn view_bot_seat_shows_as_bot() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
             pod_size: 8,

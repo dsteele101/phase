@@ -7631,9 +7631,7 @@ async fn handle_client_message(
             }
 
             let config = draft_core::types::DraftConfig {
-                source: draft_core::types::DraftSource::Set {
-                    code: set_code.clone(),
-                },
+                source: draft_core::types::DraftSource::single_set(set_code.clone()),
                 set_code: set_code.clone(),
                 kind,
                 pod_size,

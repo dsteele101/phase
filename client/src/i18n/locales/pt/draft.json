@@ -8,7 +8,8 @@
       "step1": "Você abrirá 3 boosters de 14 cartas cada",
       "step2": "Escolha uma carta por booster e passe o restante para os draftadores de IA",
       "step3": "Os boosters alternam de direção a cada rodada — esquerda, direita, esquerda",
-      "step4": "Após todas as escolhas, monte um deck de 40 cartas e jogue uma partida"
+      "step4": "Após todas as escolhas, monte um deck de 40 cartas e jogue uma partida",
+      "step1Mixed": "Você abrirá {{packCount}} boosters de tamanhos diferentes — {{packSizes}} cartas, nessa ordem"
     },
     "pod": {
       "step1": "Você está draftando com {{count}} jogadores em um pod",
@@ -71,10 +72,29 @@
       "Hard": "Difícil",
       "VeryHard": "Muito difícil"
     },
-    "chooseSet": "Escolha uma Coleção",
     "noPools": "Nenhum pool de draft disponível. Execute primeiro o pipeline de dados do draft.",
     "setIconAlt": "Ícone da coleção {{name}}",
-    "loadFailed": "Falha ao carregar as coleções"
+    "loadFailed": "Falha ao carregar as coleções",
+    "packOrder": "Ordem dos boosters",
+    "clearPacks": "Limpar",
+    "emptyPacks_one": "Escolha uma coleção para cada booster. Um draft abre {{count}} booster por padrão — repita uma coleção ou misture várias.",
+    "emptyPacks_other": "Escolha uma coleção para cada booster. Um draft abre {{count}} boosters por padrão — repita uma coleção ou misture várias para draftar um bloco.",
+    "emptyPacksFixed_one": "O sealed abre exatamente {{count}} booster. Escolha uma coleção para ele.",
+    "emptyPacksFixed_other": "O sealed abre exatamente {{count}} boosters. Escolha uma coleção para cada um — repita uma ou misture várias.",
+    "packCountFixed": "{{selected}} de {{required}} boosters escolhidos",
+    "packCountFlexible": "{{selected}} boosters escolhidos — até {{max}}",
+    "addPackFromSet": "Adicionar um booster",
+    "packsFull": "A lista de boosters está cheia",
+    "addPackOf": "Adicionar um booster de {{name}}",
+    "movePackEarlier": "Mover o booster {{number}} para antes",
+    "movePackLater": "Mover o booster {{number}} para depois",
+    "removePack": "Remover o booster {{number}}",
+    "chooseSet": "Escolha uma Coleção",
+    "draftSet": "Draftar {{name}}",
+    "fillRemaining_one": "Preencher o último booster com {{name}}",
+    "fillRemaining_other": "Preencher os {{count}} boosters restantes com {{name}}",
+    "startDraft": "Iniciar draft",
+    "startSealed": "Iniciar sealed"
   },
   "pack": {
     "confirmPick": "Confirmar Escolha",

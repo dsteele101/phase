@@ -36,6 +36,7 @@ impl DraftSession {
             status: DraftStatus::Lobby,
             pass_direction: PassDirection::for_pack(0),
             current_pack_number: 0,
+            pack_sizes: Vec::new(),
             pick_number: 0,
             seats_picked_this_round: SeatFlags::all_false(pod_size as u8),
             connected_seats: SeatFlags::all_true(pod_size as u8),
@@ -54,6 +55,41 @@ impl DraftSession {
         }
     }
 
+    /// Cards booster `pack_number` held when it was opened.
+    ///
+    /// The single read path for pack shape. Uses the sizes recorded at
+    /// `StartDraft` when present, and falls back to the uniform
+    /// `config.cards_per_pack` for snapshots written before per-pack sizes
+    /// existed (and for sessions still in Lobby, which have opened nothing).
+    pub fn cards_in_pack(&self, pack_number: u8) -> u8 {
+        entry_for_pack(&self.pack_sizes, pack_number)
+            .copied()
+            .unwrap_or(self.config.cards_per_pack)
+    }
+
+    /// Cards a single seat opens across every booster of the session.
+    pub fn total_pack_cards(&self) -> usize {
+        if self.pack_sizes.is_empty() {
+            return usize::from(self.config.pack_count) * usize::from(self.config.cards_per_pack);
+        }
+        self.pack_sizes.iter().copied().map(usize::from).sum()
+    }
+
+    /// Booster sizes for every pack of the session, in pack order. Derived so
+    /// clients render progress without reconstructing pack shape themselves.
+    pub fn pack_size_sequence(&self) -> Vec<u8> {
+        (0..self.config.pack_count)
+            .map(|pack| self.cards_in_pack(pack))
+            .collect()
+    }
+
+    /// The set filling every booster of the session, in pack order.
+    pub fn pack_set_code_sequence(&self) -> Vec<String> {
+        (0..self.config.pack_count)
+            .map(|pack| self.config.source.set_code_for_pack(pack))
+            .collect()
+    }
+
     /// Validate the small set of invariants unique to persisted Sealed events.
     ///
     /// This is intentionally an import/restore boundary check. Reducer-created
@@ -68,15 +104,17 @@ impl DraftSession {
         if self.kind != DraftKind::Sealed {
             return Ok(());
         }
-        let DraftSource::Set { code } = &self.config.source else {
+        if !matches!(self.config.source, DraftSource::Set { .. }) {
             return Err(DraftError::SealedRequiresSetSource);
-        };
-        if code != &self.config.set_code || self.set_code != self.config.set_code {
+        }
+        if self.config.source.set_code() != self.config.set_code
+            || self.set_code != self.config.set_code
+        {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "set source and session codes must match".to_string(),
             });
         }
-        if self.config.pack_count != 6 || self.config.min_deck_size != 40 {
+        if self.config.pack_count != SEALED_PACK_COUNT || self.config.min_deck_size != 40 {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
             });
@@ -105,8 +143,7 @@ impl DraftSession {
                 reason: "per-seat vectors do not match the core seats".to_string(),
             });
         }
-        let expected_pool_size =
-            usize::from(self.config.pack_count) * usize::from(self.config.cards_per_pack);
+        let expected_pool_size = self.total_pack_cards();
         if self.status != DraftStatus::Lobby
             && self
                 .pools
@@ -718,15 +755,17 @@ fn apply_start_draft(
                 reason: "session kind does not match configuration".to_string(),
             });
         }
-        let DraftSource::Set { code } = &session.config.source else {
+        if !matches!(session.config.source, DraftSource::Set { .. }) {
             return Err(DraftError::SealedRequiresSetSource);
-        };
-        if code != &session.config.set_code || session.set_code != session.config.set_code {
+        }
+        if session.config.source.set_code() != session.config.set_code
+            || session.set_code != session.config.set_code
+        {
             return Err(DraftError::InvalidSealedConfiguration {
                 reason: "set source and session codes must match".to_string(),
             });
         }
-        if session.config.pack_count != 6 || session.config.min_deck_size != 40 {
+        if session.config.pack_count != SEALED_PACK_COUNT || session.config.min_deck_size != 40 {
             return Err(DraftError::InvalidSealedConfiguration {
                 reason: "sealed requires six packs and a 40-card minimum deck".to_string(),
             });
@@ -738,8 +777,26 @@ fn apply_start_draft(
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
     let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
+
+    // Record the shape of the boosters the source actually produced, in pack
+    // order. Every seat opens the same set in the same pack round, so seat 0's
+    // packs describe the session. Picking mutates the packs from here on, so
+    // this is the only moment the original sizes are observable.
+    session.pack_sizes = all_packs
+        .first()
+        .map(|seat_packs| {
+            seat_packs
+                .iter()
+                .map(|pack| u8::try_from(pack.0.len()).unwrap_or(u8::MAX))
+                .collect()
+        })
+        .unwrap_or_default();
+
     if session.kind == DraftKind::Sealed {
-        if all_packs.len() != session.seats.len() || all_packs.iter().any(|packs| packs.len() != 6)
+        if all_packs.len() != session.seats.len()
+            || all_packs
+                .iter()
+                .any(|packs| packs.len() != usize::from(SEALED_PACK_COUNT))
         {
             return Err(DraftError::InvalidSealedConfiguration {
                 reason: "pack source did not generate six packs per seat".to_string(),
@@ -866,9 +923,7 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size,
@@ -893,6 +948,105 @@ mod tests {
         };
         let session = DraftSession::new(config, seats, "TEST-001".to_string());
         (session, source)
+    }
+
+    /// A source whose boosters differ in size by pack number — the shape a
+    /// multi-set draft produces when its sets have different MTGJSON booster
+    /// sizes. Sizes shorter than the pack count repeat their last entry, the
+    /// same rule the rest of the pack-ordered sequences follow.
+    struct MixedSizePackSource {
+        sizes: Vec<u8>,
+    }
+
+    impl PackSource for MixedSizePackSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> DraftPack {
+            let size = entry_for_pack(&self.sizes, pack_number)
+                .copied()
+                .unwrap_or(0);
+            DraftPack(
+                (0..size)
+                    .map(|i| DraftCardInstance {
+                        instance_id: format!("MIX-{seat}-{pack_number}-{i}"),
+                        name: format!("Mixed {seat}-{pack_number}-{i}"),
+                        set_code: "MIX".to_string(),
+                        collector_number: format!("{}", i + 1),
+                        rarity: "common".to_string(),
+                        colors: Vec::new(),
+                        cmc: 0,
+                        type_line: String::new(),
+                        draft_effect: None,
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    #[test]
+    fn starting_a_draft_records_the_size_of_every_booster_it_opened() {
+        let (mut session, _) = test_session(2);
+        session.config.source = DraftSource::Set {
+            codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+        };
+        let source = MixedSizePackSource {
+            sizes: vec![15, 14, 15],
+        };
+
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        assert_eq!(session.pack_sizes, vec![15, 14, 15]);
+        assert_eq!(session.cards_in_pack(0), 15);
+        assert_eq!(session.cards_in_pack(1), 14);
+        assert_eq!(session.total_pack_cards(), 44);
+        assert_eq!(
+            session.pack_set_code_sequence(),
+            vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_recorded_pack_sizes_falls_back_to_the_uniform_size() {
+        // Snapshots written before per-pack sizes were recorded leave the
+        // sequence empty; the uniform config value still describes them.
+        let (session, _) = test_session(2);
+
+        assert!(session.pack_sizes.is_empty());
+        assert_eq!(session.cards_in_pack(0), 14);
+        assert_eq!(session.cards_in_pack(2), 14);
+        assert_eq!(session.total_pack_cards(), 42);
+    }
+
+    #[test]
+    fn a_mixed_size_sealed_pool_satisfies_the_snapshot_invariant() {
+        let (mut session, _) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = SEALED_PACK_COUNT;
+        session.config.source = DraftSource::Set {
+            codes: vec!["AAA".to_string(); 3]
+                .into_iter()
+                .chain(vec!["BBB".to_string(); 3])
+                .collect(),
+        };
+        session.set_code = session.config.source.set_code();
+        session.config.set_code = session.set_code.clone();
+        let source = MixedSizePackSource {
+            sizes: vec![15, 15, 15, 14, 14, 14],
+        };
+
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+        assert_eq!(session.total_pack_cards(), 87);
+        assert!(session.pools.iter().all(|pool| pool.len() == 87));
+        // The uniform scalar would have expected 6 × 14 = 84 and rejected this.
+        session
+            .validate_sealed_snapshot()
+            .expect("a mixed-size sealed pool is valid");
     }
 
     #[test]
@@ -989,9 +1143,7 @@ mod tests {
         session.kind = DraftKind::Sealed;
         session.config.kind = DraftKind::Sealed;
         session.config.pack_count = 6;
-        session.config.source = DraftSource::Set {
-            code: "OTHER".to_string(),
-        };
+        session.config.source = DraftSource::single_set("OTHER".to_string());
 
         assert!(matches!(
             apply(&mut session, DraftAction::StartDraft, Some(&source)),
@@ -1176,9 +1328,7 @@ mod tests {
     #[test]
     fn submit_deck_all_submitted_quick_draft_transitions_to_complete() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
             pod_size: 2,
@@ -1620,9 +1770,7 @@ mod tests {
     #[test]
     fn test_se_bracket_8_players() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 8,
@@ -1659,9 +1807,7 @@ mod tests {
     #[test]
     fn single_elimination_advances_pairing_winners() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 8,

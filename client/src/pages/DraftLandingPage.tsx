@@ -47,6 +47,17 @@ function formatSetLabel(code: string, name?: string): string {
   return name ?? SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
 }
 
+/**
+ * The set whose icon stands for a draft.
+ *
+ * A multi-set draft's `setCode` joins its distinct sets (`"ISD+DKA+AVR"`,
+ * matching the engine's own `DraftSource::set_code` label), which resolves to
+ * no icon of its own; the first set it opened represents it.
+ */
+function primarySetCode(code: string): string {
+  return code.split("+")[0] ?? code;
+}
+
 function formatRelativeTime(timestamp: number, t: TFunction<"draft">): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
   if (seconds < 60) return t("relativeTime.justNow");
@@ -242,7 +253,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
     fetch(__SCRYFALL_SETS_URL__)
       .then((res) => (res.ok ? res.json() : null))
       .then((data: Record<string, { icon_svg_uri?: string }> | null) => {
-        const icon = data?.[meta.setCode.toLowerCase()]?.icon_svg_uri;
+        const icon = data?.[primarySetCode(meta.setCode).toLowerCase()]?.icon_svg_uri;
         if (icon) setSetIcon(icon);
       })
       .catch(() => {});

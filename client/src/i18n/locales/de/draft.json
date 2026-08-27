@@ -8,7 +8,8 @@
       "step1": "Du öffnest 3 Booster mit je 14 Karten",
       "step2": "Wähle pro Booster eine Karte und gib den Rest an KI-Drafter weiter",
       "step3": "Booster wechseln jede Runde die Richtung — links, rechts, links",
-      "step4": "Baue nach allen Picks ein 40-Karten-Deck und spiele eine Partie"
+      "step4": "Baue nach allen Picks ein 40-Karten-Deck und spiele eine Partie",
+      "step1Mixed": "Du öffnest {{packCount}} Booster unterschiedlicher Größe — {{packSizes}} Karten, in dieser Reihenfolge"
     },
     "pod": {
       "step1": "Du draftest mit {{count}} Spielern in einem Pod",
@@ -71,10 +72,29 @@
       "Hard": "Schwer",
       "VeryHard": "Sehr schwer"
     },
-    "chooseSet": "Wähle ein Set",
     "noPools": "Keine Draft-Pools verfügbar. Führe zuerst die Draft-Datenpipeline aus.",
     "setIconAlt": "{{name}} Set-Symbol",
-    "loadFailed": "Sets konnten nicht geladen werden"
+    "loadFailed": "Sets konnten nicht geladen werden",
+    "packOrder": "Booster-Reihenfolge",
+    "clearPacks": "Leeren",
+    "emptyPacks_one": "Wähle ein Set für jeden Booster. Ein Draft öffnet standardmäßig {{count}} Booster — wiederhole ein Set oder mische mehrere.",
+    "emptyPacks_other": "Wähle ein Set für jeden Booster. Ein Draft öffnet standardmäßig {{count}} Booster — wiederhole ein Set oder mische mehrere für einen Block-Draft.",
+    "emptyPacksFixed_one": "Sealed öffnet genau {{count}} Booster. Wähle ein Set dafür.",
+    "emptyPacksFixed_other": "Sealed öffnet genau {{count}} Booster. Wähle für jeden ein Set — wiederhole eins oder mische mehrere.",
+    "packCountFixed": "{{selected}} von {{required}} Boostern gewählt",
+    "packCountFlexible": "{{selected}} Booster gewählt — bis zu {{max}}",
+    "addPackFromSet": "Booster hinzufügen",
+    "packsFull": "Booster-Liste ist voll",
+    "addPackOf": "Booster aus {{name}} hinzufügen",
+    "movePackEarlier": "Booster {{number}} nach vorne",
+    "movePackLater": "Booster {{number}} nach hinten",
+    "removePack": "Booster {{number}} entfernen",
+    "chooseSet": "Wähle ein Set",
+    "draftSet": "{{name}} draften",
+    "fillRemaining_one": "Letzten Booster mit {{name}} füllen",
+    "fillRemaining_other": "Restliche {{count}} Booster mit {{name}} füllen",
+    "startDraft": "Draft starten",
+    "startSealed": "Sealed starten"
   },
   "pack": {
     "confirmPick": "Pick bestätigen",

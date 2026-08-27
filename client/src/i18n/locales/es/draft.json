@@ -8,7 +8,8 @@
       "step1": "Abrirás 3 sobres de 14 cartas cada uno",
       "step2": "Elige una carta por sobre y luego pasa el resto a los drafters de IA",
       "step3": "Los sobres alternan de dirección en cada ronda — izquierda, derecha, izquierda",
-      "step4": "Tras todas las elecciones, construye un mazo de 40 cartas y juega una partida"
+      "step4": "Tras todas las elecciones, construye un mazo de 40 cartas y juega una partida",
+      "step1Mixed": "Abrirás {{packCount}} sobres de tamaños distintos: {{packSizes}} cartas, en ese orden"
     },
     "pod": {
       "step1": "Estás haciendo draft con {{count}} jugadores en un pod",
@@ -71,10 +72,29 @@
       "Hard": "Difícil",
       "VeryHard": "Muy difícil"
     },
-    "chooseSet": "Elige una colección",
     "noPools": "No hay grupos de draft disponibles. Ejecuta primero la canalización de datos del draft.",
     "setIconAlt": "Icono de la colección {{name}}",
-    "loadFailed": "Error al cargar las colecciones"
+    "loadFailed": "Error al cargar las colecciones",
+    "packOrder": "Orden de los sobres",
+    "clearPacks": "Vaciar",
+    "emptyPacks_one": "Elige una colección para cada sobre. Un draft abre {{count}} sobre por defecto: repite una colección o mezcla varias.",
+    "emptyPacks_other": "Elige una colección para cada sobre. Un draft abre {{count}} sobres por defecto: repite una colección o mezcla varias para draftear un bloque.",
+    "emptyPacksFixed_one": "El sellado abre exactamente {{count}} sobre. Elige una colección para él.",
+    "emptyPacksFixed_other": "El sellado abre exactamente {{count}} sobres. Elige una colección para cada uno: repite una o mezcla varias.",
+    "packCountFixed": "{{selected}} de {{required}} sobres elegidos",
+    "packCountFlexible": "{{selected}} sobres elegidos — hasta {{max}}",
+    "addPackFromSet": "Añadir un sobre",
+    "packsFull": "La lista de sobres está llena",
+    "addPackOf": "Añadir un sobre de {{name}}",
+    "movePackEarlier": "Adelantar el sobre {{number}}",
+    "movePackLater": "Retrasar el sobre {{number}}",
+    "removePack": "Quitar el sobre {{number}}",
+    "chooseSet": "Elige una colección",
+    "draftSet": "Draftear {{name}}",
+    "fillRemaining_one": "Llenar el último sobre con {{name}}",
+    "fillRemaining_other": "Llenar los {{count}} sobres restantes con {{name}}",
+    "startDraft": "Empezar draft",
+    "startSealed": "Empezar sellado"
   },
   "pack": {
     "confirmPick": "Confirmar elección",

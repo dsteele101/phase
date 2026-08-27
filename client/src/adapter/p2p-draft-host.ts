@@ -2506,7 +2506,12 @@ export class P2PDraftHost {
       draft_effects: [],
       pool_groups: EMPTY_DRAFT_POOL_GROUPS,
       seats: this.buildSeatPublicViews(),
+      // Placeholder pack shape: the lobby has opened nothing, so the engine
+      // has not yet recorded real booster sizes. The authoritative view
+      // replaces these the moment the draft starts.
       cards_per_pack: 14,
+      pack_sizes: [14, 14, 14],
+      pack_set_codes: ["", "", ""],
       pack_count: 3,
       min_deck_size: 40,
       addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],

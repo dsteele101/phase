@@ -8,7 +8,8 @@
       "step1": "Otworzysz 3 boostery po 14 kart każdy",
       "step2": "Wybierz jedną kartę z każdego boostera, a resztę przekaż dalej do botów",
       "step3": "Boostery zmieniają kierunek w każdej rundzie — w lewo, w prawo, w lewo",
-      "step4": "Po wszystkich wyborach zbuduj talię z 40 kart i rozegraj mecz"
+      "step4": "Po wszystkich wyborach zbuduj talię z 40 kart i rozegraj mecz",
+      "step1Mixed": "Otworzysz {{packCount}} boosterów o różnych rozmiarach — {{packSizes}} kart, w tej kolejności"
     },
     "pod": {
       "step1": "Draftujesz z {{count}} graczami w grupie",
@@ -71,10 +72,29 @@
       "Hard": "Trudny",
       "VeryHard": "Bardzo trudny"
     },
-    "chooseSet": "Wybierz dodatek",
     "noPools": "Brak dostępnych pul do draftu. Najpierw uruchom pipeline danych draftu.",
     "setIconAlt": "Ikona dodatku {{name}}",
-    "loadFailed": "Nie udało się wczytać dodatków"
+    "loadFailed": "Nie udało się wczytać dodatków",
+    "packOrder": "Kolejność boosterów",
+    "clearPacks": "Wyczyść",
+    "emptyPacks_one": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} booster — powtórz dodatek lub połącz kilka.",
+    "emptyPacks_other": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} boostery — powtórz dodatek lub połącz kilka, aby draftować blok.",
+    "emptyPacksFixed_one": "Sealed otwiera dokładnie {{count}} booster. Wybierz dla niego dodatek.",
+    "emptyPacksFixed_other": "Sealed otwiera dokładnie {{count}} boosterów. Wybierz dodatek dla każdego — powtórz jeden lub połącz kilka.",
+    "packCountFixed": "Wybrano {{selected}} z {{required}} boosterów",
+    "packCountFlexible": "Wybrano {{selected}} boosterów — maksymalnie {{max}}",
+    "addPackFromSet": "Dodaj booster",
+    "packsFull": "Lista boosterów jest pełna",
+    "addPackOf": "Dodaj booster z dodatku {{name}}",
+    "movePackEarlier": "Przesuń booster {{number}} wcześniej",
+    "movePackLater": "Przesuń booster {{number}} później",
+    "removePack": "Usuń booster {{number}}",
+    "chooseSet": "Wybierz dodatek",
+    "draftSet": "Draftuj {{name}}",
+    "fillRemaining_one": "Wypełnij ostatni booster dodatkiem {{name}}",
+    "fillRemaining_other": "Wypełnij pozostałe {{count}} boostery dodatkiem {{name}}",
+    "startDraft": "Rozpocznij draft",
+    "startSealed": "Rozpocznij sealed"
   },
   "pack": {
     "confirmPick": "Potwierdź wybór",

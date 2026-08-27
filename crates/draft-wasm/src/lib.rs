@@ -138,6 +138,93 @@ fn set_cards_per_pack(set_pool: &LimitedSetPool) -> Result<u8, String> {
     })
 }
 
+/// The sets backing a draft and the order their boosters are opened in.
+///
+/// `pools` carries each distinct set once; `sequence` names which of them fills
+/// each booster, in pack order, so a set may be drafted more than once without
+/// its pool data crossing the WASM boundary more than once. A one-element
+/// sequence is a single-set draft.
+///
+/// JSON shape:
+///   `{ "pools": [<LimitedSetPool>, ...], "sequence": ["isd", "dka", "avr"] }`
+#[derive(Deserialize)]
+struct SetPackSequence {
+    pools: Vec<LimitedSetPool>,
+    sequence: Vec<String>,
+}
+
+/// A set-backed draft's source, pack shape, and generator, resolved from the
+/// selection the client sent. Single authority for turning a `SetPackSequence`
+/// into the three things every set-backed entry point needs.
+struct ResolvedSetSelection {
+    source: DraftSource,
+    /// Nominal booster size (the first pack's). Per-pack sizes are recorded on
+    /// the session at `StartDraft` from the packs this generator produces.
+    cards_per_pack: u8,
+    pack_count: u8,
+    generator: PackGenerator,
+}
+
+impl ResolvedSetSelection {
+    /// Parse and validate a client selection. `expected_packs` constrains the
+    /// sequence length for event kinds the engine fixes (Sealed opens exactly
+    /// six boosters); `None` lets the selection decide how many packs to open.
+    fn parse(selection_json: &str, expected_packs: Option<u8>) -> Result<Self, String> {
+        let selection: SetPackSequence = serde_json::from_str(selection_json)
+            .map_err(|e| format!("Failed to parse set selection: {e}"))?;
+
+        let pack_count = u8::try_from(selection.sequence.len())
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| "A draft must open between 1 and 255 packs".to_string())?;
+        if let Some(expected) = expected_packs {
+            if pack_count != expected {
+                return Err(format!(
+                    "This event opens exactly {expected} packs, but {pack_count} were selected"
+                ));
+            }
+        }
+
+        // Resolve every named set against the supplied pools up front, so a set
+        // with no pool data names itself here instead of surfacing as a short
+        // pack mid-draft.
+        let indices = selection
+            .sequence
+            .iter()
+            .map(|code| {
+                selection
+                    .pools
+                    .iter()
+                    .position(|pool| pool.code.eq_ignore_ascii_case(code))
+                    .ok_or_else(|| format!("No pool data was supplied for set '{code}'"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Every booster must have a size MTGJSON agrees on; pack 1's is the
+        // session's nominal one.
+        for &index in &indices {
+            set_cards_per_pack(&selection.pools[index])?;
+        }
+        let cards_per_pack = set_cards_per_pack(&selection.pools[indices[0]])?;
+
+        // Carry the pools' own casing into the source, so the per-pack set
+        // codes the view publishes match the codes on the cards it deals.
+        let codes: Vec<String> = indices
+            .iter()
+            .map(|&index| selection.pools[index].code.clone())
+            .collect();
+        let generator =
+            PackGenerator::for_sequence(selection.pools, &codes).map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            source: DraftSource::Set { codes },
+            cards_per_pack,
+            pack_count,
+            generator,
+        })
+    }
+}
+
 /// Initialize panic hook for better error messages in WASM.
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
@@ -160,33 +247,31 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
 
 /// Start a Quick Draft session: 1 human + 7 bots.
 ///
-/// - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+/// - `selection_json`: serialized [`SetPackSequence`] — the distinct set pools
+///   from draft-pools.json plus the set filling each booster, in pack order.
+///   The sequence length is the draft's pack count, and a set may repeat.
 /// - `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard
 /// - `seed`: RNG seed for deterministic pack generation
 ///
 /// Returns the initial DraftPlayerView as a JS object.
 #[wasm_bindgen]
 pub fn start_quick_draft(
-    set_pool_json: &str,
+    selection_json: &str,
     difficulty: u8,
     seed: u32,
 ) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {}", e)))?;
+    let selection =
+        ResolvedSetSelection::parse(selection_json, None).map_err(|e| JsValue::from_str(&e))?;
 
     let ai_difficulty = map_difficulty(difficulty);
-    let set_code = set_pool.code.clone();
-    let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
 
     let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
+        set_code: selection.source.set_code(),
+        source: selection.source,
         kind: DraftKind::Quick,
         pod_size: 8,
-        cards_per_pack,
-        pack_count: 3,
+        cards_per_pack: selection.cards_per_pack,
+        pack_count: selection.pack_count,
         min_deck_size: 40,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
@@ -206,7 +291,7 @@ pub fn start_quick_draft(
     }
 
     let mut draft_session = DraftSession::new(config, seats, "quick-draft".to_string());
-    let pack_gen = PackGenerator::new(set_pool);
+    let pack_gen = selection.generator;
 
     // Apply StartDraft to generate packs and transition to Drafting
     session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
@@ -227,23 +312,22 @@ pub fn start_quick_draft(
 /// then the human proceeds directly to deckbuilding.
 #[wasm_bindgen]
 pub fn start_sealed_draft(
-    set_pool_json: &str,
+    selection_json: &str,
     difficulty: u8,
     seed: u32,
 ) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
-    let set_code = set_pool.code.clone();
-    let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
+    // CR-independent event rule: the engine fixes sealed at six boosters
+    // (`apply_start_draft` rejects any other count), so the selection must name
+    // exactly six — mixed sets are fine, a different pack count is not.
+    let selection = ResolvedSetSelection::parse(selection_json, Some(SEALED_PACK_COUNT))
+        .map_err(|e| JsValue::from_str(&e))?;
     let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
+        set_code: selection.source.set_code(),
+        source: selection.source,
         kind: DraftKind::Sealed,
         pod_size: 8,
-        cards_per_pack,
-        pack_count: 6,
+        cards_per_pack: selection.cards_per_pack,
+        pack_count: selection.pack_count,
         min_deck_size: 40,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
@@ -262,7 +346,7 @@ pub fn start_sealed_draft(
     }
 
     let mut draft_session = DraftSession::new(config, seats, "sealed-draft".to_string());
-    let pack_gen = PackGenerator::new(set_pool);
+    let pack_gen = selection.generator;
     session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
         .map_err(|e| JsValue::from_str(&format!("Failed to start sealed event: {e}")))?;
     let view = filter_for_player(&draft_session, 0);
@@ -752,8 +836,9 @@ pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsVal
         .validate_sealed_snapshot()
         .map_err(|e| JsValue::from_str(&format!("Invalid draft snapshot: {e}")))?;
 
-    let offset = session.current_pack_number as u64 * session.config.cards_per_pack as u64
-        + session.pick_number as u64;
+    let offset = u64::from(session.cards_in_pack(session.current_pack_number))
+        * u64::from(session.current_pack_number)
+        + u64::from(session.pick_number);
     let resume_seed = session.config.rng_seed.wrapping_add(offset);
 
     DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
@@ -951,9 +1036,7 @@ fn create_multiplayer_draft_inner(
             let cards_per_pack = set_cards_per_pack(&set_pool)?;
 
             let config = DraftConfig {
-                source: DraftSource::Set {
-                    code: set_code.clone(),
-                },
+                source: DraftSource::single_set(set_code.clone()),
                 set_code,
                 kind: draft_kind,
                 pod_size: seats.len() as u8,
@@ -1156,6 +1239,113 @@ mod pool_input_tests {
             }
             _ => panic!("expected Cube"),
         }
+    }
+}
+
+#[cfg(test)]
+mod set_selection_tests {
+    use super::*;
+
+    /// A minimal `LimitedSetPool` whose single variant holds `size` commons.
+    fn pool_json(code: &str, size: u8) -> String {
+        let cards: Vec<String> = (0..40)
+            .map(|i| {
+                format!(
+                    r#"{{"name":"{code} Card {i}","set_code":"{code}","collector_number":"{n}","rarity":"common","weight":1}}"#,
+                    n = i + 1
+                )
+            })
+            .collect();
+        format!(
+            r#"{{
+                "code": "{code}",
+                "name": "{code} Set",
+                "release_date": null,
+                "pack_variants": [{{
+                    "contents": [{{
+                        "slot": "common",
+                        "count": {size},
+                        "choices": [{{ "sheet": "common", "weight": 1 }}]
+                    }}],
+                    "weight": 1
+                }}],
+                "pack_variants_total_weight": 1,
+                "sheets": {{
+                    "common": {{
+                        "cards": [{cards}],
+                        "total_weight": 40,
+                        "foil": false,
+                        "balance_colors": false
+                    }}
+                }},
+                "prints": [],
+                "basic_lands": []
+            }}"#,
+            cards = cards.join(",")
+        )
+    }
+
+    fn selection_json(pools: &[(&str, u8)], sequence: &[&str]) -> String {
+        let pools: Vec<String> = pools
+            .iter()
+            .map(|(code, size)| pool_json(code, *size))
+            .collect();
+        let sequence: Vec<String> = sequence.iter().map(|c| format!("\"{c}\"")).collect();
+        format!(
+            r#"{{ "pools": [{}], "sequence": [{}] }}"#,
+            pools.join(","),
+            sequence.join(",")
+        )
+    }
+
+    #[test]
+    fn a_selection_sets_the_pack_count_from_its_sequence_and_repeats_sets() {
+        let selection = ResolvedSetSelection::parse(
+            &selection_json(&[("AAA", 15), ("BBB", 14)], &["AAA", "BBB", "AAA"]),
+            None,
+        )
+        .expect("both named sets have pool data");
+
+        assert_eq!(selection.pack_count, 3);
+        // The nominal size follows pack 1; per-pack sizes are recorded on the
+        // session from the packs the generator produces.
+        assert_eq!(selection.cards_per_pack, 15);
+        assert_eq!(
+            selection.source,
+            DraftSource::Set {
+                codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+            }
+        );
+        assert_eq!(selection.source.set_code(), "AAA+BBB");
+    }
+
+    #[test]
+    fn a_selection_naming_a_set_it_did_not_supply_is_rejected() {
+        let error =
+            ResolvedSetSelection::parse(&selection_json(&[("AAA", 15)], &["AAA", "MISSING"]), None)
+                .err()
+                .expect("the sequence names a set with no pool");
+
+        assert!(error.contains("MISSING"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn an_empty_selection_is_rejected() {
+        assert!(ResolvedSetSelection::parse(&selection_json(&[("AAA", 15)], &[]), None).is_err());
+    }
+
+    #[test]
+    fn sealed_rejects_a_selection_that_is_not_exactly_six_boosters() {
+        let three = selection_json(&[("AAA", 15)], &["AAA", "AAA", "AAA"]);
+        assert!(ResolvedSetSelection::parse(&three, Some(SEALED_PACK_COUNT)).is_err());
+
+        let six = selection_json(
+            &[("AAA", 15), ("BBB", 14)],
+            &["AAA", "AAA", "AAA", "BBB", "BBB", "BBB"],
+        );
+        let selection = ResolvedSetSelection::parse(&six, Some(SEALED_PACK_COUNT))
+            .expect("six boosters is a valid sealed selection");
+        assert_eq!(selection.pack_count, SEALED_PACK_COUNT);
     }
 }
 

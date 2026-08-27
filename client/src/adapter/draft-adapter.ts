@@ -146,7 +146,12 @@ export type PairingStatus = "Pending" | "InProgress" | "Complete";
 export interface DraftProgressFields {
   current_pack_number: number;
   pick_number: number;
+  /** Cards in the booster being drafted right now. */
   cards_per_pack: number;
+  /** Cards in each booster, in pack order. Multi-set drafts mix sizes. */
+  pack_sizes: number[];
+  /** The set filling each booster, in pack order. */
+  pack_set_codes: string[];
   pack_count: number;
   pass_direction: "Left" | "Right";
 }
@@ -186,7 +191,12 @@ export interface SpectatorDraftView {
   pick_number: number;
   pass_direction: "Left" | "Right";
   seats: SeatPublicView[];
+  /** Cards in the booster being drafted right now, not a session-wide size. */
   cards_per_pack: number;
+  /** Cards in each booster, in pack order. Multi-set drafts mix sizes. */
+  pack_sizes: number[];
+  /** The set filling each booster, in pack order. */
+  pack_set_codes: string[];
   pack_count: number;
   min_deck_size: number;
   addable_cards: string[];
@@ -216,7 +226,12 @@ export interface DraftPlayerView {
   /** Engine-provided sealed packs in opening order. Absent for draft events. */
   sealed_packs?: DraftCardInstance[][] | null;
   seats: SeatPublicView[];
+  /** Cards in the booster being drafted right now, not a session-wide size. */
   cards_per_pack: number;
+  /** Cards in each booster, in pack order. Multi-set drafts mix sizes. */
+  pack_sizes: number[];
+  /** The set filling each booster, in pack order. */
+  pack_set_codes: string[];
   pack_count: number;
   min_deck_size: number;
   addable_cards: string[];
@@ -254,6 +269,20 @@ export type PoolInput =
         cube_draft_settings: CubeDraftSettings;
       };
     };
+
+/**
+ * The sets backing a local draft and the order their boosters open in. Mirrors
+ * the Rust `SetPackSequence` in draft-wasm.
+ *
+ * `pools` carries each distinct set's `draft-pools.json` entry once; `sequence`
+ * names which set fills each booster, in pack order, so a set may be drafted
+ * more than once without shipping its pool data twice. The sequence length is
+ * the draft's pack count.
+ */
+export interface SetPackSequence {
+  pools: unknown[];
+  sequence: string[];
+}
 
 export interface SuggestedDeck {
   main_deck: string[];
@@ -300,12 +329,16 @@ async function ensureDraftWasm(): Promise<typeof DraftWasm> {
  */
 export class DraftAdapter {
   async initialize(
-    setPoolJson: string,
+    selection: SetPackSequence,
     difficulty: number,
     seed: number,
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+    return wasm.start_quick_draft(
+      JSON.stringify(selection),
+      difficulty,
+      seed,
+    ) as DraftPlayerView;
   }
 
   /**
@@ -337,12 +370,16 @@ export class DraftAdapter {
   }
 
   async initializeSealed(
-    setPoolJson: string,
+    selection: SetPackSequence,
     difficulty: number,
     seed: number,
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    return wasm.start_sealed_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+    return wasm.start_sealed_draft(
+      JSON.stringify(selection),
+      difficulty,
+      seed,
+    ) as DraftPlayerView;
   }
 
   async initializeCube(

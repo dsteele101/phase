@@ -99,6 +99,8 @@ function mockView(status: string): DraftPlayerView {
     },
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
     pack_count: 3,
     min_deck_size: 40,
     addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],

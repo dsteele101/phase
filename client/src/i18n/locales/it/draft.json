@@ -8,7 +8,8 @@
       "step1": "Aprirai 3 buste da 14 carte ciascuna",
       "step2": "Scegli una carta per busta, poi passa il resto agli altri draftatori IA",
       "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
-      "step4": "Dopo tutte le scelte, costruisci un mazzo da 40 carte e gioca una partita"
+      "step4": "Dopo tutte le scelte, costruisci un mazzo da 40 carte e gioca una partita",
+      "step1Mixed": "Aprirai {{packCount}} buste di dimensioni diverse — {{packSizes}} carte, in quest'ordine"
     },
     "pod": {
       "step1": "Stai draftando con {{count}} giocatori in un pod",
@@ -71,10 +72,29 @@
       "Hard": "Difficile",
       "VeryHard": "Molto difficile"
     },
-    "chooseSet": "Scegli un set",
     "noPools": "Nessun pool di draft disponibile. Esegui prima la pipeline dei dati di draft.",
     "setIconAlt": "Icona set {{name}}",
-    "loadFailed": "Impossibile caricare i set"
+    "loadFailed": "Impossibile caricare i set",
+    "packOrder": "Ordine delle buste",
+    "clearPacks": "Svuota",
+    "emptyPacks_one": "Scegli un set per ogni busta. Un draft apre {{count}} busta per impostazione predefinita: ripeti un set o mescolane più di uno.",
+    "emptyPacks_other": "Scegli un set per ogni busta. Un draft apre {{count}} buste per impostazione predefinita: ripeti un set o mescolane più di uno per draftare un blocco.",
+    "emptyPacksFixed_one": "Il sealed apre esattamente {{count}} busta. Scegli un set per essa.",
+    "emptyPacksFixed_other": "Il sealed apre esattamente {{count}} buste. Scegli un set per ognuna: ripetine uno o mescolane più di uno.",
+    "packCountFixed": "{{selected}} di {{required}} buste scelte",
+    "packCountFlexible": "{{selected}} buste scelte — fino a {{max}}",
+    "addPackFromSet": "Aggiungi una busta",
+    "packsFull": "L'elenco delle buste è pieno",
+    "addPackOf": "Aggiungi una busta di {{name}}",
+    "movePackEarlier": "Anticipa la busta {{number}}",
+    "movePackLater": "Posticipa la busta {{number}}",
+    "removePack": "Rimuovi la busta {{number}}",
+    "chooseSet": "Scegli un set",
+    "draftSet": "Drafta {{name}}",
+    "fillRemaining_one": "Riempi l'ultima busta con {{name}}",
+    "fillRemaining_other": "Riempi le {{count}} buste rimanenti con {{name}}",
+    "startDraft": "Inizia draft",
+    "startSealed": "Inizia sealed"
   },
   "pack": {
     "confirmPick": "Conferma scelta",

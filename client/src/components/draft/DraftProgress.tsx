@@ -7,8 +7,23 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
 
   if (!view) return null;
 
-  const { current_pack_number, pick_number, cards_per_pack, pack_count, pass_direction } = view;
+  const {
+    current_pack_number,
+    pick_number,
+    cards_per_pack,
+    pack_sizes,
+    pack_set_codes,
+    pack_count,
+    pass_direction,
+  } = view;
   const directionArrow = pass_direction === "Left" ? "←" : "→";
+  // Engine-owned per-pack sizes. Views delivered before the field existed fall
+  // back to the current booster's size for every pack.
+  const packSize = (packIdx: number) => pack_sizes?.[packIdx] ?? cards_per_pack;
+  // A multi-set draft opens a different set each round, so the pack the player
+  // is holding needs naming. A single-set draft names the same set every round,
+  // where the label would be noise.
+  const mixedSets = new Set(pack_set_codes ?? []).size > 1;
 
   return (
     <div className="flex items-center gap-4 rounded-[16px] border border-white/10 bg-black/18 px-4 py-2.5 backdrop-blur-md">
@@ -18,14 +33,15 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
           const isCurrent = packIdx === current_pack_number;
 
           return (
-            <div key={packIdx} className="flex min-w-0 flex-1 items-center gap-1.5">
+            <div key={packIdx} className="flex min-w-0 flex-1 items-end gap-1.5">
               {packIdx > 0 && (
-                <span className="shrink-0 text-[10px] text-white/20">{directionArrow}</span>
+                <span className="shrink-0 pb-0.5 text-[10px] text-white/20">{directionArrow}</span>
               )}
               <PackSegment
-                pickCount={cards_per_pack}
-                filledPicks={isComplete ? cards_per_pack : isCurrent ? pick_number : 0}
+                pickCount={packSize(packIdx)}
+                filledPicks={isComplete ? packSize(packIdx) : isCurrent ? pick_number : 0}
                 isCurrent={isCurrent}
+                setCode={mixedSets ? pack_set_codes?.[packIdx] : undefined}
               />
             </div>
           );
@@ -34,7 +50,7 @@ export function DraftProgress({ view: viewOverride }: { view?: DraftProgressFiel
 
       <div className="shrink-0 text-xs tabular-nums text-white/45">
         <span className="font-semibold text-white">{pick_number + 1}</span>
-        <span>/{cards_per_pack}</span>
+        <span>/{packSize(current_pack_number)}</span>
       </div>
     </div>
   );
@@ -44,35 +60,49 @@ function PackSegment({
   pickCount,
   filledPicks,
   isCurrent,
+  setCode,
 }: {
   pickCount: number;
   filledPicks: number;
   isCurrent: boolean;
+  /** Only supplied when the draft mixes sets, where each pack needs naming. */
+  setCode?: string;
 }) {
   return (
-    <div className="flex min-w-0 flex-1 gap-px">
-      {Array.from({ length: pickCount }, (_, i) => {
-        const filled = i < filledPicks;
-        const isLatest = isCurrent && i === filledPicks - 1;
+    <div className="flex min-w-0 flex-1 flex-col gap-1">
+      {setCode && (
+        <span
+          className={`truncate text-[9px] font-semibold uppercase tracking-wider ${
+            isCurrent ? "text-amber-200/70" : "text-white/25"
+          }`}
+        >
+          {setCode}
+        </span>
+      )}
+      <div className="flex min-w-0 gap-px">
+        {Array.from({ length: pickCount }, (_, i) => {
+          const filled = i < filledPicks;
+          const isLatest = isCurrent && i === filledPicks - 1;
 
-        let bg: string;
-        if (filled) {
-          bg = isLatest
-            ? "bg-amber-400/90"
-            : "bg-amber-400/50";
-        } else if (isCurrent) {
-          bg = "bg-white/8";
-        } else {
-          bg = "bg-white/4";
-        }
+          let bg: string;
+          if (filled) {
+            bg = isLatest
+              ? "bg-amber-400/90"
+              : "bg-amber-400/50";
+          } else if (isCurrent) {
+            bg = "bg-white/8";
+          } else {
+            bg = "bg-white/4";
+          }
 
-        return (
-          <div
-            key={i}
-            className={`h-2 min-w-0 flex-1 first:rounded-l-full last:rounded-r-full ${bg} transition-colors duration-200`}
-          />
-        );
-      })}
+          return (
+            <div
+              key={i}
+              className={`h-2 min-w-0 flex-1 first:rounded-l-full last:rounded-r-full ${bg} transition-colors duration-200`}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }

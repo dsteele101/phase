@@ -8,7 +8,8 @@
       "step1": "Vous ouvrirez 3 boosters de 14 cartes chacun",
       "step2": "Choisissez une carte par booster, puis passez le reste aux drafteurs IA",
       "step3": "Les boosters changent de sens à chaque manche — gauche, droite, gauche",
-      "step4": "Après tous les choix, construisez un deck de 40 cartes et jouez un match"
+      "step4": "Après tous les choix, construisez un deck de 40 cartes et jouez un match",
+      "step1Mixed": "Vous ouvrirez {{packCount}} boosters de tailles différentes — {{packSizes}} cartes, dans cet ordre"
     },
     "pod": {
       "step1": "Vous draftez avec {{count}} joueurs dans un pod",
@@ -71,10 +72,29 @@
       "Hard": "Difficile",
       "VeryHard": "Très difficile"
     },
-    "chooseSet": "Choisir une extension",
     "noPools": "Aucun pool de draft disponible. Lancez d'abord le pipeline de données de draft.",
     "setIconAlt": "Icône d'extension {{name}}",
-    "loadFailed": "Échec du chargement des éditions"
+    "loadFailed": "Échec du chargement des éditions",
+    "packOrder": "Ordre des boosters",
+    "clearPacks": "Vider",
+    "emptyPacks_one": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} booster par défaut — répétez une extension ou mélangez-en plusieurs.",
+    "emptyPacks_other": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} boosters par défaut — répétez une extension ou mélangez-en plusieurs pour drafter un bloc.",
+    "emptyPacksFixed_one": "Le scellé ouvre exactement {{count}} booster. Choisissez une extension pour celui-ci.",
+    "emptyPacksFixed_other": "Le scellé ouvre exactement {{count}} boosters. Choisissez une extension pour chacun — répétez-en une ou mélangez-en plusieurs.",
+    "packCountFixed": "{{selected}} boosters sur {{required}} choisis",
+    "packCountFlexible": "{{selected}} boosters choisis — jusqu'à {{max}}",
+    "addPackFromSet": "Ajouter un booster",
+    "packsFull": "La liste de boosters est pleine",
+    "addPackOf": "Ajouter un booster de {{name}}",
+    "movePackEarlier": "Avancer le booster {{number}}",
+    "movePackLater": "Reculer le booster {{number}}",
+    "removePack": "Retirer le booster {{number}}",
+    "chooseSet": "Choisir une extension",
+    "draftSet": "Drafter {{name}}",
+    "fillRemaining_one": "Remplir le dernier booster avec {{name}}",
+    "fillRemaining_other": "Remplir les {{count}} boosters restants avec {{name}}",
+    "startDraft": "Lancer le draft",
+    "startSealed": "Lancer le scellé"
   },
   "pack": {
     "confirmPick": "Confirmer le choix",

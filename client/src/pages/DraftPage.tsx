@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
+import type { DraftPackChoice } from "../stores/draftStore";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
@@ -31,6 +32,11 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: 
 ];
 
 type DraftSetupMode = "quick" | "sealed" | "cube";
+
+/** Boosters a Sealed event opens — fixed by the engine (`SEALED_PACK_COUNT`). */
+const SEALED_PACK_COUNT = 6;
+/** Boosters a draft opens by default; the player may line up a different count. */
+const DRAFT_PACK_COUNT = 3;
 
 function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; supportsBo3: boolean }) {
   const { t } = useTranslation("draft");
@@ -349,19 +355,27 @@ export function DraftPage() {
   }, [reset]);
 
   const handleStartDraft = useCallback(
-    async (setCode: string, setName: string) => {
+    async (packs: DraftPackChoice[]) => {
       const { difficulty, startDraft, startSealedDraft } = useDraftStore.getState();
 
       const resp = await fetch(__DRAFT_POOLS_URL__);
       if (!resp.ok) throw new Error(`Failed to load draft pools: ${resp.status}`);
       const allPools: Record<string, unknown> = await resp.json();
-      const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];
-      if (!setPool) throw new Error(`No pool data for set: ${setCode}`);
 
+      // One pool per distinct set — a set drafted in several packs still
+      // crosses the WASM boundary once. `sequence` (built in the store from
+      // `packs`) is what repeats.
+      const pools = [...new Set(packs.map((pack) => pack.code))].map((code) => {
+        const pool = allPools[code.toLowerCase()] ?? allPools[code.toUpperCase()];
+        if (!pool) throw new Error(`No pool data for set: ${code}`);
+        return pool;
+      });
+
+      const selection = { packs, pools };
       if (setupMode === "sealed") {
-        await startSealedDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+        await startSealedDraft(selection, difficulty);
       } else {
-        await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+        await startDraft(selection, difficulty);
       }
     },
     [setupMode],
@@ -443,7 +457,16 @@ export function DraftPage() {
                 />
               </div>
             ) : (
-              <SetSelector onStartDraft={handleStartDraft} />
+              <SetSelector
+                onStartDraft={handleStartDraft}
+                defaultPackCount={setupMode === "sealed" ? SEALED_PACK_COUNT : DRAFT_PACK_COUNT}
+                fixedPackCount={setupMode === "sealed"}
+                startLabel={
+                  setupMode === "sealed"
+                    ? t("setSelector.startSealed")
+                    : t("setSelector.startDraft")
+                }
+              />
             )}
           </div>
         )}
@@ -453,6 +476,7 @@ export function DraftPage() {
             mode="quick"
             packCount={draftView?.pack_count}
             cardsPerPack={draftView?.cards_per_pack}
+            packSizes={draftView?.pack_sizes}
             onContinue={() => setIntroDismissed(true)}
           />
         )}
