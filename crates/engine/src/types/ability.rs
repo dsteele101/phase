@@ -1639,6 +1639,16 @@ pub enum CardPlayMode {
     Play,
 }
 
+impl CardPlayMode {
+    pub fn is_play(&self) -> bool {
+        matches!(self, Self::Play)
+    }
+}
+
+fn play_from_exile_mode_default() -> CardPlayMode {
+    CardPlayMode::Play
+}
+
 impl fmt::Display for CardPlayMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -4003,6 +4013,17 @@ pub enum CastingPermission {
     PlayFromExile {
         duration: Duration,
         granted_to: PlayerId,
+        /// CR 305.1 + CR 305.9: A "play" permission can authorize either a
+        /// spell cast or a land special action; a "cast" permission cannot
+        /// authorize a land play. This field deliberately defaults to `Play` for legacy
+        /// serialized grants, even though `CardPlayMode` itself defaults to
+        /// `Cast`: `PlayFromExile` was historically the "may play" building
+        /// block.
+        #[serde(
+            default = "play_from_exile_mode_default",
+            skip_serializing_if = "CardPlayMode::is_play"
+        )]
+        mode: CardPlayMode,
         /// CR 601.2a: Per-source use frequency for persistent play
         /// permissions. `Unlimited` preserves existing impulse-draw behavior;
         /// `OncePerTurn` models linked static permissions like Evelyn.
@@ -23513,10 +23534,60 @@ pub struct EffectResolutionResult {
     pub count: usize,
 }
 
+/// CR 608.2c: Objects produced by a `forward_result` instruction, retained for
+/// the remainder of that resolution chain. This is distinct from declared
+/// targets: a producer may move zero objects (`Some(vec![])`), and that result
+/// must not fall back to an earlier target selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedResultContext {
+    pub targets: Vec<TargetRef>,
+    /// CR 400.7: Exact identities of object results at the moment the producer
+    /// completed. A later continuation must not bind a new incarnation that
+    /// reused the same storage `ObjectId`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+impl ForwardedResultContext {
+    /// Capture the complete ordered object result of a forwarding instruction.
+    pub fn from_object_ids(
+        state: &crate::types::game_state::GameState,
+        object_ids: &[ObjectId],
+    ) -> Self {
+        Self {
+            targets: object_ids.iter().copied().map(TargetRef::Object).collect(),
+            object_incarnations: object_ids
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
+                .collect(),
+        }
+    }
+
+    /// CR 400.7: A forwarded object referent remains valid only while its
+    /// producer-time incarnation is still current. Unpinned legacy payloads
+    /// remain readable for wire compatibility.
+    pub fn object_pin_is_current(
+        &self,
+        id: ObjectId,
+        state: &crate::types::game_state::GameState,
+    ) -> bool {
+        self.object_incarnations
+            .iter()
+            .find(|pin| pin.object_id == id)
+            .is_none_or(|pin| pin.is_current(state))
+    }
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 608.2c: The immediate `forward_result` producer's complete ordered
+    /// result. `None` means no producer has run in this resolution; `Some([])`
+    /// is a completed producer that moved no objects and intentionally blocks
+    /// inherited-target fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
     /// CR 610.3b: specified duration events observed after a triggered ability
     /// triggered but before this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -29496,10 +29567,24 @@ mod tests {
             ..SpellContext::default()
         };
         assert!(external_style.attach_target_bindings.is_empty());
+        assert!(external_style.forwarded_result_context.is_none());
 
         let absent: SpellContext =
             serde_json::from_value(serde_json::json!({})).expect("legacy context deserializes");
         assert!(absent.attach_target_bindings.is_empty());
+        assert!(absent.forwarded_result_context.is_none());
+
+        let empty_forwarded: SpellContext = serde_json::from_value(serde_json::json!({
+            "forwarded_result_context": { "targets": [] }
+        }))
+        .expect("empty forward-result context deserializes");
+        assert_eq!(
+            empty_forwarded.forwarded_result_context,
+            Some(Box::new(ForwardedResultContext {
+                targets: vec![],
+                object_incarnations: vec![],
+            }))
+        );
 
         let empty: SpellContext = serde_json::from_value(serde_json::json!({
             "attach_target_bindings": {}
@@ -32592,6 +32677,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn play_from_exile_mode_serde_defaults_to_play_and_serializes_cast() {
+        let legacy = serde_json::json!({
+            "type": "PlayFromExile",
+            "duration": "UntilEndOfTurn",
+            "granted_to": 0,
+        });
+        let permission: CastingPermission = serde_json::from_value(legacy.clone())
+            .expect("legacy play-from-exile permission deserializes");
+        assert!(matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                mode: CardPlayMode::Play,
+                ..
+            }
+        ));
+        assert!(
+            !serde_json::to_value(&permission)
+                .expect("serialize legacy-default permission")
+                .as_object()
+                .expect("permission is an object")
+                .contains_key("mode"),
+            "Play is the field-specific wire default and stays omitted"
+        );
+
+        let mut explicit_cast = legacy;
+        explicit_cast["mode"] = serde_json::json!("Cast");
+        let permission: CastingPermission =
+            serde_json::from_value(explicit_cast).expect("explicit cast permission deserializes");
+        assert!(matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                mode: CardPlayMode::Cast,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(permission).expect("serialize explicit cast permission")["mode"],
+            serde_json::json!("Cast"),
+            "Cast must remain explicit because it narrows a legacy PlayFromExile grant"
+        );
     }
 
     /// CR 106.1 + CR 202.2c: the dynamic-color `AnyCombinationOfObjectColors`
