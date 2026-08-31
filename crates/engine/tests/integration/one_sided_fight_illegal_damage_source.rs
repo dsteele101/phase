@@ -24,10 +24,13 @@ use engine::game::game_object::PhaseOutCause;
 use engine::game::phasing::phase_out_object;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::types::ability::EffectKind;
+use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use engine::types::GameAction;
 
 /// Verbatim text of BOTH Flesh // Blood's Blood half (the reported card) and
 /// Soul's Fire. Named for Soul's Fire in these scenarios because "Blood" alone
@@ -57,6 +60,47 @@ fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
 
 fn red_mana(n: usize) -> Vec<ManaUnit> {
     floating_mana(n, ManaType::Red)
+}
+
+/// Drain the stack the way `advance_until_stack_empty` does, but KEEP the
+/// events each priority pass emits. Resolution events are the only way to prove
+/// a suppressed clause was actually REACHED, as opposed to never having run.
+fn drain_collecting_events(runner: &mut engine::game::scenario::GameRunner) -> Vec<GameEvent> {
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        match runner.act(GameAction::PassPriority) {
+            Ok(result) => seen.extend(result.events),
+            Err(_) => break,
+        }
+    }
+    seen
+}
+
+/// CR 608.2b: assert the damage clause was REACHED and reported itself a
+/// subject-less no-op, not merely that nothing took damage.
+///
+/// Zero damage is not evidence on its own — a regression that drops the clause
+/// before it runs deals zero too. `no_damage_source_resolved` emits this event
+/// only on the `Illegal` branch, so requiring it separates "suppressed
+/// correctly" from "never reached".
+fn assert_reported_no_damage_source(
+    events: &[GameEvent],
+    expected_kind: EffectKind,
+    spell: ObjectId,
+) {
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind, source_id, subject: None }
+                if *kind == expected_kind && *source_id == spell
+        )),
+        "expected a subject-less {expected_kind:?} resolution from the suppressed \
+         clause; its absence means the clause never ran, which is a different \
+         defect that zero damage cannot distinguish. Events: {events:?}"
+    );
 }
 
 /// Kill `victim` outright, as a removal spell resolving in the response window
@@ -94,7 +138,7 @@ fn souls_fire_deals_no_damage_when_its_subject_dies_in_response() {
     }
 
     kill(&mut runner, subject, spell);
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&recipient].damage_marked,
@@ -109,6 +153,8 @@ fn souls_fire_deals_no_damage_when_its_subject_dies_in_response() {
         runner.state().stack.is_empty(),
         "spell must finish resolving, not stay on the stack"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// Same shape with a PLAYER recipient. The bug's other face: with no object in
@@ -136,13 +182,15 @@ fn souls_fire_deals_no_damage_to_player_when_its_subject_dies_in_response() {
     }
 
     kill(&mut runner, subject, spell);
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().players[1].life,
         life_before,
         "no object deals the damage, so the player loses no life"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// Control: nothing became illegal, so the happy path must be untouched. This
@@ -245,13 +293,15 @@ fn souls_fire_deals_no_damage_when_its_subject_phases_out_in_response() {
         PhaseOutCause::Directly,
         &mut events,
     );
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&recipient].damage_marked,
         0,
         "a phased-out subject deals no damage (CR 702.26b)"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// `Pump` parent + anaphoric "its power" (Ambuscade, Clear Shot, Wolf Strike).
@@ -285,7 +335,7 @@ fn pump_subject_chain_deals_no_damage_when_its_subject_dies_in_response() {
     }
 
     kill(&mut runner, subject, spell);
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&recipient].damage_marked,
@@ -296,12 +346,22 @@ fn pump_subject_chain_deals_no_damage_when_its_subject_dies_in_response() {
         runner.state().battlefield.contains(&recipient),
         "recipient must survive"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// `DamageAll` child (Chandra's Ignition, Alpha Brawl, Waltz of Rage). The
 /// child has no target slot of its own, and the resolved subject also drives
 /// the `Another` exclusion on the recipient SET — so a lost subject must
 /// cancel the whole sweep, not sweep with the spell as its source.
+///
+/// Deliberately carries NO reach assertion, unlike its siblings: Chandra's
+/// Ignition is single-target, so losing the subject makes every target illegal
+/// and CR 608.2b counters the spell before any clause runs. Measured, not
+/// assumed — `deal_damage::resolve_all` is never entered. This test therefore
+/// guards the chain-level outcome only; the clause-level binding for a batch
+/// child is covered by `condition_instead_batch_tail_*`, which adds a second
+/// surviving target precisely so it does not fizzle.
 #[test]
 fn damage_all_chain_wipes_nothing_when_its_subject_dies_in_response() {
     let mut scenario = GameScenario::new();
@@ -430,7 +490,7 @@ fn condition_instead_tail_deals_no_damage_when_its_subject_dies_in_response() {
     }
 
     kill(&mut runner, subject, spell);
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&recipient].damage_marked,
@@ -441,6 +501,8 @@ fn condition_instead_tail_deals_no_damage_when_its_subject_dies_in_response() {
         runner.state().battlefield.contains(&recipient),
         "recipient must survive"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// Mount subject: the override would fire on a legal subject, but a dead
@@ -475,7 +537,7 @@ fn condition_instead_mount_subject_deals_no_damage_when_its_subject_dies_in_resp
     }
 
     kill(&mut runner, subject, spell);
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&recipient].damage_marked,
@@ -486,6 +548,8 @@ fn condition_instead_mount_subject_deals_no_damage_when_its_subject_dies_in_resp
         runner.state().battlefield.contains(&recipient),
         "recipient must survive"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// Phase-out variant of the not-swap route: the subject stays on the
@@ -521,13 +585,15 @@ fn condition_instead_tail_deals_no_damage_when_its_subject_phases_out_in_respons
         PhaseOutCause::Directly,
         &mut events,
     );
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&recipient].damage_marked,
         0,
         "a phased-out subject deals no damage through the instead-tail route either"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DealDamage, spell);
 }
 
 /// Control for both routes: nothing became illegal, so the tail must still deal
@@ -627,7 +693,7 @@ fn condition_instead_batch_tail_deals_no_damage_when_its_subject_dies_in_respons
     }
 
     kill(&mut runner, subject, spell);
-    runner.advance_until_stack_empty();
+    let events = drain_collecting_events(&mut runner);
 
     assert_eq!(
         runner.state().objects[&bystander].damage_marked,
@@ -640,6 +706,8 @@ fn condition_instead_batch_tail_deals_no_damage_when_its_subject_dies_in_respons
         runner.state().battlefield.contains(&bystander),
         "bystander must survive"
     );
+
+    assert_reported_no_damage_source(&events, EffectKind::DamageAll, spell);
 }
 
 /// Control: a legal subject must still fire the batch, so the fix cannot be
