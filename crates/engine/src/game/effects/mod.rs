@@ -14945,6 +14945,22 @@ fn resolve_unless_payer(
         TargetFilter::Player => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
+        // CR 508.5 + CR 118.12a: "[Effect] unless defending player [pays cost]"
+        // (Ogre Marauder). CR 508.5 fixes the payer as the player the ability's
+        // attacking source is attacking — determined per attacker, and in
+        // multiplayer one specific defending player (CR 508.5a), never all of
+        // them. `resolve_event_context_target` owns that lookup: it reads live
+        // combat state first and falls back to the defender captured on the
+        // triggering `AttackersDeclared` event once the creature has left
+        // combat, so a trigger that resolves after its attacker died still
+        // taxes the right player.
+        TargetFilter::DefendingPlayer => {
+            crate::game::targeting::resolve_event_context_target(state, payer, ability.source_id)
+                .and_then(|target| match target {
+                    TargetRef::Player(player) => Some(player),
+                    _ => None,
+                })
+        }
         // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
         // the payer is the player_scope iteration's scoped player, not a chosen
         // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
@@ -14962,7 +14978,21 @@ fn resolve_unless_payer(
         _ if crate::game::ability_utils::payer_is_declared_target(payer) => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
-        _ => None,
+        // CR 118.12a: An unresolved payer yields an EMPTY poll list, which makes
+        // the caller's `!unless_payers.is_empty()` guard skip the payment
+        // entirely and apply the effect for free. That fail-open is exactly how
+        // Ogre Marauder's missing `DefendingPlayer` arm went unnoticed: the
+        // trigger resolved, nobody was taxed, and nothing anywhere said so. Warn
+        // so the next unhandled subject surfaces instead of shipping silently.
+        _ => {
+            tracing::warn!(
+                ?payer,
+                source_id = ?ability.source_id,
+                "unless-payer did not resolve to a player; the payment is skipped \
+                 and the unless-effect applies unconditionally"
+            );
+            None
+        }
     }
 }
 
