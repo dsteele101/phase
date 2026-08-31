@@ -379,3 +379,198 @@ fn trailing_clause_still_resolves_when_the_damage_subject_dies() {
         "a clause after the damage is a separate instruction and still happens"
     );
 }
+
+/// Throw from the Saddle — the damage clause is a `SequentialSibling` TAIL of a
+/// `ConditionInstead` override, two levels down:
+///
+///   Pump  ->  PutCounter { ConditionInstead: subject is a Mount }
+///                 -> DealDamage { Power{Anaphoric}, damage_source: Target }
+///
+/// The tail is delivered by the not-swap arm's OWN descent, separate from the
+/// ordinary chain path, so it needs the same subject classification.
+///
+/// MEASURED, not assumed: an illegal subject reaches this route from BOTH
+/// subtypes. The override's condition ("if it's a Mount") reads the subject
+/// itself, so once the subject is an illegal target the condition cannot
+/// evaluate true — the swap never fires and a Mount subject funnels into the
+/// same not-swap arm. Probed at the descent: both cases print
+/// `parent_targets=[]` at the not-swap tail runner and never reach the ordinary
+/// chain classifier. The swap descent is therefore unreachable with an illegal
+/// subject for this card; it is covered anyway because both descents now share
+/// one classifier.
+const THROW_FROM_THE_SADDLE_ORACLE: &str =
+    "Target creature you control gets +1/+1 until end of turn. \
+Put a +1/+1 counter on it instead if it's a Mount. \
+Then it deals damage equal to its power to target creature you don't control.";
+
+/// Non-Mount subject: the override does not fire, so the tail is delivered by
+/// the not-swap arm's own descent. This is the reported-shape regression.
+#[test]
+fn condition_instead_tail_deals_no_damage_when_its_subject_dies_in_response() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Throw from the Saddle",
+            false,
+            THROW_FROM_THE_SADDLE_ORACLE,
+        )
+        .id();
+    let subject = scenario.add_creature(P0, "Plains Rider", 4, 4).id();
+    let recipient = scenario.add_creature(P1, "Opposing Bear", 9, 9).id();
+
+    let mut runner = scenario.build();
+    {
+        let _commit = runner
+            .cast(spell)
+            .target_objects(&[subject, recipient])
+            .commit();
+    }
+
+    kill(&mut runner, subject, spell);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&recipient].damage_marked,
+        0,
+        "the instead-tail damage clause must not turn its recipient into its own source"
+    );
+    assert!(
+        runner.state().battlefield.contains(&recipient),
+        "recipient must survive"
+    );
+}
+
+/// Mount subject: the override would fire on a legal subject, but a dead
+/// subject cannot satisfy "if it's a Mount", so this funnels into the not-swap
+/// arm too. Kept as a distinct case so a future change that makes the swap
+/// reachable with an illegal subject is still covered here.
+#[test]
+fn condition_instead_mount_subject_deals_no_damage_when_its_subject_dies_in_response() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Throw from the Saddle",
+            false,
+            THROW_FROM_THE_SADDLE_ORACLE,
+        )
+        .id();
+    let subject = scenario
+        .add_creature(P0, "Mounted Knight", 4, 4)
+        .with_subtypes(vec!["Mount"])
+        .id();
+    let recipient = scenario.add_creature(P1, "Opposing Bear", 9, 9).id();
+
+    let mut runner = scenario.build();
+    {
+        let _commit = runner
+            .cast(spell)
+            .target_objects(&[subject, recipient])
+            .commit();
+    }
+
+    kill(&mut runner, subject, spell);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&recipient].damage_marked,
+        0,
+        "the Mount-subject instead-tail must not turn its recipient into its own source"
+    );
+    assert!(
+        runner.state().battlefield.contains(&recipient),
+        "recipient must survive"
+    );
+}
+
+/// Phase-out variant of the not-swap route: the subject stays on the
+/// battlefield, so a zone check alone would miss it (CR 702.26b).
+#[test]
+fn condition_instead_tail_deals_no_damage_when_its_subject_phases_out_in_response() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Throw from the Saddle",
+            false,
+            THROW_FROM_THE_SADDLE_ORACLE,
+        )
+        .id();
+    let subject = scenario.add_creature(P0, "Plains Rider", 4, 4).id();
+    let recipient = scenario.add_creature(P1, "Opposing Bear", 9, 9).id();
+
+    let mut runner = scenario.build();
+    {
+        let _commit = runner
+            .cast(spell)
+            .target_objects(&[subject, recipient])
+            .commit();
+    }
+
+    let mut events = Vec::new();
+    phase_out_object(
+        runner.state_mut(),
+        subject,
+        PhaseOutCause::Directly,
+        &mut events,
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&recipient].damage_marked,
+        0,
+        "a phased-out subject deals no damage through the instead-tail route either"
+    );
+}
+
+/// Control for both routes: nothing became illegal, so the tail must still deal
+/// the subject's live power. Guards against fixing the bug by silencing the tail.
+#[test]
+fn condition_instead_tail_still_deals_damage_when_everything_stays_legal() {
+    for (subtypes, expected) in [(Vec::new(), 5u32), (vec!["Mount"], 5u32)] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Throw from the Saddle",
+                false,
+                THROW_FROM_THE_SADDLE_ORACLE,
+            )
+            .id();
+        let subject = {
+            let mut builder = scenario.add_creature(P0, "Rider", 4, 4);
+            if subtypes.is_empty() {
+                builder.id()
+            } else {
+                builder.with_subtypes(subtypes.clone()).id()
+            }
+        };
+        let recipient = scenario.add_creature(P1, "Opposing Bear", 9, 9).id();
+
+        let mut runner = scenario.build();
+        let outcome = runner
+            .cast(spell)
+            .target_objects(&[subject, recipient])
+            .resolve();
+
+        assert_eq!(
+            outcome.state().objects[&recipient].damage_marked,
+            expected,
+            "legal subject (subtypes {subtypes:?}) must still deal its live power through the tail"
+        );
+        assert_eq!(
+            outcome.state().objects[&subject].damage_marked,
+            0,
+            "the subject is the source, not a recipient"
+        );
+    }
+}

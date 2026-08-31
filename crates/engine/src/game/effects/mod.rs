@@ -2829,6 +2829,35 @@ fn one_sided_fight_subject(
     }
 }
 
+/// CR 120.1 + CR 608.2b: Materialize a one-sided-fight damage child with the
+/// `[subject, recipient…]` contract applied and the subject binding recorded.
+///
+/// Single authority for that pairing, because the two halves are
+/// order-dependent and easy to get wrong apart: `apply_parent_chain_context`
+/// CLEARS the one-hop binding, so the stamp must follow it. Both descents that
+/// deliver such a child — the ordinary chain path and the `ConditionInstead`
+/// not-swap tail runner — go through here, so neither can prepend a subject
+/// without recording how it bound, nor lose the binding to context propagation.
+fn prepare_one_sided_fight_child(
+    subject: OneSidedFightSubject,
+    parent: &ResolvedAbility,
+    child: &ResolvedAbility,
+    effect_context_object: Option<&CostPaidObjectSnapshot>,
+    state: &mut GameState,
+) -> ResolvedAbility {
+    let mut prepared = child.clone();
+    let binding = match subject {
+        OneSidedFightSubject::Prepend(source) => {
+            prepared.targets.insert(0, TargetRef::Object(source));
+            TargetDamageSourceBinding::Bound
+        }
+        OneSidedFightSubject::Illegal => TargetDamageSourceBinding::Illegal,
+    };
+    apply_parent_chain_context(&mut prepared, parent, effect_context_object, state);
+    prepared.context.target_damage_source = Some(binding);
+    prepared
+}
+
 fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -12810,21 +12839,43 @@ fn resolve_chain_body(
                         // (a target-less anaphoric tail — "Untap that creature." / "Draw a
                         // card.") inherit the base's targets, exactly as the else path does
                         // above.
+                        //
+                        // CR 608.2b: classified by the SAME helper the ordinary
+                        // chain descent uses, so a subject pruned as an illegal
+                        // target is RECORDED rather than silently dropped.
+                        // Open-coding the prepend here previously let the tail's
+                        // own recipient slide into the subject slot and deal its
+                        // own power to itself — Throw from the Saddle with its
+                        // rider removed in response killed the foe it targeted.
                         if is_one_sided_fight_damage_sub(&tail.effect) && !tail.targets.is_empty() {
-                            if let Some(source) = first_object_target(&ability.targets) {
-                                if first_object_target(&resolved.targets) != Some(source) {
-                                    resolved.targets.insert(0, TargetRef::Object(source));
+                            match one_sided_fight_subject(ability, tail) {
+                                Some(subject) => {
+                                    resolved = prepare_one_sided_fight_child(
+                                        subject,
+                                        ability,
+                                        tail,
+                                        effect_context_object.as_ref(),
+                                        state,
+                                    );
                                 }
+                                None => apply_parent_chain_context(
+                                    &mut resolved,
+                                    ability,
+                                    effect_context_object.as_ref(),
+                                    state,
+                                ),
                             }
-                        } else if should_propagate_parent_targets(ability, &resolved) {
-                            resolved.targets = ability.targets.clone();
+                        } else {
+                            if should_propagate_parent_targets(ability, &resolved) {
+                                resolved.targets = ability.targets.clone();
+                            }
+                            apply_parent_chain_context(
+                                &mut resolved,
+                                ability,
+                                effect_context_object.as_ref(),
+                                state,
+                            );
                         }
-                        apply_parent_chain_context(
-                            &mut resolved,
-                            ability,
-                            effect_context_object.as_ref(),
-                            state,
-                        );
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             debug_assert!(
                                 state.active_ability_continuation().is_none(),
@@ -13258,40 +13309,20 @@ fn resolve_chain_body(
         // `one_sided_fight_subject` keeps it a no-op for every other chain
         // shape, including the already-prepended re-entry.
         if is_one_sided_fight_damage_sub(&sub.effect) {
-            match one_sided_fight_subject(ability, sub) {
-                Some(OneSidedFightSubject::Prepend(source)) => {
-                    let mut sub_with_source = sub.as_ref().clone();
-                    sub_with_source.targets.insert(0, TargetRef::Object(source));
-                    apply_parent_chain_context(
-                        &mut sub_with_source,
-                        ability,
-                        effect_context_object.as_ref(),
-                        state,
-                    );
-                    sub_with_source.context.target_damage_source =
-                        Some(TargetDamageSourceBinding::Bound);
-                    resolve_ability_chain(state, &sub_with_source, events, depth + 1)?;
-                    return Ok(());
-                }
-                // CR 608.2b: the parent declared a subject and lost it. Resolve
-                // the child anyway — its own `sub_ability` tail (Contest of
-                // Claws' Discover, Piercing Exhale's Surveil, Burn Together's
-                // Sacrifice) is a separate instruction that still happens — but
-                // stamp the binding so the damage clause itself deals none.
-                Some(OneSidedFightSubject::Illegal) => {
-                    let mut sub_without_source = sub.as_ref().clone();
-                    apply_parent_chain_context(
-                        &mut sub_without_source,
-                        ability,
-                        effect_context_object.as_ref(),
-                        state,
-                    );
-                    sub_without_source.context.target_damage_source =
-                        Some(TargetDamageSourceBinding::Illegal);
-                    resolve_ability_chain(state, &sub_without_source, events, depth + 1)?;
-                    return Ok(());
-                }
-                None => {}
+            // CR 608.2b: on `Illegal` the child still RESOLVES — its own
+            // `sub_ability` tail (Contest of Claws' Discover, Burn Together's
+            // Sacrifice) is a separate instruction that still happens. Only the
+            // damage clause itself is silenced, by the stamped binding.
+            if let Some(subject) = one_sided_fight_subject(ability, sub) {
+                let prepared = prepare_one_sided_fight_child(
+                    subject,
+                    ability,
+                    sub,
+                    effect_context_object.as_ref(),
+                    state,
+                );
+                resolve_ability_chain(state, &prepared, events, depth + 1)?;
+                return Ok(());
             }
         }
 
