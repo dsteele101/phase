@@ -16,7 +16,8 @@ use crate::types::ability::{
     ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
     RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
     SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, StaticDefinition,
-    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
+    TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2782,6 +2783,52 @@ pub(crate) fn first_object_target(targets: &[TargetRef]) -> Option<ObjectId> {
     })
 }
 
+enum OneSidedFightSubject {
+    /// The parent chose this object; prepend it to restore the contract.
+    Prepend(ObjectId),
+    /// The parent declared a subject slot and no longer holds an object.
+    Illegal,
+}
+
+/// CR 120.1 + CR 608.2b: Classify how a parent instruction binds the SUBJECT of
+/// the one-sided-fight damage clause hanging off it.
+///
+/// `Some(Prepend(id))` — the parent chose an object and the child does not
+/// already lead with it, so the `[subject, recipient…]` contract must be
+/// reconstructed by prepending it.
+///
+/// `Some(Illegal)` — the parent DECLARES an object subject slot (its own effect
+/// surfaces a non-player target filter: `TargetOnly` for Soul's Fire and Blood,
+/// `Pump` for Ambuscade, `PutCounter` for Hunter's Edge, `SetTapState` for
+/// Deadshot) yet holds no object. Either CR 608.2b pruned an illegal target
+/// away, or an "up to one target" slot was legally declined (CR 115.6) — both
+/// leave the clause with no subject, and a clause with no subject deals no
+/// damage, so the two need not be told apart.
+///
+/// `None` — this parent names no object subject for the clause, so the descent
+/// falls through to the ordinary chain branches unchanged. Also covers the
+/// already-correct case where the child leads with the parent's object
+/// (a re-entered continuation needs no second prepend).
+fn one_sided_fight_subject(
+    ability: &ResolvedAbility,
+    sub: &ResolvedAbility,
+) -> Option<OneSidedFightSubject> {
+    match first_object_target(&ability.targets) {
+        // The child already leads with the subject — contract intact.
+        Some(source) if first_object_target(&sub.targets) == Some(source) => None,
+        // A `DamageAll` child (Chandra's Ignition, Alpha Brawl) carries no
+        // targets of its own and is served by the generic parent-target
+        // propagation further down; leave that path untouched.
+        Some(_) if sub.targets.is_empty() => None,
+        Some(source) => Some(OneSidedFightSubject::Prepend(source)),
+        None => ability
+            .effect
+            .target_filter()
+            .filter(|filter| !filter.is_player_scope())
+            .map(|_| OneSidedFightSubject::Illegal),
+    }
+}
+
 fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -2789,6 +2836,12 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    // CR 120.1 + CR 608.2b: The damage-subject binding names the object THIS
+    // hand-off supplies (or fails to supply) to the immediate child's damage
+    // clause. It is one-hop by construction — a grandchild's subject slot is a
+    // different slot — so clear the inherited copy here and let the one-sided
+    // fight descent re-stamp it on the child it actually binds.
+    child.context.target_damage_source = None;
     // CR 701.20e + CR 608.2c: Look-result membership is owned by precisely
     // one immediate looping child. Ordinary hand-offs must not let it leak to
     // a later grandchild with a different instruction scope.
@@ -13195,12 +13248,18 @@ fn resolve_chain_body(
         // the parent's chosen object so the sub resolves with the contract the
         // `deal_damage` resolver and `quantity::resolve_object_pt`'s
         // one-sided-fight fallback expect: `targets = [source, recipient]`
-        // (source = `targets[0]`, recipients = `targets[1..]`). Guarded on the
-        // parent already carrying an object target and the source not already
-        // being `targets[0]`, so it is a no-op for every other chain shape.
-        if is_one_sided_fight_damage_sub(&sub.effect) && !sub.targets.is_empty() {
-            if let Some(source) = first_object_target(&ability.targets) {
-                if first_object_target(&sub.targets) != Some(source) {
+        // (source = `targets[0]`, recipients = `targets[1..]`).
+        //
+        // CR 608.2b: the subject slot can also be EMPTY here, because target
+        // re-validation prunes an illegal target out of the parent's list
+        // before any effect runs. Falling through in that case is what let the
+        // recipient slide into `targets[0]` and deal its own power to itself,
+        // so this branch owns BOTH outcomes and stamps which one happened.
+        // `one_sided_fight_subject` keeps it a no-op for every other chain
+        // shape, including the already-prepended re-entry.
+        if is_one_sided_fight_damage_sub(&sub.effect) {
+            match one_sided_fight_subject(ability, sub) {
+                Some(OneSidedFightSubject::Prepend(source)) => {
                     let mut sub_with_source = sub.as_ref().clone();
                     sub_with_source.targets.insert(0, TargetRef::Object(source));
                     apply_parent_chain_context(
@@ -13209,9 +13268,30 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                         state,
                     );
+                    sub_with_source.context.target_damage_source =
+                        Some(TargetDamageSourceBinding::Bound);
                     resolve_ability_chain(state, &sub_with_source, events, depth + 1)?;
                     return Ok(());
                 }
+                // CR 608.2b: the parent declared a subject and lost it. Resolve
+                // the child anyway — its own `sub_ability` tail (Contest of
+                // Claws' Discover, Piercing Exhale's Surveil, Burn Together's
+                // Sacrifice) is a separate instruction that still happens — but
+                // stamp the binding so the damage clause itself deals none.
+                Some(OneSidedFightSubject::Illegal) => {
+                    let mut sub_without_source = sub.as_ref().clone();
+                    apply_parent_chain_context(
+                        &mut sub_without_source,
+                        ability,
+                        effect_context_object.as_ref(),
+                        state,
+                    );
+                    sub_without_source.context.target_damage_source =
+                        Some(TargetDamageSourceBinding::Illegal);
+                    resolve_ability_chain(state, &sub_without_source, events, depth + 1)?;
+                    return Ok(());
+                }
+                None => {}
             }
         }
 

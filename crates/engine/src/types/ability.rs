@@ -12566,6 +12566,38 @@ impl RevealUntilDisposition {
     }
 }
 
+/// CR 120.1 + CR 608.2b: How a `DamageSource::Target` clause's SUBJECT slot
+/// resolved during chain descent.
+///
+/// The subject ("Target creature you control deals damage equal to its power
+/// to any target") is declared by a PARENT node of the chain, while the damage
+/// itself lives on the child. The runtime contract the damage resolver reads is
+/// positional — `targets = [subject, recipient…]` — and it is reconstructed at
+/// resolution by prepending the parent's chosen object onto the child's list.
+///
+/// CR 608.2b prunes an illegal target out of the parent's list before any
+/// effect runs, which destroys the only evidence that a subject slot was ever
+/// declared: the child would then read its own recipient out of `targets[0]`
+/// and deal that recipient's power to itself. This binding preserves the
+/// distinction the pruned list can no longer express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetDamageSourceBinding {
+    /// The parent's chosen object was prepended, so the subject is `targets[0]`.
+    /// The id itself is deliberately NOT duplicated here: the target list stays
+    /// the single source of truth for WHICH object it is, and this binding
+    /// answers only WHETHER the positional contract holds. (It also keeps
+    /// `SpellContext` — and through it `ResolutionFrame` — from growing.)
+    Bound,
+    /// CR 608.2b: the parent declared a subject slot whose chosen object was an
+    /// illegal target at resolution. "If part of the effect requires
+    /// information about an illegal target, it fails to determine any such
+    /// information. Any part of the effect that requires that information won't
+    /// happen." — the damage clause needs both the subject's identity (CR 120.1:
+    /// an object that deals damage is the source of that damage) and its power,
+    /// so it deals no damage. The rest of the chain still resolves.
+    Illegal,
+}
+
 /// CR 120.3: Override for which object is the source of damage.
 /// By default, the source is the ability's source object (`ability.source_id`).
 /// `Target` means the first resolved target is the damage source (e.g.,
@@ -23621,6 +23653,13 @@ pub struct SpellContext {
     /// `ResolvedAbility` literals.
     #[serde(default, skip_serializing_if = "AttachTargetBindings::is_empty")]
     pub attach_target_bindings: AttachTargetBindings,
+    /// CR 120.1 + CR 608.2b: How the `DamageSource::Target` subject slot bound
+    /// for the immediately following damage clause. Stamped by the chain
+    /// descent that reconstructs the `[subject, recipient…]` contract and read
+    /// by `deal_damage`'s subject authority. One-hop only: cleared by
+    /// `apply_parent_chain_context` so it never reaches a grandchild.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_damage_source: Option<TargetDamageSourceBinding>,
 }
 
 impl SpellContext {
