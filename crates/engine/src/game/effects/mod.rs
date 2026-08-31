@@ -2829,6 +2829,19 @@ fn one_sided_fight_subject(
     }
 }
 
+/// The subject binding a child needs, or `None` when the caller should fall
+/// through to ordinary target propagation. Wraps the classifier with its
+/// applicability test so a descent cannot consult one without the other.
+fn one_sided_fight_subject_binding(
+    parent: &ResolvedAbility,
+    child: &ResolvedAbility,
+) -> Option<OneSidedFightSubject> {
+    if !is_one_sided_fight_damage_sub(&child.effect) {
+        return None;
+    }
+    one_sided_fight_subject(parent, child)
+}
+
 /// CR 120.1 + CR 608.2b: Materialize a one-sided-fight damage child with the
 /// `[subject, recipient…]` contract applied and the subject binding recorded.
 ///
@@ -12847,34 +12860,38 @@ fn resolve_chain_body(
                         // own recipient slide into the subject slot and deal its
                         // own power to itself — Throw from the Saddle with its
                         // rider removed in response killed the foe it targeted.
-                        if is_one_sided_fight_damage_sub(&tail.effect) && !tail.targets.is_empty() {
-                            match one_sided_fight_subject(ability, tail) {
-                                Some(subject) => {
-                                    resolved = prepare_one_sided_fight_child(
-                                        subject,
-                                        ability,
-                                        tail,
-                                        effect_context_object.as_ref(),
-                                        state,
-                                    );
+                        //
+                        // No `!tail.targets.is_empty()` gate: a FILTER-BASED
+                        // batch tail (`DamageAll`, whose recipients come from a
+                        // filter rather than a slot) carries no targets of its
+                        // own, and gating on that would route it past the
+                        // classifier to ordinary context propagation — which
+                        // clears the binding and leaves the clause falling back
+                        // to the spell as its source. The classifier itself
+                        // decides what such a tail needs: `None` while the
+                        // parent still holds its subject (ordinary propagation
+                        // supplies it, below), `Illegal` once the parent lost it.
+                        match one_sided_fight_subject_binding(ability, tail) {
+                            Some(subject) => {
+                                resolved = prepare_one_sided_fight_child(
+                                    subject,
+                                    ability,
+                                    tail,
+                                    effect_context_object.as_ref(),
+                                    state,
+                                );
+                            }
+                            None => {
+                                if should_propagate_parent_targets(ability, &resolved) {
+                                    resolved.targets = ability.targets.clone();
                                 }
-                                None => apply_parent_chain_context(
+                                apply_parent_chain_context(
                                     &mut resolved,
                                     ability,
                                     effect_context_object.as_ref(),
                                     state,
-                                ),
+                                );
                             }
-                        } else {
-                            if should_propagate_parent_targets(ability, &resolved) {
-                                resolved.targets = ability.targets.clone();
-                            }
-                            apply_parent_chain_context(
-                                &mut resolved,
-                                ability,
-                                effect_context_object.as_ref(),
-                                state,
-                            );
                         }
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             debug_assert!(
@@ -13308,22 +13325,20 @@ fn resolve_chain_body(
         // so this branch owns BOTH outcomes and stamps which one happened.
         // `one_sided_fight_subject` keeps it a no-op for every other chain
         // shape, including the already-prepended re-entry.
-        if is_one_sided_fight_damage_sub(&sub.effect) {
-            // CR 608.2b: on `Illegal` the child still RESOLVES — its own
-            // `sub_ability` tail (Contest of Claws' Discover, Burn Together's
-            // Sacrifice) is a separate instruction that still happens. Only the
-            // damage clause itself is silenced, by the stamped binding.
-            if let Some(subject) = one_sided_fight_subject(ability, sub) {
-                let prepared = prepare_one_sided_fight_child(
-                    subject,
-                    ability,
-                    sub,
-                    effect_context_object.as_ref(),
-                    state,
-                );
-                resolve_ability_chain(state, &prepared, events, depth + 1)?;
-                return Ok(());
-            }
+        // CR 608.2b: on `Illegal` the child still RESOLVES — its own
+        // `sub_ability` tail (Contest of Claws' Discover, Burn Together's
+        // Sacrifice) is a separate instruction that still happens. Only the
+        // damage clause itself is silenced, by the stamped binding.
+        if let Some(subject) = one_sided_fight_subject_binding(ability, sub) {
+            let prepared = prepare_one_sided_fight_child(
+                subject,
+                ability,
+                sub,
+                effect_context_object.as_ref(),
+                state,
+            );
+            resolve_ability_chain(state, &prepared, events, depth + 1)?;
+            return Ok(());
         }
 
         // CR 120.1 + CR 601.2c: multi-source-fight chain — the parent (the
