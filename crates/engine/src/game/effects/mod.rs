@@ -2816,9 +2816,22 @@ fn one_sided_fight_subject(
     match first_object_target(&ability.targets) {
         // The child already leads with the subject — contract intact.
         Some(source) if first_object_target(&sub.targets) == Some(source) => None,
-        // A `DamageAll` child (Chandra's Ignition, Alpha Brawl) carries no
-        // targets of its own and is served by the generic parent-target
-        // propagation further down; leave that path untouched.
+        // A FILTER-BASED batch child (`DamageAll`: Chandra's Ignition, Alpha
+        // Brawl, Volcanic Vision) carries no targets of its own. While the
+        // parent still HOLDS its subject, leave it to the generic parent-target
+        // propagation further down.
+        //
+        // LOAD-BEARING, and measured: routing it to `Prepend` instead would
+        // stamp `Bound`, which subjects it to the creature-on-the-battlefield
+        // eligibility gate — correct for the one-sided-fight class, but wrong
+        // for Volcanic Vision, whose `Target` source is the INSTANT CARD it just
+        // returned to hand. Removing this arm fails
+        // `volcanic_vision_deals_returned_cards_mana_value_after_return_to_hand`.
+        //
+        // This arm is NOT what decides the illegal case: when the parent's
+        // subject has been pruned there is no `Some(_)` to match, so an
+        // illegal subject falls to the `None` arm below and is stamped
+        // `Illegal` for batch children exactly as for single-recipient ones.
         Some(_) if sub.targets.is_empty() => None,
         Some(source) => Some(OneSidedFightSubject::Prepend(source)),
         None => ability

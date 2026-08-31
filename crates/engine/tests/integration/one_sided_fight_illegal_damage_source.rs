@@ -575,36 +575,38 @@ fn condition_instead_tail_still_deals_damage_when_everything_stays_legal() {
     }
 }
 
-/// Shape probe (not a printed card): the `ConditionInstead` tail is a
-/// FILTER-BASED batch, so it carries no target slot of its own —
+/// FILTER-BASED batch tail: the `ConditionInstead` child is a `DamageAll`,
+/// whose recipients come from a filter rather than a target slot —
 ///
-///   Pump  ->  PutCounter { ConditionInstead: subject is a Mount }
-///                 -> DamageAll { Power{Anaphoric}, damage_source: Target }
+///   Pump  ->  PutCounter { ConditionInstead }
+///                 -> DamageAll { Fixed(3), damage_source: Target }
 ///
-/// The targetless variant reaches the not-swap tail runner down a different
-/// leg than the single-recipient form: with no targets to prepend onto, the
-/// contract is normally supplied by ordinary parent-target propagation, which
-/// clears the binding. The classifier is therefore consulted for this shape too,
-/// so an illegal subject is stamped rather than falling back to the spell.
+/// With no targets to prepend onto, the contract is normally supplied by
+/// ordinary parent-target propagation, which CLEARS the binding. So the
+/// classifier has to be consulted for this shape too, or an illegal subject
+/// falls through to the unbound fallback and the batch fires off the SPELL as
+/// its source.
 ///
-/// GUARD, NOT A REGRESSION — and the distinction is measured, not assumed.
-/// This test passes both before and after that change, because a targetless
-/// batch tail contributes no target of its own, which makes the subject the
-/// CHAIN'S ONLY TARGET; losing it means every target is illegal, so CR 608.2b
-/// counters the whole spell on resolution and no effect runs at all. Probed
-/// directly: with the subject killed, neither the not-swap tail runner nor
-/// `deal_damage::resolve_all` is entered, and the spell goes to the graveyard
-/// having done nothing. No printed card parses to this shape either — scanning
-/// `data/card-data.json` for a `DamageAll{damage_source: Target}` beneath a
-/// `ConditionInstead` returns nothing.
+/// WHY TWO TARGETS. The chain deliberately carries a second, surviving target
+/// (the override clause targets an ally). Without it the subject is the chain's
+/// ONLY target, so losing it makes every target illegal and CR 608.2b counters
+/// the whole spell on resolution — the clause never runs and the test passes
+/// for a reason that has nothing to do with the binding. Every printed member
+/// of this class is single-target and therefore fizzles, which is why the
+/// corpus cannot exercise this leg. Measured, not assumed: with one target,
+/// `deal_damage::resolve_all` is never entered at all.
 ///
-/// It is kept because the chain-level fizzle and the clause-level subject gate
-/// are independent layers, and only the outer one is load-bearing today. A card
-/// that adds any second target to this chain stops fizzling, and then the inner
-/// gate is the only thing standing between an illegal subject and a live batch.
+/// WHY A FIXED AMOUNT. "deals damage equal to its power" resolves to 0 with no
+/// subject, so a power-derived amount makes damage zero on BOTH paths and the
+/// test cannot discriminate. The fixed amount is what makes reverting the
+/// binding observable.
+///
+/// REVERT PROBE (RUN, not reasoned): restore the `tail.targets.is_empty()` gate
+/// at the not-swap tail runner, or drop the `Illegal` stamp, and the bystander
+/// takes 3 instead of 0 (measured: `binding=None` -> `bystander=3`).
 const BATCH_TAIL_PROBE_ORACLE: &str = "Target creature you control gets +1/+1 until end of turn. \
-Put a +1/+1 counter on it instead if it's a Mount. \
-Then it deals damage equal to its power to each creature you don't control.";
+Put a +1/+1 counter on target creature you control instead if you control a Mount. \
+Then it deals 3 damage to each creature you don't control.";
 
 #[test]
 fn condition_instead_batch_tail_deals_no_damage_when_its_subject_dies_in_response() {
@@ -615,11 +617,13 @@ fn condition_instead_batch_tail_deals_no_damage_when_its_subject_dies_in_respons
         .add_spell_to_hand_from_oracle(P0, "Batch Tail Probe", false, BATCH_TAIL_PROBE_ORACLE)
         .id();
     let subject = scenario.add_creature(P0, "Plains Rider", 4, 4).id();
+    // Second chosen target, kept legal so the chain cannot fizzle.
+    let ally = scenario.add_creature(P0, "Ally", 2, 2).id();
     let bystander = scenario.add_creature(P1, "Opposing Bear", 9, 9).id();
 
     let mut runner = scenario.build();
     {
-        let _commit = runner.cast(spell).target_objects(&[subject]).commit();
+        let _commit = runner.cast(spell).target_objects(&[subject, ally]).commit();
     }
 
     kill(&mut runner, subject, spell);
@@ -629,7 +633,8 @@ fn condition_instead_batch_tail_deals_no_damage_when_its_subject_dies_in_respons
         runner.state().objects[&bystander].damage_marked,
         0,
         "a targetless batch tail must not fall back to the spell as its source \
-         once the declared subject is an illegal target"
+         once the declared subject is an illegal target; 3 here means the \
+         clause-level binding was reverted"
     );
     assert!(
         runner.state().battlefield.contains(&bystander),
@@ -637,10 +642,13 @@ fn condition_instead_batch_tail_deals_no_damage_when_its_subject_dies_in_respons
     );
 }
 
-/// Control for the batch leg, and the one that actually constrains the change:
-/// a legal subject must still fire the batch. Removing the classifier's
-/// applicability gate must not route a live-subject batch tail away from the
-/// ordinary parent-target propagation that supplies its source.
+/// Control: a legal subject must still fire the batch, so the fix cannot be
+/// "silence the targetless tail". This is what pins the classifier's
+/// empty-child arm in place — while the parent still holds its subject, a batch
+/// child must keep arriving by ordinary propagation rather than being stamped
+/// `Bound`, because `Bound` carries a creature-on-the-battlefield eligibility
+/// gate that not every `Target` source satisfies (Volcanic Vision's source is
+/// an instant card in hand).
 #[test]
 fn condition_instead_batch_tail_still_fires_when_everything_stays_legal() {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -650,15 +658,19 @@ fn condition_instead_batch_tail_still_fires_when_everything_stays_legal() {
         .add_spell_to_hand_from_oracle(P0, "Batch Tail Probe", false, BATCH_TAIL_PROBE_ORACLE)
         .id();
     let subject = scenario.add_creature(P0, "Plains Rider", 4, 4).id();
+    let ally = scenario.add_creature(P0, "Ally", 2, 2).id();
     let bystander = scenario.add_creature(P1, "Opposing Bear", 9, 9).id();
 
     let mut runner = scenario.build();
-    let outcome = runner.cast(spell).target_objects(&[subject]).resolve();
+    let outcome = runner
+        .cast(spell)
+        .target_objects(&[subject, ally])
+        .resolve();
 
     assert_eq!(
         outcome.state().objects[&bystander].damage_marked,
-        5,
-        "legal subject must still deal its live power (4 base + 1 pump) to the batch"
+        3,
+        "legal subject must still fire the batch"
     );
     assert_eq!(
         outcome.state().objects[&subject].damage_marked,
