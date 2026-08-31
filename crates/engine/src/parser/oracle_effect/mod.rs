@@ -15660,26 +15660,65 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 static_abilities,
                 enter_with_counters,
                 count: _,
-            } => Effect::Token {
-                name,
-                power,
-                toughness,
-                types,
-                colors,
-                keywords,
-                tapped,
-                owner,
-                attach_to,
-                enters_attacking,
-                supertypes,
-                static_abilities,
-                enter_with_counters,
+            } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
                 // so an "each player creates … for each … in their graveyard"
                 // iteration counts each player's OWN zone.
-                count: token::scope_token_for_each_to_iterating_player(quantity),
-            },
+                let scoped_count = token::scope_token_for_each_to_iterating_player(quantity);
+                // CR 608.2c + CR 400.7: this dispatcher builds the Token's
+                // base (name/P/T/types) from `base_tp` — the text BEFORE "for
+                // each" — so `try_parse_token`'s own "this way" dispatch never
+                // sees the "for each" clause here; `scoped_count` above, from
+                // this function's OWN `quantity`, is the only count this path
+                // ever produces. That `quantity` comes from the context-free
+                // `parse_for_each_clause_expr_with_context`, which correctly
+                // keeps a bare "card put into a graveyard this way" on the
+                // unfiltered `TrackedSetSize` by default — the right answer
+                // for a single-pile producer with no complementary partition
+                // to disambiguate from (Pinnacle Starcage's "put each card
+                // exiled with this artifact into its owner's graveyard, then
+                // create ... for each card put into a graveyard this way" —
+                // every exiled card lands in the SAME graveyard pile via
+                // `ChangeZoneAll`, not a Dig split). Only re-resolve through
+                // the dedicated `PutIntoGraveyard`-cause parser when a REAL
+                // Dig split precedes this chunk (`ctx.nearest_dig_rest_zone`)
+                // AND its rest destination matches the zone this clause
+                // names — Dihada, Binder of Wills's -3: "Create a Treasure
+                // token for each card put into your graveyard this way",
+                // where the preceding Dig puts the rest into Graveyard.
+                // Every other Token for-each count, and every bare-graveyard
+                // clause with no preceding Dig split, is unaffected.
+                let count = if matches!(
+                    scoped_count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    }
+                ) && ctx.nearest_dig_rest_zone == Some(Zone::Graveyard)
+                {
+                    token::parse_bare_graveyard_this_way_token_count(reference_clause)
+                        .map(|qty| QuantityExpr::Ref { qty })
+                        .unwrap_or(scoped_count)
+                } else {
+                    scoped_count
+                };
+                Effect::Token {
+                    name,
+                    power,
+                    toughness,
+                    types,
+                    colors,
+                    keywords,
+                    tapped,
+                    owner,
+                    attach_to,
+                    enters_attacking,
+                    supertypes,
+                    static_abilities,
+                    enter_with_counters,
+                    count,
+                }
+            }
             other => other,
         };
         return Some(parsed_clause(effect));
@@ -28279,6 +28318,54 @@ fn classify_latest_bare_card_publisher_in_clause(
         .or_else(|| classify_bare_card_aggregate_publisher(&clause.effect))
 }
 
+/// CR 608.2c + CR 400.7: The REST-partition zone of `effect`, only when it is
+/// an `Effect::Dig` whose kept and rest destinations actually differ — a
+/// genuine reveal/split with a non-selected partition to disambiguate from
+/// (Dihada, Binder of Wills's "... into your hand and the rest into your
+/// graveyard"). A same-zone Dig (a plain "look at the top N, put them all in
+/// Y" with no real split) has no complementary partition and returns `None`.
+fn dig_rest_zone(effect: &Effect) -> Option<Zone> {
+    let Effect::Dig {
+        destination,
+        rest_destination,
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    let kept = destination.unwrap_or(Zone::Hand);
+    let rest = rest_destination.unwrap_or(Zone::Graveyard);
+    (kept != rest).then_some(rest)
+}
+
+fn nearest_dig_rest_zone_in_ability(def: &AbilityDefinition) -> Option<Zone> {
+    dig_rest_zone(&def.effect).or_else(|| {
+        def.sub_ability
+            .as_deref()
+            .and_then(nearest_dig_rest_zone_in_ability)
+    })
+}
+
+/// CR 608.2c + CR 400.7: Lookback counterpart to
+/// `classify_latest_bare_card_publisher_in_clause`, scanning the SAME
+/// `builder.clauses()` history for the nearest already-parsed `Effect::Dig`
+/// split. Feeds `ParseContext::nearest_dig_rest_zone` so a downstream Token's
+/// bare "for each card put into a/your/their graveyard this way" count
+/// (`try_parse_for_each_effect`) can tell a Dig-split's rest partition apart
+/// from a single-pile producer's whole set (Pinnacle Starcage's "put each
+/// card exiled with this artifact into its owner's graveyard, then create ...
+/// for each card put into a graveyard this way" — every exiled card lands in
+/// the SAME graveyard pile via `ChangeZoneAll`, not a Dig, so this returns
+/// `None` and the bare `TrackedSetSize` default stays correct there).
+fn nearest_dig_rest_zone_in_clause(clause: &ParsedEffectClause) -> Option<Zone> {
+    dig_rest_zone(&clause.effect).or_else(|| {
+        clause
+            .sub_ability
+            .as_deref()
+            .and_then(nearest_dig_rest_zone_in_ability)
+    })
+}
+
 /// CR 608.2c: Re-anchor a batched set-anaphor aggregate to the CHAIN-published
 /// set.
 ///
@@ -34131,6 +34218,15 @@ pub(crate) fn parse_effect_chain_ir(
             | Some(BareCardAggregatePublisher::TerminalUnsupported)
             | None => None,
         };
+        // CR 608.2c + CR 400.7: mirrors `nearest_bare_card_publisher` above —
+        // the nearest already-parsed Dig split, feeding
+        // `ParseContext::nearest_dig_rest_zone` for the Token "for each"
+        // dispatch (see `dig_rest_zone`/`nearest_dig_rest_zone_in_clause`).
+        let nearest_dig_rest_zone = builder
+            .clauses()
+            .iter()
+            .rev()
+            .find_map(|clause| nearest_dig_rest_zone_in_clause(&clause.parsed));
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             object_pronoun_ref: prior_typed_referent.then_some(TargetFilter::ParentTarget),
@@ -34271,6 +34367,7 @@ pub(crate) fn parse_effect_chain_ir(
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
             bare_card_aggregate_source,
+            nearest_dig_rest_zone,
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single

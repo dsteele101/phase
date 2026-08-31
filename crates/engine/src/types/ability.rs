@@ -6062,6 +6062,25 @@ pub enum ThisWayCause {
     /// CR 608.2c + CR 400.7: the member was bounced (returned to its owner's
     /// hand) this way by a mass-bounce instruction.
     Bounced,
+    /// CR 608.2c + CR 400.7: the member landed in a graveyard this way as the
+    /// non-selected "rest" partition of a reveal/look split (a Dig-style "put
+    /// [kept subset] into your hand and the rest into your graveyard" — no
+    /// dedicated keyword action governs this landing zone, so it is
+    /// distinguished purely by destination, like `Returned`/`Bounced`).
+    /// Dihada, Binder of Wills's -3: "Create a Treasure token for each card
+    /// put into your graveyard this way."
+    ///
+    /// This is the third member of the "plain zone change, distinguished
+    /// purely by destination" family alongside `Returned` (battlefield) and
+    /// `Bounced` (hand) — the add-engine-variant sibling-cluster check flags
+    /// three same-shape unit variants as a parameterization candidate (e.g.
+    /// `PutInto(PlainZoneMoveDestination)`). That consolidation is deferred
+    /// rather than folded into this issue-scoped fix: `ThisWayCause` is
+    /// `Serialize`/`Deserialize` and reachable from `GameState`, so collapsing
+    /// the two EXISTING variants would be a wire-format change with a much
+    /// wider blast radius than adding one new leaf — out of scope for a
+    /// single-card bug fix (issue #8159).
+    PutIntoGraveyard,
 }
 
 /// CR 113.3b / CR 113.3c: Which stack ability kinds a `StackAbility` filter accepts.
