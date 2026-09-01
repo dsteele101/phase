@@ -222,12 +222,13 @@
     "selector": {
       "title": "Katalogauswahl",
       "core": "Kernvisualisierungen",
-      "printing": "Englische Satzdrucke",
-      "locale": "Lokalisierte Satzdrucke",
+      "printing": "Set-Drucke",
       "complete": "Kompletter aktueller Katalog",
       "curated": "Ein Bild pro Karte",
+      "deck_library": "Deckbibliothek",
       "curatedNote": "Ein Bild pro Karte, ausgewählt durch Ihre Karten-Artwork-Einstellungen im Reiter „Grafik“. Ändern Sie sie dort, folgt diese Auswahl.",
       "curatedDefaultNote": "Ein Bild pro Karte. Sie haben keine Artwork-Regeln festgelegt, daher wird das Standardbild jeder Karte geladen — fügen Sie unter „Karten-Artwork-Einstellungen“ im Reiter „Grafik“ Regeln hinzu, um andere Drucke zu wählen.",
+      "deckLibraryNote": "Ein Bild pro Karte, die in der gemeinsamen Deckbibliothek verwendet wird, einschließlich KI-Commander-Decks. Die Auswahl folgt den Karten-Artwork-Einstellungen. Nach der Installation lädt die App im laufenden Betrieb Ergänzungen und entfernt nicht mehr benötigte Bilder; das Entfernen dieses Pakets beendet diese Synchronisierung.",
       "driftNone": "Ihre installierten Bilder entsprechen bereits diesen Einstellungen.",
       "driftSummary": "Ihre installierten Bilder sind veraltet: {{add}} hinzuzufügen, {{remove}} zu entfernen, {{refresh}} zu erneuern.",
       "setCode": "Code festlegen",
@@ -288,6 +289,7 @@
       "root": "Katalogstamm",
       "packs": "Pakete: {{current}} von {{total}}",
       "objects": "Bilder: {{current}} von {{total}}",
+      "objectsUnknown": "Heruntergeladene Bilder: {{current}}",
       "scanNote": "Die Gesamtzahl wächst beim Durchsuchen des Scryfall-Snapshots. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
       "estimateNote": "Die Gesamtzahl stand beim Start dieses Downloads fest. Bereits geladene Bilder bleiben lokal und werden beim Fortsetzen übersprungen.",
       "finalizing": "Die Installation des Katalogs wird abgeschlossen"
@@ -329,7 +331,8 @@
       }
     },
     "removal": {
-      "committed": "Entfernung wurde bei Revision {{revision}} durchgeführt."
+      "committed": "Entfernung wurde bei Revision {{revision}} durchgeführt.",
+      "inProgress": "Offline-Visualisierungen werden entfernt…"
     },
     "cleanup": {
       "malformed_entry": "Ein fehlerhafter Cache-Eintrag konnte nicht wiederhergestellt werden",
@@ -341,6 +344,7 @@
       "core": "Kernvisualisierungen",
       "complete": "Kompletter aktueller Katalog",
       "curated": "Ein Bild pro Karte",
+      "deckLibrary": "Deckbibliothek",
       "printing": "{{set}}-Drucke",
       "locale": "{{set}}-Drucke ({{language}})"
     },

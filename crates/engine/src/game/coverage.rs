@@ -599,7 +599,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
-        TargetFilter::EventTarget => "damaged object of the triggering event".into(),
+        TargetFilter::EventTarget => "object targeted by the triggering event".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
@@ -2379,6 +2379,7 @@ fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
                     ThisWayCause::Sacrificed => "sacrificed",
                     ThisWayCause::Returned => "returned",
                     ThisWayCause::Bounced => "bounced",
+                    ThisWayCause::PutIntoGraveyard => "put into a graveyard",
                 };
                 format!("cards {verb} this way")
             }
@@ -8403,6 +8404,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
+            // EventTarget is a generic object participant of the trigger event
+            // (damage recipient or BecomesTarget object), resolved by the shared
+            // event-target extractor rather than a damage-only special case.
             ObjectScope::EventTarget => ("EventTargetObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),

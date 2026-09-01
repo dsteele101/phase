@@ -222,12 +222,13 @@
     "selector": {
       "title": "Seleção de catálogo",
       "core": "Visuais principais",
-      "printing": "Impressões de conjuntos em inglês",
-      "locale": "Impressões de conjuntos localizados",
+      "printing": "Impressões da coleção",
       "complete": "Catálogo atual completo",
       "curated": "Uma imagem por carta",
+      "deck_library": "Biblioteca de decks",
       "curatedNote": "Uma imagem por carta, escolhida pelas suas Preferências de Arte das Cartas na aba Visual. Altere-as lá e esta seleção acompanha.",
       "curatedDefaultNote": "Uma imagem por carta. Você não tem regras de arte, então a arte padrão de cada carta é baixada — adicione regras em Preferências de Arte das Cartas, na aba Visual, para escolher outras edições.",
+      "deckLibraryNote": "Uma imagem por cada carta usada na biblioteca compartilhada de decks, incluindo pré-construídos de Commander para IA. Esta seleção segue as Preferências de Arte das Cartas. Depois da instalação, o app baixa adições e remove imagens que já não são necessárias enquanto está em execução; remover este pacote interrompe essa sincronização.",
       "driftNone": "As suas imagens instaladas já correspondem a estas definições.",
       "driftSummary": "As suas imagens instaladas estão desatualizadas: {{add}} a adicionar, {{remove}} a remover, {{refresh}} a atualizar.",
       "setCode": "Definir código",
@@ -288,6 +289,7 @@
       "root": "Raiz do catálogo",
       "packs": "Pacotes: {{current}} de {{total}}",
       "objects": "Imagens: {{current}} de {{total}}",
+      "objectsUnknown": "Imagens baixadas: {{current}}",
       "scanNote": "O total cresce enquanto a captura do Scryfall é analisada. As imagens já baixadas ficam locais e são ignoradas ao retomar.",
       "estimateNote": "O total foi fixado no início desta transferência. As imagens já baixadas ficam locais e são ignoradas ao retomar.",
       "finalizing": "Finalizando a instalação do catálogo"
@@ -329,7 +331,8 @@
       }
     },
     "removal": {
-      "committed": "Remoção confirmada na revisão {{revision}}."
+      "committed": "Remoção confirmada na revisão {{revision}}.",
+      "inProgress": "A remover elementos visuais offline…"
     },
     "cleanup": {
       "malformed_entry": "Uma entrada de cache malformada não pôde ser recuperada",
@@ -341,6 +344,7 @@
       "core": "Visuais principais",
       "complete": "Catálogo atual completo",
       "curated": "Uma imagem por carta",
+      "deckLibrary": "Biblioteca de decks",
       "printing": "Impressões {{set}}",
       "locale": "Impressões {{set}} ({{language}})"
     },

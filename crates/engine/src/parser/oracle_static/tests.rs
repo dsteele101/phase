@@ -5553,6 +5553,65 @@ fn static_hearth_elemental_cost_reduction_includes_adventures() {
     );
 }
 
+/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring, Foe-hammer — "Instant and
+/// sorcery spells you cast cost {X} less to cast, where X is equipped
+/// creature's power." Unlike the self-spell "This spell costs {X} less ..."
+/// family above, this is a BOARD-WIDE reduction the Equipment grants to OTHER
+/// spells (`affected` = cards you control, not `SelfRef`), and X must be an
+/// `Aggregate` over the EQUIPPED creature's power — re-evaluated live off the
+/// static's own source (the Equipment) at cost-determination time, never
+/// snapshotted — so an unattached Equipment (CR 301.5f: no such creature)
+/// naturally sums to 0 rather than a garbage/default value.
+#[test]
+fn static_glamdring_foe_hammer_cost_reduction_is_live_equipped_power() {
+    let def = parse_static_line(
+        "Instant and sorcery spells you cast cost {X} less to cast, where X is equipped creature's power.",
+    )
+    .expect("Glamdring, Foe-hammer's cost reduction should parse");
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        dynamic_count: Some(QuantityRef::PropertyAggregate(ref aggregate)),
+        ..
+    } = &def.mode
+    else {
+        panic!(
+            "expected ModifyCost{{Reduce, amount: generic 1, dynamic_count: \
+             PropertyAggregate(Sum, Power, Objects(Typed(Creature, EquippedBy)))}}, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::Power);
+    let crate::types::ability::CardTypeSetSource::Objects {
+        filter: TargetFilter::Typed(ref tf),
+    } = aggregate.source()
+    else {
+        panic!(
+            "expected aggregate source Objects(Typed(Creature, EquippedBy)), got {:?}",
+            aggregate.source()
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    assert_eq!(tf.properties, vec![FilterProp::EquippedBy]);
+    // Board-wide reduction on other spells — NOT a self-spell SelfRef scope.
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf)) if tf.controller == Some(crate::types::ability::ControllerRef::You)),
+        "expected affected = cards you control, got {:?}",
+        def.affected
+    );
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        unreachable!("already matched ModifyCost above");
+    };
+    let Some(TargetFilter::Or { filters }) = spell_filter else {
+        panic!(
+            "expected an Instant/Sorcery Or spell_filter, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected exactly Instant + Sorcery");
+}
+
 /// Issue #1372: Demilich's self-spell reduction must function from the graveyard
 /// during cast-time cost determination.
 #[test]

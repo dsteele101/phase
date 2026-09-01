@@ -315,6 +315,7 @@ pub(crate) fn grant_search_found_permission_after_delivery(
         Effect::GrantCastingPermission {
             permission: crate::types::ability::CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: grant.grantee,
                 frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -789,6 +790,40 @@ fn dig_continuation_needs_full_looked_at_tracked_set(ability: &ResolvedAbility) 
         current = sub.sub_ability.as_deref();
     }
     false
+}
+
+/// CR 608.2c + CR 400.7: Dihada, Binder of Wills-style dig tails COUNT (rather
+/// than target) the non-selected "rest" partition via a downstream
+/// `QuantityRef::FilteredTrackedSetSize { caused_by: Some(PutIntoGraveyard), .. }`
+/// ("Create a Treasure token for each card put into your graveyard this
+/// way"). That cause is emitted by the parser (`oracle_effect::token`) ONLY
+/// when the Oracle text named the dig's own rest-destination zone directly
+/// before "this way", so — unlike `dig_continuation_needs_full_looked_at_tracked_set`'s
+/// downstream-move SHAPE check above — this signal is unambiguous even though
+/// the identical effect shape (`Effect::Token { count: Ref(TrackedSetSize) }`)
+/// correctly means "count the KEPT pile" for a sibling card (Search for Blex:
+/// "you lose 3 life for each card you put into your HAND this way"), which
+/// must keep reading the unchanged default kept-pile publish.
+fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool {
+    let mut wants_rest = false;
+    let mut current = Some(ability);
+    while let Some(sub) = current {
+        sub.effect.for_each_quantity_expr(&mut |expr| {
+            if matches!(
+                expr,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        caused_by: Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
+                        ..
+                    },
+                }
+            ) {
+                wants_rest = true;
+            }
+        });
+        current = sub.sub_ability.as_deref();
+    }
+    wants_rest
 }
 
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
@@ -1871,6 +1906,7 @@ pub(super) fn handle_resolution_choice(
                             rest_order: DigRestOrder::Preserve,
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
+                            publish_tracked_set_cause: None,
                             emit_reveal_until_resolved: None,
                             // The entry paused, so the publish below never
                             // runs — the completion drain publishes instead,
@@ -2129,6 +2165,7 @@ pub(super) fn handle_resolution_choice(
                                     rest_order: DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
+                                    publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
@@ -2198,6 +2235,7 @@ pub(super) fn handle_resolution_choice(
                     rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
+                    publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
@@ -3614,6 +3652,7 @@ pub(super) fn handle_resolution_choice(
                                     rest_order: DigRestOrder::Preserve,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
+                                    publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
@@ -3637,15 +3676,28 @@ pub(super) fn handle_resolution_choice(
                 // completion receives only the settled ZoneChanged occurrences,
                 // so redirected/prevented selections cannot leak into "this
                 // way" continuations after a pause.
-                let publish_set = if kept.is_empty() {
-                    Vec::new()
-                } else if state.active_ability_continuation().is_some_and(|cont| {
-                    dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
-                }) {
-                    unkept.clone()
-                } else {
-                    kept.clone()
-                };
+                // CR 608.2c: checked ahead of the `kept.is_empty()` default below —
+                // Dihada's "any number ... into your hand" can legally choose zero,
+                // in which case the REST partition (not an empty publish) is exactly
+                // what a downstream "put into your graveyard this way" count needs.
+                let (publish_set, publish_cause) =
+                    if state.active_ability_continuation().is_some_and(|cont| {
+                        dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                    }) {
+                        (unkept.clone(), None)
+                    } else if state
+                        .active_ability_continuation()
+                        .is_some_and(|cont| dig_continuation_wants_rest_pile_for_count(&cont.chain))
+                    {
+                        (
+                            unkept.clone(),
+                            Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
+                        )
+                    } else if kept.is_empty() {
+                        (Vec::new(), None)
+                    } else {
+                        (kept.clone(), None)
+                    };
                 let defer_rest_routing = state.active_ability_continuation().is_some_and(|cont| {
                     dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                 });
@@ -3681,6 +3733,7 @@ pub(super) fn handle_resolution_choice(
                         rest_order,
                         clear_markers: Vec::new(),
                         publish_tracked_set: Some(publish_set),
+                        publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
                         manifested_for_continuation: None,
                         kept_delivery: crate::types::game_state::DigKeptDeliveryOutcome::pending(
@@ -3701,18 +3754,30 @@ pub(super) fn handle_resolution_choice(
             // sub_abilities. Reveal/keep continuations (Zimone land split) bind
             // the kept subset; Expressive Iteration's bottom/exile tail binds the
             // unkept looked-at pile when its continuation chains
-            // `PutAtLibraryPosition { TrackedSet }`.
-            let publish_set = if kept.is_empty() {
-                Vec::new()
-            } else if state
+            // `PutAtLibraryPosition { TrackedSet }`; a Dihada-style "for each card
+            // put into your graveyard this way" count also binds the unkept pile
+            // (tagged `PutIntoGraveyard`) — checked ahead of the `kept.is_empty()`
+            // default so an all-declined kept selection still publishes the
+            // (non-empty) rest pile that count needs.
+            let (publish_set, publish_cause) = if state
                 .active_ability_continuation()
                 .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain))
             {
                 // Expressive Iteration-style bottom/exile tail: downstream
                 // `TrackedSet` steps address the unkept looked-at pile only.
-                unkept.clone()
+                (unkept.clone(), None)
+            } else if state
+                .active_ability_continuation()
+                .is_some_and(|cont| dig_continuation_wants_rest_pile_for_count(&cont.chain))
+            {
+                (
+                    unkept.clone(),
+                    Some(crate::types::ability::ThisWayCause::PutIntoGraveyard),
+                )
+            } else if kept.is_empty() {
+                (Vec::new(), None)
             } else {
-                kept.clone()
+                (kept.clone(), None)
             };
             // None => Graveyard; map to a concrete zone so the rest mover
             // (shared with the search-split partition) has a single Zone.
@@ -3739,6 +3804,7 @@ pub(super) fn handle_resolution_choice(
                     rest_order,
                     clear_markers: Vec::new(),
                     publish_tracked_set: Some(publish_set),
+                    publish_tracked_set_cause: publish_cause,
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
@@ -7430,6 +7496,7 @@ fn route_kept_card_or_defer(
                     rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
+                    publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
@@ -8062,6 +8129,7 @@ pub(crate) fn run_batch_completion(
             rest_order,
             clear_markers,
             publish_tracked_set,
+            publish_tracked_set_cause,
             emit_reveal_until_resolved,
             manifested_for_continuation,
             kept_delivery,
@@ -8088,6 +8156,7 @@ pub(crate) fn run_batch_completion(
                     rest_order,
                     clear_markers,
                     publish_tracked_set,
+                    publish_tracked_set_cause,
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
@@ -8126,6 +8195,7 @@ pub(crate) fn run_batch_completion(
                     rest_order,
                     clear_markers,
                     publish_tracked_set,
+                    publish_tracked_set_cause,
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
@@ -8159,6 +8229,7 @@ pub(crate) fn run_batch_completion(
                     rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
+                    publish_tracked_set_cause: None,
                     emit_reveal_until_resolved,
                     manifested_for_continuation,
                     kept_delivery,
@@ -8209,7 +8280,23 @@ pub(crate) fn run_batch_completion(
                 } else {
                     kept
                 };
-                effects::publish_fresh_tracked_set(state, published.clone());
+                let published_set_id = effects::publish_fresh_tracked_set(state, published.clone());
+                // CR 608.2c + CR 400.7: when this publish carries the REST
+                // partition for a downstream count (Dihada, Binder of Wills
+                // class — `dig_continuation_wants_rest_pile_for_count`), stamp
+                // every member with the cause so its
+                // `QuantityRef::FilteredTrackedSetSize { caused_by: Some(_), .. }`
+                // finds them. Every other publish (including the unchanged
+                // kept-pile default) carries `None` here and this is a no-op.
+                if let Some(cause) = publish_tracked_set_cause {
+                    let causes = state
+                        .tracked_set_member_causes
+                        .entry(published_set_id)
+                        .or_default();
+                    for &id in &published {
+                        causes.insert(id, cause);
+                    }
+                }
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     let continuation = if continuation_targets.is_empty() {
                         published
@@ -8594,6 +8681,7 @@ mod tests {
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
                     provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                    mode: crate::types::ability::CardPlayMode::Play,
                     duration: Duration::Permanent,
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
