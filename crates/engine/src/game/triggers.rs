@@ -5212,13 +5212,19 @@ fn collect_pending_triggers_with_collection(
                 })
                 .unwrap_or_default();
             for n in ripple_instances {
+                // CR 702.60a: Ripple fires "when you cast this spell". The
+                // WasCast intervening-if is intentionally omitted (mirroring the
+                // Storm and Casualty seams above/below): this synthesized
+                // trigger is only collected from SpellCast, which is only
+                // emitted for an actual cast, so cast-ness is already implied by
+                // the trigger event itself. A redundant WasCast condition here
+                // also FAILS its CR 603.4 resolution recheck for any Ripple card
+                // that carries a real spell ability (every printed one — Surging
+                // Dementia, Surging Flame, …), because `TriggerSourceRead`'s
+                // `cast_from_zone` reads the object field that only abilityless
+                // permanent spells populate.
                 let ripple_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                    .description("Ripple".to_string())
-                    .condition(TriggerCondition::WasCast {
-                        zone: None,
-                        controller: None,
-                        owner: None,
-                    });
+                    .description("Ripple".to_string());
                 let mut ripple_ability = ResolvedAbility::new(
                     Effect::Ripple { count: n },
                     Vec::new(),

@@ -2577,14 +2577,16 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 702.60a: declined — the hit and the rest all go to the bottom
-                // of the library together.
+                // of the library together, "in any order" (deterministic
+                // reveal order, not Cascade's random shuffle).
                 let mut all_to_bottom = revealed_misses;
                 all_to_bottom.extend(remaining_hits);
                 all_to_bottom.push(hit_card);
-                match crate::game::effects::cascade::shuffle_to_bottom(
+                match route_rest_partition_then(
                     state,
                     &all_to_bottom,
-                    source_id,
+                    crate::types::zones::Zone::Library,
+                    Some(source_id),
                     Some(
                         crate::types::game_state::BatchCompletion::RippleTerminalComplete {
                             player,

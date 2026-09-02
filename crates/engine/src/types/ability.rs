@@ -4539,7 +4539,9 @@ pub struct ResolutionCastCleanup {
     /// original `CastOffer`, so its cleanup payload is the typed source carrier.
     pub source_id: super::identifiers::ObjectId,
     /// Cards exiled/revealed during the dig that were not the hit.
-    /// Empty for Suspend's self-free-cast (no dig).
+    /// Empty for Suspend's self-free-cast (no dig). For Ripple (CR 701.20b)
+    /// these are still in the controller's library — the "exiled" name is
+    /// Cascade/Discover legacy; the cleanup only ever bottoms them.
     pub exiled_misses: Vec<super::identifiers::ObjectId>,
     /// Where the hit goes if the player declines or the cast-time MV check
     /// rejects the cast.

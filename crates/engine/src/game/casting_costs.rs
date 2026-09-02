@@ -10767,10 +10767,15 @@ fn handle_resolution_cast_success(
                         source_id,
                         final_cast: Some(cast_object),
                     });
-                match crate::game::effects::cascade::shuffle_to_bottom(
+                // CR 702.60a: "in any order" — deterministic reveal order, not
+                // Cascade's random shuffle. Routed through the shared
+                // replacement-aware rest-partition primitive (same authority
+                // `Effect::Dig` uses for the identical clause).
+                match crate::game::engine_resolution_choices::route_rest_partition_then(
                     state,
                     &exiled_misses,
-                    source_id,
+                    crate::types::zones::Zone::Library,
+                    Some(source_id),
                     Some(
                         crate::types::game_state::BatchCompletion::RippleTerminalComplete {
                             player,

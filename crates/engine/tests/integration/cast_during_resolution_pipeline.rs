@@ -15,10 +15,13 @@
 //! reason this class of bug shipped.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CastingPermission, Effect, ReplacementDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, CastingPermission, Effect, EffectKind, ReplacementDefinition,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::{CastChoice, GameAction};
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastOfferKind, CastPaymentMode, GameState, StackEntryKind, WaitingFor,
 };
@@ -27,6 +30,8 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::{EtbTapState, Zone};
+
+use crate::support::shared_card_db;
 
 const THRUMMING_STONE_ORACLE: &str = "Spells you cast have ripple 4. (When you cast a spell, you may reveal the top four cards of your library. You may cast any revealed cards with the same name as the cast spell without paying their mana costs. Put the rest on the bottom of your library in any order.)";
 const RAT_COLONY_ORACLE: &str = "Rat Colony gets +1/+0 for each other Rat you control named Rat Colony.\nA deck can have any number of cards named Rat Colony.";
@@ -1237,4 +1242,287 @@ fn accept_then_resolve_leaves_no_lingering_permission() {
          stack resolves; leaked = {leaked:?}"
     );
     let _ = hit;
+}
+
+// ---------------------------------------------------------------------------
+// CR 702.60a + CR 701.20b: Ripple's in-library reveal — the revealed top-N
+// cards STAY in the library, are published to every viewer for the duration of
+// the same-named free-cast offer, and the non-cast ones are put on the bottom.
+// The pre-fix implementation exiled the reveal and never published it, so
+// "Ripple reveals no cards" — these lock the visible reveal + the residency.
+// ---------------------------------------------------------------------------
+
+/// Fill `P0`'s mana pool with one unit per listed `ManaType`.
+fn typed_pool(scenario: &mut GameScenario, types: &[ManaType]) {
+    let units: Vec<ManaUnit> = types
+        .iter()
+        .map(|t| ManaUnit::new(*t, ObjectId(0), false, vec![]))
+        .collect();
+    scenario.with_mana_pool(P0, units);
+}
+
+fn cards_revealed_events(
+    events: &[GameEvent],
+) -> Vec<(engine::types::player::PlayerId, Vec<ObjectId>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CardsRevealed {
+                player, card_ids, ..
+            } => Some((*player, card_ids.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The Surging spells all target something; satisfy the CR 601.2c target
+/// prompt with a player target when the announcement raises one.
+fn choose_player_target_if_pending(
+    runner: &mut engine::game::scenario::GameRunner,
+    target: engine::types::player::PlayerId,
+) {
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(target)),
+            })
+            .expect("choose the spell's player target");
+    }
+}
+
+/// CR 702.60a + CR 701.20b: casting a real printed Ripple card publishes its
+/// top-N reveal while the cards stay in the library, and a same-named card on
+/// top raises the free-cast offer. Declining bottoms the pile and ends the
+/// reveal (CR 701.20d).
+#[test]
+fn surging_dementia_ripple_publishes_in_library_reveal_and_offers() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Surging Dementia is {1}{B}.
+    typed_pool(&mut scenario, &[ManaType::Black, ManaType::Black]);
+
+    let spell = scenario.add_real_card(P0, "Surging Dementia", Zone::Hand, db);
+    // Library top -> bottom. `add_real_card` push_backs, and `library.front()`
+    // is the top, so the first inserted card is on top.
+    let hit = scenario.add_real_card(P0, "Surging Dementia", Zone::Library, db);
+    let miss_a = scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+    let miss_b = scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+    let miss_c = scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+    let untouched = scenario.add_real_card(P0, "Plains", Zone::Library, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Surging Dementia");
+    choose_player_target_if_pending(&mut runner, P1);
+    let mut resolve_events = Vec::new();
+    resolve_events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("p0 pass")
+            .events,
+    );
+    resolve_events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("p1 pass")
+            .events,
+    );
+
+    // CR 702.60a: the Ripple trigger really ran — no Unimplemented leaked.
+    assert!(runner.state().objects[&spell]
+        .abilities
+        .iter()
+        .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })));
+    assert!(runner.state().objects[&spell]
+        .cast_spell_keywords
+        .iter()
+        .any(|k| matches!(k, engine::types::keywords::Keyword::Ripple(4))));
+
+    // CR 701.20a: exactly one CardsRevealed for the whole pile, top-first.
+    let revealed = cards_revealed_events(&resolve_events);
+    assert_eq!(revealed.len(), 1, "one CardsRevealed for the whole reveal");
+    assert_eq!(revealed[0].0, P0);
+    assert_eq!(revealed[0].1, vec![hit, miss_a, miss_b, miss_c]);
+
+    // CR 701.20b: NOT moved — every revealed card is still in the library,
+    // and the 5th card was never touched.
+    for id in [hit, miss_a, miss_b, miss_c, untouched] {
+        assert_eq!(
+            runner.state().objects[&id].zone,
+            Zone::Library,
+            "revealed cards stay in the library"
+        );
+    }
+    // CR 701.20a: publicly revealed while the offer is open — visible to the
+    // opponent too, not just the controller.
+    for id in [hit, miss_a, miss_b, miss_c] {
+        assert!(
+            runner.state().revealed_cards.contains(&id),
+            "revealed card {id:?} must be in the public revealed set"
+        );
+    }
+    assert!(!runner.state().revealed_cards.contains(&untouched));
+
+    // CR 702.60a: the same-named library card is offered for a free cast.
+    match &runner.state().waiting_for {
+        WaitingFor::CastOffer {
+            player,
+            kind:
+                CastOfferKind::Ripple {
+                    hit_card,
+                    remaining_hits,
+                    revealed_misses,
+                    ..
+                },
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*hit_card, hit);
+            assert!(remaining_hits.is_empty());
+            assert_eq!(revealed_misses, &vec![miss_a, miss_b, miss_c]);
+        }
+        other => panic!("expected a Ripple CastOffer, got {other:?}"),
+    }
+
+    // Decline: hit + misses all bottom (CR 702.60a).
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Decline,
+        })
+        .expect("decline the Ripple free cast");
+    for id in [hit, miss_a, miss_b, miss_c] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+    }
+    // Bottomed beneath the previously-5th card.
+    let lib = &runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library;
+    assert_eq!(lib.front().copied(), Some(untouched));
+
+    // CR 701.20d: the reveal ends — the transient `revealed_cards` lease is
+    // dropped at the next action boundary once the offer is closed.
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    for id in [hit, miss_a, miss_b, miss_c] {
+        assert!(
+            !runner.state().revealed_cards.contains(&id),
+            "the reveal lease must be released after the offer closes"
+        );
+    }
+}
+
+/// CR 702.60a + CR 701.20a: the no-same-name branch still reveals the top N —
+/// the CardsRevealed event fires (driving the log + the client animation) even
+/// though no free-cast offer is produced. This is the direct regression lock
+/// for "Ripple reveals no cards".
+#[test]
+fn surging_flame_ripple_no_match_still_reveals() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Surging Flame is {1}{R}.
+    typed_pool(&mut scenario, &[ManaType::Red, ManaType::Red]);
+
+    let spell = scenario.add_real_card(P0, "Surging Flame", Zone::Hand, db);
+    let m0 = scenario.add_real_card(P0, "Mountain", Zone::Library, db);
+    let m1 = scenario.add_real_card(P0, "Mountain", Zone::Library, db);
+    let m2 = scenario.add_real_card(P0, "Mountain", Zone::Library, db);
+    let m3 = scenario.add_real_card(P0, "Mountain", Zone::Library, db);
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Surging Flame");
+    choose_player_target_if_pending(&mut runner, P1);
+    let mut resolve_events = Vec::new();
+    resolve_events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("p0 pass")
+            .events,
+    );
+    resolve_events.extend(
+        runner
+            .act(GameAction::PassPriority)
+            .expect("p1 pass")
+            .events,
+    );
+
+    // CR 701.20a: the reveal still fires with no hit...
+    let revealed = cards_revealed_events(&resolve_events);
+    assert_eq!(revealed.len(), 1);
+    assert_eq!(revealed[0].1, vec![m0, m1, m2, m3]);
+    // ...and the effect ran to completion.
+    assert!(resolve_events.iter().any(|e| matches!(
+        e,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Ripple,
+            ..
+        }
+    )));
+
+    // No offer; priority returns.
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { .. },
+            ..
+        }
+    ));
+    // All four are bottomed.
+    for id in [m0, m1, m2, m3] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+    }
+    // CR 701.20d: the reveal lease is released at the next action boundary.
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    for id in [m0, m1, m2, m3] {
+        assert!(!runner.state().revealed_cards.contains(&id));
+    }
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .library
+            .len(),
+        4,
+        "the four revealed lands go back to the bottom — library size is unchanged"
+    );
 }

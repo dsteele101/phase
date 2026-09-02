@@ -1,20 +1,33 @@
-use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use crate::types::zones::Zone;
 
-/// CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N
-/// cards of your library, cast any of them with the same name as this spell
-/// without paying their mana cost, then put the rest on the bottom of your
-/// library in a random order.
+/// CR 702.60a: Ripple N — "When you cast this spell, you may reveal the top N
+/// cards of your library, or, if there are fewer than N cards in your library,
+/// you may reveal all the cards in your library. If you reveal cards from your
+/// library this way, you may cast any of those cards with the same name as this
+/// spell without paying their mana costs, then put all revealed cards not cast
+/// this way on the bottom of your library in any order."
 ///
-/// Reveal is modeled by moving the top N cards to exile (face up, like Cascade);
-/// the matching card is cast during resolution via the shared
-/// `initiate_cast_during_resolution` authority, and the non-cast revealed cards
-/// are moved to the bottom by the resolution-choice handler after all same-named
-/// cards the player chooses to cast from this reveal have been offered.
+/// CR 701.20b: revealing does NOT move the revealed cards — they stay on top of
+/// the library while the free-cast offer is open. The matching card is cast
+/// *from the library* during resolution via the shared
+/// `initiate_cast_during_resolution` authority (its
+/// `ExileWithAltCost { resolution_cleanup: Some(_) }` grant is zone-agnostic —
+/// see `castable_from_current_zone`), and the non-cast revealed cards are put on
+/// the bottom by the resolution-choice handler after all same-named cards the
+/// player chooses to cast from this reveal have been offered.
+///
+/// CR 702.60a "you may reveal": the engine always reveals on resolution — a
+/// no-strategic-value decline of the whole reveal is not modeled (no other
+/// engine keyword models that sub-choice); the "may" is honored by the free
+/// cast itself being optional.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -44,57 +57,27 @@ pub fn resolve(
         .map(|obj| obj.name.clone())
         .unwrap_or_default();
 
-    // CR 702.60a: reveal the top N cards (modeled as a face-up exile). Each
-    // iteration re-reads the live library top so a replacement that mutated the
-    // library mid-reveal is observed (mirrors Cascade).
-    let mut revealed: Vec<ObjectId> = Vec::new();
-    for _ in 0..count {
-        let Some(card_id) = state
-            .players
-            .iter()
-            .find(|p| p.id == controller)
-            .and_then(|p| p.library.front().copied())
-        else {
-            break;
-        };
+    // CR 702.60a + CR 701.20b: reveal the top N cards of the library (or all of
+    // them, if fewer than N) WITHOUT moving them. Top-first order is preserved
+    // for the free-cast offer and the "in any order" bottom placement.
+    let revealed: Vec<ObjectId> = state
+        .players
+        .iter()
+        .find(|p| p.id == controller)
+        .map(|p| p.library.iter().take(count as usize).copied().collect())
+        .unwrap_or_default();
 
-        // CR 702.60a + CR 614.6: reveal the top card by moving it to exile.
-        // Route through the zone-change pipeline so a board-wide `Moved` exile
-        // redirect is consulted — the raw mover never proposed the inner
-        // ZoneChange, so the redirect-aware check below (which expects the card
-        // may have landed elsewhere) had no Moved redirect to react to. No
-        // Exile-targeting Moved redirect exists in the current pool, so this is
-        // behavior-preserving today. CR 616.1: a future Exile-targeting redirect
-        // could surface an ordering choice mid-reveal; park the prompt (mirrors
-        // `exile_from_top_until`'s NeedsChoice arm) and return rather than
-        // continuing to reveal the remaining cards past a parked prompt.
-        let result = zone_pipeline::move_object(
-            state,
-            ZoneMoveRequest::effect(card_id, Zone::Exile, ability.source_id),
-            events,
-        );
-        if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = result {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            return Ok(());
-        }
-
-        // CR 614.1: a replacement may have redirected the card elsewhere; only
-        // count it as revealed if it actually landed in exile.
-        if state.objects.get(&card_id).map(|o| o.zone) != Some(Zone::Exile) {
-            if state
-                .players
-                .iter()
-                .find(|p| p.id == controller)
-                .is_some_and(|p| p.library.front().copied() == Some(card_id))
-            {
-                // Defensive: card somehow still on top — break to avoid looping.
-                break;
-            }
-            continue;
-        }
-        revealed.push(card_id);
+    if revealed.is_empty() {
+        // CR 702.60a: an empty library reveals nothing; resolve cleanly.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
     }
+
+    publish_ripple_reveal(state, controller, &revealed, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -102,6 +85,7 @@ pub fn resolve(
         subject: None,
     });
 
+    // `partition` preserves top-first order within each bucket.
     let (mut hits, revealed_misses): (Vec<_>, Vec<_>) = revealed.into_iter().partition(|id| {
         !source_name.is_empty() && state.objects.get(id).is_some_and(|o| o.name == source_name)
     });
@@ -123,11 +107,16 @@ pub fn resolve(
         }
         true => {
             // CR 702.60a: no same-named card revealed — put them all on the
-            // bottom of the library.
-            let _ = super::cascade::shuffle_to_bottom(
+            // bottom of the library "in any order". The engine takes the
+            // deterministic top-first reveal order (mirroring
+            // `DigRestOrder::Preserve` for the same clause on `Effect::Dig`),
+            // routed through the shared replacement-aware rest-partition
+            // primitive rather than Cascade's `shuffle_to_bottom`.
+            let _ = crate::game::engine_resolution_choices::route_rest_partition_then(
                 state,
                 &revealed_misses,
-                ability.source_id,
+                Zone::Library,
+                Some(ability.source_id),
                 None,
                 events,
             );
@@ -135,6 +124,58 @@ pub fn resolve(
     }
 
     Ok(())
+}
+
+/// CR 701.20a/b: Publish a Ripple reveal. The cards stay in the library, so
+/// visibility rides entirely on the resolved-information sets:
+///
+/// * `Controller` / `UntilActionBoundary` feeds `state.revealed_cards`, which
+///   `is_visible_revealed_card` honors for every viewer in every zone (the
+///   library included). `apply_action` keeps this set alive across the
+///   `CastOffer { kind: Ripple }` boundary (see `engine.rs`).
+/// * `Public` / `UntilZoneChange` is the durable CR 701.20a public fact,
+///   auto-cleared per card when it changes zones (cast to the stack, or
+///   bottomed within the library).
+///
+/// One `CardsRevealed` event carries the whole simultaneously-revealed pile
+/// (CR 701.20a); it also lights up the game log and the client reveal
+/// animation. `last_revealed_ids` is set for `LastRevealed` consumers.
+fn publish_ripple_reveal(
+    state: &mut GameState,
+    controller: PlayerId,
+    revealed: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) {
+    if revealed.is_empty() {
+        return;
+    }
+    state
+        .resolve_and_apply_information(
+            revealed,
+            ResolvedInformationAudience::Controller(controller),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("resolved ripple reveal occurrences must be live and distinct");
+    state
+        .resolve_and_apply_information(
+            revealed,
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilZoneChange,
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("published ripple reveal occurrences must be live and distinct");
+
+    let card_names: Vec<String> = revealed
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+        .collect();
+    events.push(GameEvent::CardsRevealed {
+        player: controller,
+        card_ids: revealed.to_vec(),
+        card_names,
+    });
+    state.last_revealed_ids = revealed.to_vec();
 }
 
 #[cfg(test)]
@@ -162,6 +203,8 @@ mod tests {
     }
 
     /// CR 702.60a: a same-named card in the top N is offered for a free cast.
+    /// CR 701.20b: the revealed cards stay in the library and are published to
+    /// every viewer for the duration of the offer.
     #[test]
     fn offers_same_named_revealed_card() {
         let (mut state, source_id) = setup("Surging Flame");
@@ -171,7 +214,8 @@ mod tests {
 
         let ability =
             ResolvedAbility::new(Effect::Ripple { count: 2 }, vec![], source_id, PlayerId(0));
-        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
             WaitingFor::CastOffer {
@@ -190,6 +234,26 @@ mod tests {
             }
             other => panic!("expected Ripple CastOffer, got {other:?}"),
         }
+
+        // CR 701.20b: no card moved — both are still in the library.
+        for id in [other, match_card] {
+            assert_eq!(state.objects.get(&id).map(|o| o.zone), Some(Zone::Library));
+        }
+        // CR 701.20a: both are publicly revealed while the offer is open.
+        assert!(state.revealed_cards.contains(&other));
+        assert!(state.revealed_cards.contains(&match_card));
+        // CR 701.20a: one event carries the whole revealed pile, top-first.
+        let revealed_event = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CardsRevealed {
+                    card_ids, player, ..
+                } => Some((player, card_ids)),
+                _ => None,
+            })
+            .expect("Ripple emits a CardsRevealed event");
+        assert_eq!(*revealed_event.0, PlayerId(0));
+        assert_eq!(revealed_event.1, &vec![other, match_card]);
     }
 
     /// CR 702.60a: all same-named cards revealed by one ripple remain eligible.
@@ -225,6 +289,7 @@ mod tests {
     }
 
     /// CR 702.60a: no same-named card revealed — all go to the bottom, no offer.
+    /// The reveal is still published (CR 701.20a) even though nothing is cast.
     #[test]
     fn no_match_bottoms_revealed_cards() {
         let (mut state, source_id) = setup("Surging Might");
@@ -234,7 +299,8 @@ mod tests {
 
         let ability =
             ResolvedAbility::new(Effect::Ripple { count: 2 }, vec![], source_id, PlayerId(0));
-        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(
             !matches!(
@@ -251,6 +317,18 @@ mod tests {
         for id in [a, b] {
             assert_eq!(state.objects.get(&id).map(|o| o.zone), Some(Zone::Library));
         }
+        // CR 701.20a: the reveal fires even with no hit — drives the log + client.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![a, b]
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Ripple,
+                ..
+            }
+        )));
     }
 
     /// CR 702.60a: empty library reveals nothing and offers nothing.

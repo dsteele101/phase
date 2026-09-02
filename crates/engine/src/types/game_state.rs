@@ -8910,7 +8910,10 @@ pub enum CastOfferKind {
     /// mana cost, or decline. `hit_card` is the matching revealed card being
     /// offered, `remaining_hits` are other same-named cards from the same reveal
     /// still eligible to cast, and `revealed_misses` are revealed cards that
-    /// cannot be cast this way.
+    /// cannot be cast this way. CR 701.20b: every id here names a card that is
+    /// still in the controller's library (the reveal does not move them); the
+    /// hit is cast from the library and the misses are placed on the bottom
+    /// once the offers are exhausted.
     Ripple {
         hit_card: ObjectId,
         remaining_hits: Vec<ObjectId>,
