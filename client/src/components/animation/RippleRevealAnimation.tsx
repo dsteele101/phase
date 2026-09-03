@@ -1,10 +1,7 @@
 import { motion } from "framer-motion";
 import { useEffect, useRef } from "react";
 
-import {
-  ResolvedAnimationImage,
-  type AnimationImageSnapshot,
-} from "./ResolvedAnimationImage.tsx";
+import { ResolvedAnimationImage } from "./ResolvedAnimationImage.tsx";
 import type { MillCard } from "./MillRevealAnimation.tsx";
 
 interface RippleRevealAnimationProps {
