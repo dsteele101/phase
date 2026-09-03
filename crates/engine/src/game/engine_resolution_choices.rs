@@ -888,6 +888,8 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::Ripple { .. },
                 ..
             }
+            | WaitingFor::RippleRevealChoice { .. }
+            | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::FreeCastWindow { .. },
                 ..
@@ -2576,34 +2578,64 @@ pub(super) fn handle_resolution_choice(
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
-                // CR 702.60a: declined — the hit and the rest all go to the bottom
-                // of the library together, "in any order" (deterministic
-                // reveal order, not Cascade's random shuffle).
-                let mut all_to_bottom = revealed_misses;
-                all_to_bottom.extend(remaining_hits);
-                all_to_bottom.push(hit_card);
-                match route_rest_partition_then(
-                    state,
-                    &all_to_bottom,
-                    crate::types::zones::Zone::Library,
-                    Some(source_id),
-                    Some(
-                        crate::types::game_state::BatchCompletion::RippleTerminalComplete {
-                            player,
-                            source_id,
-                            final_cast: None,
-                        },
-                    ),
-                    events,
-                ) {
-                    crate::game::zone_pipeline::BatchMoveResult::Done => {
-                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-                    }
-                    crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-                    }
-                }
+                // CR 702.60a: the free cast is declined — the hit and every
+                // still-offered card join the misses and all go on the bottom
+                // "in any order". Nothing was cast, so `final_cast` is `None`.
+                let mut all_uncast = revealed_misses;
+                all_uncast.extend(remaining_hits);
+                all_uncast.push(hit_card);
+                effects::ripple::open_bottom_order_or_place(
+                    state, source_id, player, all_uncast, None, events,
+                );
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
+        }
+        // CR 702.60a: "you **may** reveal the top N cards of your library." On
+        // `Decline` nothing is revealed — the library is untouched and no
+        // reveal is published. On `Cast` the reveal is published and the
+        // same-named free-cast offers begin.
+        (
+            WaitingFor::RippleRevealChoice {
+                player,
+                source_id,
+                count,
+            },
+            GameAction::RippleChoice { choice },
+        ) => {
+            if matches!(choice, crate::types::actions::CastChoice::Cast) {
+                effects::ripple::perform_reveal_and_offer(state, source_id, count, events);
+            } else {
+                // CR 702.60a: declined. An empty terminal batch still fires
+                // `RippleTerminalComplete`, which un-pauses the resolving Ripple
+                // trigger (nothing was revealed, so there is nothing to bottom).
+                effects::ripple::place_on_library_bottom(state, source_id, &[], None, events);
+                let _ = player;
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 702.60a + CR 608.2d: the controller announces the bottom-placement
+        // order for the uncast revealed cards. `order` must be a permutation of
+        // the offered pile.
+        (
+            WaitingFor::RippleBottomOrder {
+                player,
+                source_id,
+                cards,
+                final_cast,
+            },
+            GameAction::SelectCards { cards: order },
+        ) => {
+            let _ = player;
+            if order.len() != cards.len()
+                || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
+                || !order.iter().all(|id| cards.contains(id))
+            {
+                return Err(EngineError::InvalidAction(
+                    "Ripple bottom order must be a permutation of the revealed cards".to_string(),
+                ));
+            }
+            effects::ripple::place_on_library_bottom(state, source_id, &order, final_cast, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
         // the controller either picks one candidate to cast for free or declines

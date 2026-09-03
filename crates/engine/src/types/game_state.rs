@@ -12314,6 +12314,42 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
     },
+    /// CR 702.60a: "you **may** reveal the top N cards of your library" — the
+    /// initial optional-reveal decision of a resolving Ripple trigger. The
+    /// controller answers with `GameAction::RippleChoice` (`Cast` = reveal,
+    /// `Decline` = don't). On decline nothing is revealed, the library is left
+    /// untouched, and no `CardsRevealed` / `revealed_cards` publication occurs.
+    RippleRevealChoice {
+        player: PlayerId,
+        /// The resolving Ripple ability's source spell (CR 702.60a).
+        source_id: ObjectId,
+        /// N from "Ripple N" — how many cards the reveal would show. Carried for
+        /// the prompt UI; the actual pile is re-read from the live library top
+        /// when the reveal is accepted.
+        count: u32,
+    },
+    /// CR 702.60a + CR 608.2d: "put all revealed cards not cast this way on the
+    /// bottom of your library **in any order**." Once the same-named free-cast
+    /// offers are exhausted (or declined, or there was no hit), the controller
+    /// announces the order for the uncast revealed cards. The response is
+    /// `GameAction::SelectCards { cards }` carrying a permutation of `cards`;
+    /// the engine places them on the library bottom in that submitted order.
+    /// Raised only when 2+ cards remain — a single card has no ordering choice.
+    RippleBottomOrder {
+        player: PlayerId,
+        /// The resolving Ripple ability's source spell (CR 702.60a).
+        source_id: ObjectId,
+        /// The uncast revealed cards awaiting a bottom-placement order. Still in
+        /// the controller's library and still publicly revealed (CR 701.20a)
+        /// until the order is submitted.
+        cards: Vec<ObjectId>,
+        /// CR 603.3b + CR 608.2g: the same-named card cast from the terminal
+        /// free-cast offer, if any. Threaded into
+        /// `BatchCompletion::RippleTerminalComplete` when the order is submitted
+        /// so the parked-trigger / terminal-`SpellCast` settlement still fires.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_cast: Option<ObjectId>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -14438,6 +14474,8 @@ impl WaitingFor {
             WaitingFor::StationTarget { .. } => "StationTarget",
             WaitingFor::SaddleMount { .. } => "SaddleMount",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
+            WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -14595,6 +14633,8 @@ impl WaitingFor {
             | WaitingFor::StationTarget { player, .. }
             | WaitingFor::SaddleMount { player, .. }
             | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::RippleRevealChoice { player, .. }
+            | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -15045,6 +15085,10 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
+                // CR 702.60a: the Ripple bottom-order response is a free
+                // permutation of the offered pile — the candidate enumerator
+                // only lists {identity}, so `apply()` is the real validator.
+                | WaitingFor::RippleBottomOrder { .. }
         )
     }
 

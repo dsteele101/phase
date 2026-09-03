@@ -9359,11 +9359,12 @@ fn apply_action(
             | WaitingFor::SeparatePilesChoice { .. }
             // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards
             // stay in the library and remain public while the controller works
-            // through the same-named free-cast offers.
+            // through the same-named free-cast offers and the bottom-order step.
             | WaitingFor::CastOffer {
                 kind: crate::types::game_state::CastOfferKind::Ripple { .. },
                 ..
             }
+            | WaitingFor::RippleBottomOrder { .. }
     ) {
         state.revealed_cards.clear();
     }

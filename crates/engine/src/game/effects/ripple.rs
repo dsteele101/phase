@@ -1,6 +1,7 @@
+use crate::game::zone_pipeline::BatchMoveResult;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
@@ -15,19 +16,24 @@ use crate::types::zones::Zone;
 /// spell without paying their mana costs, then put all revealed cards not cast
 /// this way on the bottom of your library in any order."
 ///
+/// This is a two-decision effect (CR 608.2d):
+/// 1. `WaitingFor::RippleRevealChoice` — the optional reveal ("you **may**
+///    reveal"). Declining leaves the library untouched and publishes nothing.
+/// 2. `WaitingFor::RippleBottomOrder` — the controller announces the bottom
+///    placement order for the uncast revealed cards ("in any order"). Raised
+///    only when 2+ cards remain.
+///
 /// CR 701.20b: revealing does NOT move the revealed cards — they stay on top of
-/// the library while the free-cast offer is open. The matching card is cast
-/// *from the library* during resolution via the shared
+/// the library while the free-cast offers run. The matching card is cast *from
+/// the library* during resolution via the shared
 /// `initiate_cast_during_resolution` authority (its
 /// `ExileWithAltCost { resolution_cleanup: Some(_) }` grant is zone-agnostic —
-/// see `castable_from_current_zone`), and the non-cast revealed cards are put on
-/// the bottom by the resolution-choice handler after all same-named cards the
-/// player chooses to cast from this reveal have been offered.
+/// see `castable_from_current_zone`).
 ///
-/// CR 702.60a "you may reveal": the engine always reveals on resolution — a
-/// no-strategic-value decline of the whole reveal is not modeled (no other
-/// engine keyword models that sub-choice); the "may" is honored by the free
-/// cast itself being optional.
+/// Everything after decision 1's accept lives in
+/// [`crate::game::engine_resolution_choices`] alongside the `RippleChoice` /
+/// `SelectCards` handlers; this resolver only computes the reveal size and opens
+/// decision 1.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -50,16 +56,57 @@ pub fn resolve(
         return Err(EffectError::PlayerNotFound);
     }
 
-    // CR 702.60a: same name as *this* spell. Read the source spell's name.
+    // CR 702.60a: how many cards the reveal would show — the top N, or the
+    // whole library if it holds fewer than N.
+    let available = state
+        .players
+        .iter()
+        .find(|p| p.id == controller)
+        .map(|p| p.library.len().min(count as usize))
+        .unwrap_or(0);
+
+    // The Ripple effect's resolver has run; the reveal decision and its
+    // follow-ups are driven from the resolution-choice handler.
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    if available == 0 {
+        // CR 702.60a: an empty library has nothing to reveal — resolve cleanly.
+        return Ok(());
+    }
+
+    // CR 702.60a: "you **may** reveal the top N cards of your library." Offer
+    // that decision before anything is revealed or published.
+    state.waiting_for = WaitingFor::RippleRevealChoice {
+        player: controller,
+        source_id: ability.source_id,
+        count: available as u32,
+    };
+    Ok(())
+}
+
+/// CR 702.60a: the controller accepted the optional reveal. Publish the top-N
+/// pile (still in the library, CR 701.20b), then either offer the first
+/// same-named card for a free cast or move to the bottom-order step.
+pub(crate) fn perform_reveal_and_offer(
+    state: &mut GameState,
+    source_id: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(controller) = state.objects.get(&source_id).map(|obj| obj.controller) else {
+        return;
+    };
     let source_name = state
         .objects
-        .get(&ability.source_id)
+        .get(&source_id)
         .map(|obj| obj.name.clone())
         .unwrap_or_default();
 
-    // CR 702.60a + CR 701.20b: reveal the top N cards of the library (or all of
-    // them, if fewer than N) WITHOUT moving them. Top-first order is preserved
-    // for the free-cast offer and the "in any order" bottom placement.
+    // CR 702.60a + CR 701.20b: reveal the top N (or all) WITHOUT moving them.
     let revealed: Vec<ObjectId> = state
         .players
         .iter()
@@ -68,62 +115,88 @@ pub fn resolve(
         .unwrap_or_default();
 
     if revealed.is_empty() {
-        // CR 702.60a: an empty library reveals nothing; resolve cleanly.
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
+        return;
     }
 
     publish_ripple_reveal(state, controller, &revealed, events);
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
 
     // `partition` preserves top-first order within each bucket.
     let (mut hits, revealed_misses): (Vec<_>, Vec<_>) = revealed.into_iter().partition(|id| {
         !source_name.is_empty() && state.objects.get(id).is_some_and(|o| o.name == source_name)
     });
 
-    match hits.is_empty() {
-        false => {
-            let hit_card = hits.remove(0);
-            // CR 702.60a: offer the free cast. The accept/decline + bottoming of
-            // the rest is handled in `engine_resolution_choices`.
-            state.waiting_for = WaitingFor::CastOffer {
-                player: controller,
-                kind: CastOfferKind::Ripple {
-                    hit_card,
-                    remaining_hits: hits,
-                    revealed_misses,
-                    source_id: ability.source_id,
-                },
-            };
-        }
-        true => {
-            // CR 702.60a: no same-named card revealed — put them all on the
-            // bottom of the library "in any order". The engine takes the
-            // deterministic top-first reveal order (mirroring
-            // `DigRestOrder::Preserve` for the same clause on `Effect::Dig`),
-            // routed through the shared replacement-aware rest-partition
-            // primitive rather than Cascade's `shuffle_to_bottom`.
-            let _ = crate::game::engine_resolution_choices::route_rest_partition_then(
-                state,
-                &revealed_misses,
-                Zone::Library,
-                Some(ability.source_id),
-                None,
-                events,
-            );
-        }
+    if hits.is_empty() {
+        // CR 702.60a: no same-named card — go straight to the bottom-order step.
+        open_bottom_order_or_place(state, source_id, controller, revealed_misses, None, events);
+    } else {
+        let hit_card = hits.remove(0);
+        state.waiting_for = WaitingFor::CastOffer {
+            player: controller,
+            kind: CastOfferKind::Ripple {
+                hit_card,
+                remaining_hits: hits,
+                revealed_misses,
+                source_id,
+            },
+        };
     }
+}
 
-    Ok(())
+/// CR 702.60a + CR 608.2d: place the uncast revealed cards on the bottom of the
+/// library "in any order". With 2+ cards, prompt the controller for the order
+/// (`WaitingFor::RippleBottomOrder`); with 0 or 1 there is no ordering choice,
+/// so place immediately. `final_cast` is threaded to
+/// `BatchCompletion::RippleTerminalComplete` so the parked-trigger / terminal
+/// `SpellCast` settlement fires once the cards land.
+pub(crate) fn open_bottom_order_or_place(
+    state: &mut GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    cards: Vec<ObjectId>,
+    final_cast: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    if cards.len() >= 2 {
+        state.waiting_for = WaitingFor::RippleBottomOrder {
+            player: controller,
+            source_id,
+            cards,
+            final_cast,
+        };
+        return BatchMoveResult::Done;
+    }
+    place_on_library_bottom(state, source_id, &cards, final_cast, events)
+}
+
+/// CR 702.60a + CR 603.3b: place `ordered` on the library bottom in the given
+/// order and fire `RippleTerminalComplete`. The completion is what un-pauses the
+/// resolving Ripple trigger (it sets `waiting_for` back to `Priority`), so it
+/// runs on *every* terminal path — even an empty `ordered` (a declined reveal or
+/// an all-hits Ripple) still passes an empty batch to fire it.
+pub(crate) fn place_on_library_bottom(
+    state: &mut GameState,
+    source_id: ObjectId,
+    ordered: &[ObjectId],
+    final_cast: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let completion = state
+        .objects
+        .get(&source_id)
+        .map(|obj| obj.controller)
+        .map(|player| BatchCompletion::RippleTerminalComplete {
+            player,
+            source_id,
+            final_cast,
+        });
+    crate::game::engine_resolution_choices::route_rest_partition_then(
+        state,
+        ordered,
+        Zone::Library,
+        Some(source_id),
+        completion,
+        events,
+    )
 }
 
 /// CR 701.20a/b: Publish a Ripple reveal. The cards stay in the library, so
@@ -202,6 +275,52 @@ mod tests {
         create_object(state, card_id, PlayerId(0), name.to_string(), Zone::Library)
     }
 
+    /// Run `resolve` (which opens the optional-reveal prompt) then accept it,
+    /// mirroring the `(RippleRevealChoice, RippleChoice::Cast)` engine handler.
+    fn resolve_and_accept(
+        state: &mut GameState,
+        source_id: ObjectId,
+        count: u32,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let ability =
+            ResolvedAbility::new(Effect::Ripple { count }, vec![], source_id, PlayerId(0));
+        resolve(state, &ability, events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RippleRevealChoice { count: c, .. } if c == count),
+            "resolve must open the optional-reveal prompt, got {:?}",
+            state.waiting_for
+        );
+        perform_reveal_and_offer(state, source_id, count, events);
+    }
+
+    /// CR 702.60a: `resolve` opens the "you may reveal" decision, carrying N.
+    #[test]
+    fn resolve_opens_optional_reveal_prompt() {
+        let (mut state, source_id) = setup("Surging Flame");
+        let a = add_library_card(&mut state, "Mountain");
+        let b = add_library_card(&mut state, "Mountain");
+        state.players[0].library = im::vector![a, b];
+
+        let ability =
+            ResolvedAbility::new(Effect::Ripple { count: 4 }, vec![], source_id, PlayerId(0));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RippleRevealChoice {
+                player: PlayerId(0),
+                count: 2, // clamped to the two-card library
+                ..
+            }
+        ));
+        // CR 701.20b: nothing revealed or published yet.
+        assert!(state.revealed_cards.is_empty());
+        for id in [a, b] {
+            assert_eq!(state.objects.get(&id).map(|o| o.zone), Some(Zone::Library));
+        }
+    }
+
     /// CR 702.60a: a same-named card in the top N is offered for a free cast.
     /// CR 701.20b: the revealed cards stay in the library and are published to
     /// every viewer for the duration of the offer.
@@ -212,10 +331,8 @@ mod tests {
         let match_card = add_library_card(&mut state, "Surging Flame");
         state.players[0].library = im::vector![other, match_card];
 
-        let ability =
-            ResolvedAbility::new(Effect::Ripple { count: 2 }, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
+        resolve_and_accept(&mut state, source_id, 2, &mut events);
 
         match &state.waiting_for {
             WaitingFor::CastOffer {
@@ -265,9 +382,7 @@ mod tests {
         let second_match = add_library_card(&mut state, "Surging Flame");
         state.players[0].library = im::vector![first_match, miss, second_match];
 
-        let ability =
-            ResolvedAbility::new(Effect::Ripple { count: 3 }, vec![], source_id, PlayerId(0));
-        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        resolve_and_accept(&mut state, source_id, 3, &mut Vec::new());
 
         match &state.waiting_for {
             WaitingFor::CastOffer {
@@ -288,65 +403,56 @@ mod tests {
         }
     }
 
-    /// CR 702.60a: no same-named card revealed — all go to the bottom, no offer.
-    /// The reveal is still published (CR 701.20a) even though nothing is cast.
+    /// CR 702.60a + CR 608.2d: with no same-named card and 2+ revealed cards,
+    /// the reveal is published and the controller is prompted for the bottom
+    /// order (`WaitingFor::RippleBottomOrder`).
     #[test]
-    fn no_match_bottoms_revealed_cards() {
+    fn no_match_opens_bottom_order_prompt() {
         let (mut state, source_id) = setup("Surging Might");
         let a = add_library_card(&mut state, "Forest");
         let b = add_library_card(&mut state, "Bear");
         state.players[0].library = im::vector![a, b];
 
-        let ability =
-            ResolvedAbility::new(Effect::Ripple { count: 2 }, vec![], source_id, PlayerId(0));
         let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
+        resolve_and_accept(&mut state, source_id, 2, &mut events);
 
-        assert!(
-            !matches!(
-                state.waiting_for,
-                WaitingFor::CastOffer {
-                    kind: CastOfferKind::Ripple { .. },
-                    ..
-                }
-            ),
-            "no same-named card should produce no offer"
-        );
-        // Both revealed cards returned to the library (bottom).
-        assert_eq!(state.players[0].library.len(), 2);
+        match &state.waiting_for {
+            WaitingFor::RippleBottomOrder {
+                player,
+                cards,
+                final_cast,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(cards, &vec![a, b]);
+                assert!(final_cast.is_none());
+            }
+            other => panic!("expected RippleBottomOrder, got {other:?}"),
+        }
+        // CR 701.20b: still in the library, and publicly revealed.
         for id in [a, b] {
             assert_eq!(state.objects.get(&id).map(|o| o.zone), Some(Zone::Library));
+            assert!(state.revealed_cards.contains(&id));
         }
-        // CR 701.20a: the reveal fires even with no hit — drives the log + client.
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![a, b]
         )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::EffectResolved {
-                kind: EffectKind::Ripple,
-                ..
-            }
-        )));
     }
 
-    /// CR 702.60a: empty library reveals nothing and offers nothing.
+    /// CR 702.60a: an empty library has nothing to reveal — `resolve` opens no
+    /// prompt and completes.
     #[test]
-    fn empty_library_no_offer() {
+    fn empty_library_no_prompt() {
         let (mut state, source_id) = setup("Surging Aether");
         state.players[0].library.clear();
+        let before = state.waiting_for.clone();
 
         let ability =
             ResolvedAbility::new(Effect::Ripple { count: 1 }, vec![], source_id, PlayerId(0));
         resolve(&mut state, &ability, &mut Vec::new()).unwrap();
 
-        assert!(!matches!(
-            state.waiting_for,
-            WaitingFor::CastOffer {
-                kind: CastOfferKind::Ripple { .. },
-                ..
-            }
-        ));
+        assert_eq!(state.waiting_for, before);
+        assert!(state.revealed_cards.is_empty());
     }
 }

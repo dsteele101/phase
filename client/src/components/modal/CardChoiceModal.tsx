@@ -57,6 +57,7 @@ import {
   CoinFlipKeepModal,
   DigModal,
   RevealModal,
+  RippleBottomOrderModal,
   ScryModal,
   ArrangePlanarDeckTopModal,
   SurveilModal,
@@ -133,6 +134,14 @@ export function CardChoiceModal() {
     case "ArrangePlanarDeckTopChoice":
       if (!canActForWaitingState) return null;
       return <ArrangePlanarDeckTopModal data={waitingFor.data} />;
+    case "RippleBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RippleBottomOrderModal
+          key={waitingFor.data.cards.join("-")}
+          data={waitingFor.data}
+        />
+      );
     case "CoinFlipKeepChoice":
       if (!canActForWaitingState) return null;
       return <CoinFlipKeepModal data={waitingFor.data} />;
