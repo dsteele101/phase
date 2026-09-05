@@ -114,7 +114,7 @@ export function BoosterPackModal({
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <div className="flex max-h-[62vh] flex-wrap justify-center gap-2 overflow-y-auto p-2">
-        {entries.map((entry, index) => {
+        {[...entries].reverse().map((entry, index) => {
           const isSelected = selected.has(entry.packSlot);
           return (
             <motion.button
