@@ -2390,7 +2390,15 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
-    "fromSideboard": "From sideboard"
+    "fromSideboard": "From sideboard",
+    "fromBoosterPack": "From {{setCode}} booster pack"
+  },
+  "boosterPack": {
+    "title": "{{setCode}} Booster Pack",
+    "subtitleExact_one": "Choose {{count}} card to keep — the rest are removed from the game",
+    "subtitleExact_other": "Choose {{count}} cards to keep — the rest are removed from the game",
+    "subtitleUpTo_one": "Choose up to {{count}} card to keep — the rest are removed from the game",
+    "subtitleUpTo_other": "Choose up to {{count}} cards to keep — the rest are removed from the game"
   },
   "phaseName": {
     "Untap": "Untap",

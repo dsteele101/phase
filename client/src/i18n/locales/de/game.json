@@ -2332,7 +2332,15 @@
   },
   "outsideGame": {
     "fromExile": "Aus dem Exil",
-    "fromSideboard": "Aus dem Sideboard"
+    "fromSideboard": "Aus dem Sideboard",
+    "fromBoosterPack": "Aus einem {{setCode}}-Booster"
+  },
+  "boosterPack": {
+    "title": "{{setCode}}-Booster",
+    "subtitleExact_one": "Wähle {{count}} Karte zum Behalten – der Rest wird aus dem Spiel entfernt",
+    "subtitleExact_other": "Wähle {{count}} Karten zum Behalten – der Rest wird aus dem Spiel entfernt",
+    "subtitleUpTo_one": "Wähle bis zu {{count}} Karte zum Behalten – der Rest wird aus dem Spiel entfernt",
+    "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Behalten – der Rest wird aus dem Spiel entfernt"
   },
   "phaseName": {
     "Untap": "Enttappen",

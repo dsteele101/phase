@@ -2354,6 +2354,7 @@ impl ReflexiveGateParent {
             | Effect::FlipPermanent { .. }
             | Effect::SearchLibrary { .. }
             | Effect::SearchOutsideGame { .. }
+            | Effect::OpenBoosterPack { .. }
             | Effect::RevealHand { .. }
             | Effect::RevealFromHand { .. }
             | Effect::Reveal { .. }
@@ -10312,6 +10313,7 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::RollDie { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. }
         | Effect::SearchOutsideGame { count: amount, .. }
+        | Effect::OpenBoosterPack { count: amount, .. }
         | Effect::SetLifeTotal { amount, .. }
         | Effect::SkipNextStep { count: amount, .. }
         | Effect::SkipNextTurn { count: amount, .. }

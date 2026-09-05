@@ -2332,7 +2332,15 @@
   },
   "outsideGame": {
     "fromExile": "Dall'esilio",
-    "fromSideboard": "Dalla sideboard"
+    "fromSideboard": "Dalla sideboard",
+    "fromBoosterPack": "Da una busta {{setCode}}"
+  },
+  "boosterPack": {
+    "title": "Busta {{setCode}}",
+    "subtitleExact_one": "Scegli {{count}} carta da tenere; il resto è rimosso dalla partita",
+    "subtitleExact_other": "Scegli {{count}} carte da tenere; il resto è rimosso dalla partita",
+    "subtitleUpTo_one": "Scegli fino a {{count}} carta da tenere; il resto è rimosso dalla partita",
+    "subtitleUpTo_other": "Scegli fino a {{count}} carte da tenere; il resto è rimosso dalla partita"
   },
   "phaseName": {
     "Untap": "STAP",

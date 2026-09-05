@@ -78,6 +78,7 @@ mod bolas_citadel_regression;
 mod bombur_gentle_dreamer_conditional_untap;
 mod boneyard_parley_pile_separation;
 mod boon_reflection_gain_life_drain;
+mod booster_tutor_open_pack;
 mod borg_queen_assimilate;
 mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;

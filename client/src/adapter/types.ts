@@ -508,7 +508,11 @@ export interface DeckPoolEntry {
  */
 export type OutsideGameChoiceSource =
   | { type: "Sideboard"; data: { sideboard_index: number; card: CardFacePartial } }
-  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } }
+  | {
+      type: "BoosterPack";
+      data: { pack_slot: number; set_code: string; card: CardFacePartial };
+    };
 
 export interface OutsideGameChoiceEntry {
   source: OutsideGameChoiceSource;
@@ -522,7 +526,8 @@ export interface OutsideGameChoiceEntry {
  */
 export type OutsideGameSelection =
   | { type: "Sideboard"; data: { sideboard_index: number } }
-  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } }
+  | { type: "BoosterPack"; data: { pack_slot: number } };
 
 export interface OutsideGameCardUse {
   player: PlayerId;
@@ -1622,6 +1627,12 @@ export interface LibrarySearchCardView {
 /** Partial typing of engine CardFace — only fields the frontend currently reads. */
 export interface CardFacePartial {
   name: string;
+  /**
+   * Scryfall oracle id, when the engine recorded one for the face. Lets choice
+   * modals resolve card art for a face that has no in-game `GameObject` yet
+   * (wishboard entries, booster-pack cards).
+   */
+  scryfall_oracle_id?: string;
 }
 
 export interface CompanionInfo {

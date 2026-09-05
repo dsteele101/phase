@@ -2332,7 +2332,15 @@
   },
   "outsideGame": {
     "fromExile": "Z wygnania",
-    "fromSideboard": "Z zaplecza"
+    "fromSideboard": "Z zaplecza",
+    "fromBoosterPack": "Z boostera {{setCode}}"
+  },
+  "boosterPack": {
+    "title": "Booster {{setCode}}",
+    "subtitleExact_one": "Wybierz {{count}} kartę do zatrzymania – reszta zostaje usunięta z gry",
+    "subtitleExact_other": "Wybierz {{count}} kart do zatrzymania – reszta zostaje usunięta z gry",
+    "subtitleUpTo_one": "Wybierz do {{count}} karty do zatrzymania – reszta zostaje usunięta z gry",
+    "subtitleUpTo_other": "Wybierz do {{count}} kart do zatrzymania – reszta zostaje usunięta z gry"
   },
   "phaseName": {
     "Untap": "Odwracanie",

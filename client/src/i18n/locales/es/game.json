@@ -2332,7 +2332,15 @@
   },
   "outsideGame": {
     "fromExile": "Desde el exilio",
-    "fromSideboard": "Desde el banquillo"
+    "fromSideboard": "Desde el banquillo",
+    "fromBoosterPack": "De un sobre de {{setCode}}"
+  },
+  "boosterPack": {
+    "title": "Sobre de {{setCode}}",
+    "subtitleExact_one": "Elige {{count}} carta para quedártela; el resto se retira de la partida",
+    "subtitleExact_other": "Elige {{count}} cartas para quedártelas; el resto se retira de la partida",
+    "subtitleUpTo_one": "Elige hasta {{count}} carta para quedártela; el resto se retira de la partida",
+    "subtitleUpTo_other": "Elige hasta {{count}} cartas para quedártelas; el resto se retira de la partida"
   },
   "phaseName": {
     "Untap": "Enderezar",

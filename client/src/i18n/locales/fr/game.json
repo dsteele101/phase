@@ -2332,7 +2332,15 @@
   },
   "outsideGame": {
     "fromExile": "Depuis l'exil",
-    "fromSideboard": "Depuis la réserve"
+    "fromSideboard": "Depuis la réserve",
+    "fromBoosterPack": "D'un booster {{setCode}}"
+  },
+  "boosterPack": {
+    "title": "Booster {{setCode}}",
+    "subtitleExact_one": "Choisissez {{count}} carte à garder ; le reste est retiré de la partie",
+    "subtitleExact_other": "Choisissez {{count}} cartes à garder ; le reste est retiré de la partie",
+    "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte à garder ; le reste est retiré de la partie",
+    "subtitleUpTo_other": "Choisissez jusqu'à {{count}} cartes à garder ; le reste est retiré de la partie"
   },
   "phaseName": {
     "Untap": "Dégagement",

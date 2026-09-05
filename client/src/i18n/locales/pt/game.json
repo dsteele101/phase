@@ -2332,7 +2332,15 @@
   },
   "outsideGame": {
     "fromExile": "Do exílio",
-    "fromSideboard": "Do sideboard"
+    "fromSideboard": "Do sideboard",
+    "fromBoosterPack": "De um booster de {{setCode}}"
+  },
+  "boosterPack": {
+    "title": "Booster de {{setCode}}",
+    "subtitleExact_one": "Escolha {{count}} carta para ficar; o resto é removido do jogo",
+    "subtitleExact_other": "Escolha {{count}} cartas para ficar; o resto é removido do jogo",
+    "subtitleUpTo_one": "Escolha até {{count}} carta para ficar; o resto é removido do jogo",
+    "subtitleUpTo_other": "Escolha até {{count}} cartas para ficar; o resto é removido do jogo"
   },
   "phaseName": {
     "Untap": "Desvirar",

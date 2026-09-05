@@ -7618,6 +7618,8 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
+        // CR 400.11b: carries no `Duration` to demote.
+        | Effect::OpenBoosterPack { .. }
         | Effect::RevealHand { .. }
         | Effect::Reveal { .. }
         | Effect::RevealChosenNumbers { .. }

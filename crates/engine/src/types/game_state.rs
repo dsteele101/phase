@@ -8353,6 +8353,23 @@ pub enum OutsideGameChoiceSource {
     },
     /// CR 406.3: A face-up card the player owns in the exile zone.
     FaceUpExile { object_id: ObjectId },
+    /// CR 400.11 + CR 400.11b: A card in a booster pack `Effect::OpenBoosterPack`
+    /// just opened. The pack's cards are outside the game and in no zone, so —
+    /// like `Sideboard` — the entry carries the full `CardFace` the taken card
+    /// is built from, plus the set the pack came from for display. `pack_slot`
+    /// is the card's position in the opened pack and its only stable identity.
+    BoosterPack {
+        pack_slot: usize,
+        set_code: String,
+        /// Boxed, unlike `Sideboard`'s inline face: `WaitingFor` is stored
+        /// inline in `GameState`, which `phase-server` moves BY VALUE through
+        /// the action + AI path, so this enum's largest variant is multiplied by
+        /// every live `GameState` on a frame chain (see `types/game_state_size.rs`
+        /// and the `game_state_stack_budget` regression). `Sideboard` already
+        /// sets that ceiling; adding a set code beside a second inline face
+        /// would raise it.
+        card: Box<crate::types::card::CardFace>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8367,6 +8384,47 @@ pub struct OutsideGameChoiceEntry {
 
 fn default_one_u32() -> u32 {
     1
+}
+
+/// CR 400.11: the sealed booster products a game can open packs from.
+///
+/// A "shelf" rather than the whole printed corpus: hydrating every set's faces
+/// would clone the entire card database into game state. Instead
+/// `game::boosters::build_shelf` stocks a small, deterministic sample of sets,
+/// and each `Effect::OpenBoosterPack` resolution opens a freshly collated pack
+/// from one of them — so the number of packs a game can open is unbounded while
+/// the resident cost stays proportional to the shelf, not to the corpus.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoosterShelf {
+    /// Products in deterministic order. Empty when no card in the game opens
+    /// booster packs, or when the loaded card database carries no set that can
+    /// fill a pack.
+    pub products: Vec<BoosterProduct>,
+}
+
+impl BoosterShelf {
+    pub fn is_empty(&self) -> bool {
+        self.products.is_empty()
+    }
+}
+
+/// One set on the [`BoosterShelf`], with its cards bucketed by the pack slot
+/// they can fill. Buckets hold full `CardFace`s because a card taken out of the
+/// pack becomes a real card in the game (CR 400.11b) and there is no card
+/// database at resolution time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoosterProduct {
+    /// MTGJSON set code, shown to the player as the pack's identity.
+    pub set_code: String,
+    /// Cards printed at common in this set (the ten-card commons run).
+    pub commons: Vec<CardFace>,
+    /// Cards printed at uncommon in this set (three-card run).
+    pub uncommons: Vec<CardFace>,
+    /// Cards printed at rare in this set (the rare slot).
+    pub rares: Vec<CardFace>,
+    /// Cards printed at mythic rare in this set. The rare slot upgrades to a
+    /// mythic at the printed rate when this bucket is non-empty.
+    pub mythics: Vec<CardFace>,
 }
 
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
@@ -18663,6 +18721,16 @@ declare_game_state! {
     #[serde(skip)]
     pub momir_pool_faces: Arc<HashMap<String, CardFace>>,
 
+    /// CR 400.11: the sealed booster products this game can open packs from.
+    /// Populated only when some card in the game carries
+    /// `Effect::OpenBoosterPack` (see `rehydrate_card_db_metadata`); empty
+    /// otherwise, so an ordinary game pays nothing for it. Skipped in
+    /// serialization and rebuilt deterministically per peer from the loaded card
+    /// DB — the pack a resolution actually opens travels in `waiting_for`, so no
+    /// peer needs the shelf to see it.
+    #[serde(skip)]
+    pub booster_shelf: Arc<BoosterShelf>,
+
     /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
     /// Skipped in serialization — runtime context only.
     #[serde(skip)]
@@ -23434,6 +23502,7 @@ impl GameState {
             meld_pair_registry: Arc::new(HashMap::new()),
             momir_pool: BTreeMap::new(),
             momir_pool_faces: Arc::new(HashMap::new()),
+            booster_shelf: Arc::new(BoosterShelf::default()),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
@@ -25452,6 +25521,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         meld_pair_registry: _,
         momir_pool: _,
         momir_pool_faces: _,
+        booster_shelf: _,
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
