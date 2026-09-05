@@ -8446,6 +8446,11 @@ fn parse_there_are_conditions_with_quantity(
         (None, Some(_)) => Comparator::GE,
         (None, None) => Comparator::EQ,
     };
+    match parse_filtered_zone_card_count(rest) {
+        Ok((rest, qty)) => return Ok((rest, make_quantity_comparison(qty, comparator, n))),
+        Err(nom::Err::Error(_)) => {}
+        Err(error @ (nom::Err::Failure(_) | nom::Err::Incomplete(_))) => return Err(error),
+    }
     if let Ok((rest_after_type, type_text)) =
         take_until::<_, _, OracleError<'_>>(" cards total in ").parse(rest)
     {
@@ -8474,6 +8479,101 @@ fn parse_there_are_conditions_with_quantity(
             n,
         ),
     ))
+}
+
+/// CR 109.2a + CR 400.1: A card description with a named zone counts matching
+/// cards in that zone, so this preserves the parsed filter rather than flattening
+/// it into a lexical noun or a card-type list.
+///
+/// The type phrase and locative zone are deliberately parsed by their separate
+/// authorities. `parse_type_phrase` owns the complete noun phrase, while
+/// `parse_scoped_zone_count_ref` owns the player/zone scope after `in `.
+fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest_after_noun, noun) = take_until(" in ").parse(input)?;
+    let (after_cards, _) = terminated(take_until("cards"), tag("cards")).parse(noun)?;
+    if !after_cards.is_empty() {
+        return Err(oracle_err(input));
+    }
+    let (filter, remainder) = parse_type_phrase(noun);
+    if !remainder.trim().is_empty() || !is_admissible_zone_card_count_filter(&filter) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" in ").parse(rest_after_noun)?;
+    let (rest, (zone, scope)) = cut(preceded(
+        peek(alt((tag("your "), tag("all graveyards")))),
+        parse_scoped_zone_count_ref,
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types: Vec::new(),
+            filter: Some(filter),
+            scope,
+        },
+    ))
+}
+
+/// Limits the filtered zone-count bridge to card descriptions whose semantics
+/// remain valid in every counted zone. All other filter forms deliberately fall
+/// through to the legacy quantity grammar instead of being partially accepted.
+fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) => {
+            controller.is_none()
+                && !type_filters.is_empty()
+                && !type_filters.iter().any(type_filter_contains_any)
+                && !properties.is_empty()
+                && properties
+                    .iter()
+                    .all(is_admissible_zone_card_count_property)
+        }
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(is_admissible_zone_card_count_filter)
+        }
+        _ => false,
+    }
+}
+
+/// `TypeFilter::Any` would make this bridge a broad unfiltered count. Descend
+/// through its recursive variants so nested `Any` filters cannot bypass that
+/// boundary.
+fn type_filter_contains_any(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Any => true,
+        TypeFilter::Non(filter) => type_filter_contains_any(filter),
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_contains_any),
+        TypeFilter::Creature
+        | TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Subtype(_) => false,
+    }
+}
+
+/// Only static card-description properties can be evaluated meaningfully in a
+/// named card zone. The default is intentionally reject-by-default so a future
+/// property cannot widen this parser without an explicit admissibility decision.
+fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
+    matches!(
+        property,
+        FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::NotSupertype { .. }
+    )
 }
 
 /// Self-referential source alternatives shared by the "exiled with [source]"
@@ -14612,25 +14712,276 @@ mod tests {
             parse_inner_condition("there are fewer than six creature cards in your graveyard")
                 .unwrap();
         assert_eq!(rest, "");
-        match c {
+        assert_eq!(
+            c,
             StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ZoneCardCount {
-                                zone: ZoneRef::Graveyard,
-                                card_types,
-                                filter: None,
-                                scope: CountScope::Controller,
-                            },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
                     },
+                },
                 comparator: Comparator::LT,
                 rhs: QuantityExpr::Fixed { value: 6 },
-            } => {
-                assert_eq!(card_types, vec![TypeFilter::Creature]);
             }
-            other => panic!("expected ZoneCardCount Creature LT 6, got {other:?}"),
+        );
+    }
+
+    #[test]
+    fn filtered_zone_card_counts_preserve_filter_scope_and_comparator_axes() {
+        let typed = |type_filters, properties| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: None,
+                properties,
+            })
+        };
+        let cases = [
+            (
+                "there are four or more historic cards in your graveyard",
+                Comparator::GE,
+                4,
+                typed(vec![TypeFilter::Card], vec![FilterProp::Historic]),
+                CountScope::Controller,
+            ),
+            (
+                "there are two nonhistoric cards in all graveyards",
+                Comparator::EQ,
+                2,
+                typed(vec![TypeFilter::Card], vec![FilterProp::NotHistoric]),
+                CountScope::All,
+            ),
+            (
+                "there are three legendary creature cards in your graveyard",
+                Comparator::EQ,
+                3,
+                typed(
+                    vec![TypeFilter::Creature],
+                    vec![FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    }],
+                ),
+                CountScope::Controller,
+            ),
+            (
+                "there are two nonbasic land cards in all graveyards",
+                Comparator::EQ,
+                2,
+                typed(
+                    vec![TypeFilter::Land],
+                    vec![FilterProp::NotSupertype {
+                        value: Supertype::Basic,
+                    }],
+                ),
+                CountScope::All,
+            ),
+            (
+                "there are three or more legendary creature or nonbasic land cards in all graveyards",
+                Comparator::GE,
+                3,
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(
+                            vec![TypeFilter::Creature],
+                            vec![FilterProp::HasSupertype {
+                                value: Supertype::Legendary,
+                            }],
+                        ),
+                        typed(
+                            vec![TypeFilter::Land],
+                            vec![
+                                FilterProp::NotSupertype {
+                                    value: Supertype::Basic,
+                                },
+                                FilterProp::HasSupertype {
+                                    value: Supertype::Legendary,
+                                },
+                            ],
+                        ),
+                    ],
+                },
+                CountScope::All,
+            ),
+        ];
+
+        for (text, comparator, threshold, filter, scope) in cases {
+            let (rest, condition) = parse_inner_condition(text)
+                .unwrap_or_else(|error| panic!("must parse {text:?}: {error:?}"));
+            assert_eq!(rest, "", "unconsumed remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            card_types: Vec::new(),
+                            filter: Some(filter),
+                            scope,
+                        },
+                    },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value: threshold },
+                },
+                "exact AST for {text:?}",
+            );
         }
+    }
+
+    #[test]
+    fn filtered_zone_card_count_reach_guards_preserve_legacy_and_boundaries() {
+        let (rest, cards_total) =
+            parse_inner_condition("there are three creature cards total in your graveyard")
+                .expect("cards-total legacy path must remain reachable");
+        assert_eq!(rest, "");
+        assert_eq!(
+            cards_total,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        let (rest, instant_or_sorcery) = parse_inner_condition(
+            "there are three or more instant or sorcery cards in your graveyard",
+        )
+        .expect("property-free type disjunction must retain its legacy count path");
+        assert_eq!(rest, "");
+        assert_eq!(
+            instant_or_sorcery,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }
+        );
+
+        let (rest, card_types_among) = parse_inner_condition(
+            "there are four or more card types among cards in your graveyard",
+        )
+        .expect("card-types-among legacy path must remain reachable");
+        assert_eq!(rest, "");
+        assert_eq!(
+            card_types_among,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+
+        let (rest, bare_cards) = parse_inner_condition("there are four cards in your graveyard")
+            .expect("bare cards must retain their canonical quantity path");
+        assert_eq!(rest, "");
+        assert_eq!(
+            bare_cards,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+
+        let (rest, battlefield_count) =
+            parse_inner_condition("there are seven or more lands on the battlefield")
+                .expect("battlefield count fallback must remain reachable");
+        assert_eq!(rest, "");
+        assert_eq!(
+            battlefield_count,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Land],
+                            controller: None,
+                            properties: vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                        }),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            }
+        );
+
+        let (_, plural_historic) =
+            parse_filtered_zone_card_count("historic cards in your graveyard")
+                .expect("positive reach guard for rejected filtered-count forms");
+        assert!(matches!(plural_historic, QuantityRef::ZoneCardCount { .. }));
+        assert!(matches!(
+            parse_filtered_zone_card_count("historic card in your graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+        for text in [
+            "creature cards in your graveyard",
+            "Lesson cards in your graveyard",
+            "instant or sorcery cards in your graveyard",
+        ] {
+            assert!(
+                matches!(
+                    parse_filtered_zone_card_count(text),
+                    Err(nom::Err::Error(_))
+                ),
+                "property-free filter must fall through to the legacy count parser for {text:?}"
+            );
+        }
+        assert!(matches!(
+            parse_filtered_zone_card_count("artifact cards you control in your graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+        assert!(matches!(
+            parse_filtered_zone_card_count("tapped creature cards in your graveyard"),
+            Err(nom::Err::Error(_))
+        ));
+
+        for text in [
+            "there are five historic cards in an opponent's graveyard",
+            "there are five historic cards in each player's graveyard",
+            "there are five historic cards in graveyard",
+        ] {
+            assert!(
+                matches!(parse_inner_condition(text), Err(nom::Err::Failure(_))),
+                "unsupported filtered-count scope must commit as Failure for {text:?}"
+            );
+        }
+
+        let (rest, _) =
+            parse_inner_condition("there are four or more historic cards in your graveyard total")
+                .expect("unconsumed tail must remain visible to the caller");
+        assert_eq!(rest, " total");
+        let (rest, _) = parse_inner_condition(
+            "there are four or more historic cards in your graveyard, draw a card",
+        )
+        .expect("comma boundary must remain visible to the caller");
+        assert_eq!(rest, ", draw a card");
     }
 
     /// CR 107.1 + CR 611.3a: "there are fewer than N cards ..." with the plain
@@ -14666,17 +15017,21 @@ mod tests {
             parse_inner_condition("there are more than two creature cards in your graveyard")
                 .unwrap();
         assert_eq!(rest, "");
-        match c {
+        assert_eq!(
+            c,
             StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::ZoneCardCount { .. },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature],
+                        filter: None,
+                        scope: CountScope::Controller,
                     },
+                },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Fixed { value: 2 },
-            } => {}
-            other => panic!("expected ZoneCardCount GT 2, got {other:?}"),
-        }
+            }
+        );
     }
 
     /// CR 107.1: suffix regression — the "or more" (GE) suffix axis still parses
@@ -14848,25 +15203,21 @@ mod tests {
             parse_inner_condition("there are three or more Lesson cards in your graveyard")
                 .unwrap();
         assert_eq!(rest, "");
-        match c {
+        assert_eq!(
+            c,
             StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty:
-                            QuantityRef::ZoneCardCount {
-                                zone: crate::types::ability::ZoneRef::Graveyard,
-                                card_types,
-                                scope: crate::types::ability::CountScope::Controller,
-                                filter: None,
-                            },
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
+                        filter: None,
+                        scope: CountScope::Controller,
                     },
+                },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
-            } => {
-                assert_eq!(card_types, vec![TypeFilter::Subtype("Lesson".to_string())]);
             }
-            other => panic!("expected Lesson graveyard count GE 3, got {other:?}"),
-        }
+        );
     }
 
     #[test]
