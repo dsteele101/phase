@@ -31423,6 +31423,87 @@ fn heroic_defiance_pt_grant_gated_on_most_common_color() {
     );
 }
 
+/// CR 105.2 + CR 611.3a (Invasion Djinn cycle — Sulam Djinn): "This creature
+/// gets -2/-2 as long as [color] is the most common color among all permanents
+/// or is tied for most common" must parse to a `StaticCondition::And` of two
+/// `QuantityComparison`s: (1) the largest per-color count across all
+/// permanents (`QuantityRef::ObjectCountBySharedQuality` grouped by
+/// `SharedQuality::Color`, `AggregateFunction::Max`) is at least 1 — a
+/// most-common-color bucket must actually exist — and (2) the named color's
+/// battlefield-wide permanent count (`QuantityRef::ObjectCount`) is at least
+/// that max. `Comparator::GE` already admits ties, matching the printed "or
+/// is tied for most common" tail. The first conjunct is required so an
+/// all-colorless battlefield (no bucket reaches size 1) can never vacuously
+/// satisfy `0 >= 0`.
+#[test]
+fn sulam_djinn_pt_penalty_gated_on_green_being_most_common_color() {
+    let defs = parse_static_line_multi(
+        "This creature gets -2/-2 as long as green is the most common color \
+         among all permanents or is tied for most common.",
+    );
+    let penalty = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Continuous)
+        .expect("a continuous P/T penalty");
+    assert!(
+        penalty
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: -2 }),
+        "penalty must subtract 2 power, got {:?}",
+        penalty.modifications
+    );
+    assert!(
+        penalty
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: -2 }),
+        "penalty must subtract 2 toughness, got {:?}",
+        penalty.modifications
+    );
+
+    let all_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: Vec::new(),
+    });
+    let green_permanents = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Permanent],
+        controller: None,
+        properties: vec![FilterProp::HasColor {
+            color: ManaColor::Green,
+        }],
+    });
+    let max_color_bucket = || QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCountBySharedQuality {
+            filter: all_permanents.clone(),
+            quality: SharedQuality::Color,
+            aggregate: AggregateFunction::Max,
+        },
+    };
+    assert_eq!(
+        penalty.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: max_color_bucket(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: green_permanents,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: max_color_bucket(),
+                },
+            ],
+        }),
+        "the -2/-2 must be gated on (max per-color count >= 1) AND (green's count >= the max \
+         per-color count), so an all-colorless battlefield can never vacuously satisfy it"
+    );
+}
+
 /// CR 509.1b (#4590 review): a granted ability's OWN inner "unless" must stay
 /// inside the quoted ability — the attached-subject grant parser must not lift it
 /// onto the static grant as a condition. Coral Net grants a triggered ability

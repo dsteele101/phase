@@ -223,6 +223,7 @@ mod disjunctive_state_change_head_coverage_honesty;
 mod disorder_in_the_court_5955;
 mod divine_gambit_metamorphose_prompt_8257;
 mod divine_visitation_token_substitution;
+mod djinn_most_common_color_static;
 mod doom_s_time_platform_exile_with_time_counters;
 mod doomsday;
 mod doran_attack_block_pump;
