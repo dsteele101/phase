@@ -114,6 +114,9 @@ export function BoosterPackModal({
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <div className="flex max-h-[62vh] flex-wrap justify-center gap-2 overflow-y-auto p-2">
+        {/* `collate_pack` deals the rare first so it falls inside the AI's
+            `SELECTION_POOL_CAP` window; presentation reverses here so the
+            pack reads commons-first with the rare last. */}
         {[...entries].reverse().map((entry, index) => {
           const isSelected = selected.has(entry.packSlot);
           return (
