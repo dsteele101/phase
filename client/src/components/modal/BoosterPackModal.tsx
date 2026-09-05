@@ -40,7 +40,7 @@ export function boosterPackEntries(
       packSlot: choice.source.data.pack_slot,
       setCode: choice.source.data.set_code,
       name: choice.source.data.card.name,
-      oracleId: choice.source.data.card.scryfall_oracle_id,
+      oracleId: choice.source.data.card.scryfall_oracle_id ?? undefined,
     });
   }
   return entries;

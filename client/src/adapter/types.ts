@@ -1632,7 +1632,7 @@ export interface CardFacePartial {
    * modals resolve card art for a face that has no in-game `GameObject` yet
    * (wishboard entries, booster-pack cards).
    */
-  scryfall_oracle_id?: string;
+  scryfall_oracle_id?: string | null;
 }
 
 export interface CompanionInfo {

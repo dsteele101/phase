@@ -170,9 +170,9 @@ pub fn build_shelf(db: &CardDatabase, seed: u64) -> BoosterShelf {
                     Rarity::Uncommon => buckets.uncommons.push(face),
                     Rarity::Rare => buckets.rares.push(face),
                     Rarity::Mythic => buckets.mythics.push(face),
-                    // CR 400.11: "special" and "bonus" printings (Timeshifted
-                    // sheets, box toppers, The List slots) are not part of a
-                    // draft booster's rarity skeleton, so they fill no slot.
+                    // Special/bonus printings (Timeshifted sheets, box toppers,
+                    // The List slots) are a print-run convention, not a CR
+                    // rarity skeleton, so they fill no draft-booster slot.
                     Rarity::Special | Rarity::Bonus => {}
                 }
             }
@@ -211,15 +211,19 @@ pub fn build_shelf(db: &CardDatabase, seed: u64) -> BoosterShelf {
 
 /// Collate one booster pack from `product`, drawing from `rng`.
 ///
-/// Returns the pack's cards in slot order (commons, then uncommons, then the
-/// rare). No card appears twice: a pack is a stack of distinct physical cards,
-/// and the aggregated-rarity bucketing (see the module docs) can otherwise put
+/// Returns the pack in deal order (rare, then uncommons, then commons).
+///
+/// Deal-rare-first is load-bearing for two reasons: a card that is both this
+/// product's only rare and one of its commons fills the slot that has no
+/// substitute, and the AI candidate window (`SELECTION_POOL_CAP`) truncates
+/// from the front — reversing for a commons-first display layout would push
+/// the rare out of that window. Presentation order belongs in the modal.
+/// No card appears twice: a pack is a stack of distinct physical cards, and
+/// the aggregated-rarity bucketing (see the module docs) can otherwise put
 /// the same card in two buckets of the same product.
 pub fn collate_pack(product: &BoosterProduct, rng: &mut impl Rng) -> Vec<CardFace> {
     let mut pack: Vec<CardFace> = Vec::with_capacity(COMMON_SLOTS + UNCOMMON_SLOTS + 1);
 
-    // The rare slot is dealt first so a card that is both this product's only
-    // rare and one of its commons fills the slot that has no substitute.
     let rare_bucket = if !product.mythics.is_empty() && rng.random_ratio(1, MYTHIC_IN) {
         &product.mythics
     } else {
@@ -228,10 +232,6 @@ pub fn collate_pack(product: &BoosterProduct, rng: &mut impl Rng) -> Vec<CardFac
     deal_distinct(rare_bucket, 1, &mut pack, rng);
     deal_distinct(&product.uncommons, UNCOMMON_SLOTS, &mut pack, rng);
     deal_distinct(&product.commons, COMMON_SLOTS, &mut pack, rng);
-
-    // Slot order for display: the rare is dealt first but a pack reads
-    // commons-first, with the rare last.
-    pack.reverse();
     pack
 }
 
@@ -396,8 +396,10 @@ mod tests {
         assert_eq!(build_shelf(&db, 42), build_shelf(&db, 42));
     }
 
-    /// CR 400.11: a pack is a stack of DISTINCT physical cards, dealt to the
-    /// modern draft-booster skeleton.
+    /// A pack is a stack of distinct physical cards, dealt to the modern
+    /// draft-booster skeleton. The rare is first so the AI candidate window
+    /// includes it (`SELECTION_POOL_CAP` is 12; a reversed 14-card pack would
+    /// drop the rare).
     #[test]
     fn a_collated_pack_is_the_full_skeleton_with_no_repeats() {
         let db = db_with_one_fillable_set();
@@ -406,6 +408,7 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(11);
         let pack = collate_pack(product, &mut rng);
 
+        assert_eq!(pack[0].name, "Full Rare");
         assert_eq!(pack.len(), COMMON_SLOTS + UNCOMMON_SLOTS + 1);
         let distinct: std::collections::BTreeSet<&str> =
             pack.iter().map(|face| face.name.as_str()).collect();
