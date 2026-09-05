@@ -1530,6 +1530,12 @@ pub fn fallback_action(
                                 object_id: *object_id,
                             }
                         }
+                        // CR 400.11b: one pick per opened pack slot.
+                        OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => {
+                            OutsideGameSelection::BoosterPack {
+                                pack_slot: *pack_slot,
+                            }
+                        }
                     })
                 })
                 .take(*count)
@@ -4529,6 +4535,7 @@ fn softmax_select_index(
 
 #[cfg(test)]
 mod tests {
+    use engine::types::actions::ResolveAllScope;
     use std::path::Path;
 
     use super::*;
@@ -5748,7 +5755,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -5773,7 +5783,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -5811,7 +5824,10 @@ mod tests {
         engine::game::engine::apply(
             &mut state,
             P0,
-            GameAction::BeginResolveAll { max_resolutions: 5 },
+            GameAction::BeginResolveAll {
+                max_resolutions: 5,
+                scope: ResolveAllScope::Shared,
+            },
         )
         .expect("the priority holder may propose Resolve All");
 
@@ -12933,6 +12949,7 @@ mod tests {
                 up_to: false,
                 constraint: None,
                 source_id: source,
+                reciprocal_role: None,
             }
         });
         push("DiscardChoice", &|state| {
@@ -13396,6 +13413,7 @@ mod tests {
             up_to: true,
             constraint: None,
             source_id: source,
+            reciprocal_role: None,
         };
 
         assert_eq!(

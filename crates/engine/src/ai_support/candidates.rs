@@ -1484,6 +1484,12 @@ pub fn candidate_actions_broad_with_probe(
                             object_id: *object_id,
                         });
                     }
+                    // CR 400.11b: one physical card per opened pack slot.
+                    OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => {
+                        pool.push(OutsideGameSelection::BoosterPack {
+                            pack_slot: *pack_slot,
+                        });
+                    }
                 }
             }
             let sizes = if *up_to {
@@ -7440,6 +7446,7 @@ mod tests {
             up_to: true,
             constraint: None,
             source_id: ObjectId(100),
+            reciprocal_role: None,
         };
 
         let actions = candidate_actions_broad(&state);

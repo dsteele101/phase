@@ -57,6 +57,7 @@ import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { useSetCatalog } from "../../hooks/useSetSymbols.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 import { VisualPackManager } from "./visual-packs/VisualPackManager.tsx";
+import { OfflinePreparationSection } from "./OfflinePreparationSection.tsx";
 
 export type SettingsHighlight = "board-background";
 
@@ -807,6 +808,13 @@ export function PreferencesModal({
 
               {activeTab === "data" && (
         <>
+          {/* Not gated on the desktop shell. The service worker precaches the
+              app shell, engine WASM and card data for the browser too, so a
+              readiness checklist is meaningful there — and the browser is where
+              a player is most likely to be surprised by a broken offline
+              session. The native-engine row reports "not applicable" off
+              desktop, which is exactly what it is. */}
+          <OfflinePreparationSection nativeEngineEnabled={nativeEngineEnabled} />
           <VisualPackManager />
           <CloudSyncSection />
           <DataSection />
@@ -939,6 +947,7 @@ function CloudSyncSection() {
   const available = useCloudSyncStore((s) => s.available);
   const identity = useCloudSyncStore((s) => s.identity);
   const sessionResolved = useCloudSyncStore((s) => s.sessionResolved);
+  const paused = useCloudSyncStore((s) => s.paused);
   const status = useCloudSyncStore((s) => s.status);
   const error = useCloudSyncStore((s) => s.error);
   const lastSyncedAt = useCloudSyncStore((s) => s.lastSyncedAt);
@@ -953,9 +962,9 @@ function CloudSyncSection() {
   // who keep file backup as their data-portability path.
   if (!available) return null;
 
-  const syncing = status === "syncing";
+  const syncing = !paused && status === "syncing";
 
-  const statusLine =
+  const statusDetail =
     status === "error" ? (
       <span className="text-rose-400">
         {t("sync.statusError")}
@@ -971,6 +980,8 @@ function CloudSyncSection() {
       })
     );
 
+  const statusLine = paused ? t("sync.statusPaused") : statusDetail;
+
   return (
     <SettingsSection title={t("sync.title")}>
       <p className="text-xs text-slate-400">{t("sync.description")}</p>
@@ -979,27 +990,34 @@ function CloudSyncSection() {
       {!sessionResolved ? (
         // Session restore in flight — withhold the sign-in CTA so a signed-in
         // user doesn't see the prompt flash before identity adopts.
-        <p className="text-xs text-slate-500">{t("sync.statusSyncing")}</p>
+        <p className="text-xs text-slate-500">
+          {paused ? statusLine : t("sync.statusSyncing")}
+        </p>
       ) : !identity ? (
-        <div className="flex flex-wrap gap-2">
-          <button
-            className={SYNC_BUTTON_CLASS}
-            onClick={() => void signIn("discord")}
-          >
-            <span className="flex items-center gap-2">
-              <DiscordIcon className="h-4 w-4" />
-              {t("sync.signInWith", { provider: t("sync.providerDiscord") })}
-            </span>
-          </button>
-          <button
-            className={SYNC_BUTTON_CLASS}
-            onClick={() => void signIn("google")}
-          >
-            <span className="flex items-center gap-2">
-              <GoogleIcon className="h-4 w-4" />
-              {t("sync.signInWith", { provider: t("sync.providerGoogle") })}
-            </span>
-          </button>
+        <div className="flex flex-col gap-3">
+          {paused && <p className="text-xs text-slate-500">{statusLine}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={SYNC_BUTTON_CLASS}
+              disabled={paused}
+              onClick={() => void signIn("discord")}
+            >
+              <span className="flex items-center gap-2">
+                <DiscordIcon className="h-4 w-4" />
+                {t("sync.signInWith", { provider: t("sync.providerDiscord") })}
+              </span>
+            </button>
+            <button
+              className={SYNC_BUTTON_CLASS}
+              disabled={paused}
+              onClick={() => void signIn("google")}
+            >
+              <span className="flex items-center gap-2">
+                <GoogleIcon className="h-4 w-4" />
+                {t("sync.signInWith", { provider: t("sync.providerGoogle") })}
+              </span>
+            </button>
+          </div>
         </div>
       ) : (
         <div className="flex flex-col gap-3">
@@ -1046,18 +1064,21 @@ function CloudSyncSection() {
               <div className="flex flex-wrap gap-2">
                 <button
                   className={SYNC_BUTTON_CLASS}
+                  disabled={paused}
                   onClick={() => void resolveConflict("cloud")}
                 >
                   {t("sync.keepCloud")}
                 </button>
                 <button
                   className={SYNC_BUTTON_CLASS}
+                  disabled={paused}
                   onClick={() => void resolveConflict("local")}
                 >
                   {t("sync.keepLocal")}
                 </button>
                 <button
                   className={SYNC_BUTTON_CLASS}
+                  disabled={paused}
                   onClick={() => void resolveConflict("merge")}
                 >
                   {t("sync.keepBothDecks")}
@@ -1068,7 +1089,7 @@ function CloudSyncSection() {
             <div className="flex flex-wrap items-center gap-2">
               <button
                 className={SYNC_BUTTON_CLASS}
-                disabled={syncing}
+                disabled={syncing || paused}
                 onClick={() => void syncNow()}
               >
                 <span className="flex items-center gap-2">
@@ -1078,6 +1099,7 @@ function CloudSyncSection() {
               </button>
               <button
                 className={SYNC_BUTTON_CLASS}
+                disabled={paused}
                 onClick={() => void signOut()}
               >
                 {t("sync.signOut")}
@@ -1085,7 +1107,10 @@ function CloudSyncSection() {
             </div>
           )}
 
-          <p className="text-xs text-slate-500">{statusLine}</p>
+          <div className="flex flex-col gap-1 text-xs text-slate-500">
+            <p>{statusLine}</p>
+            {paused && <p>{statusDetail}</p>}
+          </div>
         </div>
       )}
     </SettingsSection>
