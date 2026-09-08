@@ -265,7 +265,8 @@ fn effect_grants_ai_extra_turn(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ExtraTurn {
-            target: TargetFilter::Controller
+            target: TargetFilter::Controller,
+            count: _,
         }
     )
 }
@@ -5807,6 +5808,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::ExtraTurn {
                 target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
             },
         );
         if let Some(condition) = self_loss_condition {

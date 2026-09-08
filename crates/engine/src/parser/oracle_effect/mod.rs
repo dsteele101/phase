@@ -24477,7 +24477,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             *target = subject_filter;
         }
         // CR 500.7: "target player takes an extra turn" — inject subject target
-        Effect::ExtraTurn { target } if *target == TargetFilter::Controller => {
+        Effect::ExtraTurn { target, count: _ } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
         // CR 104.3e: "that player loses the game" / "target player
@@ -34015,6 +34015,33 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
     })
 }
 
+/// CR 705.2: Strip a trailing per-head quantifier when a preceding `FlipCoins`
+/// instruction already supplies the per-head iteration. The chain consolidator
+/// installs the stripped instruction as `FlipCoins::win_effect`, so retaining a
+/// second quantity here would apply it twice.
+fn strip_trailing_coin_heads_quantifier(text: &str) -> Option<&str> {
+    let lower = text.to_ascii_lowercase();
+    let (_, base) = all_consuming(terminated(
+        take_until(" for each "),
+        (
+            tag::<_, _, OracleError<'_>>(" for each "),
+            alt((tag("coins"), tag("coin"))),
+            space1,
+            tag("that"),
+            space1,
+            alt((tag("comes"), tag("come"), tag("came"))),
+            space1,
+            tag("up"),
+            space1,
+            tag("heads"),
+            opt(tag(".")),
+        ),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    Some(text[..base.len()].trim_end())
+}
+
 pub(crate) fn parse_effect_chain_ir(
     text: &str,
     kind: AbilityKind,
@@ -34293,6 +34320,17 @@ pub(crate) fn parse_effect_chain_ir(
         if normalized_text.is_empty() {
             continue;
         }
+        let previous_is_multi_coin_flip = builder
+            .clauses()
+            .iter()
+            .rev()
+            .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+            .is_some_and(|clause| matches!(clause.parsed.effect, Effect::FlipCoins { .. }));
+        let normalized_text = if previous_is_multi_coin_flip {
+            strip_trailing_coin_heads_quantifier(normalized_text).unwrap_or(normalized_text)
+        } else {
+            normalized_text
+        };
         let has_bare_recipient_counter_gate =
             crate::parser::oracle_nom::condition::is_leading_if_bare_recipient_counter_condition(
                 normalized_text,

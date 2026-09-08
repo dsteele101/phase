@@ -1576,4 +1576,5 @@ mod zhulodok_double_cascade;
 mod context_ref_slot_hygiene;
 mod exchange_control_of_a_spell;
 mod exploit_ceased_exploiter_lki;
+mod extra_turn_quantity;
 mod ripple_reveal_choice_interaction;

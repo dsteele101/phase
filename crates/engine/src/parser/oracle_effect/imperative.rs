@@ -68,6 +68,32 @@ use super::super::oracle_util::{
     split_around, starts_with_possessive, TextPair,
 };
 
+fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
+    all_consuming(terminated(
+        preceded(
+            (alt((tag("takes"), tag("take"))), space1),
+            terminated(
+                alt((
+                    value(QuantityExpr::Fixed { value: 1 }, tag("an extra turn")),
+                    map(
+                        (
+                            nom_primitives::parse_number,
+                            space1,
+                            alt((tag("extra turns"), tag("extra turn"))),
+                        ),
+                        |(value, _, _)| QuantityExpr::Fixed {
+                            value: value as i32,
+                        },
+                    ),
+                )),
+                (space1, tag("after this one")),
+            ),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(input)
+}
+
 /// CR 611.2 + CR 601.2f + CR 118.7: Parse the transient (this-turn)
 /// activated-ability cost-reduction effect — "activated abilities of <subject>
 /// cost {N} less to activate [this turn]" (The Dining Car's chaos ability).
@@ -11719,17 +11745,21 @@ pub(super) fn parse_imperative_family_ast(
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
-            if alt((
-                value((), tag::<_, _, OracleError<'_>>("take the initiative")),
-                value((), tag("takes the initiative")),
+            if all_consuming(terminated(
+                alt((
+                    value((), tag::<_, _, OracleError<'_>>("take the initiative")),
+                    value((), tag("takes the initiative")),
+                )),
+                opt(tag(".")),
             ))
-            .parse(lower)
+            .parse(lower.trim())
             .is_ok()
             {
                 Some(ImperativeFamilyAst::TakeTheInitiative)
-            } else if nom_primitives::scan_contains(lower, "extra turn") {
+            } else if let Some(count) = nom_parse_lower(lower.trim(), parse_extra_turn) {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
                     target: TargetFilter::Controller,
+                    count,
                 }))
             } else {
                 None
