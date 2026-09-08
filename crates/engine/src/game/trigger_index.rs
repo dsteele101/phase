@@ -494,6 +494,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // CR 732.2: a halted-resolution notification produces no trigger keys.
         GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
@@ -1382,6 +1383,28 @@ mod tests {
             &state,
         );
         assert!(event_keys.contains(&TriggerEventKey::PhaseIn));
+    }
+
+    #[test]
+    fn extra_turn_creation_is_trigger_inert() {
+        let state = GameState::new_two_player(42);
+        let creation_keys = keys_from_event(
+            &GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
+            },
+            &state,
+        );
+        assert!(creation_keys.is_empty());
+
+        let turn_started_keys = keys_from_event(
+            &GameEvent::TurnStarted {
+                player_id: PlayerId(0),
+                turn_number: 2,
+            },
+            &state,
+        );
+        assert!(turn_started_keys.contains(&TriggerEventKey::TurnStarted));
     }
 
     #[test]

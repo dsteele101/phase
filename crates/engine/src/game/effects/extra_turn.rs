@@ -32,12 +32,8 @@ pub fn resolve(
         }
     };
 
-    // CR 805.8: With shared team turns, an extra turn for a player is taken by
-    // that player's team; store the team's seat-order representative as anchor.
-    let player = crate::game::topology::normalize_shared_turn_recipient(state, player);
-
     // CR 500.7: Queue after the *specified* turn (current active player), LIFO.
-    crate::game::turns::enqueue_extra_turn(state, player, state.active_player);
+    crate::game::turns::enqueue_extra_turn(state, player, state.active_player, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ExtraTurn,
@@ -137,13 +133,27 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.extra_turns, vec![et(0, 0)]);
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::EffectResolved {
-                kind: EffectKind::ExtraTurn,
-                ..
-            }
-        )));
+        assert_eq!(
+            events,
+            vec![
+                GameEvent::ExtraTurnCreated {
+                    player_id: PlayerId(0),
+                    anchor: PlayerId(0),
+                },
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ExtraTurn,
+                    source_id: ObjectId(1),
+                    subject: None,
+                },
+            ]
+        );
+        let GameEvent::ExtraTurnCreated { player_id, anchor } = &events[0] else {
+            unreachable!();
+        };
+        assert_eq!(
+            (*player_id, *anchor),
+            (state.extra_turns[0].player, state.extra_turns[0].anchor)
+        );
     }
 
     #[test]

@@ -766,6 +766,13 @@ pub enum GameEvent {
         player_id: PlayerId,
         turn_number: u32,
     },
+    /// CR 500.7: One extra turn was created after the turn identified by
+    /// `anchor`; `player_id` is the beneficiary. CR 805.8: In a shared-team-turn
+    /// game, both ids are the corresponding shared-turn representatives.
+    ExtraTurnCreated {
+        player_id: PlayerId,
+        anchor: PlayerId,
+    },
     PhaseChanged {
         phase: Phase,
     },
@@ -1803,6 +1810,22 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "TurnStarted");
         assert_eq!(json["data"]["turn_number"], 1);
+    }
+
+    #[test]
+    fn extra_turn_created_serializes_with_normalized_record_identity() {
+        let event = GameEvent::ExtraTurnCreated {
+            player_id: PlayerId(2),
+            anchor: PlayerId(5),
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "ExtraTurnCreated");
+        assert_eq!(json["data"]["player_id"], 2);
+        assert_eq!(json["data"]["anchor"], 5);
+
+        let round_tripped: GameEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, event);
     }
 
     #[test]

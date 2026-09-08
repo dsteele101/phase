@@ -2928,6 +2928,7 @@ export type GameEvent =
       data: { searcher: PlayerId; cards: LibrarySearchCardView[]; audience: PlayerId[] };
     }
   | { type: "TurnStarted"; data: { player_id: PlayerId; turn_number: number } }
+  | { type: "ExtraTurnCreated"; data: { player_id: PlayerId; anchor: PlayerId } }
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
