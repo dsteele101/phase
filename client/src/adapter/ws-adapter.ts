@@ -208,6 +208,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 69 — GameEvent gained the tagged variant ExtraTurnCreated { player_id,
+ *      anchor }. Event-bearing full-server frames can now carry that tag, so
+ *      the exact handshake must refuse v68 peers that do not share the variant
+ *      contract. P2P moves in lockstep; lobby messages are unchanged.
  * 68 — PendingManaAbility.chosen_tappers changed from Vec<ObjectId> to
  *      Option<Vec<ObjectId>> (#8698), so an ANSWERED zero-tapper selection of
  *      the CR 107.3a X-sentinel form (X=0) is distinguishable from a selection
@@ -459,7 +463,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 68;
+export const PROTOCOL_VERSION = 69;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

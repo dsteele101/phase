@@ -56,6 +56,10 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 69 — `GameEvent` gained the tagged variant `ExtraTurnCreated { player_id,
+///      anchor }`. Event-bearing full-game frames can now carry that tag, so
+///      the full-game handshake must reject v68 peers that do not share the
+///      variant contract. P2P moves in lockstep; lobby messages are unchanged.
 /// 68 — `PendingManaAbility::chosen_tappers` changed from `Vec<ObjectId>` to
 ///      `Option<Vec<ObjectId>>` (#8698) — a `GameState` payload field type
 ///      change, so an ANSWERED zero-tapper selection of the CR 107.3a
@@ -422,7 +426,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 68;
+pub const PROTOCOL_VERSION: u32 = 69;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1467,12 +1471,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 68);
+        assert_eq!(PROTOCOL_VERSION, 69);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 67);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 68);
     }
 
     #[test]
