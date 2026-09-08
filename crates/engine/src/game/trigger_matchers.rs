@@ -1033,6 +1033,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::CounterRemoved { .. }
+        | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
         | GameEvent::Unattached { .. }
