@@ -1174,6 +1174,12 @@ pub fn ensure_ready(state: &mut GameState) {
 /// keys hit, plus the `unclassified` bucket. Caller dedups against the
 /// per-event `registered_this_event` set as usual.
 pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[ObjectId; 16]> {
+    // CR 500.7: creating an extra turn adds it directly after the specified
+    // turn. `ExtraTurnCreated` is internal accounting for that insertion, not
+    // a triggerable game event, so it must not reach catch-all definitions.
+    if matches!(event, GameEvent::ExtraTurnCreated { .. }) {
+        return SmallVec::new();
+    }
     let mut out: SmallVec<[ObjectId; 16]> = SmallVec::new();
     out.extend(state.trigger_index.unclassified.iter().copied());
     let keys = keys_from_event(event, state);
@@ -1357,6 +1363,37 @@ mod tests {
         let (keys, route) = keys_from_trigger_def(&def);
         assert!(keys.is_empty());
         assert!(route);
+    }
+
+    #[test]
+    fn extra_turn_creation_does_not_route_unclassified_candidates() {
+        let mut state = GameState::new_two_player(42);
+        let watcher = ObjectId(99);
+        state.objects.insert(
+            watcher,
+            GameObject::new(
+                watcher,
+                CardId(99),
+                PlayerId(0),
+                "Always Watcher".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.trigger_index.add(
+            watcher,
+            &[TriggerDefinition::new(TriggerMode::Always)],
+            false,
+        );
+        assert!(state.trigger_index.unclassified.contains(&watcher));
+
+        let candidates = candidates_for_event(
+            &state,
+            &GameEvent::ExtraTurnCreated {
+                player_id: PlayerId(0),
+                anchor: PlayerId(1),
+            },
+        );
+        assert!(candidates.is_empty());
     }
 
     #[test]

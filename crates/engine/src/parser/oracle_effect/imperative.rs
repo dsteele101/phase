@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{one_of, space0, space1, u8 as parse_u8};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -75,14 +75,14 @@ fn parse_extra_turn(input: &str) -> OracleResult<'_, QuantityExpr> {
             terminated(
                 alt((
                     value(QuantityExpr::Fixed { value: 1 }, tag("an extra turn")),
-                    map(
+                    map_res(
                         (
                             nom_primitives::parse_number,
                             space1,
                             alt((tag("extra turns"), tag("extra turn"))),
                         ),
-                        |(value, _, _)| QuantityExpr::Fixed {
-                            value: value as i32,
+                        |(value, _, _)| {
+                            i32::try_from(value).map(|value| QuantityExpr::Fixed { value })
                         },
                     ),
                 )),

@@ -34019,10 +34019,9 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
 /// instruction already supplies the per-head iteration. The chain consolidator
 /// installs the stripped instruction as `FlipCoins::win_effect`, so retaining a
 /// second quantity here would apply it twice.
-fn strip_trailing_coin_heads_quantifier(text: &str) -> Option<&str> {
-    let lower = text.to_ascii_lowercase();
-    let (_, base) = all_consuming(terminated(
-        take_until(" for each "),
+fn parse_coin_heads_quantifier(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
         (
             tag::<_, _, OracleError<'_>>(" for each "),
             alt((tag("coins"), tag("coin"))),
@@ -34036,6 +34035,18 @@ fn strip_trailing_coin_heads_quantifier(text: &str) -> Option<&str> {
             tag("heads"),
             opt(tag(".")),
         ),
+    )
+    .parse(input)
+}
+
+fn strip_trailing_coin_heads_quantifier(text: &str) -> Option<&str> {
+    let lower = text.to_ascii_lowercase();
+    let (_, base) = all_consuming(terminated(
+        recognize(many_till(
+            anychar,
+            peek(terminated(parse_coin_heads_quantifier, eof)),
+        )),
+        parse_coin_heads_quantifier,
     ))
     .parse(lower.as_str())
     .ok()?;

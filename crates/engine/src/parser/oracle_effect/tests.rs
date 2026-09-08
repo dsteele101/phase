@@ -31922,6 +31922,25 @@ fn extra_turn_grammar_is_all_consuming_and_does_not_shadow_initiative() {
 }
 
 #[test]
+fn extra_turn_count_rejects_values_above_i32_max() {
+    assert!(matches!(
+        parse_effect("Target player takes 2147483647 extra turns after this one."),
+        Effect::ExtraTurn {
+            count: QuantityExpr::Fixed { value: i32::MAX },
+            ..
+        }
+    ));
+    assert!(matches!(
+        parse_imperative_effect(
+            "take 2147483648 extra turns after this one",
+            &mut ParseContext::default(),
+        )
+        .effect,
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
 fn ral_zarek_coin_result_shell_preserves_singular_extra_turn_count() {
     let def = parse_effect_chain(
         "Flip five coins. Take an extra turn after this one for each coin that comes up heads.",
@@ -31944,6 +31963,16 @@ fn ral_zarek_coin_result_shell_preserves_singular_extra_turn_count() {
             count: QuantityExpr::Fixed { value: 1 },
         }
     ));
+}
+
+#[test]
+fn coin_heads_quantifier_uses_the_final_for_each_clause() {
+    assert_eq!(
+        strip_trailing_coin_heads_quantifier(
+            "For each player, draw a card for each coin that comes up heads."
+        ),
+        Some("For each player, draw a card")
+    );
 }
 
 #[test]
