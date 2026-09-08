@@ -5,6 +5,11 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
+// IMPLEMENTATION BUDGET BOUND: resolving one effect must not allocate an
+// attacker-controlled number of queued turns and events. This is an engine
+// resource ceiling, not a restriction imposed by the Comprehensive Rules.
+pub(crate) const MAX_EXTRA_TURNS_PER_RESOLUTION: i32 = 1_000;
+
 /// CR 500.7: Grant an extra turn to the resolved target player.
 /// Extra turns are stored as a LIFO stack — push to end, pop from end.
 /// The most recently created extra turn is taken first.
@@ -35,6 +40,17 @@ pub fn resolve(
 
     // CR 107.1b: a negative calculated effect result is treated as zero.
     let count = resolve_quantity_with_targets(state, count, ability).max(0);
+    if count > MAX_EXTRA_TURNS_PER_RESOLUTION {
+        tracing::warn!(
+            source_id = ?ability.source_id,
+            count,
+            limit = MAX_EXTRA_TURNS_PER_RESOLUTION,
+            "rejecting oversized extra-turn resolution"
+        );
+        return Err(EffectError::InvalidParam(format!(
+            "extra turn count {count} exceeds the per-resolution limit of {MAX_EXTRA_TURNS_PER_RESOLUTION}"
+        )));
+    }
     // CR 500.7: add multiple extra turns one at a time after the same specified turn.
     let anchor = state.active_player;
     for _ in 0..count {
@@ -337,6 +353,72 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn extra_turn_resolution_accepts_the_resource_limit() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        let ability = make_ability_with_count(
+            TargetFilter::Controller,
+            QuantityExpr::Fixed {
+                value: MAX_EXTRA_TURNS_PER_RESOLUTION,
+            },
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.extra_turns.len(),
+            MAX_EXTRA_TURNS_PER_RESOLUTION as usize
+        );
+        assert_eq!(events.len(), MAX_EXTRA_TURNS_PER_RESOLUTION as usize + 1);
+        assert!(matches!(
+            events.last(),
+            Some(GameEvent::EffectResolved { .. })
+        ));
+    }
+
+    #[test]
+    fn extra_turn_resolution_rejects_oversized_fixed_and_dynamic_counts_atomically() {
+        let mut state = GameState::default();
+        state.extra_turns.push(et(1, 0));
+        let original_turns = state.extra_turns.clone();
+        let mut events = vec![GameEvent::EffectResolved {
+            kind: EffectKind::Draw,
+            source_id: ObjectId(2),
+            subject: None,
+        }];
+        let original_events = events.clone();
+        let fixed = make_ability_with_count(
+            TargetFilter::Controller,
+            QuantityExpr::Fixed {
+                value: MAX_EXTRA_TURNS_PER_RESOLUTION + 1,
+            },
+            PlayerId(0),
+        );
+
+        let error = resolve(&mut state, &fixed, &mut events).unwrap_err();
+
+        assert!(matches!(error, EffectError::InvalidParam(_)));
+        assert_eq!(state.extra_turns, original_turns);
+        assert_eq!(events, original_events);
+
+        let mut dynamic = make_ability_with_count(
+            TargetFilter::Controller,
+            QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::Variable { name: "X".into() },
+            },
+            PlayerId(0),
+        );
+        dynamic.chosen_x = Some(u32::MAX);
+
+        let error = resolve(&mut state, &dynamic, &mut events).unwrap_err();
+
+        assert!(matches!(error, EffectError::InvalidParam(_)));
+        assert_eq!(state.extra_turns, original_turns);
+        assert_eq!(events, original_events);
     }
 
     #[test]

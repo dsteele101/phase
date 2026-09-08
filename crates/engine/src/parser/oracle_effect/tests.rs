@@ -31908,6 +31908,17 @@ fn extra_turn_fixed_cardinal_and_subject_are_preserved() {
 #[test]
 fn extra_turn_grammar_is_all_consuming_and_does_not_shadow_initiative() {
     assert!(matches!(
+        parse_imperative_effect(
+            "take two extra turns after this one",
+            &mut ParseContext::default(),
+        )
+        .effect,
+        Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 2 },
+        }
+    ));
+    assert!(matches!(
         parse_effect("Take the initiative."),
         Effect::TakeTheInitiative
     ));
