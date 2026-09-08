@@ -11756,13 +11756,13 @@ pub(super) fn parse_imperative_family_ast(
             .is_ok()
             {
                 Some(ImperativeFamilyAst::TakeTheInitiative)
-            } else if let Some(count) = nom_parse_lower(lower.trim(), parse_extra_turn) {
-                Some(ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
+            } else {
+                nom_parse_lower(lower.trim(), parse_extra_turn).map(|count| {
+                    ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
                     target: TargetFilter::Controller,
                     count,
-                }))
-            } else {
-                None
+                    })
+                })
             }
         }
         // CR 702.26a + CR 702.26c: "phase out" / "phases out" / "phase in" /
