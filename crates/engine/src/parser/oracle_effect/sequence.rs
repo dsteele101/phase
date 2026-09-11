@@ -9999,6 +9999,7 @@ mod tests {
     fn control_continuation_splits_when_its_head_carries_the_subject() {
         let chunks = split_subject_elided_control_continuations(
             split_clause_sequence("that player untaps Karona and gains control of it."),
+            // allow-noncombinator: test stub classifier, not parser dispatch.
             |head| head == "that player untaps Karona",
         );
         assert_eq!(chunks.len(), 2);
