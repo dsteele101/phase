@@ -61,35 +61,124 @@ fn karona_false_god_upkeep_scoped_subject_gives_control() {
     assert_no_unimplemented(untap);
 }
 
-/// The scoped carry is restricted to the `each player's upkeep` context; a
-/// controller-scoped upkeep instruction must not fabricate a ScopedPlayer
-/// recipient merely because it also has a control clause.
+/// The trigger's effect chain, head first, following `sub_ability` links.
+fn trigger_chain_effects(trigger: &TriggerDefinition) -> Vec<&Effect> {
+    std::iter::successors(trigger.execute.as_deref(), |def| def.sub_ability.as_deref())
+        .map(|def| def.effect.as_ref())
+        .collect()
+}
+
+/// CR 608.2c: the scoped phase player stated once governs a same-sentence
+/// conjugated "and" continuation — Seizan, Perverter of Truth's upkeep player
+/// draws the two cards, not the ability's controller.
 #[test]
-fn controller_upkeep_subject_does_not_become_scoped_player_recipient() {
+fn scoped_phase_subject_carries_into_conjugated_and_continuation() {
     let trigger = parse_trigger_line(
-        "At the beginning of your upkeep, you untap Karona and gain control of it.",
-        "Karona, False God",
+        "At the beginning of each player's upkeep, that player loses 2 life and draws two cards.",
+        "Seizan, Perverter of Truth",
     );
-    let untap = trigger.execute.as_deref().expect("upkeep effect");
-    assert!(matches!(
-        untap.effect.as_ref(),
-        Effect::SetTapState {
-            target: TargetFilter::SelfRef,
-            scope: EffectScope::Single,
-            state: TapStateChange::Untap,
-        }
-    ));
-    let control = untap
-        .sub_ability
-        .as_deref()
-        .expect("control continuation must be reached");
-    assert!(matches!(
-        control.effect.as_ref(),
-        Effect::GainControl {
-            target: TargetFilter::ParentTarget,
-        }
-    ));
-    assert_no_unimplemented(untap);
+    let effects = trigger_chain_effects(&trigger);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::LoseLife {
+                    target: Some(TargetFilter::ScopedPlayer),
+                    ..
+                },
+                Effect::Draw {
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                },
+            ]
+        ),
+        "{effects:?}"
+    );
+}
+
+/// CR 608.2c + CR 701.9a: the same carry across a ", then" continuation — Anvil
+/// of Bogardan's draw-step player discards, not the ability's controller.
+#[test]
+fn scoped_phase_subject_carries_into_conjugated_then_continuation() {
+    let trigger = parse_trigger_line(
+        "At the beginning of each player's draw step, that player draws an additional card, then discards a card.",
+        "Anvil of Bogardan",
+    );
+    let effects = trigger_chain_effects(&trigger);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::Draw {
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                },
+                Effect::Discard {
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                },
+            ]
+        ),
+        "{effects:?}"
+    );
+}
+
+/// CR 608.2c + CR 701.23a + CR 701.24a: the carry spans the whole run of
+/// continuations — Maralen of the Mornsong's draw-step player searches and
+/// shuffles their own library.
+#[test]
+fn scoped_phase_subject_carries_across_a_run_of_continuations() {
+    let trigger = parse_trigger_line(
+        "At the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
+        "Maralen of the Mornsong",
+    );
+    let effects = trigger_chain_effects(&trigger);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SearchLibrary {
+                target_player: Some(TargetFilter::ScopedPlayer),
+                ..
+            }
+        )),
+        "that player searches their own library: {effects:?}"
+    );
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            })
+        ),
+        "that player shuffles their own library: {effects:?}"
+    );
+}
+
+/// CR 608.2c: only an ELIDED subject is re-supplied. A continuation that
+/// prints its own subject keeps it, even inside a scoped-phase body.
+#[test]
+fn scoped_phase_subject_does_not_override_a_printed_continuation_subject() {
+    let trigger = parse_trigger_line(
+        "At the beginning of each player's upkeep, that player loses 2 life and you draw a card.",
+        "Scoped Probe",
+    );
+    let effects = trigger_chain_effects(&trigger);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::LoseLife {
+                    target: Some(TargetFilter::ScopedPlayer),
+                    ..
+                },
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                },
+            ]
+        ),
+        "{effects:?}"
+    );
 }
 
 /// CR 603.4 + CR 601.2f: Liberator's intervening "if" survives the whole
