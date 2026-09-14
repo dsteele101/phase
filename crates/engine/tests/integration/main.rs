@@ -260,6 +260,7 @@ mod dredgers_insight_mill_from_among;
 mod druid_of_purification_destroy_chosen_4780;
 mod duskmantle_seer_each_player_reveal;
 mod dyadrine_counter_selection;
+mod electrostatic_bolt;
 mod elemental_spectacle_regression;
 mod elspeth_resplendent_conjoined_counter_choice;
 mod elusive_otter_repro;
