@@ -34053,18 +34053,24 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {
     let lower = text.to_lowercase();
-    if !scan_contains_phrase(&lower, "shuffles it into their library")
-        || !scan_contains_phrase(&lower, "reveals the top card of their library")
-        || scan_contains_phrase(&lower, "reveals the top card of your library")
-    {
+    if !scan_contains_phrase(&lower, "shuffles it into their library") {
+        return;
+    }
+
+    let repair_reveal = scan_contains_phrase(&lower, "reveals the top card of their library")
+        && !scan_contains_phrase(&lower, "reveals the top card of your library");
+    let repair_exile = scan_contains_phrase(&lower, "exiles the top card of their library")
+        && !scan_contains_phrase(&lower, "exiles the top card of your library");
+
+    if !repair_reveal && !repair_exile {
         return;
     }
 
     // CR 108.3 + CR 400.3 + CR 608.2c: after an owner's-library shuffle,
-    // a following "their library" reveal refers to that same owner. The generic
-    // reveal parser binds "their library" to the relative-player anaphor (or, for
-    // a subjectless reveal, to the controller), so repair only the owner-shuffle
-    // chain and leave explicit "your library" reveals untouched.
+    // a following "their library" reveal or exile refers to that same owner. The generic
+    // reveal/exile parser binds "their library" to the relative-player anaphor (or, for
+    // a subjectless reveal/exile, to the controller), so repair only the owner-shuffle
+    // chain and leave explicit "your library" instructions untouched.
     let mut saw_owner_shuffle = false;
     let mut current = Some(def);
     while let Some(node) = current {
@@ -34073,7 +34079,12 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                 saw_owner_shuffle = true;
             }
             Effect::RevealTop { player, .. }
-                if saw_owner_shuffle && is_repairable_library_owner(player) =>
+                if saw_owner_shuffle && repair_reveal && is_repairable_library_owner(player) =>
+            {
+                *player = TargetFilter::ParentTargetOwner;
+            }
+            Effect::ExileTop { player, .. }
+                if saw_owner_shuffle && repair_exile && is_repairable_library_owner(player) =>
             {
                 *player = TargetFilter::ParentTargetOwner;
             }
