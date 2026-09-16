@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const llmMocks = vi.hoisted(() => ({
-  executeLlmRequest: vi.fn<() => Promise<string>>(),
+  executeLlmRequest: vi.fn<
+    (spec: unknown, options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<string>
+  >(),
 }));
 
 const leaseMocks = vi.hoisted(() => ({
@@ -21,7 +23,14 @@ const debugMocks = vi.hoisted(() => ({ debugLog: vi.fn() }));
 vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 
 import type { DraftPlayerView } from "../../../adapter/draft-adapter";
-import { botSeatIndices, collectLlmDraftResponses, reportLlmDraftOutcomes } from "../draftLlm";
+import {
+  botSeatIndices,
+  cancelLlmDraftRun,
+  collectLlmDraftResponses,
+  isLlmDraftDisabled,
+  reportLlmDraftOutcomes,
+  resetLlmDraftBreaker,
+} from "../draftLlm";
 import type { LlmProfile } from "../types";
 
 const PROFILE: LlmProfile = {
@@ -71,6 +80,9 @@ let leaseHeld = false;
 beforeEach(() => {
   llmMocks.executeLlmRequest.mockReset();
   leaseMocks.withDraftEngineOperation.mockReset();
+  debugMocks.debugLog.mockReset();
+  resetLlmDraftBreaker();
+  cancelLlmDraftRun();
   leaseHeld = false;
 });
 
@@ -189,5 +201,142 @@ describe("LLM drafters", () => {
     const messages = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
     expect(messages.some((message) => message.includes("hoarding removal"))).toBe(false);
     expect(messages.some((message) => message.includes("provider timeout"))).toBe(true);
+  });
+
+  // ── Cancellation lifecycle ───────────────────────────────────────────────
+
+  it("passes an abort signal to every provider call", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    let seenSignal: AbortSignal | undefined;
+    llmMocks.executeLlmRequest.mockImplementation(async (_spec, options) => {
+      seenSignal = options?.signal;
+      return '{"choice":0}';
+    });
+
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+    expect(seenSignal?.aborted).toBe(false);
+  });
+
+  it("contains a superseded round rather than letting it reach the provider", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+
+    // Two picks in flight: the second supersedes the first before the first
+    // gets past its (awaited) request-building phase.
+    const [first, second] = await Promise.all([
+      collectLlmDraftResponses(PROFILE, [1], () => true),
+      collectLlmDraftResponses(PROFILE, [1], () => true),
+    ]);
+
+    // The superseded round contributes nothing and never spends a request on a
+    // pack that has moved on; only the current round does.
+    expect(first).toEqual([]);
+    expect(second).toHaveLength(1);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts calls already dispatched when a later round supersedes them", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    const signals: AbortSignal[] = [];
+    let release!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markDispatched!: () => void;
+    const dispatched = new Promise<void>((resolve) => {
+      markDispatched = resolve;
+    });
+    llmMocks.executeLlmRequest.mockImplementation(async (_spec, options) => {
+      if (options?.signal) signals.push(options.signal);
+      markDispatched();
+      await hung;
+      return '{"choice":0}';
+    });
+
+    const first = collectLlmDraftResponses(PROFILE, [1], () => true);
+    // Wait for the call to actually be in flight rather than guessing at a
+    // number of microtask ticks — request building awaits both the set catalog
+    // and the engine lease before it dispatches.
+    await dispatched;
+
+    cancelLlmDraftRun();
+    release();
+    await first;
+
+    // The dispatched call's socket is cut loose rather than left to run out its
+    // 20-second timeout.
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it("abandons a round explicitly cancelled by the draft store", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockImplementation(async () => {
+      cancelLlmDraftRun();
+      return '{"choice":0}';
+    });
+
+    // Replies that arrive after cancellation describe a pack that has passed.
+    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
+  });
+
+  it("discards replies for a pick that went stale mid-flight", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    let fresh = true;
+    const stillCurrent = () => fresh;
+    llmMocks.executeLlmRequest.mockImplementation(async () => {
+      fresh = false;
+      return '{"choice":0}';
+    });
+
+    await expect(collectLlmDraftResponses(PROFILE, [1], stillCurrent)).resolves.toEqual([]);
+  });
+
+  // ── Per-profile failure breaker ──────────────────────────────────────────
+
+  it("gives up on a profile after consecutive failed rounds and stops calling it", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockRejectedValue(new Error("provider down"));
+
+    for (let round = 0; round < 3; round += 1) {
+      await collectLlmDraftResponses(PROFILE, [1], () => true);
+    }
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
+
+    const callsBefore = llmMocks.executeLlmRequest.mock.calls.length;
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    // No further latency is spent on a provider the session has given up on.
+    expect(llmMocks.executeLlmRequest.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("resets the breaker on any successful round", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockRejectedValueOnce(new Error("blip"));
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    llmMocks.executeLlmRequest.mockRejectedValue(new Error("blip"));
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    // Two failures after a success is below the ceiling.
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  /// A pod with no eligible seat is not a provider failure and must not count
+  /// toward giving up on the profile.
+  it("does not blame the profile when the engine offers no seats", async () => {
+    leaseReturning([]);
+
+    for (let round = 0; round < 5; round += 1) {
+      await collectLlmDraftResponses(PROFILE, [1], () => true);
+    }
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
   });
 });

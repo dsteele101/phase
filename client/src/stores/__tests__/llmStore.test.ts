@@ -182,4 +182,78 @@ describe("llmStore", () => {
     // The profile survives; only the credential is gone.
     expect(profile?.name).toBe("Legacy");
   });
+
+  // ── Credential scope: the endpoint, not just the vendor ──────────────────
+
+  it("drops the credential when the endpoint changes", () => {
+    const id = useLlmStore.getState().addProfile({
+      model: "gpt-5",
+      apiKey: "sk-openai",
+      provider: "OpenAi",
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+    });
+
+    // Retargeting at a host the player may not control must not carry the key.
+    useLlmStore.getState().updateProfile(id, { baseUrl: "https://someone-elses.example/v1" });
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === id);
+    expect(profile?.apiKey).toBe("");
+    expect(isProfileUsable(profile)).toBe(false);
+  });
+
+  it("drops the credential when the endpoint is cleared back to the default", () => {
+    const id = useLlmStore.getState().addProfile({
+      model: "gpt-5",
+      apiKey: "sk-openai",
+      baseUrl: "https://proxy.internal/v1",
+      enabled: true,
+    });
+
+    useLlmStore.getState().updateProfile(id, { baseUrl: null });
+
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("");
+  });
+
+  it("keeps the credential when a patch restates the same endpoint", () => {
+    const id = useLlmStore.getState().addProfile({
+      model: "gpt-5",
+      apiKey: "sk-openai",
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+    });
+
+    // The settings form re-sends the current value routinely; that is not a
+    // change and must not wipe a working key.
+    useLlmStore.getState().updateProfile(id, { baseUrl: "https://api.openai.com/v1" });
+    useLlmStore.getState().updateProfile(id, { baseUrl: "  https://api.openai.com/v1  " });
+    useLlmStore.getState().updateProfile(id, { name: "renamed" });
+
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-openai");
+  });
+
+  it("treats an absent and an empty endpoint as the same default", () => {
+    const id = useLlmStore
+      .getState()
+      .addProfile({ model: "gpt-5", apiKey: "sk-openai", baseUrl: null, enabled: true });
+
+    useLlmStore.getState().updateProfile(id, { baseUrl: "   " });
+
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-openai");
+  });
+
+  it("accepts a replacement credential supplied with the endpoint change", () => {
+    const id = useLlmStore.getState().addProfile({
+      model: "gpt-5",
+      apiKey: "sk-old",
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+    });
+
+    useLlmStore
+      .getState()
+      .updateProfile(id, { baseUrl: "https://proxy.internal/v1", apiKey: "sk-new" });
+
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-new");
+  });
 });

@@ -36,6 +36,7 @@ pub mod catalog;
 pub mod error;
 pub mod fingerprint;
 pub mod game_decision;
+pub mod probe;
 pub mod prompt;
 pub mod provider;
 pub mod render;
@@ -49,6 +50,7 @@ pub use game_decision::{
     build_game_decision_prompt, decision_fingerprint, select_action, GameDecisionRequest,
     LlmActionSelection,
 };
+pub use probe::{connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};
 pub use provider::{
     HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, WireProtocol,

@@ -21,6 +21,17 @@ export function apply_seat_mutation(state_json: string, mutation_json: string): 
 export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string): any;
 
 /**
+ * Build the connection-probe request for an endpoint.
+ *
+ * Stateless by design: a player configures a provider in Settings, usually
+ * with no game running, and a test that required a live board would be
+ * untestable exactly when it is most needed. The request is built by the same
+ * `build_chat_request` a real decision uses, so a probe that succeeds proves
+ * the endpoint, credential and model the game path will use.
+ */
+export function buildLlmProbeRequest(endpoint_json: string): any;
+
+/**
  * Build the bounded card corpus for parallel AI scoring workers. The live
  * main engine remains the only authority that owns the full card database.
  */
@@ -668,12 +679,24 @@ export function submit_interaction_js(actor: number, submission: any): any;
  */
 export function take_last_panic_message(): string | undefined;
 
+/**
+ * Validate a probe response through the engine's own extraction and decoding.
+ *
+ * The transport deliberately returns non-2xx bodies rather than rejecting, so
+ * that a vendor's error message survives to be shown. That makes "bytes came
+ * back" a meaningless success signal -- a rejected key and an unknown model
+ * both arrive as well-formed bodies. This is the authority that says whether a
+ * reply is one the game path could actually use.
+ */
+export function validateLlmProbeResponse(provider_label: string, response_body: string): any;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
@@ -729,6 +752,7 @@ export interface InitOutput {
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
+    readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number) => any;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;

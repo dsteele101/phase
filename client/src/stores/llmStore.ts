@@ -71,6 +71,28 @@ function newProfileId(): string {
   return `llm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Absent, empty and whitespace-only base URLs all mean "the provider default",
+ *  so they must compare equal — otherwise clearing a field the player never set
+ *  would count as retargeting and wipe a working key. */
+function normalizedBaseUrl(url: string | null | undefined): string {
+  return (url ?? "").trim();
+}
+
+/**
+ * Whether a patch points this profile's credential at a different endpoint.
+ *
+ * True when the patch changes the provider or the base URL to a different
+ * value. A patch that merely restates the current value — which the settings
+ * form does on every render — is not a change and must not clear anything.
+ */
+function retargetsCredential(profile: LlmProfile, patch: Partial<LlmProfile>): boolean {
+  const providerMoved = patch.provider != null && patch.provider !== profile.provider;
+  const endpointMoved =
+    patch.baseUrl !== undefined
+    && normalizedBaseUrl(patch.baseUrl) !== normalizedBaseUrl(profile.baseUrl);
+  return providerMoved || endpointMoved;
+}
+
 /** A profile is usable only when the player explicitly enabled it AND it names
  *  a model. The key check is the engine's (`LlmEndpointConfig::validate`), which
  *  runs before any request is built; this is the cheap UI-side gate. */
@@ -111,11 +133,14 @@ export const useLlmStore = create<LlmState>()(
           profiles: state.profiles.map((profile) => {
             if (profile.id !== id) return profile;
             const next = { ...profile, ...patch };
-            // A credential is scoped to the vendor it was issued by. Switching
-            // provider without clearing it would send an OpenAI key to
-            // Anthropic (or to whatever endpoint the player points at next), so
-            // the key is dropped unless this very patch supplies a new one.
-            if (patch.provider != null && patch.provider !== profile.provider) {
+            // A credential is scoped to the ENDPOINT it was issued for, which is
+            // the provider and the base URL together. Either one changing points
+            // the key at a different server: switching provider would send an
+            // OpenAI key to Anthropic, and editing the base URL would send it to
+            // whatever host was typed — including one the player does not
+            // control. The key is therefore dropped on either change, unless
+            // this very patch supplies its replacement.
+            if (retargetsCredential(profile, patch)) {
               next.apiKey = patch.apiKey ?? "";
               next.enabled = patch.enabled ?? false;
             }
@@ -189,7 +214,19 @@ export const useLlmStore = create<LlmState>()(
       // stopped storing keys" and "your stored key is gone".
       onRehydrateStorage: () => (state) => {
         if (!state) return;
-        useLlmStore.setState({ profiles: state.profiles.map((profile) => ({ ...profile })) });
+        // Deferred, not immediate. Persist can invoke this callback
+        // SYNCHRONOUSLY during `create(...)` when the storage is synchronous, at
+        // which point `useLlmStore` is still in its temporal dead zone and
+        // touching it throws a ReferenceError that would take the whole module
+        // down at import. A microtask runs after construction has completed, and
+        // nothing depends on the scrub landing sooner: `merge` has already
+        // blanked the credential in memory, so this write only rewrites the
+        // stored record through `partialize` to remove it from disk.
+        queueMicrotask(() => {
+          useLlmStore.setState({
+            profiles: state.profiles.map((profile) => ({ ...profile })),
+          });
+        });
       },
       merge: (persisted, current) => {
         const incoming = (persisted ?? {}) as Partial<LlmState>;

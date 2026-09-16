@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useGameStore } from "../../stores/gameStore";
 import { useLlmStore } from "../../stores/llmStore";
 import { loadProviderCatalog } from "../../services/llm/catalog";
-import { executeLlmRequest, LlmTransportError } from "../../services/llm/llmClient";
-import { endpointOf } from "../../services/llm/types";
+import { testLlmEndpoint } from "../../services/llm/probe";
 import type {
   LlmProfile,
   LlmProviderCatalogEntry,
@@ -149,6 +147,19 @@ function ProfileCard({
 }) {
   const { t } = useTranslation("settings");
   const [test, setTest] = useState<TestState>({ status: "idle" });
+  // Local draft so the endpoint commits once, on blur, rather than per
+  // keystroke. Re-synced whenever the stored value changes underneath (a
+  // provider switch resets it to the new default).
+  const [endpointDraft, setEndpointDraft] = useState(profile.baseUrl ?? "");
+  useEffect(() => {
+    setEndpointDraft(profile.baseUrl ?? "");
+  }, [profile.baseUrl]);
+  const commitEndpoint = useCallback(() => {
+    const next = endpointDraft.trim() || null;
+    if ((next ?? "") === (profile.baseUrl ?? "")) return;
+    onChange({ baseUrl: next });
+    setTest({ status: "idle" });
+  }, [endpointDraft, profile.baseUrl, onChange]);
   const entry = catalog.find((row) => row.provider === profile.provider);
   const suggestedModels = entry?.models ?? [];
   // A model the player typed is "custom" precisely when the catalog does not
@@ -262,10 +273,18 @@ function ProfileCard({
         <input
           type="url"
           inputMode="url"
-          value={profile.baseUrl ?? ""}
+          value={endpointDraft}
           placeholder={entry?.defaultBaseUrl ?? t("llm.endpointPlaceholder")}
           aria-label={t("llm.endpoint")}
-          onChange={(e) => onChange({ baseUrl: e.target.value.trim() || null })}
+          // Committed on blur (or Enter), never per keystroke. Changing the
+          // endpoint clears the credential — it is scoped to the server it was
+          // issued for — and committing on every character would wipe the key on
+          // the first one typed.
+          onChange={(e) => setEndpointDraft(e.target.value)}
+          onBlur={commitEndpoint}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitEndpoint();
+          }}
           className={FIELD_CLASS}
         />
       </Field>
@@ -314,60 +333,38 @@ function ProfileCard({
         {test.status === "failed" && (
           <span className="min-w-0 break-words text-xs text-amber-300">{test.message}</span>
         )}
+        {test.status === "idle" && (
+          <span className="min-w-0 text-[10px] text-slate-500">{t("llm.testHint")}</span>
+        )}
       </div>
     </div>
   );
 }
 
 /**
- * Test a profile by running one real decision-shaped request through the
- * engine's own request builder.
+ * Test a profile end to end.
  *
- * Deliberately not a hand-rolled ping: testing anything other than the exact
- * request the game will send would let a working test coexist with a broken
- * opponent. The request is built against whatever game state exists; when there
- * is none, the engine refuses and the test reports that instead of a false
- * failure.
+ * Delegates to {@link testLlmEndpoint}, which builds the request with the
+ * engine, performs it, and validates the reply with the engine's own decoder.
+ * A resolved fetch is NOT success: the transport returns non-2xx bodies so a
+ * vendor's message survives to be shown, and both of the failures a player is
+ * most likely to hit — a rejected key and an unknown model — arrive as
+ * well-formed HTTP responses.
+ *
+ * Needs no game: the probe is stateless, which is what makes it usable at the
+ * moment a player is actually configuring a provider.
  */
 function useLlmConnectionTest(
   profile: LlmProfile,
   setTest: (state: TestState) => void,
 ): () => void {
-  const { t } = useTranslation("settings");
   return useCallback(() => {
     void (async () => {
       setTest({ status: "running" });
-      const adapter = useGameStore.getState().adapter;
-      if (!adapter?.buildLlmDecisionRequest) {
-        setTest({ status: "failed", message: t("llm.testNeedsGame") });
-        return;
-      }
-      try {
-        const built = await adapter.buildLlmDecisionRequest(
-          "Medium",
-          1,
-          JSON.stringify(endpointOf(profile)),
-          "[]",
-        );
-        if (!built?.request) {
-          setTest({ status: "failed", message: built?.error ?? t("llm.testNeedsGame") });
-          return;
-        }
-        await executeLlmRequest(built.request, { timeoutMs: 20_000 });
-        setTest({ status: "ok" });
-      } catch (error) {
-        setTest({
-          status: "failed",
-          message:
-            error instanceof LlmTransportError
-              ? error.message
-              : error instanceof Error
-                ? error.message
-                : String(error),
-        });
-      }
+      const result = await testLlmEndpoint(profile);
+      setTest(result.ok ? { status: "ok" } : { status: "failed", message: result.error });
     })();
-  }, [profile, setTest, t]);
+  }, [profile, setTest]);
 }
 
 /** The engine-owned provider catalog. */

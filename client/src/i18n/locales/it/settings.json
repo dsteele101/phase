@@ -506,11 +506,11 @@
     "test": "Prova connessione",
     "testing": "Prova in corso…",
     "testOk": "Connesso.",
-    "testNeedsGame": "Avvia prima una partita: la prova invia la stessa richiesta di un turno reale.",
     "draftToggle": {
       "label": "Usa per i bot del draft",
       "hint": "I posti bot di un draft scelgono con il modello, usando il contesto dei set del formato.",
       "profile": "Provider per il draft"
-    }
+    },
+    "testHint": "Invia una richiesta reale e verifica la risposta esattamente come farebbe un turno di gioco."
   }
 }

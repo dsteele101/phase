@@ -506,11 +506,11 @@
     "test": "Test connection",
     "testing": "Testing…",
     "testOk": "Connected.",
-    "testNeedsGame": "Start a game first — the test sends the same request a real turn would.",
     "draftToggle": {
       "label": "Use for draft bots",
       "hint": "Bot seats in a draft pod pick with the model, using the format’s set context.",
       "profile": "Draft provider"
-    }
+    },
+    "testHint": "Sends one real request and checks the reply the same way a game turn would."
   }
 }
