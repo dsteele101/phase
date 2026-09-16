@@ -11,13 +11,18 @@
  */
 
 import { ensureWasmInit } from "../engineRuntime";
-import { executeLlmRequest } from "./llmClient";
-import { endpointOf, type LlmHttpRequestSpec, type LlmProfile } from "./types";
+import { executeLlmRequest, LlmTransportError } from "./llmClient";
+import {
+  endpointOf,
+  type LlmFailure,
+  type LlmHttpRequestSpec,
+  type LlmProfile,
+} from "./types";
 
 /** Bound for a probe. Shorter than a real decision: a player is watching it. */
 export const LLM_PROBE_TIMEOUT_MS = 20_000;
 
-export type LlmProbeResult = { ok: true } | { ok: false; error: string };
+export type LlmProbeResult = { ok: true } | ({ ok: false } & LlmFailure);
 
 interface ProbeRequestResult {
   request?: LlmHttpRequestSpec;
@@ -31,35 +36,46 @@ interface ProbeValidation {
 
 export async function testLlmEndpoint(
   profile: LlmProfile,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<LlmProbeResult> {
   let wasm: typeof import("@wasm/engine");
   try {
     await ensureWasmInit();
     wasm = await import("@wasm/engine");
   } catch (error) {
-    return { ok: false, error: `Engine unavailable: ${describe(error)}` };
+    return { ok: false, code: "engineUnavailable", detail: describe(error) };
   }
 
   // The engine refuses here for a missing model, a missing key, or a credential
   // bound for a plaintext endpoint — before anything reaches the network.
   const built = wasm.buildLlmProbeRequest(JSON.stringify(endpointOf(profile))) as ProbeRequestResult;
   if (!built?.request) {
-    return { ok: false, error: built?.error ?? "Could not build a request for this endpoint" };
+    // `built.error` is the ENGINE's own refusal (no model, missing key, a
+    // credential bound for a plaintext endpoint). It is data, shown verbatim.
+    return { ok: false, code: "requestNotBuilt", detail: built?.error };
   }
 
   let body: string;
   try {
     body = await executeLlmRequest(built.request, {
       timeoutMs: options.timeoutMs ?? LLM_PROBE_TIMEOUT_MS,
+      // Forwarded so a probe for an endpoint the player has since edited,
+      // removed, or navigated away from is cut loose instead of running to its
+      // timeout against a configuration that no longer exists.
+      signal: options.signal,
     });
   } catch (error) {
-    return { ok: false, error: describe(error) };
+    if (error instanceof LlmTransportError) {
+      return { ok: false, code: error.code, detail: undefined };
+    }
+    return { ok: false, code: "unreachable", detail: describe(error) };
   }
 
   const verdict = wasm.validateLlmProbeResponse(profile.provider, body) as ProbeValidation;
   if (verdict?.ok) return { ok: true };
-  return { ok: false, error: verdict?.error ?? "The endpoint returned a reply the engine could not use" };
+  // The vendor's own message ("Incorrect API key provided", "models/x is not
+  // found") is the most useful half and survives untranslated.
+  return { ok: false, code: "undecodable", detail: verdict?.error };
 }
 
 function describe(error: unknown): string {

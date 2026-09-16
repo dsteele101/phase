@@ -511,6 +511,16 @@
       "hint": "Los asientos de bot de un draft eligen con el modelo, usando el contexto de sets del formato.",
       "profile": "Proveedor para el draft"
     },
-    "testHint": "Envía una petición real y comprueba la respuesta igual que lo haría un turno de partida."
+    "testHint": "Envía una petición real y comprueba la respuesta igual que lo haría un turno de partida.",
+    "errors": {
+      "engineUnavailable": "No se pudo cargar el motor.",
+      "requestNotBuilt": "Este proveedor no está configurado por completo.",
+      "undecodable": "El endpoint respondió, pero no con algo que la partida pueda usar.",
+      "emptyBody": "El endpoint devolvió una respuesta vacía.",
+      "cancelled": "La prueba se canceló.",
+      "timedOut": "El endpoint no respondió a tiempo.",
+      "unreachable": "No se pudo contactar con el endpoint. Comprueba la URL y que el proveedor permita peticiones desde el navegador.",
+      "oversized": "El endpoint devolvió muchos más datos de los que cabe esperar de una respuesta de chat."
+    }
   }
 }

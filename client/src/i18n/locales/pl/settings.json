@@ -511,6 +511,16 @@
       "hint": "Boty w drafcie wybierają kartę modelem, z kontekstem dodatków danego formatu.",
       "profile": "Dostawca do draftu"
     },
-    "testHint": "Wysyła prawdziwe zapytanie i sprawdza odpowiedź dokładnie tak, jak zrobiłaby to tura gry."
+    "testHint": "Wysyła prawdziwe zapytanie i sprawdza odpowiedź dokładnie tak, jak zrobiłaby to tura gry.",
+    "errors": {
+      "engineUnavailable": "Nie udało się wczytać silnika.",
+      "requestNotBuilt": "Ten dostawca nie jest w pełni skonfigurowany.",
+      "undecodable": "Endpoint odpowiedział, ale nie czymś, czego gra może użyć.",
+      "emptyBody": "Endpoint zwrócił pustą odpowiedź.",
+      "cancelled": "Test został anulowany.",
+      "timedOut": "Endpoint nie odpowiedział na czas.",
+      "unreachable": "Nie udało się połączyć z endpointem. Sprawdź adres URL oraz to, czy dostawca zezwala na zapytania z przeglądarki.",
+      "oversized": "Endpoint zwrócił znacznie więcej danych niż odpowiedź czatu."
+    }
   }
 }

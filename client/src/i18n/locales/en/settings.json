@@ -511,6 +511,16 @@
       "hint": "Bot seats in a draft pod pick with the model, using the format’s set context.",
       "profile": "Draft provider"
     },
-    "testHint": "Sends one real request and checks the reply the same way a game turn would."
+    "testHint": "Sends one real request and checks the reply the same way a game turn would.",
+    "errors": {
+      "engineUnavailable": "The engine could not be loaded.",
+      "requestNotBuilt": "This provider is not fully configured.",
+      "undecodable": "The endpoint replied, but not with something the game can use.",
+      "emptyBody": "The endpoint returned an empty response.",
+      "cancelled": "The test was cancelled.",
+      "timedOut": "The endpoint did not respond in time.",
+      "unreachable": "Could not reach the endpoint. Check the URL, and that the provider allows browser requests.",
+      "oversized": "The endpoint returned far more data than a chat completion."
+    }
   }
 }

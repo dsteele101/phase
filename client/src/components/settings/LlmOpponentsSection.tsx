@@ -3,7 +3,10 @@ import { useTranslation } from "react-i18next";
 
 import { useLlmStore } from "../../stores/llmStore";
 import { loadProviderCatalog } from "../../services/llm/catalog";
-import { testLlmEndpoint } from "../../services/llm/probe";
+import {
+  useLlmConnectionTest,
+  type LlmTestState,
+} from "../../hooks/useLlmConnectionTest";
 import type {
   LlmProfile,
   LlmProviderCatalogEntry,
@@ -31,11 +34,6 @@ const MENU_CLASS = "min-h-[40px] rounded-lg border border-white/10 bg-black/30 p
 /** Sentinel for "type a model id I don't have in the list". */
 const CUSTOM_MODEL = "__custom__";
 
-type TestState =
-  | { status: "idle" }
-  | { status: "running" }
-  | { status: "ok" }
-  | { status: "failed"; message: string };
 
 export function LlmOpponentsSection() {
   const { t } = useTranslation("settings");
@@ -146,7 +144,7 @@ function ProfileCard({
   onRemove: () => void;
 }) {
   const { t } = useTranslation("settings");
-  const [test, setTest] = useState<TestState>({ status: "idle" });
+  const [test, setTest] = useState<LlmTestState>({ status: "idle" });
   // Local draft so the endpoint commits once, on blur, rather than per
   // keystroke. Re-synced whenever the stored value changes underneath (a
   // provider switch resets it to the new default).
@@ -158,7 +156,6 @@ function ProfileCard({
     const next = endpointDraft.trim() || null;
     if ((next ?? "") === (profile.baseUrl ?? "")) return;
     onChange({ baseUrl: next });
-    setTest({ status: "idle" });
   }, [endpointDraft, profile.baseUrl, onChange]);
   const entry = catalog.find((row) => row.provider === profile.provider);
   const suggestedModels = entry?.models ?? [];
@@ -183,7 +180,6 @@ function ProfileCard({
       apiKey: "",
       enabled: false,
     });
-    setTest({ status: "idle" });
   };
 
   return (
@@ -331,7 +327,13 @@ function ProfileCard({
           <span className="text-xs text-emerald-300">{t("llm.testOk")}</span>
         )}
         {test.status === "failed" && (
-          <span className="min-w-0 break-words text-xs text-amber-300">{test.message}</span>
+          <span className="min-w-0 break-words text-xs text-amber-300">
+            {/* The reason is translated; the provider's own diagnostic is
+                appended verbatim, because it is data and usually the useful
+                half ("Incorrect API key provided"). */}
+            {t(`llm.errors.${test.code}`)}
+            {test.detail ? ` ${test.detail}` : ""}
+          </span>
         )}
         {test.status === "idle" && (
           <span className="min-w-0 text-[10px] text-slate-500">{t("llm.testHint")}</span>
@@ -339,32 +341,6 @@ function ProfileCard({
       </div>
     </div>
   );
-}
-
-/**
- * Test a profile end to end.
- *
- * Delegates to {@link testLlmEndpoint}, which builds the request with the
- * engine, performs it, and validates the reply with the engine's own decoder.
- * A resolved fetch is NOT success: the transport returns non-2xx bodies so a
- * vendor's message survives to be shown, and both of the failures a player is
- * most likely to hit — a rejected key and an unknown model — arrive as
- * well-formed HTTP responses.
- *
- * Needs no game: the probe is stateless, which is what makes it usable at the
- * moment a player is actually configuring a provider.
- */
-function useLlmConnectionTest(
-  profile: LlmProfile,
-  setTest: (state: TestState) => void,
-): () => void {
-  return useCallback(() => {
-    void (async () => {
-      setTest({ status: "running" });
-      const result = await testLlmEndpoint(profile);
-      setTest(result.ok ? { status: "ok" } : { status: "failed", message: result.error });
-    })();
-  }, [profile, setTest]);
 }
 
 /** The engine-owned provider catalog. */

@@ -99,3 +99,27 @@ export function endpointOf(profile: LlmProfile): LlmEndpointConfig {
     temperature: profile.temperature,
   };
 }
+
+/**
+ * Phase-authored failure reasons, as codes rather than prose.
+ *
+ * The UI translates these; the accompanying `detail` is NOT translated because
+ * it is data — a vendor's own diagnostic ("Incorrect API key provided",
+ * "models/x is not found"), which is the most useful part of the message and
+ * must survive verbatim. Only sentences this project wrote become codes.
+ */
+export type LlmMessageCode =
+  | "engineUnavailable"
+  | "requestNotBuilt"
+  | "undecodable"
+  | "emptyBody"
+  | "cancelled"
+  | "timedOut"
+  | "unreachable"
+  | "oversized";
+
+export interface LlmFailure {
+  code: LlmMessageCode;
+  /** Provider- or engine-authored diagnostic, shown verbatim. */
+  detail?: string;
+}

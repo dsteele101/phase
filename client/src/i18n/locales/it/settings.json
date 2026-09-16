@@ -511,6 +511,16 @@
       "hint": "I posti bot di un draft scelgono con il modello, usando il contesto dei set del formato.",
       "profile": "Provider per il draft"
     },
-    "testHint": "Invia una richiesta reale e verifica la risposta esattamente come farebbe un turno di gioco."
+    "testHint": "Invia una richiesta reale e verifica la risposta esattamente come farebbe un turno di gioco.",
+    "errors": {
+      "engineUnavailable": "Non è stato possibile caricare il motore.",
+      "requestNotBuilt": "Questo provider non è configurato completamente.",
+      "undecodable": "L'endpoint ha risposto, ma non con qualcosa che la partita possa usare.",
+      "emptyBody": "L'endpoint ha restituito una risposta vuota.",
+      "cancelled": "La prova è stata annullata.",
+      "timedOut": "L'endpoint non ha risposto in tempo.",
+      "unreachable": "Impossibile raggiungere l'endpoint. Controlla l'URL e che il provider consenta richieste dal browser.",
+      "oversized": "L'endpoint ha restituito molti più dati di una risposta di chat."
+    }
   }
 }

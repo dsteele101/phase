@@ -511,6 +511,16 @@
       "hint": "Les sièges bots d'un draft choisissent avec le modèle, avec le contexte des éditions du format.",
       "profile": "Fournisseur pour le draft"
     },
-    "testHint": "Envoie une vraie requête et vérifie la réponse exactement comme le ferait un tour de jeu."
+    "testHint": "Envoie une vraie requête et vérifie la réponse exactement comme le ferait un tour de jeu.",
+    "errors": {
+      "engineUnavailable": "Le moteur n'a pas pu être chargé.",
+      "requestNotBuilt": "Ce fournisseur n'est pas entièrement configuré.",
+      "undecodable": "Le point de terminaison a répondu, mais pas avec quelque chose d'exploitable par la partie.",
+      "emptyBody": "Le point de terminaison a renvoyé une réponse vide.",
+      "cancelled": "Le test a été annulé.",
+      "timedOut": "Le point de terminaison n'a pas répondu à temps.",
+      "unreachable": "Impossible de joindre le point de terminaison. Vérifiez l'URL et que le fournisseur autorise les requêtes depuis le navigateur.",
+      "oversized": "Le point de terminaison a renvoyé bien plus de données qu'une réponse de chat."
+    }
   }
 }
