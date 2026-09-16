@@ -27,9 +27,12 @@ import { MenuSelect } from "../ui/MenuSelect";
  * path: a model released after this build ships works by typing its id.
  */
 
+// 44px is the minimum comfortable touch target; every interactive control in
+// this panel meets it, since Settings is reachable on phones.
+const TOUCH_TARGET = "min-h-[44px]";
 const FIELD_CLASS =
-  "min-h-[40px] w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400/60 focus:outline-none";
-const MENU_CLASS = "min-h-[40px] rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm";
+  `${TOUCH_TARGET} w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400/60 focus:outline-none`;
+const MENU_CLASS = `${TOUCH_TARGET} rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm`;
 
 /** Sentinel for "type a model id I don't have in the list". */
 const CUSTOM_MODEL = "__custom__";
@@ -74,7 +77,7 @@ export function LlmOpponentsSection() {
       <button
         type="button"
         onClick={() => addProfile()}
-        className="min-h-[40px] self-start rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-sm font-medium text-sky-100 transition-colors hover:bg-sky-500/20"
+        className={`${TOUCH_TARGET} self-start rounded-lg border border-sky-400/40 bg-sky-500/10 px-3 py-2 text-sm font-medium text-sky-100 transition-colors hover:bg-sky-500/20`}
       >
         {t("llm.addProvider")}
       </button>
@@ -213,7 +216,7 @@ function ProfileCard({
           type="button"
           onClick={onRemove}
           aria-label={t("llm.remove")}
-          className="min-h-[40px] shrink-0 rounded-lg border border-rose-400/30 px-2.5 text-sm text-rose-200 transition-colors hover:bg-rose-500/15"
+          className={`${TOUCH_TARGET} shrink-0 rounded-lg border border-rose-400/30 px-2.5 text-sm text-rose-200 transition-colors hover:bg-rose-500/15`}
         >
           ✕
         </button>
@@ -319,7 +322,7 @@ function ProfileCard({
           type="button"
           onClick={runTest}
           disabled={test.status === "running" || !profile.model.trim()}
-          className="min-h-[36px] rounded-lg border border-white/12 bg-white/5 px-3 text-xs font-medium text-slate-200 transition-colors hover:bg-white/10 disabled:opacity-40"
+          className={`${TOUCH_TARGET} rounded-lg border border-white/12 bg-white/5 px-3 text-xs font-medium text-slate-200 transition-colors hover:bg-white/10 disabled:opacity-40`}
         >
           {test.status === "running" ? t("llm.testing") : t("llm.test")}
         </button>

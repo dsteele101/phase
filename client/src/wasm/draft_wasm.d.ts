@@ -36,14 +36,19 @@ export function auto_pick(): any;
 export function booster_pack_pool_for_game(): any;
 
 /**
- * Build one LLM pick request per named bot seat.
+ * Build one LLM pick request per eligible bot seat.
  *
- * `seats_json` is the list of seats bound to an LLM profile; seats absent from
- * it keep the heuristic bot. `set_names_json` is an optional set-code -> name
- * map so the format brief reads "Triple Mirrodin" rather than "Triple MRD";
- * codes are used verbatim when it is absent.
+ * Takes NO seat list. Which seats an LLM may draft for is an authority
+ * question this crate already owns ([`llm_eligible_bot_seats`]), and accepting
+ * a caller's list made the display layer a second classifier of the same
+ * thing -- one free to drift toward naming a human seat, whose private pool
+ * and unpassed pack would then be rendered into a third-party prompt.
+ *
+ * `set_names_json` is an optional set-code -> name map so the format brief
+ * reads "Triple Mirrodin" rather than "Triple MRD"; codes are used verbatim
+ * when it is absent.
  */
-export function buildLlmDraftPickRequests(endpoint_json: string, seats_json: string, set_names_json: string): any;
+export function buildLlmDraftPickRequests(endpoint_json: string, set_names_json: string): any;
 
 /**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
@@ -352,7 +357,7 @@ export interface InitOutput {
     readonly apply_draft_action: (a: number, b: number) => [number, number, number];
     readonly auto_pick: () => [number, number, number];
     readonly booster_pack_pool_for_game: () => [number, number, number];
-    readonly buildLlmDraftPickRequests: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly buildLlmDraftPickRequests: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
     readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];

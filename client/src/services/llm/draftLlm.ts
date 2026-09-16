@@ -11,10 +11,7 @@
  */
 
 import { withDraftEngineOperation } from "../../adapter/draft-adapter";
-import type {
-  DraftPlayerView,
-  LlmDraftResponsePayload,
-} from "../../adapter/draft-adapter";
+import type { LlmDraftResponsePayload } from "../../adapter/draft-adapter";
 import { ensureSetCatalog } from "../setCatalog";
 import { debugLog } from "../../game/debugLog";
 import { executeLlmRequest } from "./llmClient";
@@ -129,10 +126,8 @@ async function setNameMap(): Promise<Record<string, string>> {
  */
 export async function collectLlmDraftResponses(
   profile: LlmProfile,
-  botSeats: number[],
   stillCurrent: () => boolean,
 ): Promise<LlmDraftResponsePayload[]> {
-  if (botSeats.length === 0) return [];
   // A profile the session has given up on skips the round entirely, so a dead
   // provider costs no further latency.
   if (draftDisabled.has(profile.id)) return [];
@@ -147,14 +142,19 @@ export async function collectLlmDraftResponses(
   let requests: LlmDraftPickRequest[];
   try {
     const setNames = await setNameMap();
+    // No seat list is supplied. Which seats an LLM may draft for is an
+    // AUTHORITY question the draft engine already answers (`DraftSeat::Bot`, in
+    // `llm_eligible_bot_seats`), and a second selection here would be a
+    // client-side classification of the same thing -- free to drift, and
+    // drifting toward disclosing a human seat's private pool.
     requests = await withDraftEngineOperation((lease) =>
-      lease.buildLlmDraftPickRequests(
-        JSON.stringify(endpointOf(profile)),
-        botSeats,
-        setNames,
-      ),
+      lease.buildLlmDraftPickRequests(JSON.stringify(endpointOf(profile)), setNames),
     );
   } catch (error) {
+    // A run the draft lifecycle cancelled (abandon, new draft, resume) will
+    // reject here too, and that is not the provider's fault. Charging it would
+    // let abandoning three drafts disable a healthy profile.
+    if (run.signal.aborted || !stillCurrent()) return [];
     debugLog(`LLM drafters unavailable; using the engine bots: ${describe(error)}`, "warn");
     recordRound(profile.id, false);
     return [];
@@ -204,7 +204,8 @@ export async function collectLlmDraftResponses(
 
   if (responses.length === 0) {
     // Every call failed at the transport. That is a real failure and the only
-    // one this function can judge on its own.
+    // one this function can judge on its own -- but only once the run is known
+    // to still be live, checked immediately above.
     recordRound(profile.id, false);
     return [];
   }
@@ -255,11 +256,6 @@ export function reportLlmDraftOutcomes(outcomes: LlmDraftOutcome[]): void {
       );
     }
   }
-}
-
-/** Bot seats in a pod, in seat order. Seat 0 is the local player. */
-export function botSeatIndices(view: DraftPlayerView): number[] {
-  return view.seats.filter((seat) => seat.is_bot).map((seat) => seat.seat_index);
 }
 
 function describe(error: unknown): string {
