@@ -501,7 +501,7 @@
     "apiKey": "Clé d'API",
     "apiKeyPlaceholder": "Collez votre clé d'API",
     "apiKeyOptional": "Facultative pour un serveur local",
-    "apiKeyStorage": "Stockée uniquement sur cet appareil. Les clés d'API sont délibérément exclues de l'export de sauvegarde et de la synchronisation cloud : vous devrez les saisir sur chaque appareil.",
+    "apiKeyStorage": "Conservée en mémoire pour cette session de navigation uniquement. Les clés d'API ne sont jamais écrites sur le disque et sont exclues de l'export de sauvegarde et de la synchronisation cloud : vous la ressaisirez après un rechargement. Une clé d'API impose aussi un point de terminaison https://, sauf si le serveur est sur localhost.",
     "apiKeyGet": "Obtenir une clé",
     "test": "Tester la connexion",
     "testing": "Test en cours…",

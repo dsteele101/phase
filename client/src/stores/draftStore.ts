@@ -12,7 +12,11 @@ import {
   type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
-import { botSeatIndices, submitPickWithLlmBots } from "../services/llm/draftLlm";
+import {
+  botSeatIndices,
+  collectLlmDraftResponses,
+  reportLlmDraftOutcomes,
+} from "../services/llm/draftLlm";
 import { draftProfile, useLlmStore } from "./llmStore";
 import {
   MAX_MATERIALIZED_VIRTUAL_BASICS,
@@ -664,19 +668,33 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     useDraftStore.setState({ pendingPickIntent: null, pickInteractionLocked: false });
   };
   try {
+    // LLM drafters are opt-in twice over: a profile must be configured AND
+    // drafting must be switched on for it. Anything else — including a pod with
+    // no bot seats — takes the ordinary engine-bot path.
+    //
+    // Collected BEFORE the submitting lease is taken. `collectLlmDraftResponses`
+    // builds its requests under a lease of its own and then performs the
+    // provider I/O with none held, so the singleton draft engine queue is never
+    // blocked across a network round trip. Each reply carries the pack
+    // fingerprint it was built from and the engine re-validates it against the
+    // live pack below, so a pack that moved on during the gap is refused per
+    // seat rather than mis-picked.
+    const llmProfile = request.kind === "pick" ? draftProfile(useLlmStore.getState()) : undefined;
+    const llmResponses = llmProfile
+      ? await collectLlmDraftResponses(llmProfile, botSeatIndices(view), isFresh)
+      : [];
+    if (!isFresh()) return { status: "ignored", reason: "stale" };
+
     const nextView = await withDraftEngineOperation((lease) => {
       if (!isFresh()) {
         throw new Error("Stale draft pick request");
       }
       switch (request.kind) {
         case "pick": {
-          // LLM drafters are opt-in twice over: a profile must be configured
-          // AND drafting must be switched on for it. Anything else — including
-          // a pod with no bot seats — takes the ordinary engine-bot path.
-          const profile = draftProfile(useLlmStore.getState());
-          const botSeats = profile ? botSeatIndices(view) : [];
-          if (profile && botSeats.length > 0) {
-            return submitPickWithLlmBots(lease, request.instanceId, profile, botSeats);
+          if (llmResponses.length > 0) {
+            const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
+            reportLlmDraftOutcomes(outcome.llmOutcomes);
+            return outcome.view;
           }
           return lease.submitPick(request.instanceId);
         }

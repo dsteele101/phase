@@ -501,7 +501,7 @@
     "apiKey": "Klucz API",
     "apiKeyPlaceholder": "Wklej swój klucz API",
     "apiKeyOptional": "Opcjonalny dla serwerów lokalnych",
-    "apiKeyStorage": "Przechowywany wyłącznie na tym urządzeniu. Klucze API są celowo wyłączone z eksportu kopii zapasowej i synchronizacji w chmurze, więc trzeba je wpisać na każdym urządzeniu.",
+    "apiKeyStorage": "Przechowywany w pamięci tylko na czas tej sesji przeglądarki. Klucze API nigdy nie trafiają na dysk i są wyłączone z eksportu kopii zapasowej oraz synchronizacji w chmurze, więc po przeładowaniu trzeba go wpisać ponownie. Klucz API wymaga też endpointu https://, chyba że serwer działa na localhost.",
     "apiKeyGet": "Zdobądź klucz",
     "test": "Testuj połączenie",
     "testing": "Testowanie…",

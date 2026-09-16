@@ -785,6 +785,34 @@ struct LlmDraftOutcome {
     error: Option<String>,
 }
 
+/// The seats a caller may have an LLM drafter act for: BOT seats of this pod,
+/// and nothing else.
+///
+/// This is an authority check, not a bounds check, and the distinction is the
+/// whole point. `DraftSeat::Human` is legal at ANY index — an 8-player Premier
+/// or Traditional pod seats humans at 1..7 — so a seat number alone carries no
+/// permission. Rendering a seat's `filter_for_player` view builds a prompt out
+/// of that seat's private pool and unpassed pack and ships it to a third-party
+/// provider, which for a human seat would disclose another player's hidden
+/// information to an outside service. A caller-supplied seat list is therefore
+/// filtered against the session's own seat roster before anything is rendered.
+///
+/// Returns seats in the caller's order, de-duplicated, so one seat cannot be
+/// billed twice for the same pick step.
+fn llm_eligible_bot_seats(draft_session: &DraftSession, requested: &[u8]) -> Vec<u8> {
+    let mut eligible: Vec<u8> = Vec::with_capacity(requested.len());
+    for seat in requested {
+        let is_bot = matches!(
+            draft_session.seats.get(usize::from(*seat)),
+            Some(DraftSeat::Bot { .. })
+        );
+        if is_bot && !eligible.contains(seat) {
+            eligible.push(*seat);
+        }
+    }
+    eligible
+}
+
 /// Build one LLM pick request per named bot seat.
 ///
 /// `seats_json` is the list of seats bound to an LLM profile; seats absent from
@@ -812,13 +840,10 @@ pub fn build_llm_draft_pick_requests(
         let requests: Vec<serde_json::Value> = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
-            seats
-                .iter()
-                .filter(|seat| {
-                    // Seat 0 is the human; a seat past the pod does not exist.
-                    **seat > 0 && usize::from(**seat) < draft_session.seats.len()
-                })
+            llm_eligible_bot_seats(draft_session, &seats)
+                .into_iter()
                 .filter_map(|seat| {
+                    let seat = &seat;
                     let view = filter_for_player(draft_session, *seat);
                     let request = phase_llm::build_draft_pick_prompt(
                         *seat, &view, difficulty, card_db, &set_names,
@@ -898,6 +923,15 @@ fn resolve_llm_draft_pick(
     draft_session: &DraftSession,
     response: &LlmDraftResponse,
 ) -> Result<phase_llm::LlmPickSelection, phase_llm::LlmError> {
+    // Same authority as the request side. A response naming a human seat cannot
+    // have come from a request this bridge issued, so it is refused rather than
+    // used to pick for that player.
+    if !matches!(
+        draft_session.seats.get(usize::from(response.seat)),
+        Some(DraftSeat::Bot { .. })
+    ) {
+        return Err(phase_llm::LlmError::StaleDecision);
+    }
     let Some(Some(pack)) = draft_session.current_pack.get(usize::from(response.seat)) else {
         return Err(phase_llm::LlmError::StaleDecision);
     };
@@ -4805,5 +4839,94 @@ mod create_multiplayer_draft_tests {
         assert!(!deck.main_deck.is_empty(), "deck = {:?}", deck.main_deck);
 
         clear_state();
+    }
+}
+
+#[cfg(test)]
+mod llm_seat_authority_tests {
+    use super::*;
+
+    /// A pod whose seat roster is explicit about which indices are bots, so the
+    /// test never leans on the "seat 0 is the human" convention that the
+    /// authority check exists to stop trusting.
+    fn pod(bot_seats: &[u8], pod_size: u8) -> DraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 7,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..pod_size)
+            .map(|index| {
+                if bot_seats.contains(&index) {
+                    DraftSeat::Bot {
+                        name: format!("Bot {index}"),
+                    }
+                } else {
+                    DraftSeat::Human {
+                        player_id: engine::types::player::PlayerId(index),
+                        display_name: format!("Player {index}"),
+                    }
+                }
+            })
+            .collect();
+        DraftSession::new(config, seats, "LLM-AUTH".to_string())
+    }
+
+    /// The motivating case: an 8-human Premier pod. Every seat index is in
+    /// range, so a bounds check would admit all of them, but none may have its
+    /// private pool and pack rendered into a third-party prompt.
+    #[test]
+    fn a_pod_of_humans_yields_no_llm_seat_however_the_caller_asks() {
+        let session = pod(&[], 8);
+        assert_eq!(
+            llm_eligible_bot_seats(&session, &[0, 1, 2, 3, 4, 5, 6, 7]),
+            Vec::<u8>::new()
+        );
+    }
+
+    /// A human at a NONZERO index is refused. This is the leak the seat-number
+    /// convention allowed: seat 3 is in range and is not seat 0, so the old
+    /// bounds check passed it straight through to `filter_for_player`.
+    #[test]
+    fn a_nonzero_human_seat_is_refused_while_its_bot_neighbours_are_admitted() {
+        let session = pod(&[1, 2, 4], 5);
+        assert_eq!(llm_eligible_bot_seats(&session, &[3]), Vec::<u8>::new());
+        assert_eq!(llm_eligible_bot_seats(&session, &[1, 3, 4]), vec![1, 4]);
+    }
+
+    /// Seat 0 carries no special status in either direction: it is admitted
+    /// when it is a bot, exactly like any other index.
+    #[test]
+    fn seat_zero_is_governed_by_its_role_not_its_number() {
+        assert_eq!(llm_eligible_bot_seats(&pod(&[0], 2), &[0]), vec![0]);
+        assert_eq!(
+            llm_eligible_bot_seats(&pod(&[1], 2), &[0]),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn out_of_range_seats_are_refused_rather_than_panicking() {
+        let session = pod(&[1], 2);
+        assert_eq!(
+            llm_eligible_bot_seats(&session, &[2, 9, 255]),
+            Vec::<u8>::new()
+        );
+    }
+
+    /// A caller cannot bill one seat twice for the same pick step.
+    #[test]
+    fn repeated_seats_collapse_to_one_request() {
+        let session = pod(&[1], 3);
+        assert_eq!(llm_eligible_bot_seats(&session, &[1, 1, 1]), vec![1]);
     }
 }

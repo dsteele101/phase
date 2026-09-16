@@ -156,9 +156,12 @@ async function llmActionProposal(
     if (resolved?.error) debugLog(`LLM opponent (seat ${llmSeatIndex}): ${resolved.error}`, "warn");
     return null;
   }
-  if (resolved.reasoning) {
-    debugLog(`LLM opponent (seat ${llmSeatIndex}) reasoning: ${resolved.reasoning}`, "info");
-  }
+  // The model's reasoning is deliberately NOT logged. `debugLog` writes a
+  // `visibility: "Public"` entry into `logHistory` -- the shared game log, which
+  // is also the history this engine feeds back into later prompts. Publishing a
+  // seat's private deliberation there would leak it to every player and echo it
+  // into subsequent decisions. It stays on `resolved.reasoning` for a future
+  // private channel (the local-only AI decision receipt is the established one).
   return resolved.proposal;
 }
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { executeLlmRequest, LlmTransportError } from "../llmClient";
+import { executeLlmRequest, LLM_MAX_RESPONSE_BYTES, LlmTransportError } from "../llmClient";
 import type { LlmHttpRequestSpec } from "../types";
 
 const spec: LlmHttpRequestSpec = {
@@ -90,5 +90,67 @@ describe("executeLlmRequest", () => {
     );
 
     await expect(executeLlmRequest(spec, { timeoutMs: 5 })).rejects.toThrow(/timed out/);
+  });
+
+  it("never opens a socket for a decision that is already stale", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      executeLlmRequest(spec, { signal: controller.signal }),
+    ).rejects.toThrow(/cancelled/);
+    // The provider is never called, so it is never billed for a reply that
+    // would be discarded.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("abandons a response that exceeds the size cap instead of buffering it", async () => {
+    const chunk = new TextEncoder().encode("x".repeat(64 * 1024));
+    let emitted = 0;
+    const cancel = vi.fn(async () => {});
+    // A stream that would never stop on its own.
+    const body = {
+      getReader: () => ({
+        read: async () => {
+          emitted += chunk.byteLength;
+          return { done: false, value: chunk };
+        },
+        cancel,
+      }),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ status: 200, body }) as unknown as Response),
+    );
+
+    await expect(executeLlmRequest(spec)).rejects.toThrow(/exceeded/);
+    // Stopped at the budget rather than reading forever, and the socket was
+    // released.
+    expect(emitted).toBeLessThanOrEqual(LLM_MAX_RESPONSE_BYTES + chunk.byteLength);
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("reads a normal streamed body in full", async () => {
+    const payload = '{"choices":[{"message":{"content":"pick 1"}}]}';
+    const encoded = new TextEncoder().encode(payload);
+    let sent = false;
+    const body = {
+      getReader: () => ({
+        read: async () => {
+          if (sent) return { done: true, value: undefined };
+          sent = true;
+          return { done: false, value: encoded };
+        },
+        cancel: async () => {},
+      }),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ status: 200, body }) as unknown as Response),
+    );
+
+    await expect(executeLlmRequest(spec)).resolves.toBe(payload);
   });
 });

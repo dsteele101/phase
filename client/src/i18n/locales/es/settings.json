@@ -501,7 +501,7 @@
     "apiKey": "Clave de API",
     "apiKeyPlaceholder": "Pega tu clave de API",
     "apiKeyOptional": "Opcional para servidores locales",
-    "apiKeyStorage": "Se guarda solo en este dispositivo. Las claves de API quedan excluidas a propósito de la copia de seguridad y de la sincronización en la nube, así que tendrás que introducirlas en cada dispositivo.",
+    "apiKeyStorage": "Se mantiene en memoria solo durante esta sesión del navegador. Las claves de API nunca se escriben en disco y quedan excluidas de la copia de seguridad y de la sincronización en la nube, así que tendrás que volver a introducirla tras recargar. Además, una clave de API exige un endpoint https:// salvo que el servidor esté en localhost.",
     "apiKeyGet": "Obtener una clave",
     "test": "Probar conexión",
     "testing": "Probando…",

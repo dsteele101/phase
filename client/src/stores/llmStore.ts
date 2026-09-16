@@ -5,6 +5,35 @@ import { LLM_ENDPOINTS_KEY } from "../constants/storage";
 import type { LlmProfile, LlmProviderId } from "../services/llm/types";
 
 /**
+ * How a profile is persisted: everything except the credential.
+ *
+ * `apiKey` is deliberately absent. A key written to `localStorage` is readable
+ * by anything with script access to the origin and outlives the session that
+ * needed it, so keys live in memory for the lifetime of the tab and are
+ * re-entered afterwards. {@link STORED_PROFILE_KEYS} is the allowlist the
+ * persister projects through, so a field added to `LlmProfile` is NOT persisted
+ * until it is named here.
+ */
+type StoredProfile = Omit<LlmProfile, "apiKey">;
+
+const STORED_PROFILE_KEYS = [
+  "id",
+  "name",
+  "provider",
+  "baseUrl",
+  "model",
+  "maxOutputTokens",
+  "temperature",
+  "enabled",
+] as const satisfies readonly (keyof StoredProfile)[];
+
+function withoutCredential(profile: LlmProfile): StoredProfile {
+  return Object.fromEntries(
+    STORED_PROFILE_KEYS.map((key) => [key, profile[key]]),
+  ) as StoredProfile;
+}
+
+/**
  * Configured LLM opponent endpoints.
  *
  * LLM opponents are strictly opt-in. An empty profile list — the default, and
@@ -79,9 +108,19 @@ export const useLlmStore = create<LlmState>()(
 
       updateProfile(id, patch) {
         set((state) => ({
-          profiles: state.profiles.map((profile) =>
-            profile.id === id ? { ...profile, ...patch } : profile,
-          ),
+          profiles: state.profiles.map((profile) => {
+            if (profile.id !== id) return profile;
+            const next = { ...profile, ...patch };
+            // A credential is scoped to the vendor it was issued by. Switching
+            // provider without clearing it would send an OpenAI key to
+            // Anthropic (or to whatever endpoint the player points at next), so
+            // the key is dropped unless this very patch supplies a new one.
+            if (patch.provider != null && patch.provider !== profile.provider) {
+              next.apiKey = patch.apiKey ?? "";
+              next.enabled = patch.enabled ?? false;
+            }
+            return next;
+          }),
         }));
       },
 
@@ -116,7 +155,47 @@ export const useLlmStore = create<LlmState>()(
         set({ draftProfileId });
       },
     }),
-    { name: LLM_ENDPOINTS_KEY },
+    {
+      name: LLM_ENDPOINTS_KEY,
+      version: 1,
+      // The credential never reaches storage. A profile rehydrates with an
+      // empty `apiKey`, which `isProfileUsable` treats as unconfigured for
+      // every provider that requires one.
+      partialize: (state) => ({
+        profiles: state.profiles.map(withoutCredential),
+        seatBindings: state.seatBindings,
+        draftEnabled: state.draftEnabled,
+        draftProfileId: state.draftProfileId,
+      }),
+      // Scrub credentials written by the pre-v1 shape, which persisted them.
+      // Runs on every load of a v0 record, so an existing key is removed from
+      // disk the first time this build reads it rather than lingering.
+      migrate: (persisted, version) => {
+        const state = persisted as Partial<LlmState> | undefined;
+        if (!state) return persisted as LlmState;
+        if (version >= 1) return state as LlmState;
+        return {
+          ...state,
+          profiles: (state.profiles ?? []).map((profile) => ({
+            ...withoutCredential(profile),
+            apiKey: "",
+          })),
+        } as LlmState;
+      },
+      merge: (persisted, current) => {
+        const incoming = (persisted ?? {}) as Partial<LlmState>;
+        return {
+          ...current,
+          ...incoming,
+          // Rehydrated profiles carry no credential by construction; restate it
+          // so a hand-edited storage record cannot smuggle one back in.
+          profiles: (incoming.profiles ?? []).map((profile) => ({
+            ...profile,
+            apiKey: "",
+          })),
+        };
+      },
+    },
   ),
 );
 
