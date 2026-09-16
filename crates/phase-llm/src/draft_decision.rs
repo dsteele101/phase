@@ -63,6 +63,28 @@ pub fn pick_fingerprint(seat: u8, pack: &[DraftCardInstance]) -> String {
     )
 }
 
+/// The drafter's standing brief.
+///
+/// `min_deck_size` is the engine's, never a literal: CR 100.2b gives limited a
+/// 40-card minimum but CR 903.13f(1) requires at least 60 for Commander draft,
+/// and a Commander drafter told to build 40 is being contradicted by the format
+/// summary in its own user message.
+fn draft_system_prompt(difficulty: AiDifficulty, required: usize, min_deck_size: usize) -> String {
+    format!(
+        "You are drafting a Magic: The Gathering limited deck. You are one seat \
+         in the pod and you are building the best {min_deck_size}-card deck you \
+         can from what you take.\n\n{}\n\nYou will be shown the format, your pool \
+         so far, and the pack in front of you as a numbered list. Pick from that \
+         list only.\n\n{}",
+        difficulty_brief(difficulty),
+        if required > 1 {
+            multi_response_contract(required)
+        } else {
+            RESPONSE_CONTRACT.to_string()
+        },
+    )
+}
+
 /// Build the pick prompt for one seat.
 ///
 /// `view` must be that seat's own projection
@@ -83,19 +105,14 @@ pub fn build_draft_pick_prompt(
     }
     let required = view.required_pick_count.clamp(1, pack.len());
     let options = option_lines(pack, db, difficulty);
+    // CR 100.2b gives limited a 40-card minimum, but CR 903.13f(1) requires at
+    // least 60 for Commander draft. The engine publishes the number this
+    // procedure actually enforces, so the brief must read it rather than restate
+    // the common case -- a Commander drafter told to build 40 is being given
+    // instructions that contradict the format summary two lines below it.
+    let min_deck_size = view.min_deck_size;
 
-    let system = format!(
-        "You are drafting a Magic: The Gathering limited deck. You are one seat \
-         in the pod and you are building the best 40-card deck you can from what \
-         you take.\n\n{}\n\nYou will be shown the format, your pool so far, and \
-         the pack in front of you as a numbered list. Pick from that list only.\n\n{}",
-        difficulty_brief(difficulty),
-        if required > 1 {
-            multi_response_contract(required)
-        } else {
-            RESPONSE_CONTRACT.to_string()
-        },
-    );
+    let system = draft_system_prompt(difficulty, required, min_deck_size);
 
     let instruction = if required > 1 {
         // CR 903.13b: a Commander Draft seat takes two cards per step.
@@ -263,6 +280,28 @@ mod tests {
     fn set_names_are_keyed_case_insensitively() {
         let names = set_names_from_pairs([("mrd".to_string(), "Mirrodin".to_string())]);
         assert_eq!(names.get("MRD").map(String::as_str), Some("Mirrodin"));
+    }
+
+    /// CR 100.2b vs CR 903.13f(1): the brief must carry the minimum the ENGINE
+    /// publishes for this procedure, not the common case.
+    #[test]
+    fn the_brief_states_the_engine_published_minimum_deck_size() {
+        let limited = draft_system_prompt(AiDifficulty::Medium, 1, 40);
+        assert!(limited.contains("best 40-card deck"), "{limited}");
+        assert!(!limited.contains("60-card"), "{limited}");
+
+        // A Commander draft seat (CR 903.13f(1)) builds at least 60.
+        let commander = draft_system_prompt(AiDifficulty::Medium, 2, 60);
+        assert!(commander.contains("best 60-card deck"), "{commander}");
+        assert!(!commander.contains("40-card"), "{commander}");
+    }
+
+    #[test]
+    fn a_multi_card_step_uses_the_multi_pick_reply_contract() {
+        let single = draft_system_prompt(AiDifficulty::Medium, 1, 40);
+        let double = draft_system_prompt(AiDifficulty::Medium, 2, 60);
+        assert!(single.contains("\"choice\": <the number"), "{single}");
+        assert!(double.contains("2 option numbers"), "{double}");
     }
 
     #[test]

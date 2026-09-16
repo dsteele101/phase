@@ -125,14 +125,20 @@ const GEMINI_MODELS: &[ModelOption] = &[
     },
 ];
 
+// DeepSeek renamed its line: the current Models & Pricing page names
+// `deepseek-flash` and `deepseek-v4-pro`. The previous `deepseek-chat` /
+// `deepseek-reasoner` ids are gone from the catalog rather than kept as dead
+// rows -- a listed id that 404s is worse than an absent one, because the player
+// has no reason to doubt it. Anything not listed remains reachable through the
+// free-text field.
 const DEEPSEEK_MODELS: &[ModelOption] = &[
     ModelOption {
-        id: "deepseek-chat",
-        label: "DeepSeek Chat",
+        id: "deepseek-flash",
+        label: "DeepSeek Flash",
     },
     ModelOption {
-        id: "deepseek-reasoner",
-        label: "DeepSeek Reasoner",
+        id: "deepseek-v4-pro",
+        label: "DeepSeek V4 Pro",
     },
 ];
 
@@ -176,7 +182,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         value: "DeepSeek",
         display_name: "DeepSeek",
         default_base_url: Some("https://api.deepseek.com/v1"),
-        default_model: "deepseek-chat",
+        default_model: "deepseek-flash",
         requires_api_key: true,
         api_key_url: "https://platform.deepseek.com/api_keys",
         models: DEEPSEEK_MODELS,

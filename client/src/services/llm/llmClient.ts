@@ -8,7 +8,7 @@
  * a hung provider cannot stall a turn.
  */
 
-import type { LlmHttpRequestSpec } from "./types";
+import type { LlmHttpRequestSpec, LlmMessageCode } from "./types";
 
 /**
  * Per-call ceiling. A decision that has not come back by now is abandoned and
@@ -28,9 +28,17 @@ export const LLM_REQUEST_TIMEOUT_MS = 45_000;
  */
 export const LLM_MAX_RESPONSE_BYTES = 1024 * 1024;
 
-/** A transport-level failure, distinct from the engine's `LlmError` outcomes. */
+/**
+ * A transport-level failure, distinct from the engine's `LlmError` outcomes.
+ *
+ * Carries both a `code` and a `message`: the code is what the UI translates,
+ * the message is the developer-facing text that reaches the debug log. Keeping
+ * both means a localized surface and a legible log without one constraining the
+ * other.
+ */
 export class LlmTransportError extends Error {
   constructor(
+    readonly code: LlmMessageCode,
     message: string,
     readonly status?: number,
   ) {
@@ -68,7 +76,7 @@ export async function executeLlmRequest(
     // this, an abort raised before the call is made is only noticed after the
     // request has gone out — the provider is billed and the reply discarded.
     if (options.signal?.aborted) {
-      throw new LlmTransportError("LLM request cancelled");
+      throw new LlmTransportError("cancelled", "LLM request cancelled");
     }
     const response = await fetch(spec.url, {
       method: spec.method,
@@ -82,6 +90,7 @@ export async function executeLlmRequest(
     const text = await readCappedText(response, LLM_MAX_RESPONSE_BYTES);
     if (!text) {
       throw new LlmTransportError(
+        "emptyBody",
         `LLM endpoint returned an empty body (HTTP ${response.status})`,
         response.status,
       );
@@ -90,15 +99,14 @@ export async function executeLlmRequest(
   } catch (error) {
     if (error instanceof LlmTransportError) throw error;
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new LlmTransportError(
-        options.signal?.aborted
-          ? "LLM request cancelled"
-          : `LLM request timed out after ${timeoutMs}ms`,
-      );
+      throw options.signal?.aborted
+        ? new LlmTransportError("cancelled", "LLM request cancelled")
+        : new LlmTransportError("timedOut", `LLM request timed out after ${timeoutMs}ms`);
     }
     // A CORS rejection and a DNS failure are indistinguishable to `fetch`, so
     // the message names both rather than guessing.
     throw new LlmTransportError(
+      "unreachable",
       `Could not reach the LLM endpoint (network error, or the provider does not allow browser requests): ${
         error instanceof Error ? error.message : String(error)
       }`,
@@ -148,6 +156,7 @@ async function readCappedText(response: Response, maxBytes: number): Promise<str
 
 function oversized(maxBytes: number): LlmTransportError {
   return new LlmTransportError(
+    "oversized",
     `LLM response exceeded ${maxBytes} bytes; the endpoint is not returning a chat completion`,
   );
 }

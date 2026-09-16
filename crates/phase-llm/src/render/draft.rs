@@ -40,7 +40,7 @@ pub fn format_context(view: &DraftPlayerView, set_names: &SetNames) -> String {
         view.cards_per_pack
     )];
 
-    if let Some(rotation) = set_rotation(view, set_names) {
+    if let Some(rotation) = source_sentence(view, set_names) {
         lines.push(rotation);
     }
     lines.push(format!(
@@ -50,9 +50,75 @@ pub fn format_context(view: &DraftPlayerView, set_names: &SetNames) -> String {
     lines.join("\n")
 }
 
-/// The set rotation sentence, or `None` for a cube (whose "sets" are one cube).
-fn set_rotation(view: &DraftPlayerView, set_names: &SetNames) -> Option<String> {
-    rotation_sentence(&rotation_codes(view)?, set_names)
+/// The source sentence: how this draft's boosters are chosen.
+///
+/// Branches on the layout because the two shapes are different CLAIMS, not
+/// different formatting. A uniform draft has a known per-round sequence; a
+/// Chaos draft does not have one at all — `pack_generator` randomizes every
+/// seat's every round independently, and the view deliberately publishes
+/// candidate INTENT rather than assignments. Rendering the candidate pool as an
+/// ordered rotation would tell the model which set each future booster will be,
+/// which is information no one has.
+fn source_sentence(view: &DraftPlayerView, set_names: &SetNames) -> Option<String> {
+    // The engine's own per-pack record wins wherever it is published. It is
+    // deliberately EMPTY for Chaos (`visible_pack_set_codes`), so this cannot
+    // leak an assignment.
+    if !view.pack_set_codes.is_empty() {
+        return rotation_sentence(&view.pack_set_codes, set_names);
+    }
+    match &view.source {
+        draft_core::view::DraftSourceView::Set { layout } => match layout {
+            SetLayoutView::UniformByRound { codes } => rotation_sentence(codes, set_names),
+            SetLayoutView::Chaos {
+                candidate_codes,
+                current_pack_code,
+                completed_own_pack_codes,
+                ..
+            } => chaos_sentence(
+                candidate_codes,
+                current_pack_code.as_deref(),
+                completed_own_pack_codes.as_deref(),
+                set_names,
+            ),
+        },
+        draft_core::view::DraftSourceView::Cube { .. } => None,
+    }
+}
+
+/// What a Chaos drafter actually knows: the pool boosters are drawn from, the
+/// set in front of them right now, and — only once the draft is over — which
+/// sets they opened. Never a future assignment, because none exists yet.
+fn chaos_sentence(
+    candidate_codes: &[String],
+    current_pack_code: Option<&str>,
+    completed_own_pack_codes: Option<&[String]>,
+    set_names: &SetNames,
+) -> Option<String> {
+    if candidate_codes.is_empty() {
+        return None;
+    }
+    let pool: Vec<String> = candidate_codes
+        .iter()
+        .map(|code| format!("{} ({code})", set_name(code, set_names)))
+        .collect();
+    let mut sentence = format!(
+        "Format: Chaos draft — every booster is drawn at random from this pool,          independently for each seat and each round: {}. Which set a future          booster will be is not knowable.",
+        pool.join(", ")
+    );
+    if let Some(code) = current_pack_code {
+        sentence.push_str(&format!(
+            " The booster you are holding is {} ({code}).",
+            set_name(code, set_names)
+        ));
+    }
+    if let Some(codes) = completed_own_pack_codes.filter(|codes| !codes.is_empty()) {
+        let opened: Vec<String> = codes
+            .iter()
+            .map(|code| format!("{} ({code})", set_name(code, set_names)))
+            .collect();
+        sentence.push_str(&format!(" You opened, in order: {}.", opened.join(", ")));
+    }
+    Some(sentence)
 }
 
 /// The rotation sentence for an explicit pack-round set sequence.
@@ -79,26 +145,6 @@ pub fn rotation_sentence(codes: &[String], set_names: &SetNames) -> Option<Strin
             codes.join(", ")
         )
     })
-}
-
-/// Set codes in pack-round order. `pack_set_codes` is the engine's own per-pack
-/// record and is preferred; the declared layout is the fallback for a view taken
-/// before any pack opened.
-fn rotation_codes(view: &DraftPlayerView) -> Option<Vec<String>> {
-    if !view.pack_set_codes.is_empty() {
-        return Some(view.pack_set_codes.clone());
-    }
-    match &view.source {
-        draft_core::view::DraftSourceView::Set { layout } => Some(match layout {
-            SetLayoutView::UniformByRound { codes } => codes.clone(),
-            // Chaos keeps other seats' assignments private; a seat knows only
-            // the pool it was drawn from.
-            SetLayoutView::Chaos {
-                candidate_codes, ..
-            } => candidate_codes.clone(),
-        }),
-        draft_core::view::DraftSourceView::Cube { .. } => None,
-    }
 }
 
 fn set_name(code: &str, set_names: &SetNames) -> String {
@@ -225,6 +271,74 @@ mod tests {
     #[test]
     fn no_sets_yields_no_rotation_sentence() {
         assert_eq!(rotation_sentence(&[], &names()), None);
+    }
+
+    // ── Chaos: a candidate pool is not a rotation ────────────────────────
+
+    /// The finding: Chaos candidates were forwarded to the rotation sentence,
+    /// which claims "one pack per round, in that order". `pack_generator`
+    /// randomizes every seat's every round independently, so that ordering does
+    /// not exist and the model was being told something no one knows.
+    #[test]
+    fn chaos_candidates_are_never_described_as_an_ordered_rotation() {
+        let sentence =
+            chaos_sentence(&codes(&["MRD", "DST", "5DN"]), None, None, &names()).unwrap();
+
+        assert!(!sentence.contains("in that order"), "{sentence}");
+        assert!(!sentence.contains("one pack per round"), "{sentence}");
+        assert!(!sentence.contains("Triple"), "{sentence}");
+    }
+
+    #[test]
+    fn chaos_describes_an_unordered_pool_and_says_the_future_is_unknowable() {
+        let sentence =
+            chaos_sentence(&codes(&["MRD", "DST", "5DN"]), None, None, &names()).unwrap();
+
+        assert!(sentence.contains("drawn at random"), "{sentence}");
+        assert!(
+            sentence.contains("independently for each seat"),
+            "{sentence}"
+        );
+        assert!(sentence.contains("not knowable"), "{sentence}");
+        for named in ["Mirrodin (MRD)", "Darksteel (DST)", "Fifth Dawn (5DN)"] {
+            assert!(sentence.contains(named), "{named} missing from {sentence}");
+        }
+    }
+
+    /// The two things a Chaos seat legitimately knows: the booster in front of
+    /// it, and — only once picking is over — what it opened.
+    #[test]
+    fn chaos_reports_the_current_booster_when_the_view_publishes_one() {
+        let sentence =
+            chaos_sentence(&codes(&["MRD", "DST"]), Some("DST"), None, &names()).unwrap();
+
+        assert!(
+            sentence.contains("booster you are holding is Darksteel (DST)"),
+            "{sentence}"
+        );
+    }
+
+    #[test]
+    fn chaos_reports_its_completed_sequence_only_when_published() {
+        let withheld = chaos_sentence(&codes(&["MRD", "DST"]), None, None, &names()).unwrap();
+        assert!(!withheld.contains("You opened"), "{withheld}");
+
+        let completed = chaos_sentence(
+            &codes(&["MRD", "DST"]),
+            None,
+            Some(&codes(&["DST", "MRD"])),
+            &names(),
+        )
+        .unwrap();
+        assert!(
+            completed.contains("You opened, in order: Darksteel (DST), Mirrodin (MRD)"),
+            "{completed}"
+        );
+    }
+
+    #[test]
+    fn an_empty_chaos_candidate_pool_yields_no_sentence() {
+        assert_eq!(chaos_sentence(&[], None, None, &names()), None);
     }
 
     #[test]

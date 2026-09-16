@@ -17,6 +17,7 @@ import {
   cancelLlmDraftRun,
   collectLlmDraftResponses,
   reportLlmDraftOutcomes,
+  resetLlmDraftBreaker,
 } from "../services/llm/draftLlm";
 import { draftProfile, useLlmStore } from "./llmStore";
 import {
@@ -228,6 +229,14 @@ function beginLifecycle(): number {
   exclusiveToken = null;
   invalidateWorkspaceDependents();
   cancelScheduledPersistence();
+  // Abandoning or replacing a draft must take its LLM work with it. Without
+  // this, a provider call started for the old draft runs to its full timeout
+  // holding a socket, and its reply lands against a pod that no longer exists.
+  cancelLlmDraftRun();
+  // The failure breaker is scoped to a draft, not to the tab. A provider that
+  // was down during one draft must get a fresh chance in the next, or three
+  // transient failures would silently disable it for the rest of the session.
+  resetLlmDraftBreaker();
   useDraftStore.setState({
     ...initialState,
     interactionGeneration: lifecycleGeneration,
