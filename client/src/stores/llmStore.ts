@@ -71,6 +71,29 @@ function newProfileId(): string {
   return `llm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Profiles recovered from a persisted payload, keeping only record-shaped
+ * entries.
+ *
+ * Storage is not a trusted input: the record can be hand-edited, truncated by a
+ * quota failure, or written by a different build. `profiles` may therefore be
+ * absent, `null`, an object, a string, or an array containing `null` — and any
+ * of those would throw inside `migrate`/`merge` BEFORE `partialize` gets the
+ * chance to scrub a pre-v1 credential, leaving the key on disk and the store
+ * unconstructable. Anything unrecognisable is dropped rather than repaired,
+ * because a half-understood profile is one that could still name an endpoint.
+ */
+function readPersistedProfiles(value: unknown): LlmProfile[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is LlmProfile =>
+      typeof entry === "object"
+      && entry !== null
+      && !Array.isArray(entry)
+      && typeof (entry as { id?: unknown }).id === "string",
+  );
+}
+
 /** Absent, empty and whitespace-only base URLs all mean "the provider default",
  *  so they must compare equal — otherwise clearing a field the player never set
  *  would count as retargeting and wipe a working key. */
@@ -196,12 +219,16 @@ export const useLlmStore = create<LlmState>()(
       // Runs on every load of a v0 record, so an existing key is removed from
       // disk the first time this build reads it rather than lingering.
       migrate: (persisted, version) => {
-        const state = persisted as Partial<LlmState> | undefined;
-        if (!state) return persisted as LlmState;
+        if (typeof persisted !== "object" || persisted === null || Array.isArray(persisted)) {
+          // Not a state record at all. Returning it unchanged lets `merge`
+          // fall back to the store's defaults rather than throwing here.
+          return persisted as LlmState;
+        }
+        const state = persisted as Partial<LlmState>;
         if (version >= 1) return state as LlmState;
         return {
           ...state,
-          profiles: (state.profiles ?? []).map((profile) => ({
+          profiles: readPersistedProfiles(state.profiles).map((profile) => ({
             ...withoutCredential(profile),
             apiKey: "",
           })),
@@ -224,7 +251,7 @@ export const useLlmStore = create<LlmState>()(
         // stored record through `partialize` to remove it from disk.
         queueMicrotask(() => {
           useLlmStore.setState({
-            profiles: state.profiles.map((profile) => ({ ...profile })),
+            profiles: readPersistedProfiles(state.profiles).map((profile) => ({ ...profile })),
           });
         });
       },
@@ -235,7 +262,7 @@ export const useLlmStore = create<LlmState>()(
           ...incoming,
           // Rehydrated profiles carry no credential by construction; restate it
           // so a hand-edited storage record cannot smuggle one back in.
-          profiles: (incoming.profiles ?? []).map((profile) => ({
+          profiles: readPersistedProfiles(incoming.profiles).map((profile) => ({
             ...profile,
             apiKey: "",
           })),

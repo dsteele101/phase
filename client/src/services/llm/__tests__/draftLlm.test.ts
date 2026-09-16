@@ -25,9 +25,7 @@ vi.mock("../../setCatalog", () => ({
 const debugMocks = vi.hoisted(() => ({ debugLog: vi.fn() }));
 vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 
-import type { DraftPlayerView } from "../../../adapter/draft-adapter";
 import {
-  botSeatIndices,
   cancelLlmDraftRun,
   collectLlmDraftResponses,
   isLlmDraftDisabled,
@@ -91,18 +89,20 @@ beforeEach(() => {
 });
 
 describe("LLM drafters", () => {
-  it("collects nothing when the pod has no bot seats", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
+  /// The pod's eligible seats are the ENGINE's answer, delivered as the request
+  /// list. A pod with no bot seat simply yields no requests.
+  it("collects nothing when the engine names no eligible seat", async () => {
+    leaseReturning([]);
 
-    await expect(collectLlmDraftResponses(PROFILE, [], () => true)).resolves.toEqual([]);
-    expect(leaseMocks.withDraftEngineOperation).not.toHaveBeenCalled();
+    await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
   });
 
   it("returns one reply per seat, tagged with the pack fingerprint it was built from", async () => {
     leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
     llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":3}' });
 
-    await expect(collectLlmDraftResponses(PROFILE, [1, 2], () => true)).resolves.toEqual([
+    await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([
       { seat: 1, fingerprint: "fp-1", provider: "Anthropic", status: 200, body: '{"choice":3}' },
       { seat: 2, fingerprint: "fp-2", provider: "Anthropic", status: 200, body: '{"choice":3}' },
     ]);
@@ -120,7 +120,7 @@ describe("LLM drafters", () => {
       return { status: 200, body: '{"choice":0}' };
     });
 
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
 
     expect(heldDuringFetch).toBe(false);
   });
@@ -130,14 +130,14 @@ describe("LLM drafters", () => {
     leaseMocks.withDraftEngineOperation.mockImplementation(
       async (work: (l: unknown) => unknown) =>
         work({
-          buildLlmDraftPickRequests: (_endpoint: string, _seats: number[], setNames: unknown) => {
+          buildLlmDraftPickRequests: (_endpoint: string, setNames: unknown) => {
             seenSetNames = setNames;
             return [];
           },
         }),
     );
 
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
 
     expect(seenSetNames).toEqual({ MRD: "Mirrodin" });
   });
@@ -146,27 +146,27 @@ describe("LLM drafters", () => {
     leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("network down"));
 
-    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
+    await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
   });
 
   it("collects nothing when the engine builds no requests", async () => {
     leaseReturning([]);
 
-    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
+    await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
     expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
   });
 
   it("collects nothing when request building throws", async () => {
     leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("draft not initialized"));
 
-    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
+    await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
   });
 
   /// A pick the player has already superseded must not reach the provider.
   it("abandons the round trip when the pick is no longer current", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
 
-    await expect(collectLlmDraftResponses(PROFILE, [1], () => false)).resolves.toEqual([]);
+    await expect(collectLlmDraftResponses(PROFILE, () => false)).resolves.toEqual([]);
     expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
   });
 
@@ -176,22 +176,10 @@ describe("LLM drafters", () => {
       .mockResolvedValueOnce({ status: 200, body: '{"choice":1}' })
       .mockRejectedValueOnce(new Error("timeout"));
 
-    const responses = await collectLlmDraftResponses(PROFILE, [1, 2], () => true);
+    const responses = await collectLlmDraftResponses(PROFILE, () => true);
 
     expect(responses).toHaveLength(1);
     expect(responses[0]?.seat).toBe(1);
-  });
-
-  it("reads bot seats off the engine-published seat list", () => {
-    const view = {
-      seats: [
-        { seat_index: 0, is_bot: false },
-        { seat_index: 1, is_bot: true },
-        { seat_index: 2, is_bot: true },
-      ],
-    } as unknown as DraftPlayerView;
-
-    expect(botSeatIndices(view)).toEqual([1, 2]);
   });
 
   /// Reasoning is derived from a seat's private pack and pool, and debugLog
@@ -217,7 +205,7 @@ describe("LLM drafters", () => {
       return { status: 200, body: '{"choice":0}' };
     });
 
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
 
     expect(seenSignal).toBeInstanceOf(AbortSignal);
     expect(seenSignal?.aborted).toBe(false);
@@ -230,8 +218,8 @@ describe("LLM drafters", () => {
     // Two picks in flight: the second supersedes the first before the first
     // gets past its (awaited) request-building phase.
     const [first, second] = await Promise.all([
-      collectLlmDraftResponses(PROFILE, [1], () => true),
-      collectLlmDraftResponses(PROFILE, [1], () => true),
+      collectLlmDraftResponses(PROFILE, () => true),
+      collectLlmDraftResponses(PROFILE, () => true),
     ]);
 
     // The superseded round contributes nothing and never spends a request on a
@@ -259,7 +247,7 @@ describe("LLM drafters", () => {
       return { status: 200, body: '{"choice":0}' };
     });
 
-    const first = collectLlmDraftResponses(PROFILE, [1], () => true);
+    const first = collectLlmDraftResponses(PROFILE, () => true);
     // Wait for the call to actually be in flight rather than guessing at a
     // number of microtask ticks — request building awaits both the set catalog
     // and the engine lease before it dispatches.
@@ -282,7 +270,7 @@ describe("LLM drafters", () => {
     });
 
     // Replies that arrive after cancellation describe a pack that has passed.
-    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
+    await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
   });
 
   it("discards replies for a pick that went stale mid-flight", async () => {
@@ -295,7 +283,7 @@ describe("LLM drafters", () => {
       return { status: 200, body: '{"choice":0}' };
     });
 
-    await expect(collectLlmDraftResponses(PROFILE, [1], stillCurrent)).resolves.toEqual([]);
+    await expect(collectLlmDraftResponses(PROFILE, stillCurrent)).resolves.toEqual([]);
   });
 
   // ── Per-profile failure breaker ──────────────────────────────────────────
@@ -305,12 +293,12 @@ describe("LLM drafters", () => {
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("provider down"));
 
     for (let round = 0; round < 3; round += 1) {
-      await collectLlmDraftResponses(PROFILE, [1], () => true);
+      await collectLlmDraftResponses(PROFILE, () => true);
     }
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
 
     const callsBefore = llmMocks.executeLlmRequest.mock.calls.length;
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
 
     // No further latency is spent on a provider the session has given up on.
     expect(llmMocks.executeLlmRequest.mock.calls.length).toBe(callsBefore);
@@ -319,15 +307,15 @@ describe("LLM drafters", () => {
   it("resets the breaker when the engine actually uses a pick", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockRejectedValueOnce(new Error("blip"));
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
 
     llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
     recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: true }]);
 
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("blip"));
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
-    await collectLlmDraftResponses(PROFILE, [1], () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
+    await collectLlmDraftResponses(PROFILE, () => true);
 
     // Two failures after a success is below the ceiling.
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
@@ -344,7 +332,7 @@ describe("LLM drafters", () => {
     });
 
     for (let round = 0; round < 3; round += 1) {
-      const responses = await collectLlmDraftResponses(PROFILE, [1], () => true);
+      const responses = await collectLlmDraftResponses(PROFILE, () => true);
       // Bytes came back, so the round reaches submit...
       expect(responses).toHaveLength(1);
       // ...and the engine refuses every seat, which is what counts.
@@ -379,7 +367,7 @@ describe("LLM drafters", () => {
 
     for (let round = 0; round < 5; round += 1) {
       fresh = true;
-      await collectLlmDraftResponses(PROFILE, [1], () => fresh);
+      await collectLlmDraftResponses(PROFILE, () => fresh);
     }
 
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
@@ -393,7 +381,7 @@ describe("LLM drafters", () => {
     });
 
     for (let round = 0; round < 5; round += 1) {
-      await collectLlmDraftResponses(PROFILE, [1], () => true);
+      await collectLlmDraftResponses(PROFILE, () => true);
     }
 
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
@@ -405,7 +393,46 @@ describe("LLM drafters", () => {
     leaseReturning([]);
 
     for (let round = 0; round < 5; round += 1) {
-      await collectLlmDraftResponses(PROFILE, [1], () => true);
+      await collectLlmDraftResponses(PROFILE, () => true);
+    }
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  /// The finding: a run the draft lifecycle cancelled rejects in the
+  /// request-building phase too, and charging that to the provider would let
+  /// abandoning three drafts disable a healthy profile.
+  it("does not charge the breaker for a preflight that failed after cancellation", async () => {
+    leaseMocks.withDraftEngineOperation.mockImplementation(async () => {
+      // Exactly what `beginLifecycle` does while a round is building.
+      cancelLlmDraftRun();
+      throw new Error("draft session replaced");
+    });
+
+    for (let round = 0; round < 5; round += 1) {
+      await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
+    }
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  /// A genuine build failure with the run still live IS the provider's problem
+  /// and still counts, so the guard above cannot mask a real fault.
+  it("still charges the breaker for a preflight failure on a live run", async () => {
+    leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("engine unavailable"));
+
+    for (let round = 0; round < 3; round += 1) {
+      await collectLlmDraftResponses(PROFILE, () => true);
+    }
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
+  });
+
+  it("does not charge the breaker for a preflight failure on a stale pick", async () => {
+    leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("engine unavailable"));
+
+    for (let round = 0; round < 5; round += 1) {
+      await collectLlmDraftResponses(PROFILE, () => false);
     }
 
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);

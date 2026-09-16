@@ -13,7 +13,6 @@ import {
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import {
-  botSeatIndices,
   cancelLlmDraftRun,
   collectLlmDraftResponses,
   recordLlmDraftSubmission,
@@ -692,7 +691,7 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     // seat rather than mis-picked.
     const llmProfile = request.kind === "pick" ? draftProfile(useLlmStore.getState()) : undefined;
     const llmResponses = llmProfile
-      ? await collectLlmDraftResponses(llmProfile, botSeatIndices(view), isFresh)
+      ? await collectLlmDraftResponses(llmProfile, isFresh)
       : [];
     if (!isFresh()) {
       // The pick was superseded while the provider was answering. Cut the round

@@ -920,20 +920,18 @@ export class DraftEngineOperationLease {
   }
 
   /**
-   * Engine-authored LLM pick requests for the named bot seats.
+   * Engine-authored LLM pick requests for this pod's eligible bot seats.
    *
-   * Read-only: no pick is applied and no session state changes. Seats absent
-   * from `seats`, and seats the engine cannot build a prompt for, simply get no
-   * request and keep the heuristic bot.
+   * Takes no seat list: which seats an LLM may draft for is decided by the
+   * draft engine from its own roster, so the display layer never names one.
+   * Read-only — no pick is applied and no session state changes.
    */
   buildLlmDraftPickRequests(
     endpointJson: string,
-    seats: number[],
     setNames: Record<string, string>,
   ): LlmDraftPickRequest[] {
     return this.wasm.buildLlmDraftPickRequests(
       endpointJson,
-      JSON.stringify(seats),
       JSON.stringify(setNames),
     ) as LlmDraftPickRequest[];
   }

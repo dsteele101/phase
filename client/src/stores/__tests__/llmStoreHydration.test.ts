@@ -121,4 +121,96 @@ describe("persisted store hydration", () => {
     const { useLlmStore } = await freshStore();
     expect(useLlmStore.getState().profiles).toEqual([]);
   });
+
+  // ── Malformed persisted containers ───────────────────────────────────────
+
+  /// Storage is not a trusted input: it can be hand-edited, truncated by a
+  /// quota failure, or written by another build. A shape that throws during
+  /// migration would take the module down at import AND leave a pre-v1
+  /// credential on disk, because `partialize` never gets to run.
+  it("survives a profiles payload that is not an array", async () => {
+    for (const profiles of [null, 42, "profiles", { id: "p1" }, true]) {
+      vi.resetModules();
+      localStorage.clear();
+      seed({ profiles, seatBindings: {}, draftEnabled: false, draftProfileId: null });
+
+      const { useLlmStore } = await freshStore();
+
+      expect(useLlmStore.getState().profiles).toEqual([]);
+    }
+  });
+
+  it("drops null and non-record entries but keeps the valid profiles beside them", async () => {
+    seed({
+      profiles: [
+        null,
+        "not-a-profile",
+        42,
+        ["nested"],
+        { name: "no id" },
+        {
+          id: "good",
+          name: "Keeper",
+          provider: "OpenAi",
+          baseUrl: null,
+          apiKey: "sk-should-be-scrubbed",
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    const profiles = useLlmStore.getState().profiles;
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]?.id).toBe("good");
+    // The scrub still happens, which is the point of not throwing first.
+    expect(profiles[0]?.apiKey).toBe("");
+  });
+
+  it("scrubs a credential even when the record also contains malformed entries", async () => {
+    seed({
+      profiles: [
+        null,
+        {
+          id: "good",
+          name: "Keeper",
+          provider: "OpenAi",
+          baseUrl: null,
+          apiKey: "sk-must-not-survive",
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(localStorage.getItem(LLM_ENDPOINTS_KEY)).not.toContain("sk-must-not-survive");
+  });
+
+  it("survives a persisted record that is not an object at all", async () => {
+    for (const record of ['"a string"', "42", "[1,2,3]", "null"]) {
+      vi.resetModules();
+      localStorage.clear();
+      localStorage.setItem(LLM_ENDPOINTS_KEY, JSON.stringify({ state: JSON.parse(record), version: 0 }));
+
+      const { useLlmStore } = await freshStore();
+
+      expect(useLlmStore.getState().profiles).toEqual([]);
+    }
+  });
 });
