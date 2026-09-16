@@ -121,6 +121,7 @@ type EngineRequest =
       playerId: number;
       fingerprint: string;
       provider: string;
+      status: number;
       responseBody: string;
     }
   | { type: "llmProviderCatalog"; id: number }
@@ -593,6 +594,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
             msg.playerId,
             msg.fingerprint,
             msg.provider,
+            msg.status,
             msg.responseBody,
           ) ?? null,
         );

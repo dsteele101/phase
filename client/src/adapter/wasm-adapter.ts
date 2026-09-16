@@ -715,6 +715,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     playerId: number,
     fingerprint: string,
     provider: string,
+    status: number,
     responseBody: string,
   ): Promise<AiLlmProposalResult | null> {
     this.assertInitialized("getAiActionProposalFromLlmResponse");
@@ -724,6 +725,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
           playerId,
           fingerprint,
           provider,
+          status,
           responseBody,
         );
       }
@@ -731,6 +733,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         playerId,
         fingerprint,
         provider,
+        status,
         responseBody,
       );
     } catch (err) {
@@ -1354,6 +1357,7 @@ interface MainThreadFallback {
     playerId: number,
     fingerprint: string,
     provider: string,
+    status: number,
     responseBody: string,
   ): Promise<AiLlmProposalResult | null>;
   llmProviderCatalog(): Promise<unknown>;
@@ -1543,6 +1547,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerId: number,
       fingerprint: string,
       provider: string,
+      status: number,
       responseBody: string,
     ) =>
       enqueue(
@@ -1551,6 +1556,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
             playerId,
             fingerprint,
             provider,
+            status,
             responseBody,
           ) ?? null) as AiLlmProposalResult | null,
       ),

@@ -53,18 +53,28 @@ export interface LlmCallOptions {
   signal?: AbortSignal;
 }
 
+/** A provider response, as received. Status travels WITH the body because the
+ *  body alone cannot be judged: an error page or a gateway failure can parse as
+ *  a completion envelope, so only the engine, holding both, can rule. */
+export interface LlmResponse {
+  status: number;
+  body: string;
+}
+
 /**
  * Perform one provider call.
  *
  * A non-2xx response is NOT thrown away: providers put their most useful
  * diagnostics (bad key, unknown model, rate limit) in the error body, and the
- * engine's response parser surfaces them. The body is returned for any status
- * that carries one; only a transport failure with no body throws.
+ * engine's response parser surfaces them. The status is returned alongside so
+ * the engine can refuse the response regardless of how its body parses — this
+ * transport deliberately does not make that call itself. Only a transport
+ * failure with no body throws.
  */
 export async function executeLlmRequest(
   spec: LlmHttpRequestSpec,
   options: LlmCallOptions = {},
-): Promise<string> {
+): Promise<LlmResponse> {
   const timeoutMs = options.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -95,7 +105,7 @@ export async function executeLlmRequest(
         response.status,
       );
     }
-    return text;
+    return { status: response.status, body: text };
   } catch (error) {
     if (error instanceof LlmTransportError) throw error;
     if (error instanceof DOMException && error.name === "AbortError") {

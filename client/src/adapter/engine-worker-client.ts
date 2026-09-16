@@ -447,6 +447,7 @@ export class EngineWorkerClient {
     playerId: number,
     fingerprint: string,
     provider: string,
+    status: number,
     responseBody: string,
   ): Promise<AiLlmProposalResult | null> {
     return this.request<AiLlmProposalResult | null>(
@@ -455,6 +456,7 @@ export class EngineWorkerClient {
         playerId,
         fingerprint,
         provider,
+        status,
         responseBody,
       },
       ENGINE_REQUEST_TIMEOUT_MS,

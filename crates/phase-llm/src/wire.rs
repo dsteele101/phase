@@ -121,6 +121,36 @@ pub fn build_chat_request(
     })
 }
 
+/// Pull the assistant's text out of a response, given its HTTP status.
+///
+/// This is the status-aware entry point every caller should use. A non-2xx
+/// response is a failure NO MATTER WHAT ITS BODY LOOKS LIKE: a proxy, a gateway
+/// or a misrouted path can return a 4xx/5xx whose payload still parses as a
+/// completion envelope, and accepting it would let an error masquerade as a
+/// decision. The vendor's own diagnostic is still lifted out of that body when
+/// present, because it is the most useful thing the player can be shown.
+pub fn completion_from_response(
+    provider: LlmProvider,
+    status: u16,
+    body: &str,
+) -> LlmResult<String> {
+    if !(200..300).contains(&status) {
+        let detail = serde_json::from_str::<Value>(body)
+            .ok()
+            .as_ref()
+            .and_then(provider_error_detail)
+            .unwrap_or_else(|| {
+                // No parsable envelope: say what happened without echoing an
+                // arbitrary body, which may be an HTML error page.
+                format!("the endpoint returned HTTP {status}")
+            });
+        return Err(LlmError::Provider {
+            detail: format!("HTTP {status}: {detail}"),
+        });
+    }
+    extract_completion_text(provider, body)
+}
+
 /// Pull the assistant's text out of a raw response body.
 ///
 /// A provider error envelope becomes [`LlmError::Provider`] rather than a parse
@@ -368,6 +398,59 @@ mod tests {
             extract_completion_text(LlmProvider::Gemini, body).unwrap(),
             "ab"
         );
+    }
+
+    /// The finding: a non-2xx response whose body still parses as a valid
+    /// completion must not be accepted as a decision.
+    #[test]
+    fn a_non_2xx_response_is_refused_even_when_its_body_looks_like_a_completion() {
+        let looks_fine = r#"{"choices":[{"message":{"content":"{\"choice\": 0}"}}]}"#;
+        for status in [400, 401, 403, 404, 429, 500, 502, 503] {
+            let result = completion_from_response(LlmProvider::OpenAi, status, looks_fine);
+            assert!(
+                matches!(result, Err(LlmError::Provider { .. })),
+                "HTTP {status} must not yield a completion"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_2xx_response_keeps_the_vendors_diagnostic() {
+        let body = r#"{"error":{"message":"Incorrect API key provided"}}"#;
+        let error = completion_from_response(LlmProvider::OpenAi, 401, body).unwrap_err();
+        let LlmError::Provider { detail } = error else {
+            panic!("expected a provider error");
+        };
+        assert!(detail.contains("401"), "{detail}");
+        assert!(detail.contains("Incorrect API key provided"), "{detail}");
+    }
+
+    #[test]
+    fn a_non_2xx_response_with_an_unparsable_body_still_reports_its_status() {
+        let error = completion_from_response(LlmProvider::OpenAi, 502, "<html>Bad Gateway</html>")
+            .unwrap_err();
+        let LlmError::Provider { detail } = error else {
+            panic!("expected a provider error");
+        };
+        assert!(detail.contains("502"), "{detail}");
+        // The raw HTML is not echoed back at the player.
+        assert!(!detail.contains("<html>"), "{detail}");
+    }
+
+    #[test]
+    fn a_2xx_response_decodes_normally_and_still_honours_an_error_envelope() {
+        let ok = r#"{"choices":[{"message":{"content":"pick 1"}}]}"#;
+        assert_eq!(
+            completion_from_response(LlmProvider::OpenAi, 200, ok).unwrap(),
+            "pick 1"
+        );
+        // Some providers return 200 with an error envelope; that is still a
+        // failure.
+        let soft_error = r#"{"error":{"message":"rate limited"}}"#;
+        assert!(matches!(
+            completion_from_response(LlmProvider::OpenAi, 200, soft_error),
+            Err(LlmError::Provider { .. })
+        ));
     }
 
     #[test]

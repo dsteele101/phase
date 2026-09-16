@@ -186,4 +186,27 @@ describe("useLlmConnectionTest", () => {
     });
     expect(last(states)).toEqual({ status: "ok" });
   });
+
+  /// The probe must not report Connected for a non-2xx response whose body
+  /// happens to decode. The engine holds that verdict; this asserts the hook
+  /// surfaces the refusal rather than the shape of the body.
+  it("reports a failure when the engine refuses a non-2xx reply", async () => {
+    probeMocks.testLlmEndpoint.mockResolvedValue({
+      ok: false,
+      code: "undecodable",
+      detail: "HTTP 429: rate limited",
+    });
+    const { result, states } = renderTest(profile());
+
+    await act(async () => {
+      result.current();
+    });
+
+    expect(last(states)).toEqual({
+      status: "failed",
+      code: "undecodable",
+      detail: "HTTP 429: rate limited",
+    });
+    expect(states).not.toContainEqual({ status: "ok" });
+  });
 });
