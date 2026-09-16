@@ -116,7 +116,10 @@ pub fn build_game_decision_prompt(
 
     let user = format!(
         "{board}\n--- DECISION ---\nThe game is waiting on you for: {}\n\nYour legal options:\n{}\n",
-        describe_waiting_for(&state.waiting_for),
+        // The VIEWER-PROJECTED prompt, not the authoritative one. A raw
+        // `WaitingFor` can name objects and choices this seat may not read —
+        // the same reason the board above is rendered from the filtered state.
+        describe_waiting_for(&visible.waiting_for),
         options
             .iter()
             .enumerate()
@@ -219,6 +222,58 @@ mod tests {
                     .unwrap();
             assert!(request.prompt.system.contains(difficulty_brief(difficulty)));
         }
+    }
+
+    /// A prompt leaves the machine for a third-party provider, so anything the
+    /// engine marks `HiddenInformation` must not survive into it. The transport
+    /// hands back whatever log it accumulated; the filtering that matters is
+    /// here, at the engine authority, where a caller cannot widen it.
+    #[test]
+    fn hidden_information_history_cannot_reach_the_provider() {
+        use engine::types::log::{
+            GameLogEntry, LogCategory, LogPresentation, LogSegment, LogVisibility,
+        };
+        use engine::types::phase::Phase;
+
+        let entry = |text: &str, visibility| GameLogEntry {
+            seq: 0,
+            turn: 2,
+            phase: Phase::Draw,
+            category: LogCategory::Zone,
+            segments: vec![LogSegment::Text(text.to_string())],
+            presentation: LogPresentation {
+                visibility,
+                ..LogPresentation::default()
+            },
+        };
+        let history = vec![
+            entry("Player 1 attacks", LogVisibility::Public),
+            // What `engine::game::log::visibility` marks for a draw: the entry
+            // names the exact card.
+            entry(
+                "Player 0 draws Black Lotus",
+                LogVisibility::HiddenInformation,
+            ),
+        ];
+
+        let state = GameState::default();
+        let request = build_game_decision_prompt(
+            &state,
+            &two_option_contract(),
+            // The difficulty with the widest history window, so nothing is
+            // omitted merely by being outside the budget.
+            AiDifficulty::VeryHard,
+            None,
+            &history,
+        )
+        .unwrap();
+
+        let prompt = format!("{}\n{}", request.prompt.system, request.prompt.user);
+        assert!(prompt.contains("Player 1 attacks"), "{prompt}");
+        assert!(
+            !prompt.contains("Black Lotus"),
+            "hidden entry leaked: {prompt}"
+        );
     }
 
     #[test]

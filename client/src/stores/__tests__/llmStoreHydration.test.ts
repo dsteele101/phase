@@ -347,4 +347,96 @@ describe("persisted store hydration", () => {
       enabled: true,
     });
   });
+
+  // ── The rest of the persisted slice ──────────────────────────────────────
+
+  /// The finding: only `profiles` was validated, so the remaining fields were
+  /// spread through untyped. `profileForSeat` indexes `seatBindings` and
+  /// `removeProfile` calls `Object.entries` on it, so a null value crashed at
+  /// the first read rather than at hydration.
+  it("survives seat bindings that are not a record", async () => {
+    for (const seatBindings of [null, 42, "bindings", ["a"], true]) {
+      vi.resetModules();
+      localStorage.clear();
+      seed({ profiles: [], seatBindings, draftEnabled: false, draftProfileId: null });
+
+      const { useLlmStore, profileForSeat } = await freshStore();
+
+      expect(useLlmStore.getState().seatBindings).toEqual({});
+      // The read path that would have thrown.
+      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    }
+  });
+
+  it("keeps only seat bindings that name a seat index and a profile id", async () => {
+    seed({
+      profiles: [],
+      seatBindings: {
+        0: "good",
+        1: 42,
+        2: null,
+        3: "",
+        "-1": "negative",
+        "1.5": "fractional",
+        notASeat: "nope",
+        4: "also-good",
+      },
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    expect(useLlmStore.getState().seatBindings).toEqual({ 0: "good", 4: "also-good" });
+  });
+
+  it("removes a profile without throwing when bindings arrived malformed", async () => {
+    seed({ profiles: [], seatBindings: null, draftEnabled: false, draftProfileId: null });
+
+    const { useLlmStore } = await freshStore();
+    const id = useLlmStore.getState().addProfile({ model: "m", enabled: true });
+
+    // `removeProfile` calls `Object.entries(seatBindings)`.
+    expect(() => useLlmStore.getState().removeProfile(id)).not.toThrow();
+    expect(useLlmStore.getState().profiles).toEqual([]);
+  });
+
+  it("only a real boolean enables drafting", async () => {
+    for (const draftEnabled of ["true", 1, {}, [], null]) {
+      vi.resetModules();
+      localStorage.clear();
+      seed({ profiles: [], seatBindings: {}, draftEnabled, draftProfileId: null });
+
+      const { useLlmStore } = await freshStore();
+
+      // A truthy non-boolean must not switch an LLM into a draft pod.
+      expect(useLlmStore.getState().draftEnabled).toBe(false);
+    }
+
+    vi.resetModules();
+    localStorage.clear();
+    seed({ profiles: [], seatBindings: {}, draftEnabled: true, draftProfileId: null });
+    const { useLlmStore } = await freshStore();
+    expect(useLlmStore.getState().draftEnabled).toBe(true);
+  });
+
+  it("coerces a non-string draft profile id to null", async () => {
+    seed({ profiles: [], seatBindings: {}, draftEnabled: true, draftProfileId: 42 });
+
+    const { useLlmStore } = await freshStore();
+
+    expect(useLlmStore.getState().draftProfileId).toBeNull();
+  });
+
+  it("normalizes every field of a record whose whole slice is wrong-typed", async () => {
+    seed({ profiles: "nope", seatBindings: "nope", draftEnabled: "yes", draftProfileId: [] });
+
+    const { useLlmStore } = await freshStore();
+
+    const state = useLlmStore.getState();
+    expect(state.profiles).toEqual([]);
+    expect(state.seatBindings).toEqual({});
+    expect(state.draftEnabled).toBe(false);
+    expect(state.draftProfileId).toBeNull();
+  });
 });

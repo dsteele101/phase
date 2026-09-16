@@ -13,7 +13,7 @@ use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::log::{GameLogEntry, LogSegment};
+use engine::types::log::{GameLogEntry, LogSegment, LogVisibility};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -273,9 +273,15 @@ fn push_history(out: &mut String, history: &[GameLogEntry], limit: usize) {
     if limit == 0 || history.is_empty() {
         return;
     }
+    // Filter BEFORE windowing so dropped entries do not consume the budget —
+    // otherwise a burst of draws would silently shorten the visible history.
+    let visible: Vec<&GameLogEntry> = history.iter().filter(|entry| is_public(entry)).collect();
+    if visible.is_empty() {
+        return;
+    }
     out.push_str("\n--- RECENT GAME HISTORY (oldest first) ---\n");
-    let start = history.len().saturating_sub(limit);
-    for entry in &history[start..] {
+    let start = visible.len().saturating_sub(limit);
+    for entry in &visible[start..] {
         out.push_str(&format!(
             "T{} {:?}: {}\n",
             entry.turn,
@@ -283,6 +289,20 @@ fn push_history(out: &mut String, history: &[GameLogEntry], limit: usize) {
             render_log_entry(entry)
         ));
     }
+}
+
+/// Whether a log entry may appear in a prompt.
+///
+/// The engine already classifies every entry, and `LogVisibility` is not a
+/// display hint: `HiddenInformation` marks entries the normal game log must not
+/// disclose — card draws name the exact card via `LogSegment::CardName`
+/// (`engine::game::log::visibility`). A prompt leaves the machine for a
+/// third-party provider, which is strictly weaker than the on-screen log this
+/// classification was written for, so the same bar applies and the engine's own
+/// verdict is what enforces it. A transport handing back an unfiltered log
+/// cannot widen what gets rendered.
+fn is_public(entry: &GameLogEntry) -> bool {
+    matches!(entry.presentation.visibility, LogVisibility::Public)
 }
 
 /// Flatten an engine-authored log entry's segments into one sentence. The
@@ -493,6 +513,64 @@ mod tests {
         assert!(out.contains("event 7"));
         assert!(out.contains("event 9"));
         assert!(!out.contains("event 6"));
+    }
+
+    fn hidden_entry(text: &str) -> GameLogEntry {
+        let mut entry = log_entry(vec![LogSegment::Text(text.to_string())]);
+        entry.presentation.visibility = LogVisibility::HiddenInformation;
+        entry
+    }
+
+    /// The engine marks card draws `HiddenInformation` because the entry names
+    /// the exact card. A prompt leaves the machine entirely, so it must clear
+    /// the same bar the on-screen log does.
+    #[test]
+    fn hidden_information_entries_never_reach_the_prompt() {
+        let history = vec![
+            log_entry(vec![LogSegment::Text("Player 1 plays a land".to_string())]),
+            hidden_entry("Player 0 draws Black Lotus"),
+            log_entry(vec![LogSegment::Text("Player 1 passes".to_string())]),
+        ];
+
+        let mut out = String::new();
+        push_history(&mut out, &history, 40);
+
+        assert!(out.contains("plays a land"), "{out}");
+        assert!(out.contains("passes"), "{out}");
+        assert!(!out.contains("Black Lotus"), "hidden entry leaked: {out}");
+        assert!(!out.contains("draws"), "hidden entry leaked: {out}");
+    }
+
+    /// A hidden entry must not consume the history budget either: filtering
+    /// before windowing keeps the visible window the size it claims to be.
+    #[test]
+    fn hidden_entries_do_not_consume_the_history_window() {
+        let mut history: Vec<GameLogEntry> = Vec::new();
+        for index in 0..10 {
+            history.push(hidden_entry(&format!("secret {index}")));
+            history.push(log_entry(vec![LogSegment::Text(format!("public {index}"))]));
+        }
+
+        let mut out = String::new();
+        push_history(&mut out, &history, 3);
+
+        for index in 7..10 {
+            assert!(out.contains(&format!("public {index}")), "{out}");
+        }
+        assert!(!out.contains("secret"), "hidden entry leaked: {out}");
+        assert!(!out.contains("public 6"), "window overran: {out}");
+    }
+
+    /// A history made up entirely of hidden entries yields no section at all,
+    /// rather than an empty heading that implies nothing happened.
+    #[test]
+    fn an_all_hidden_history_renders_no_section() {
+        let history = vec![hidden_entry("secret a"), hidden_entry("secret b")];
+
+        let mut out = String::new();
+        push_history(&mut out, &history, 40);
+
+        assert!(out.is_empty(), "{out}");
     }
 
     #[test]
