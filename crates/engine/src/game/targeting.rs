@@ -1,7 +1,6 @@
 use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
-use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind, TriggerSourceContext};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -472,21 +471,7 @@ fn find_legal_targets_with_context(
             );
         }
 
-        let is_any_target_like = matches!(filter, TargetFilter::Any) || is_any_other_target;
         for &obj_id in &state.battlefield {
-            if is_any_target_like {
-                let Some(obj) = state.objects.get(&obj_id) else {
-                    continue;
-                };
-                // CR 115.4: "any target" / "another target" / "any other target" may be a creature,
-                // player, planeswalker, or battle.
-                if !obj.card_types.core_types.contains(&CoreType::Creature)
-                    && !obj.card_types.core_types.contains(&CoreType::Planeswalker)
-                    && !obj.card_types.core_types.contains(&CoreType::Battle)
-                {
-                    continue;
-                }
-            }
             if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
@@ -564,29 +549,7 @@ fn has_legal_target_with_context(
         .is_empty();
     }
 
-    let is_any_other_target = matches!(
-        filter,
-        TargetFilter::Typed(tf)
-            if tf.type_filters.is_empty()
-                && tf.controller.is_none()
-                && tf.properties.as_slice() == [FilterProp::Another]
-    );
-    let is_any_target_like = matches!(filter, TargetFilter::Any) || is_any_other_target;
-
     for &obj_id in &state.battlefield {
-        if is_any_target_like {
-            let Some(obj) = state.objects.get(&obj_id) else {
-                continue;
-            };
-            // CR 115.4: "any target" / "another target" / "any other target" may be a creature,
-            // player, planeswalker, or battle.
-            if !obj.card_types.core_types.contains(&CoreType::Creature)
-                && !obj.card_types.core_types.contains(&CoreType::Planeswalker)
-                && !obj.card_types.core_types.contains(&CoreType::Battle)
-            {
-                continue;
-            }
-        }
         if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;

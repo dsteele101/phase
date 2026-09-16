@@ -92,13 +92,25 @@ fn consume_spirit_legal_targets_enumeration() {
     let artifact = add_permanent(state, 105, P1, "Sol Ring", CoreType::Artifact);
     let enchantment = add_permanent(state, 106, P1, "Blood Moon", CoreType::Enchantment);
 
-    let ability = &state.objects[&spell].abilities[0];
-    let filter = ability
-        .effect
-        .target_filter()
-        .expect("Consume Spirit must have a target filter");
+    // 1. Generic TargetFilter::Any enumeration (targeting::find_legal_targets) includes all battlefield objects + players.
+    let generic_targets =
+        targeting::find_legal_targets(state, &engine::types::ability::TargetFilter::Any, P0, spell);
+    assert!(generic_targets.contains(&TargetRef::Player(P0)));
+    assert!(generic_targets.contains(&TargetRef::Player(P1)));
+    assert!(generic_targets.contains(&TargetRef::Object(creature)));
+    assert!(generic_targets.contains(&TargetRef::Object(planeswalker)));
+    assert!(generic_targets.contains(&TargetRef::Object(battle)));
+    assert!(generic_targets.contains(&TargetRef::Object(land)));
+    assert!(generic_targets.contains(&TargetRef::Object(artifact)));
+    assert!(generic_targets.contains(&TargetRef::Object(enchantment)));
 
-    let legal_targets = targeting::find_legal_targets(state, filter, P0, spell);
+    // 2. Consume Spirit target slot building (build_target_slots) narrows "any target" damage slot to CR 115.4 domain.
+    let ability = &state.objects[&spell].abilities[0];
+    let resolved =
+        engine::types::ability::ResolvedAbility::new(*ability.effect.clone(), vec![], spell, P0);
+    let slots = engine::game::ability_utils::build_target_slots(state, &resolved)
+        .expect("Consume Spirit target slots must build");
+    let legal_targets = &slots[0].legal_targets;
 
     // CR 115.4: legal targets include creatures, players, planeswalkers, and battles.
     assert!(legal_targets.contains(&TargetRef::Player(P0)));
@@ -526,4 +538,178 @@ fn soul_burn_accepts_black_and_red_mana_for_x_and_rejects_green() {
             "Paying for X in Soul Burn with green mana must be rejected"
         );
     }
+}
+
+#[test]
+fn non_damage_any_target_allows_artifacts_and_lands() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Spell with a non-damage ability targeting TargetFilter::Any
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tap Anything", false, "Tap target permanent.")
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+
+    let land = add_permanent(state, 104, P1, "Island", CoreType::Land);
+    let artifact = add_permanent(state, 105, P1, "Sol Ring", CoreType::Artifact);
+    let creature = add_permanent(state, 101, P1, "Grizzly Bears", CoreType::Creature);
+
+    let ability = &state.objects[&spell].abilities[0];
+    let resolved =
+        engine::types::ability::ResolvedAbility::new(*ability.effect.clone(), vec![], spell, P0);
+    let slots = engine::game::ability_utils::build_target_slots(state, &resolved)
+        .expect("target slots must build");
+    let legal_targets = &slots[0].legal_targets;
+
+    assert!(
+        legal_targets.contains(&TargetRef::Object(land)),
+        "Non-damage Any target must allow targeting land"
+    );
+    assert!(
+        legal_targets.contains(&TargetRef::Object(artifact)),
+        "Non-damage Any target must allow targeting artifact"
+    );
+    assert!(
+        legal_targets.contains(&TargetRef::Object(creature)),
+        "Non-damage Any target must allow targeting creature"
+    );
+}
+
+#[test]
+fn consume_spirit_with_cost_increase_tax_payable_with_unrestricted_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    // Thalia-style tax (+{1} cost increase):
+    // Consume Spirit base {1}{B} + X=1 {1} + Tax {1} = {3}{B} (4 mana total).
+    // Restricted X count = 1 (must be Black).
+    // Unrestricted generic = 2 (1 base + 1 tax, can be Colorless).
+    // Mana pool: 2 Black (1 for {B}, 1 for X) + 2 Colorless (for {2} unrestricted).
+    let mut pool = black_pool(2);
+    pool.extend(colorless_pool(2));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+
+    let taxer = add_permanent(state, 301, P1, "Thalia Guardian", CoreType::Creature);
+    state
+        .objects
+        .get_mut(&taxer)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
+            amount: ManaCost::generic(1),
+            spell_filter: None,
+            dynamic_count: None,
+        }));
+
+    let outcome = runner.cast(spell).x(1).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -1);
+    outcome.assert_life_delta(P0, 1);
+}
+
+#[test]
+fn consume_spirit_with_cost_floor_min_3_payable_with_unrestricted_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    // Trinisphere floor (min 3 mana):
+    // Consume Spirit with X=0: base {1}{B} (2 mana) is floored to {2}{B} (3 mana total).
+    // Restricted X count = 0.
+    // Unrestricted generic = 2 (1 base + 1 floor, can be Colorless).
+    // Mana pool: 1 Black (for {B}) + 2 Colorless (for {2} unrestricted).
+    let mut pool = black_pool(1);
+    pool.extend(colorless_pool(2));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+
+    let trini = add_permanent(state, 302, P1, "Trinisphere", CoreType::Artifact);
+    state
+        .objects
+        .get_mut(&trini)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Minimum,
+            amount: ManaCost::generic(3),
+            spell_filter: None,
+            dynamic_count: None,
+        }));
+
+    let outcome = runner.cast(spell).x(0).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, 0);
+    outcome.assert_life_delta(P0, 0);
+}
+
+#[test]
+fn consume_spirit_with_cost_floor_min_3_with_x1() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    // Trinisphere floor (min 3 mana):
+    // Consume Spirit with X=1: base {1}{B} + X=1 {1} = {2}{B} (3 mana total, meets floor).
+    // Restricted X count = 1 (must be Black).
+    // Unrestricted generic = 1 (1 base, can be Colorless).
+    // Mana pool: 2 Black (1 for {B}, 1 for X) + 1 Colorless (for {1} unrestricted).
+    let mut pool = black_pool(2);
+    pool.extend(colorless_pool(1));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+
+    let trini = add_permanent(state, 302, P1, "Trinisphere", CoreType::Artifact);
+    state
+        .objects
+        .get_mut(&trini)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Minimum,
+            amount: ManaCost::generic(3),
+            spell_filter: None,
+            dynamic_count: None,
+        }));
+
+    let outcome = runner.cast(spell).x(1).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -1);
+    outcome.assert_life_delta(P0, 1);
 }

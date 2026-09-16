@@ -13506,7 +13506,7 @@ fn finalize_mana_payment_with_resume(
     let spend_only_on_x_count = state
         .objects
         .get(&pending.object_id)
-        .map(|obj| super::casting::compute_spend_only_on_x_generic_count(obj, &pending))
+        .map(|obj| super::casting::compute_spend_only_on_x_generic_count(state, obj, &pending))
         .unwrap_or(0);
     state.active_spend_only_on_x_count = Some((pending.object_id, spend_only_on_x_count));
     let finalize_result = (|| -> Result<WaitingFor, EngineError> {
@@ -13937,7 +13937,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     let spend_only_on_x_count = state
         .objects
         .get(&pending.object_id)
-        .map(|obj| super::casting::compute_spend_only_on_x_generic_count(obj, &pending))
+        .map(|obj| super::casting::compute_spend_only_on_x_generic_count(state, obj, &pending))
         .unwrap_or(0);
     state.active_spend_only_on_x_count = Some((pending.object_id, spend_only_on_x_count));
     let finalize_result = (|| -> Result<WaitingFor, EngineError> {

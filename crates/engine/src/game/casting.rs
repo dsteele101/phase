@@ -8526,24 +8526,57 @@ pub(super) fn apply_target_dependent_cost_modifiers(
 /// CR 601.2b / CR 601.2f / CR 601.2h: Calculate how many generic mana pips in the
 /// final cost correspond to restricted {X} contributions rather than unrestricted base/tax generic.
 pub(crate) fn compute_spend_only_on_x_generic_count(
-    obj: &GameObject,
+    state: &GameState,
+    _obj: &GameObject,
     pending: &PendingCast,
 ) -> u32 {
-    let base = pending.base_cost.as_ref().unwrap_or(&obj.mana_cost);
-    let mut unrestricted_generic = match base {
-        ManaCost::Cost { generic, .. } => *generic,
-        _ => 0,
-    };
-    for addition in &pending.declared_mana_additions {
-        if let ManaCost::Cost { generic, .. } = addition {
-            unrestricted_generic += *generic;
-        }
+    let chosen_x = pending.ability.chosen_x.unwrap_or(0);
+    if chosen_x == 0 {
+        return 0;
     }
+
     let final_generic = match &pending.cost {
         ManaCost::Cost { generic, .. } => *generic,
-        _ => 0,
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => 0,
     };
-    final_generic.saturating_sub(unrestricted_generic)
+    if final_generic == 0 {
+        return 0;
+    }
+
+    let mut collected = collect_self_spell_cost_modifiers(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        Some(&pending.ability),
+        false,
+        None,
+    );
+    collected.extend(collect_battlefield_cost_modifiers(
+        state,
+        pending.ability.controller,
+        pending.object_id,
+        Some(&pending.ability),
+        false,
+        None,
+    ));
+
+    let total_generic_reductions: u32 = collected
+        .iter()
+        .filter(|m| !m.is_raise)
+        .map(|m| match &m.amount {
+            ManaCost::Cost { generic, .. } => generic.saturating_mul(m.multiplier),
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
+        })
+        .sum();
+
+    let x_after_reductions = chosen_x.saturating_sub(total_generic_reductions);
+    x_after_reductions.min(final_generic)
 }
 
 /// CR 601.2b / CR 601.2h: Return any color restrictions on paying {X} and the count of
@@ -8579,7 +8612,7 @@ pub(crate) fn spend_only_on_x_info(
     }
     (
         Some(colors),
-        compute_spend_only_on_x_generic_count(obj, pending),
+        compute_spend_only_on_x_generic_count(state, obj, pending),
     )
 }
 

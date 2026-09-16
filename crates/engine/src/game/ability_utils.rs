@@ -2926,11 +2926,24 @@ impl<'a> DamageReplacementTargetRole<'a> {
     pub(crate) fn denotes_damage_any_target(self) -> bool {
         match self {
             Self::OriginalRecipient(filter) | Self::RedirectRecipient(filter) => {
-                matches!(filter, TargetFilter::Any)
+                is_any_target_filter(filter)
             }
             Self::DeclaredSource(_) => false,
         }
     }
+}
+
+/// CR 115.4: "any target" or "any other target" in damage effects denotes a creature, player,
+/// planeswalker or battle.
+fn is_any_target_filter(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Any)
+        || matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.controller.is_none()
+                    && tf.properties.as_slice() == [FilterProp::Another]
+        )
 }
 
 pub(crate) fn damage_replacement_target_roles(
@@ -7055,11 +7068,11 @@ impl<'a> AbilityTargetSlot<'a> {
 /// CR 115.4: "any target" is a creature, player, planeswalker or battle.
 /// Single authority for which declared damage slots use that domain.
 fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlot<'_>) -> bool {
-    if !matches!(slot.filter(), TargetFilter::Any) {
+    if !is_any_target_filter(slot.filter()) {
         return false;
     }
     match effect {
-        Effect::DealDamage { target, .. } => matches!(target, TargetFilter::Any),
+        Effect::DealDamage { target, .. } => is_any_target_filter(target),
         // CR 609.7a + CR 614.9: only the role declared at THIS slot decides; a
         // declared source is never narrowed because a sibling recipient is `Any`.
         Effect::CreateDamageReplacement { .. } => match slot {
@@ -7088,13 +7101,17 @@ fn damage_any_target_legal_targets(
         ability.controller,
         ability.source_id,
     );
+    let mut permanent_filter = TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+        TypeFilter::Creature,
+        TypeFilter::Planeswalker,
+        TypeFilter::Battle,
+    ]));
+    if let TargetFilter::Typed(tf) = slot.filter() {
+        permanent_filter.properties = tf.properties.clone();
+    }
     let permanent_targets = targeting::find_legal_targets(
         state,
-        &TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
-            TypeFilter::Creature,
-            TypeFilter::Planeswalker,
-            TypeFilter::Battle,
-        ]))),
+        &TargetFilter::Typed(permanent_filter),
         ability.controller,
         ability.source_id,
     );
