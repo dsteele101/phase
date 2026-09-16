@@ -32,7 +32,8 @@ vi.mock("../../engineRecovery", () => ({
   notifyEngineLost: () => {},
   routePanic: async () => {},
 }));
-vi.mock("../../debugLog", () => ({ debugLog: vi.fn() }));
+const debugMocks = vi.hoisted(() => ({ debugLog: vi.fn() }));
+vi.mock("../../debugLog", () => ({ debugLog: debugMocks.debugLog }));
 vi.mock("../../../services/llm/llmClient", () => ({
   executeLlmRequest: llmMocks.executeLlmRequest,
 }));
@@ -109,6 +110,7 @@ beforeEach(() => {
   dispatchMocks.dispatchAiActionProposal.mockReset();
   dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
   llmMocks.executeLlmRequest.mockReset();
+  debugMocks.debugLog.mockReset();
   useLlmStore.setState({
     profiles: [],
     seatBindings: {},
@@ -325,6 +327,36 @@ describe("LLM-driven AI seats", () => {
     expect(JSON.parse(endpointJson)).toMatchObject({ apiKey: "k", provider: "OpenAi" });
     // The transport receives only what the engine built — never the profile.
     expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(HTTP_SPEC, expect.anything());
+    controller.dispose();
+  });
+
+  /// `debugLog` writes a `visibility: "Public"` entry into `logHistory` — the
+  /// shared game log, which is ALSO the history fed back into later prompts.
+  /// A seat's private deliberation must not land there.
+  it("never writes model reasoning into the public game log", async () => {
+    bindSeatToProvider();
+    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => proposal(PASS, "heuristic")),
+      buildLlmDecisionRequest: vi.fn(async () => ({
+        fingerprint: "fp-1",
+        optionCount: 2,
+        request: HTTP_SPEC,
+      })),
+      getAiActionProposalFromLlmResponse: vi.fn(async () => ({
+        proposal: proposal(CAST, "llm-bound"),
+        reasoning: "holding removal for their bomb",
+      })),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Hard", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    const logged = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
+    expect(logged.some((message) => message.includes("holding removal"))).toBe(false);
     controller.dispose();
   });
 });

@@ -501,7 +501,7 @@
     "apiKey": "API-Schlüssel",
     "apiKeyPlaceholder": "API-Schlüssel einfügen",
     "apiKeyOptional": "Bei lokalen Servern optional",
-    "apiKeyStorage": "Wird nur auf diesem Gerät gespeichert. API-Schlüssel sind bewusst vom Backup-Export und von der Cloud-Synchronisierung ausgenommen — du gibst sie auf jedem Gerät neu ein.",
+    "apiKeyStorage": "Nur für diese Browsersitzung im Arbeitsspeicher. API-Schlüssel werden nie auf die Festplatte geschrieben und sind vom Backup-Export und der Cloud-Synchronisierung ausgenommen — nach einem Neuladen gibst du ihn erneut ein. Ein API-Schlüssel verlangt außerdem einen https://-Endpunkt, sofern der Server nicht auf localhost läuft.",
     "apiKeyGet": "Schlüssel holen",
     "test": "Verbindung testen",
     "testing": "Test läuft …",

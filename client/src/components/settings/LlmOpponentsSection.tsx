@@ -160,13 +160,16 @@ function ProfileCard({
   const onProviderChange = (value: string) => {
     const next = value as LlmProviderId;
     const nextEntry = catalog.find((row) => row.provider === next);
-    // Switching vendor invalidates the model and the endpoint together: a
-    // model id is vendor-specific, and silently keeping one would produce a
-    // confusing 404 at the first decision instead of here.
+    // Switching vendor invalidates the model, the endpoint AND the credential
+    // together. A model id is vendor-specific, and a key is issued by one
+    // vendor -- carrying it over would send an OpenAI key to Anthropic at the
+    // first decision. The store enforces this too; clearing it here keeps the
+    // field visibly empty rather than showing a stale masked value.
     onChange({
       provider: next,
       model: nextEntry?.defaultModel ?? "",
       baseUrl: null,
+      apiKey: "",
       enabled: false,
     });
     setTest({ status: "idle" });

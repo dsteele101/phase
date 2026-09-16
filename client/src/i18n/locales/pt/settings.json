@@ -501,7 +501,7 @@
     "apiKey": "Chave de API",
     "apiKeyPlaceholder": "Cola a tua chave de API",
     "apiKeyOptional": "Opcional para servidores locais",
-    "apiKeyStorage": "Guardada apenas neste dispositivo. As chaves de API são deliberadamente excluídas da exportação de cópia de segurança e da sincronização na nuvem, por isso terás de as introduzir em cada dispositivo.",
+    "apiKeyStorage": "Mantida em memória apenas nesta sessão do navegador. As chaves de API nunca são escritas em disco e ficam excluídas da exportação de cópia de segurança e da sincronização na nuvem, por isso terás de a introduzir novamente após recarregar. Uma chave de API exige também um endpoint https://, a menos que o servidor esteja em localhost.",
     "apiKeyGet": "Obter uma chave",
     "test": "Testar ligação",
     "testing": "A testar…",

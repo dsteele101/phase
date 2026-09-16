@@ -501,7 +501,7 @@
     "apiKey": "API key",
     "apiKeyPlaceholder": "Paste your API key",
     "apiKeyOptional": "Optional for local servers",
-    "apiKeyStorage": "Stored on this device only. API keys are deliberately excluded from backup export and cloud sync, so you will re-enter them on each device.",
+    "apiKeyStorage": "Kept in memory for this browser session only. API keys are never written to disk and are excluded from backup export and cloud sync, so you will re-enter yours after a reload. An API key also requires an https:// endpoint unless the server is on localhost.",
     "apiKeyGet": "Get a key",
     "test": "Test connection",
     "testing": "Testing…",

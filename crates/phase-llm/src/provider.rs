@@ -174,7 +174,7 @@ impl LlmEndpointConfig {
 
     /// Reject a config that cannot produce a usable request before any network
     /// call is attempted, so the UI can explain the gap instead of surfacing a
-    /// provider 401.
+    /// provider 401 — or, worse, putting a credential on the wire in clear.
     pub fn validate(&self) -> LlmResult<()> {
         if self.model.trim().is_empty() {
             return Err(LlmError::Configuration {
@@ -186,9 +186,76 @@ impl LlmEndpointConfig {
                 detail: format!("{} requires an API key", self.provider.display_name()),
             });
         }
-        self.resolved_base_url()?;
+        let base = self.resolved_base_url()?;
+        // A credential must never leave the machine in clear text. The wire
+        // builder puts the API key in an Authorization / x-api-key /
+        // x-goog-api-key header, so a plaintext endpoint would expose it to
+        // every hop on the path. Loopback is exempt because the traffic never
+        // reaches a network -- that is the local-model case (Ollama, LM Studio)
+        // the OpenAI-compatible provider exists for.
+        if !self.api_key.trim().is_empty() && is_credential_exposing_url(&base) {
+            return Err(LlmError::Configuration {
+                detail: format!(
+                    "refusing to send an API key over plaintext HTTP to {base}; \
+                     use https:// (a local endpoint on localhost is exempt)"
+                ),
+            });
+        }
         Ok(())
     }
+}
+
+/// Whether sending a credential to `url` would put it on the wire in clear.
+///
+/// True for plaintext `http://` to anything but loopback. Anything already
+/// encrypted, and anything that never leaves the machine, is fine.
+fn is_credential_exposing_url(url: &str) -> bool {
+    let Some(rest) = strip_http_scheme(url) else {
+        // No `http://` prefix: either https, or a spelling the transport will
+        // reject on its own. Not this check's call to make.
+        return false;
+    };
+    !is_loopback_authority(rest)
+}
+
+/// The authority portion after `http://`, case-insensitively.
+fn strip_http_scheme(url: &str) -> Option<&str> {
+    let trimmed = url.trim_start();
+    let (scheme, rest) = trimmed.split_once("://")?;
+    scheme.eq_ignore_ascii_case("http").then_some(rest)
+}
+
+/// Whether an authority names this machine.
+///
+/// Covers `localhost` and any `*.localhost` subdomain (RFC 6761 reserves the
+/// whole TLD for loopback), the entire `127.0.0.0/8` range, and IPv6 `[::1]`.
+/// Userinfo is stripped first so `http://127.0.0.1@evil.example` — which
+/// actually resolves to `evil.example` — is not mistaken for loopback.
+fn is_loopback_authority(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // Everything before the last '@' is userinfo, not the host.
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match host_port.strip_prefix('[') {
+        // IPv6 literal: the bracketed span is the host, port follows the ']'.
+        Some(inner) => inner.split(']').next().unwrap_or_default(),
+        None => host_port.split(':').next().unwrap_or_default(),
+    };
+
+    if host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host == "::1"
+    {
+        return true;
+    }
+    // 127.0.0.0/8 -- the whole block is loopback, not just 127.0.0.1.
+    let mut octets = host.split('.');
+    let first = octets.next().and_then(|part| part.parse::<u8>().ok());
+    let remaining: Vec<&str> = octets.collect();
+    first == Some(127)
+        && remaining.len() == 3
+        && remaining.iter().all(|part| part.parse::<u8>().is_ok())
 }
 
 /// Strip a protocol's own call path off a pasted URL, leaving the API root.
@@ -426,6 +493,86 @@ mod tests {
         };
         assert!(matches!(
             config.validate(),
+            Err(LlmError::Configuration { .. })
+        ));
+    }
+
+    fn keyed(url: &str) -> LlmResult<()> {
+        LlmEndpointConfig {
+            provider: LlmProvider::OpenAiCompatible,
+            base_url: Some(url.to_string()),
+            api_key: "sk-secret".to_string(),
+            model: "m".to_string(),
+            max_output_tokens: None,
+            temperature: None,
+        }
+        .validate()
+    }
+
+    #[test]
+    fn a_credential_is_refused_over_plaintext_http_to_a_remote_host() {
+        for url in [
+            "http://api.example.com/v1",
+            "http://192.168.1.50:8080/v1",
+            "HTTP://API.EXAMPLE.COM/v1",
+            // Userinfo that merely LOOKS like loopback: this resolves to
+            // evil.example, so it must not be treated as local.
+            "http://127.0.0.1@evil.example/v1",
+        ] {
+            assert!(
+                matches!(keyed(url), Err(LlmError::Configuration { .. })),
+                "must refuse a key over: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credential_is_allowed_to_loopback_and_to_https() {
+        for url in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://127.1.2.3:1234/v1",
+            "http://[::1]:8080/v1",
+            "http://ollama.localhost/v1",
+            "https://api.example.com/v1",
+        ] {
+            assert_eq!(keyed(url), Ok(()), "must allow a key over: {url}");
+        }
+    }
+
+    /// The rule is about protecting a CREDENTIAL, not about banning plaintext:
+    /// a keyless local server stays reachable over http.
+    #[test]
+    fn a_keyless_endpoint_is_unaffected_by_the_plaintext_rule() {
+        let config = LlmEndpointConfig {
+            provider: LlmProvider::OpenAiCompatible,
+            base_url: Some("http://gpu-box.internal:8000/v1".to_string()),
+            api_key: String::new(),
+            model: "llama-3".to_string(),
+            max_output_tokens: None,
+            temperature: None,
+        };
+        assert_eq!(config.validate(), Ok(()));
+    }
+
+    /// `build_chat_request` calls `validate` first, so the refusal happens
+    /// before a credential is ever placed into a header.
+    #[test]
+    fn no_request_is_built_for_a_credentialed_plaintext_endpoint() {
+        let config = LlmEndpointConfig {
+            provider: LlmProvider::OpenAiCompatible,
+            base_url: Some("http://api.example.com/v1".to_string()),
+            api_key: "sk-secret".to_string(),
+            model: "m".to_string(),
+            max_output_tokens: None,
+            temperature: None,
+        };
+        let prompt = crate::prompt::LlmPrompt {
+            system: "s".to_string(),
+            user: "u".to_string(),
+        };
+        assert!(matches!(
+            crate::wire::build_chat_request(&config, &prompt),
             Err(LlmError::Configuration { .. })
         ));
     }

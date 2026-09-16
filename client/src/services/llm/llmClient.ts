@@ -17,6 +17,17 @@ import type { LlmHttpRequestSpec } from "./types";
  */
 export const LLM_REQUEST_TIMEOUT_MS = 45_000;
 
+/**
+ * Ceiling on how much of a provider response is read.
+ *
+ * The body is untrusted input from a third-party endpoint, and the engine only
+ * ever needs a short JSON decision out of it. Buffering the whole stream would
+ * let a misconfigured, hostile, or simply chatty endpoint pin arbitrary memory
+ * in the tab, so the read stops at this many bytes and the call fails. 1 MiB is
+ * orders of magnitude above any real completion envelope.
+ */
+export const LLM_MAX_RESPONSE_BYTES = 1024 * 1024;
+
 /** A transport-level failure, distinct from the engine's `LlmError` outcomes. */
 export class LlmTransportError extends Error {
   constructor(
@@ -53,6 +64,12 @@ export async function executeLlmRequest(
   options.signal?.addEventListener("abort", onAbort);
 
   try {
+    // A decision that is already stale must not open a socket at all. Without
+    // this, an abort raised before the call is made is only noticed after the
+    // request has gone out — the provider is billed and the reply discarded.
+    if (options.signal?.aborted) {
+      throw new LlmTransportError("LLM request cancelled");
+    }
     const response = await fetch(spec.url, {
       method: spec.method,
       headers: Object.fromEntries(spec.headers.map((header) => [header.name, header.value])),
@@ -62,7 +79,7 @@ export async function executeLlmRequest(
       credentials: "omit",
       cache: "no-store",
     });
-    const text = await response.text();
+    const text = await readCappedText(response, LLM_MAX_RESPONSE_BYTES);
     if (!text) {
       throw new LlmTransportError(
         `LLM endpoint returned an empty body (HTTP ${response.status})`,
@@ -90,4 +107,51 @@ export async function executeLlmRequest(
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", onAbort);
   }
+}
+
+/**
+ * Read a response body, refusing anything past `maxBytes`.
+ *
+ * Streams through the body reader so an oversized response is abandoned as soon
+ * as the budget is exceeded, rather than after it has been buffered in full.
+ * Falls back to `response.text()` only where the stream API is unavailable (an
+ * environment without `Response.body`, which includes some test doubles); the
+ * length is still checked there, just after the fact.
+ */
+async function readCappedText(response: Response, maxBytes: number): Promise<string> {
+  const body = response.body;
+  if (!body?.getReader) {
+    const text = await response.text();
+    if (byteLength(text) > maxBytes) throw oversized(maxBytes);
+    return text;
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw oversized(maxBytes);
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    // Releases the socket whether the read completed, overran, or aborted.
+    reader.cancel().catch(() => {});
+  }
+  chunks.push(decoder.decode());
+  return chunks.join("");
+}
+
+function oversized(maxBytes: number): LlmTransportError {
+  return new LlmTransportError(
+    `LLM response exceeded ${maxBytes} bytes; the endpoint is not returning a chat completion`,
+  );
+}
+
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
 }

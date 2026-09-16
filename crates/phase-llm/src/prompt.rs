@@ -117,11 +117,21 @@ pub fn multi_response_contract(required: usize) -> String {
 
 /// Decode a model's reply into option indices.
 ///
-/// Deliberately forgiving in every way that cannot produce a wrong *legal*
-/// answer: fenced JSON, prose around the JSON, a bare array, and a bare integer
-/// all decode. What it will not do is guess — an index outside the offered
-/// domain is an error, never a clamp, because clamping would silently convert
-/// "the model misread the board" into "the engine took an action nobody chose".
+/// STRICT by construction. The only accepted shapes are a JSON object whose
+/// choice field holds a number, an exact integer string, or an array of those;
+/// and a reply whose entire trimmed text is a single integer. Fenced JSON and
+/// prose surrounding a JSON object are tolerated because neither changes which
+/// number is the answer.
+///
+/// What is NOT accepted is any reply where the answer must be *inferred* from
+/// prose. "I considered option 2, but choose 3" contains two integers and no
+/// structural rule picks the right one — scanning would silently select 2, a
+/// legal action the model did not choose. A wrong-but-legal action is the worst
+/// possible outcome here: it is invisible, it is attributed to the model, and
+/// it changes the game. Refusing costs one heuristic fallback, so every
+/// ambiguity resolves to a refusal.
+///
+/// An index outside the offered domain is likewise an error, never a clamp.
 pub fn decode_choice(text: &str, option_count: usize, wanted: usize) -> LlmResult<LlmChoice> {
     if option_count == 0 {
         return Err(LlmError::UndecodableChoice {
@@ -141,15 +151,19 @@ pub fn decode_choice(text: &str, option_count: usize, wanted: usize) -> LlmResul
         .as_ref()
         .and_then(choice_field)
         .map(collect_numbers)
+        .transpose()?
         .filter(|numbers| !numbers.is_empty())
         .or_else(|| {
-            // No usable JSON: fall back to the first integers in the reply. A
-            // model that answers "I'll take option 3" is still unambiguous.
-            let numbers = scan_integers(stripped);
-            (!numbers.is_empty()).then_some(numbers)
+            // No usable JSON. The one unambiguous non-JSON reply is a bare
+            // integer and nothing else — not a sentence that happens to contain
+            // one, which is where a scan would start guessing.
+            parse_exact_integer(stripped).map(|number| vec![number])
         })
         .ok_or_else(|| LlmError::UndecodableChoice {
-            detail: format!("no option number found in {:?}", truncate(text, 200)),
+            detail: format!(
+                "reply is not a structured choice: {:?}",
+                truncate(text, 200)
+            ),
         })?;
 
     let mut indices: Vec<usize> = Vec::with_capacity(wanted.max(1));
@@ -252,70 +266,52 @@ fn reasoning_field(object: &Value) -> Option<&str> {
         .filter(|reason| !reason.is_empty())
 }
 
-/// Numbers carried by a `choice` field, whatever container it arrived in: a
-/// number, a numeric string, or an array of either.
-fn collect_numbers(value: &Value) -> Vec<i64> {
-    match value {
-        Value::Number(number) => number.as_i64().into_iter().collect(),
-        Value::String(text) => scan_integers(text),
-        Value::Array(items) => items.iter().flat_map(collect_numbers).collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Every standalone non-negative integer in `text`, in order.
+/// Numbers carried by a `choice` field.
 ///
-/// A digit run is standalone when it is not part of a longer token. That rules
-/// out card stats and model names that could otherwise be mistaken for an
-/// answer (`2/2`, `gpt-4`, `2.5`), while still accepting a number that merely
-/// ends a sentence (`I'll take option 2.`) — the separator characters only bind
-/// when a digit sits on the other side of them.
-fn scan_integers(text: &str) -> Vec<i64> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut numbers = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        if !chars[index].is_ascii_digit() {
-            index += 1;
-            continue;
+/// Accepts a JSON number, a string that is EXACTLY an integer, or an array of
+/// those. Any other shape — a sentence, a float, a nested object — is an error
+/// rather than a salvage attempt, so a field the model filled with prose can
+/// never resolve to one of the numbers inside that prose.
+fn collect_numbers(value: &Value) -> LlmResult<Vec<i64>> {
+    match value {
+        Value::Number(number) => {
+            number
+                .as_i64()
+                .map(|number| vec![number])
+                .ok_or_else(|| LlmError::UndecodableChoice {
+                    detail: format!("choice {number} is not a whole number"),
+                })
         }
-        let start = index;
-        while index < chars.len() && chars[index].is_ascii_digit() {
-            index += 1;
-        }
-        let before_free = start == 0 || !binds_left(&chars, start);
-        let after_free = index == chars.len() || !binds_right(&chars, index);
-        if before_free && after_free {
-            if let Ok(number) = chars[start..index]
-                .iter()
-                .collect::<String>()
-                .parse::<i64>()
-            {
-                numbers.push(number);
+        Value::String(text) => parse_exact_integer(text)
+            .map(|number| vec![number])
+            .ok_or_else(|| LlmError::UndecodableChoice {
+                detail: format!(
+                    "choice {:?} is not a bare option number",
+                    truncate(text, 80)
+                ),
+            }),
+        Value::Array(items) => {
+            let mut numbers = Vec::with_capacity(items.len());
+            for item in items {
+                numbers.extend(collect_numbers(item)?);
             }
+            Ok(numbers)
         }
+        other => Err(LlmError::UndecodableChoice {
+            detail: format!("choice field is {other}, not an option number"),
+        }),
     }
-    numbers
 }
 
-/// Whether the character before a digit run joins it into a longer token.
-fn binds_left(chars: &[char], start: usize) -> bool {
-    let previous = chars[start - 1];
-    if previous.is_alphanumeric() || previous == '_' {
-        return true;
+/// `Some(n)` only when `text` is entirely one non-negative integer, ignoring
+/// surrounding whitespace and a single trailing period. Nothing else parses:
+/// no embedded number, no sign, no decimal point.
+fn parse_exact_integer(text: &str) -> Option<i64> {
+    let trimmed = text.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
     }
-    // `/`, `.` and `-` bind only with a digit on their far side: `2/2` and `2.5`
-    // are one token, `option 2.` is not.
-    matches!(previous, '/' | '.' | '-') && start >= 2 && chars[start - 2].is_ascii_digit()
-}
-
-/// Whether the character after a digit run joins it into a longer token.
-fn binds_right(chars: &[char], end: usize) -> bool {
-    let next = chars[end];
-    if next.is_alphanumeric() || next == '_' {
-        return true;
-    }
-    matches!(next, '/' | '.' | '-') && chars.get(end + 1).is_some_and(char::is_ascii_digit)
+    trimmed.parse::<i64>().ok()
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -353,10 +349,8 @@ mod tests {
     #[test]
     fn a_bare_integer_reply_decodes() {
         assert_eq!(decode_choice("3", 5, 1).unwrap().indices, vec![3]);
-        assert_eq!(
-            decode_choice("I'll take option 2.", 5, 1).unwrap().indices,
-            vec![2]
-        );
+        // Whitespace and a single trailing period are punctuation, not content.
+        assert_eq!(decode_choice("  3.  ", 5, 1).unwrap().indices, vec![3]);
     }
 
     #[test]
@@ -384,24 +378,93 @@ mod tests {
         ));
     }
 
+    /// The finding this strictness exists for: a reply naming two options in
+    /// prose has no structural answer, and scanning selected the FIRST one — a
+    /// legal action the model had explicitly rejected.
     #[test]
-    fn power_toughness_in_prose_is_not_mistaken_for_an_answer() {
-        let choice = decode_choice("The 2/2 trades with their 3/3. {\"choice\": 1}", 4, 1).unwrap();
-        assert_eq!(choice.indices, vec![1]);
-        // With no JSON at all the same guard still holds: the stats bind into
-        // longer tokens, so only the standalone number is an answer.
-        assert_eq!(
-            decode_choice("My 2/2 blocks; I choose 3", 5, 1)
-                .unwrap()
-                .indices,
-            vec![3]
-        );
+    fn prose_naming_two_options_is_refused_rather_than_resolved_to_the_first() {
+        for reply in [
+            "I considered option 2, but choose 3",
+            "Not 2 — go with 3.",
+            "Between 2 and 3 I prefer 3",
+        ] {
+            assert!(
+                matches!(
+                    decode_choice(reply, 5, 1),
+                    Err(LlmError::UndecodableChoice { .. })
+                ),
+                "must refuse: {reply}"
+            );
+        }
+    }
+
+    /// Even a sentence a reader finds unambiguous is refused: accepting it
+    /// re-introduces scanning, and the reader's confidence does not generalize.
+    #[test]
+    fn a_single_number_embedded_in_prose_is_still_refused() {
+        assert!(matches!(
+            decode_choice("I'll take option 2.", 5, 1),
+            Err(LlmError::UndecodableChoice { .. })
+        ));
     }
 
     #[test]
-    fn a_decimal_is_never_read_as_two_answers() {
+    fn a_choice_string_carrying_prose_is_refused() {
+        for reply in [
+            r#"{"choice": "option 2 or maybe 3"}"#,
+            r#"{"choice": "I pick 2"}"#,
+            r#"{"choice": "two"}"#,
+        ] {
+            assert!(
+                matches!(
+                    decode_choice(reply, 5, 1),
+                    Err(LlmError::UndecodableChoice { .. })
+                ),
+                "must refuse: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_numeric_choice_field_is_refused() {
+        for reply in [
+            r#"{"choice": null}"#,
+            r#"{"choice": true}"#,
+            r#"{"choice": 1.5}"#,
+            r#"{"choice": {"index": 1}}"#,
+        ] {
+            assert!(
+                matches!(
+                    decode_choice(reply, 5, 1),
+                    Err(LlmError::UndecodableChoice { .. })
+                ),
+                "must refuse: {reply}"
+            );
+        }
+    }
+
+    /// One bad entry refuses the whole selection rather than yielding a shorter
+    /// list, which a multi-pick step would treat as a partial answer.
+    #[test]
+    fn a_mixed_array_is_refused_whole() {
+        assert!(matches!(
+            decode_choice(r#"{"choice": [1, "pick 2"]}"#, 5, 2),
+            Err(LlmError::UndecodableChoice { .. })
+        ));
+    }
+
+    /// Prose around a structural answer stays harmless — the JSON object
+    /// decides — so card stats and confidences contribute no number.
+    #[test]
+    fn prose_around_a_json_object_never_contributes_a_number() {
         assert_eq!(
-            decode_choice("confidence 0.85 — I pick 1", 4, 1)
+            decode_choice("The 2/2 trades with their 3/3. {\"choice\": 1}", 4, 1)
+                .unwrap()
+                .indices,
+            vec![1]
+        );
+        assert_eq!(
+            decode_choice("confidence 0.85 — {\"choice\": 1}", 4, 1)
                 .unwrap()
                 .indices,
             vec![1]

@@ -4,16 +4,24 @@ const llmMocks = vi.hoisted(() => ({
   executeLlmRequest: vi.fn<() => Promise<string>>(),
 }));
 
+const leaseMocks = vi.hoisted(() => ({
+  withDraftEngineOperation: vi.fn(),
+}));
+
 vi.mock("../llmClient", () => ({ executeLlmRequest: llmMocks.executeLlmRequest }));
+vi.mock("../../../adapter/draft-adapter", () => ({
+  withDraftEngineOperation: leaseMocks.withDraftEngineOperation,
+}));
 vi.mock("../../setCatalog", () => ({
   ensureSetCatalog: async () => ({
     mrd: { name: "Mirrodin", released_at: "2003-10-02" },
   }),
 }));
-vi.mock("../../../game/debugLog", () => ({ debugLog: vi.fn() }));
+const debugMocks = vi.hoisted(() => ({ debugLog: vi.fn() }));
+vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 
 import type { DraftPlayerView } from "../../../adapter/draft-adapter";
-import { botSeatIndices, submitPickWithLlmBots } from "../draftLlm";
+import { botSeatIndices, collectLlmDraftResponses, reportLlmDraftOutcomes } from "../draftLlm";
 import type { LlmProfile } from "../types";
 
 const PROFILE: LlmProfile = {
@@ -28,145 +36,132 @@ const PROFILE: LlmProfile = {
   enabled: true,
 };
 
-const HUMAN_VIEW = { pool: [] } as unknown as DraftPlayerView;
-const BOT_VIEW = { pool: [] } as unknown as DraftPlayerView;
+const REQUEST = {
+  url: "https://x.test",
+  method: "POST",
+  headers: [] as [],
+  body: "{}",
+};
 
-interface PickRequestRow {
-  seat: number;
-  fingerprint: string;
-  optionCount: number;
-  requiredPickCount: number;
-  request: { url: string; method: string; headers: []; body: string };
-}
-
-type BuildRequests = (
-  endpointJson: string,
-  seats: number[],
-  setNames: Record<string, string>,
-) => PickRequestRow[];
-
-type SubmitWithLlm = (
-  cardInstanceId: string,
-  responses: { seat: number; fingerprint: string; provider: string; body: string }[],
-) => { view: DraftPlayerView; llmOutcomes: { seat: number; used: boolean }[] };
-
-function lease(overrides: Record<string, unknown> = {}) {
+function pickRequest(seat: number, fingerprint: string) {
   return {
-    submitPick: vi.fn((_cardInstanceId: string) => HUMAN_VIEW),
-    buildLlmDraftPickRequests: vi.fn<BuildRequests>(() => [
-      {
-        seat: 1,
-        fingerprint: "fp-1",
-        optionCount: 15,
-        requiredPickCount: 1,
-        request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
-      },
-    ]),
-    submitPickWithLlmBotPicks: vi.fn<SubmitWithLlm>(() => ({
-      view: BOT_VIEW,
-      llmOutcomes: [{ seat: 1, used: true }],
-    })),
-    ...overrides,
+    seat,
+    fingerprint,
+    optionCount: 15,
+    requiredPickCount: 1,
+    request: REQUEST,
   };
 }
 
+/** Drives the mocked lease, recording whether it was held during network I/O. */
+function leaseReturning(requests: unknown, onEnter?: () => void) {
+  leaseMocks.withDraftEngineOperation.mockImplementation(async (work: (l: unknown) => unknown) => {
+    onEnter?.();
+    const lease = {
+      buildLlmDraftPickRequests: vi.fn(() => requests),
+    };
+    const result = await work(lease);
+    leaseHeld = false;
+    return result;
+  });
+}
+
+let leaseHeld = false;
+
 beforeEach(() => {
   llmMocks.executeLlmRequest.mockReset();
+  leaseMocks.withDraftEngineOperation.mockReset();
+  leaseHeld = false;
 });
 
 describe("LLM drafters", () => {
-  it("takes the ordinary path when the pod has no bot seats", async () => {
-    const l = lease();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const view = await submitPickWithLlmBots(l as any, "card-1", PROFILE, []);
+  it("collects nothing when the pod has no bot seats", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
 
-    expect(view).toBe(HUMAN_VIEW);
-    expect(l.submitPick).toHaveBeenCalledWith("card-1");
-    expect(l.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    await expect(collectLlmDraftResponses(PROFILE, [], () => true)).resolves.toEqual([]);
+    expect(leaseMocks.withDraftEngineOperation).not.toHaveBeenCalled();
   });
 
-  it("passes each seat's reply back to the engine to resolve", async () => {
+  it("returns one reply per seat, tagged with the pack fingerprint it was built from", async () => {
+    leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
     llmMocks.executeLlmRequest.mockResolvedValue('{"choice":3}');
-    const l = lease();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const view = await submitPickWithLlmBots(l as any, "card-1", PROFILE, [1]);
 
-    expect(view).toBe(BOT_VIEW);
-    expect(l.submitPickWithLlmBotPicks).toHaveBeenCalledWith("card-1", [
+    await expect(collectLlmDraftResponses(PROFILE, [1, 2], () => true)).resolves.toEqual([
       { seat: 1, fingerprint: "fp-1", provider: "Anthropic", body: '{"choice":3}' },
+      { seat: 2, fingerprint: "fp-2", provider: "Anthropic", body: '{"choice":3}' },
     ]);
-    expect(l.submitPick).not.toHaveBeenCalled();
+  });
+
+  /// The follow-up this split exists for: the singleton draft engine queue must
+  /// not be blocked while a provider is answering.
+  it("performs provider I/O with no engine lease held", async () => {
+    leaseReturning([pickRequest(1, "fp-1")], () => {
+      leaseHeld = true;
+    });
+    let heldDuringFetch: boolean | null = null;
+    llmMocks.executeLlmRequest.mockImplementation(async () => {
+      heldDuringFetch = leaseHeld;
+      return '{"choice":0}';
+    });
+
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    expect(heldDuringFetch).toBe(false);
   });
 
   it("gives the engine the format's set names so the brief can read 'Triple Mirrodin'", async () => {
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
-    const l = lease();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await submitPickWithLlmBots(l as any, "card-1", PROFILE, [1]);
+    let seenSetNames: unknown;
+    leaseMocks.withDraftEngineOperation.mockImplementation(
+      async (work: (l: unknown) => unknown) =>
+        work({
+          buildLlmDraftPickRequests: (_endpoint: string, _seats: number[], setNames: unknown) => {
+            seenSetNames = setNames;
+            return [];
+          },
+        }),
+    );
 
-    expect(l.buildLlmDraftPickRequests.mock.calls[0]?.[2]).toEqual({ MRD: "Mirrodin" });
+    await collectLlmDraftResponses(PROFILE, [1], () => true);
+
+    expect(seenSetNames).toEqual({ MRD: "Mirrodin" });
   });
 
-  it("falls back to the engine bots when every provider call fails", async () => {
+  it("collects nothing when every provider call fails", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("network down"));
-    const l = lease();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const view = await submitPickWithLlmBots(l as any, "card-1", PROFILE, [1]);
 
-    expect(view).toBe(HUMAN_VIEW);
-    expect(l.submitPick).toHaveBeenCalledWith("card-1");
-    expect(l.submitPickWithLlmBotPicks).not.toHaveBeenCalled();
+    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
   });
 
-  it("falls back to the engine bots when the engine builds no requests", async () => {
-    const l = lease({ buildLlmDraftPickRequests: vi.fn<BuildRequests>(() => []) });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const view = await submitPickWithLlmBots(l as any, "card-1", PROFILE, [1]);
+  it("collects nothing when the engine builds no requests", async () => {
+    leaseReturning([]);
 
-    expect(view).toBe(HUMAN_VIEW);
-    expect(l.submitPick).toHaveBeenCalledWith("card-1");
+    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
   });
 
-  it("falls back to the engine bots when request building throws", async () => {
-    const l = lease({
-      buildLlmDraftPickRequests: vi.fn<BuildRequests>(() => {
-        throw new Error("draft session not initialized");
-      }),
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const view = await submitPickWithLlmBots(l as any, "card-1", PROFILE, [1]);
+  it("collects nothing when request building throws", async () => {
+    leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("draft not initialized"));
 
-    expect(view).toBe(HUMAN_VIEW);
-    expect(l.submitPick).toHaveBeenCalledWith("card-1");
+    await expect(collectLlmDraftResponses(PROFILE, [1], () => true)).resolves.toEqual([]);
   });
 
-  it("still resolves the pick when only some seats answered", async () => {
+  /// A pick the player has already superseded must not reach the provider.
+  it("abandons the round trip when the pick is no longer current", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+
+    await expect(collectLlmDraftResponses(PROFILE, [1], () => false)).resolves.toEqual([]);
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+  });
+
+  it("still returns the seats that answered when others did not", async () => {
+    leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
     llmMocks.executeLlmRequest
       .mockResolvedValueOnce('{"choice":1}')
       .mockRejectedValueOnce(new Error("timeout"));
-    const l = lease({
-      buildLlmDraftPickRequests: vi.fn<BuildRequests>(() => [
-        {
-          seat: 1,
-          fingerprint: "fp-1",
-          optionCount: 15,
-          requiredPickCount: 1,
-          request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
-        },
-        {
-          seat: 2,
-          fingerprint: "fp-2",
-          optionCount: 15,
-          requiredPickCount: 1,
-          request: { url: "https://x.test", method: "POST", headers: [], body: "{}" },
-        },
-      ]),
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const view = await submitPickWithLlmBots(l as any, "card-1", PROFILE, [1, 2]);
 
-    expect(view).toBe(BOT_VIEW);
-    const responses = l.submitPickWithLlmBotPicks.mock.calls[0]?.[1] ?? [];
+    const responses = await collectLlmDraftResponses(PROFILE, [1, 2], () => true);
+
     expect(responses).toHaveLength(1);
     expect(responses[0]?.seat).toBe(1);
   });
@@ -181,5 +176,18 @@ describe("LLM drafters", () => {
     } as unknown as DraftPlayerView;
 
     expect(botSeatIndices(view)).toEqual([1, 2]);
+  });
+
+  /// Reasoning is derived from a seat's private pack and pool, and debugLog
+  /// writes a public game-log entry — so it must never be reported.
+  it("never reports model reasoning, only failures", () => {
+    reportLlmDraftOutcomes([
+      { seat: 1, used: true, reasoning: "I am hoarding removal" },
+      { seat: 2, used: false, error: "provider timeout" },
+    ]);
+
+    const messages = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
+    expect(messages.some((message) => message.includes("hoarding removal"))).toBe(false);
+    expect(messages.some((message) => message.includes("provider timeout"))).toBe(true);
   });
 });

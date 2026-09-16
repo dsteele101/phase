@@ -4,6 +4,7 @@ import "../../test/helpers/persistedStorage";
 
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { LLM_ENDPOINTS_KEY } from "../../constants/storage";
 import { draftProfile, isProfileUsable, profileForSeat, useLlmStore } from "../llmStore";
 import type { LlmProfile } from "../../services/llm/types";
 
@@ -96,5 +97,53 @@ describe("llmStore", () => {
     const id = useLlmStore.getState().addProfile({ apiKey: "sk-test", model: "m", enabled: true });
     const profile = useLlmStore.getState().profiles.find((p) => p.id === id) as LlmProfile;
     expect(profile.apiKey).toBe("sk-test");
+  });
+
+  it("never writes the API key to persistent storage", () => {
+    useLlmStore
+      .getState()
+      .addProfile({ name: "Claude", model: "m", apiKey: "sk-super-secret", enabled: true });
+
+    const raw = localStorage.getItem(LLM_ENDPOINTS_KEY) ?? "";
+    // The profile itself persists — only the credential is withheld.
+    expect(raw).toContain("Claude");
+    expect(raw).not.toContain("sk-super-secret");
+    expect(raw).not.toContain("apiKey");
+  });
+
+  it("drops the credential when the provider changes", () => {
+    const id = useLlmStore
+      .getState()
+      .addProfile({ model: "gpt-5", apiKey: "sk-openai", provider: "OpenAi", enabled: true });
+
+    useLlmStore.getState().updateProfile(id, { provider: "Anthropic" });
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === id);
+    // An OpenAI key must never be sent to Anthropic.
+    expect(profile?.apiKey).toBe("");
+    // And the profile is no longer usable until a new key is supplied.
+    expect(isProfileUsable(profile)).toBe(false);
+  });
+
+  it("keeps the credential when the provider is unchanged", () => {
+    const id = useLlmStore
+      .getState()
+      .addProfile({ model: "gpt-5", apiKey: "sk-openai", provider: "OpenAi", enabled: true });
+
+    useLlmStore.getState().updateProfile(id, { name: "renamed" });
+
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-openai");
+  });
+
+  it("accepts a new credential supplied in the same patch as the provider change", () => {
+    const id = useLlmStore
+      .getState()
+      .addProfile({ model: "gpt-5", apiKey: "sk-openai", provider: "OpenAi", enabled: true });
+
+    useLlmStore
+      .getState()
+      .updateProfile(id, { provider: "Anthropic", apiKey: "sk-anthropic" });
+
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-anthropic");
   });
 });
