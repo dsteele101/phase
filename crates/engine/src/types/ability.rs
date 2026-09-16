@@ -23553,6 +23553,11 @@ pub enum CastingRestriction {
     /// `restrictions.rs` treats it as always-satisfied for the timing check and
     /// the mana-payment path excludes real pool mana when it is present.
     CantSpendMana,
+    /// CR 601.2b / CR 601.2h: "Spend only [color(s)] mana on X."
+    /// Parameterized over the allowed mana colors for paying {X}.
+    SpendOnlyOnX {
+        colors: Vec<ManaColor>,
+    },
 }
 
 /// CR 602.2b + CR 601.2f: Self-referential activation/cast cost modification.

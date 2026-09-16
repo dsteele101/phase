@@ -2926,11 +2926,24 @@ impl<'a> DamageReplacementTargetRole<'a> {
     pub(crate) fn denotes_damage_any_target(self) -> bool {
         match self {
             Self::OriginalRecipient(filter) | Self::RedirectRecipient(filter) => {
-                matches!(filter, TargetFilter::Any)
+                is_any_target_filter(filter)
             }
             Self::DeclaredSource(_) => false,
         }
     }
+}
+
+/// CR 115.4: "any target" or "any other target" in damage effects denotes a creature, player,
+/// planeswalker or battle.
+fn is_any_target_filter(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Any)
+        || matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.is_empty()
+                    && tf.controller.is_none()
+                    && tf.properties.as_slice() == [FilterProp::Another]
+        )
 }
 
 pub(crate) fn damage_replacement_target_roles(
@@ -7055,11 +7068,11 @@ impl<'a> AbilityTargetSlot<'a> {
 /// CR 115.4: "any target" is a creature, player, planeswalker or battle.
 /// Single authority for which declared damage slots use that domain.
 fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlot<'_>) -> bool {
-    if !matches!(slot.filter(), TargetFilter::Any) {
+    if !is_any_target_filter(slot.filter()) {
         return false;
     }
     match effect {
-        Effect::DealDamage { target, .. } => matches!(target, TargetFilter::Any),
+        Effect::DealDamage { target, .. } => is_any_target_filter(target),
         // CR 609.7a + CR 614.9: only the role declared at THIS slot decides; a
         // declared source is never narrowed because a sibling recipient is `Any`.
         Effect::CreateDamageReplacement { .. } => match slot {
@@ -7088,13 +7101,17 @@ fn damage_any_target_legal_targets(
         ability.controller,
         ability.source_id,
     );
+    let mut permanent_filter = TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+        TypeFilter::Creature,
+        TypeFilter::Planeswalker,
+        TypeFilter::Battle,
+    ]));
+    if let TargetFilter::Typed(tf) = slot.filter() {
+        permanent_filter.properties = tf.properties.clone();
+    }
     let permanent_targets = targeting::find_legal_targets(
         state,
-        &TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
-            TypeFilter::Creature,
-            TypeFilter::Planeswalker,
-            TypeFilter::Battle,
-        ]))),
+        &TargetFilter::Typed(permanent_filter),
         ability.controller,
         ability.source_id,
     );
@@ -21685,6 +21702,332 @@ mod tests {
             caster,
             "without the stamp the gate falls back to the ability's controller — the \
              wrong seat this change exists to correct"
+        );
+    }
+
+    #[test]
+    fn damage_any_target_legal_targets_narrows_deal_damage_any_target() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+
+        let battle = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Invasion".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battle)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Battle);
+
+        let land = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let artifact = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let enchantment = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Blood Moon".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchantment)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Enchantment);
+
+        let source = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Battlefield,
+        );
+
+        let damage_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                amount: QuantityExpr::Fixed { value: 3 },
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let slot = AbilityTargetSlot::Declared {
+            index: 0,
+            filter: &TargetFilter::Any,
+        };
+
+        // CR 115.4: "any target" in damage effects denotes a creature, player, planeswalker, or battle.
+        let targets = damage_any_target_legal_targets(&state, &damage_ability, slot)
+            .expect("damage any target must return narrowed domain");
+
+        assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(targets.contains(&TargetRef::Object(creature)));
+        assert!(targets.contains(&TargetRef::Object(planeswalker)));
+        assert!(targets.contains(&TargetRef::Object(battle)));
+        assert!(
+            !targets.contains(&TargetRef::Object(land)),
+            "Land must not be in damage any-target domain"
+        );
+        assert!(
+            !targets.contains(&TargetRef::Object(artifact)),
+            "Artifact must not be in damage any-target domain"
+        );
+        assert!(
+            !targets.contains(&TargetRef::Object(enchantment)),
+            "Enchantment must not be in damage any-target domain"
+        );
+        assert_eq!(targets.len(), 5); // 2 players + 3 valid permanents
+    }
+
+    #[test]
+    fn damage_any_target_legal_targets_narrows_deal_damage_bare_another_target() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&planeswalker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Planeswalker);
+
+        let battle = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Invasion".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battle)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Battle);
+
+        let land = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let source = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Damage Source Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let another_filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
+
+        let damage_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                target: another_filter.clone(),
+                amount: QuantityExpr::Fixed { value: 2 },
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let slot = AbilityTargetSlot::Declared {
+            index: 0,
+            filter: &another_filter,
+        };
+
+        // CR 115.4: bare "another target" in damage effects denotes creature, player, planeswalker, or battle,
+        // excluding the source itself and non-creature/planeswalker/battle objects.
+        let targets = damage_any_target_legal_targets(&state, &damage_ability, slot)
+            .expect("damage another target must return narrowed domain");
+
+        assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
+        assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+        assert!(targets.contains(&TargetRef::Object(creature)));
+        assert!(targets.contains(&TargetRef::Object(planeswalker)));
+        assert!(targets.contains(&TargetRef::Object(battle)));
+        assert!(
+            !targets.contains(&TargetRef::Object(source)),
+            "Source object must be excluded by FilterProp::Another"
+        );
+        assert!(
+            !targets.contains(&TargetRef::Object(land)),
+            "Land must not be in damage another-target domain"
+        );
+        assert_eq!(targets.len(), 5);
+    }
+
+    #[test]
+    fn damage_any_target_legal_targets_returns_none_for_non_damage_any() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let source = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Aura Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let non_damage_ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let slot = AbilityTargetSlot::Declared {
+            index: 0,
+            filter: &TargetFilter::Any,
+        };
+
+        // Non-damage effect must NOT narrow through damage_any_target_legal_targets
+        assert_eq!(
+            damage_any_target_legal_targets(&state, &non_damage_ability, slot),
+            None,
+            "Non-damage effect must return None from damage_any_target_legal_targets"
+        );
+
+        // And build_target_slots retains broad Any targeting, including lands
+        let slots = build_target_slots(&state, &non_damage_ability)
+            .expect("build_target_slots must succeed");
+        assert!(
+            slots[0].legal_targets.contains(&TargetRef::Object(land)),
+            "Non-damage Any target slot must include land"
         );
     }
 }
