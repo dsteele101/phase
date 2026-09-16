@@ -213,4 +213,138 @@ describe("persisted store hydration", () => {
       expect(useLlmStore.getState().profiles).toEqual([]);
     }
   });
+
+  // ── Partial records: valid JSON, incomplete profile ──────────────────────
+
+  /// The finding: `{ id: "p", enabled: true }` is valid JSON with a string id,
+  /// so a filter-only guard admits it — and the settings UI then calls
+  /// `.trim()` on an absent `model`. Normalization means anything that reaches
+  /// the store is a COMPLETE profile.
+  it("completes an id-only record instead of admitting a partial one", async () => {
+    seed({
+      profiles: [{ id: "p", enabled: true }],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    const profile = useLlmStore.getState().profiles[0];
+    expect(profile).toBeDefined();
+    // Every field the UI touches is present and of the declared type.
+    expect(typeof profile?.name).toBe("string");
+    expect(typeof profile?.model).toBe("string");
+    expect(typeof profile?.apiKey).toBe("string");
+    expect(typeof profile?.enabled).toBe("boolean");
+    expect(profile?.baseUrl).toBeNull();
+    expect(profile?.maxOutputTokens).toBeNull();
+    expect(profile?.temperature).toBeNull();
+    // It claimed to be enabled but has no model, so it cannot be usable.
+    expect(profile?.enabled).toBe(false);
+  });
+
+  it("coerces every field that arrived with the wrong type", async () => {
+    seed({
+      profiles: [
+        {
+          id: "  p  ",
+          name: 42,
+          provider: { not: "a provider" },
+          baseUrl: 7,
+          model: ["gpt-5"],
+          maxOutputTokens: "many",
+          temperature: Number.NaN,
+          enabled: "yes",
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    expect(useLlmStore.getState().profiles[0]).toEqual({
+      id: "p",
+      name: "",
+      provider: "OpenAi",
+      baseUrl: null,
+      apiKey: "",
+      model: "",
+      maxOutputTokens: null,
+      temperature: null,
+      enabled: false,
+    });
+  });
+
+  it("keeps a recognisable provider and buckets an unknown one as compatible", async () => {
+    seed({
+      profiles: [
+        { id: "a", provider: "anthropic", model: "m" },
+        { id: "b", provider: "Open-AI", model: "m" },
+        { id: "c", provider: "some-self-hosted-thing", model: "m" },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    const byId = Object.fromEntries(
+      useLlmStore.getState().profiles.map((profile) => [profile.id, profile.provider]),
+    );
+    // Same normalization the engine's `LlmProvider::from_label` applies.
+    expect(byId).toEqual({ a: "Anthropic", b: "OpenAi", c: "OpenAiCompatible" });
+  });
+
+  it("drops a record with no usable id rather than fabricating one", async () => {
+    seed({
+      profiles: [{ enabled: true, model: "m" }, { id: "   ", model: "m" }, { id: 7 }],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    // Without a stable identity a profile cannot be bound, edited or removed.
+    expect(useLlmStore.getState().profiles).toEqual([]);
+  });
+
+  it("preserves a complete record untouched apart from its credential", async () => {
+    seed({
+      profiles: [
+        {
+          id: "full",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: "https://api.anthropic.com/v1",
+          apiKey: "sk-must-not-survive",
+          model: "claude-sonnet-5",
+          maxOutputTokens: 2048,
+          temperature: 0.2,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    expect(useLlmStore.getState().profiles[0]).toEqual({
+      id: "full",
+      name: "Claude",
+      provider: "Anthropic",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: "",
+      model: "claude-sonnet-5",
+      maxOutputTokens: 2048,
+      temperature: 0.2,
+      enabled: true,
+    });
+  });
 });

@@ -72,26 +72,97 @@ function newProfileId(): string {
 }
 
 /**
- * Profiles recovered from a persisted payload, keeping only record-shaped
- * entries.
+ * Every provider id the app understands, mirroring `ACCEPTED_PROVIDER_LABELS`
+ * in `crates/phase-llm/src/provider.rs`. Kept as a literal list so a persisted
+ * string can be checked against it without waiting for the async catalog.
+ */
+const KNOWN_PROVIDERS: readonly LlmProviderId[] = [
+  "OpenAi",
+  "Anthropic",
+  "Gemini",
+  "DeepSeek",
+  "OpenAiCompatible",
+] as const;
+
+/**
+ * Coerce a persisted provider value to a known id.
+ *
+ * Applies the same normalization `LlmProvider::from_label` does — case- and
+ * punctuation-insensitive — and falls back to `OpenAiCompatible` for anything
+ * unrecognised, which is exactly what the engine does with an unknown label.
+ */
+function normalizeProvider(value: unknown): LlmProviderId {
+  if (typeof value !== "string") return DEFAULT_PROVIDER;
+  const normalized = value.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  const match = KNOWN_PROVIDERS.find(
+    (provider) => provider.toLowerCase() === normalized,
+  );
+  return match ?? "OpenAiCompatible";
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** `null` means "the provider default"; any non-string is treated the same. */
+function normalizeNullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/** A finite positive number, or `null`. Rejects NaN, Infinity and strings. */
+function normalizePositiveNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function normalizeFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Profiles recovered from a persisted payload, NORMALIZED to complete records.
  *
  * Storage is not a trusted input: the record can be hand-edited, truncated by a
- * quota failure, or written by a different build. `profiles` may therefore be
- * absent, `null`, an object, a string, or an array containing `null` — and any
- * of those would throw inside `migrate`/`merge` BEFORE `partialize` gets the
- * chance to scrub a pre-v1 credential, leaving the key on disk and the store
- * unconstructable. Anything unrecognisable is dropped rather than repaired,
- * because a half-understood profile is one that could still name an endpoint.
+ * quota failure, or written by a different build. Two failure modes follow, and
+ * filtering alone only addresses the first:
+ *
+ *  - a shape that THROWS during migrate/merge (`profiles` as `null`, an object,
+ *    a string, or an array holding `null`) stops `partialize` from ever running,
+ *    leaving a pre-v1 credential on disk and the store unconstructable;
+ *  - a shape that SURVIVES but is incomplete — `{ id: "p", enabled: true }` is
+ *    valid JSON with a string id — reaches the settings UI, which calls
+ *    `.trim()` on `model` and `name` and crashes on `undefined`.
+ *
+ * Every field is therefore coerced to its declared type here, so anything this
+ * function returns satisfies `LlmProfile` structurally and no consumer needs a
+ * defensive check of its own. Only `id` is load-bearing enough to reject on:
+ * without a stable identity a profile cannot be bound to a seat, edited, or
+ * removed, so a record lacking one is dropped rather than given a fabricated id.
  */
 function readPersistedProfiles(value: unknown): LlmProfile[] {
   if (!Array.isArray(value)) return [];
-  return value.filter(
-    (entry): entry is LlmProfile =>
-      typeof entry === "object"
-      && entry !== null
-      && !Array.isArray(entry)
-      && typeof (entry as { id?: unknown }).id === "string",
-  );
+  return value.flatMap((entry): LlmProfile[] => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    if (!id) return [];
+    return [
+      {
+        id,
+        name: normalizeString(record.name),
+        provider: normalizeProvider(record.provider),
+        baseUrl: normalizeNullableString(record.baseUrl),
+        // Never restored from storage: credentials are not persisted, and a
+        // hand-edited record must not smuggle one back in.
+        apiKey: "",
+        model: normalizeString(record.model),
+        maxOutputTokens: normalizePositiveNumber(record.maxOutputTokens),
+        temperature: normalizeFiniteNumber(record.temperature),
+        // A profile whose model did not survive cannot be usable, so it must
+        // not present itself as enabled.
+        enabled: record.enabled === true && normalizeString(record.model).trim() !== "",
+      },
+    ];
+  });
 }
 
 /** Absent, empty and whitespace-only base URLs all mean "the provider default",
@@ -228,10 +299,7 @@ export const useLlmStore = create<LlmState>()(
         if (version >= 1) return state as LlmState;
         return {
           ...state,
-          profiles: readPersistedProfiles(state.profiles).map((profile) => ({
-            ...withoutCredential(profile),
-            apiKey: "",
-          })),
+          profiles: readPersistedProfiles(state.profiles),
         } as LlmState;
       },
       // `partialize` stops FUTURE writes from carrying a credential, but a key
@@ -262,10 +330,9 @@ export const useLlmStore = create<LlmState>()(
           ...incoming,
           // Rehydrated profiles carry no credential by construction; restate it
           // so a hand-edited storage record cannot smuggle one back in.
-          profiles: readPersistedProfiles(incoming.profiles).map((profile) => ({
-            ...profile,
-            apiKey: "",
-          })),
+          // `readPersistedProfiles` returns complete records with no
+          // credential, so nothing further is restated here.
+          profiles: readPersistedProfiles(incoming.profiles),
         };
       },
     },
