@@ -15235,21 +15235,29 @@ mod tests {
 
     /// Unrecognized spend-only lines (like "Spend only mana produced by basic lands to cast this spell")
     /// must not be swallowed by a generic "spend only " prefix check when SpendOnlyOnX does not match.
+    ///
+    /// Tests both the `check_silent_drops` pipeline guard and the discriminating `audit_card_lines`
+    /// coverage authority at `crates/engine/src/game/coverage.rs:11058-11073` for supported and
+    /// unrecognized spend-only lines.
     #[test]
     fn unrecognized_spend_only_line_is_still_a_silent_drop() {
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, CastingRestriction, Effect, QuantityExpr, TargetFilter,
         };
+        use crate::types::mana::ManaColor;
 
-        const ORACLE: &str =
+        const UNRECOGNIZED_ORACLE: &str =
             "Spend only mana produced by basic lands to cast this spell.\nDraw two cards.";
 
-        let mut face = make_face();
-        // Give face some other casting restriction to prove presence of a casting restriction
-        // does not grant blanket immunity to unrelated "Spend only" lines.
-        face.casting_restrictions
-            .push(CastingRestriction::CantSpendMana);
-        face.abilities.push(
+        let mut unrecognized_face = make_face();
+        // Give face SpendOnlyOnX to prove that having a SpendOnlyOnX restriction does NOT
+        // grant blanket immunity to an unrecognized "Spend only" line.
+        unrecognized_face
+            .casting_restrictions
+            .push(CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black],
+            });
+        unrecognized_face.abilities.push(
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Draw {
@@ -15260,15 +15268,65 @@ mod tests {
             .description("Draw two cards.".to_string()),
         );
 
-        let parse_details = build_parse_details_for_face(&face);
+        // 1. Retain the existing check_silent_drops unrecognized-line guard
+        let parse_details = build_parse_details_for_face(&unrecognized_face);
         let mut missing = Vec::new();
         check_silent_drops(
-            &Some(ORACLE.to_string()),
+            &Some(UNRECOGNIZED_ORACLE.to_string()),
             "Basic Spell",
             &parse_details,
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+
+        // 2. Discriminating audit_card_lines assertion for the unrecognized line:
+        // Because extract_spend_only_on_x_prefix returns None for this unrecognized line,
+        // audit_card_lines must NOT treat it as covered_by_casting, and must emit SilentDrop.
+        // If audit_card_lines reverted to `lower.starts_with("spend only ")`, this assertion would fail.
+        let unrecognized_findings = audit_card_lines(UNRECOGNIZED_ORACLE, &unrecognized_face);
+        assert!(
+            unrecognized_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line == "Spend only mana produced by basic lands to cast this spell."
+            )),
+            "Unrecognized spend-only line must be emitted as SilentDrop by audit_card_lines: {unrecognized_findings:?}"
+        );
+
+        // 3. Discriminating audit_card_lines assertion for a supported SpendOnlyOnX line:
+        // A valid "Spend only [colors] mana on X" line with SpendOnlyOnX present on face
+        // must be recognized as covered_by_casting and not emitted as SilentDrop.
+        const SUPPORTED_ORACLE: &str = "Spend only black mana on X.\nDraw two cards.";
+        let mut supported_face = make_face();
+        supported_face
+            .casting_restrictions
+            .push(CastingRestriction::SpendOnlyOnX {
+                colors: vec![ManaColor::Black],
+            });
+        supported_face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw two cards.".to_string()),
+        );
+
+        let supported_findings = audit_card_lines(SUPPORTED_ORACLE, &supported_face);
+        assert!(
+            !supported_findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line == "Spend only black mana on X."
+            )),
+            "Supported SpendOnlyOnX line must not be emitted as SilentDrop by audit_card_lines: {supported_findings:?}"
+        );
+        assert!(
+            supported_findings.is_empty(),
+            "Supported SpendOnlyOnX card should have no semantic findings: {supported_findings:?}"
+        );
     }
 
     #[test]
