@@ -506,11 +506,11 @@
     "test": "Tester la connexion",
     "testing": "Test en cours…",
     "testOk": "Connecté.",
-    "testNeedsGame": "Lancez d'abord une partie : le test envoie exactement la requête d'un vrai tour.",
     "draftToggle": {
       "label": "Utiliser pour les bots de draft",
       "hint": "Les sièges bots d'un draft choisissent avec le modèle, avec le contexte des éditions du format.",
       "profile": "Fournisseur pour le draft"
-    }
+    },
+    "testHint": "Envoie une vraie requête et vérifie la réponse exactement comme le ferait un tour de jeu."
   }
 }

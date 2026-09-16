@@ -506,11 +506,11 @@
     "test": "Testuj połączenie",
     "testing": "Testowanie…",
     "testOk": "Połączono.",
-    "testNeedsGame": "Najpierw rozpocznij grę — test wysyła dokładnie takie samo zapytanie jak prawdziwa tura.",
     "draftToggle": {
       "label": "Użyj do botów w drafcie",
       "hint": "Boty w drafcie wybierają kartę modelem, z kontekstem dodatków danego formatu.",
       "profile": "Dostawca do draftu"
-    }
+    },
+    "testHint": "Wysyła prawdziwe zapytanie i sprawdza odpowiedź dokładnie tak, jak zrobiłaby to tura gry."
   }
 }

@@ -14,6 +14,7 @@ import {
 } from "../adapter/draft-adapter";
 import {
   botSeatIndices,
+  cancelLlmDraftRun,
   collectLlmDraftResponses,
   reportLlmDraftOutcomes,
 } from "../services/llm/draftLlm";
@@ -683,7 +684,12 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
     const llmResponses = llmProfile
       ? await collectLlmDraftResponses(llmProfile, botSeatIndices(view), isFresh)
       : [];
-    if (!isFresh()) return { status: "ignored", reason: "stale" };
+    if (!isFresh()) {
+      // The pick was superseded while the provider was answering. Cut the round
+      // loose rather than letting it run to its timeout holding sockets open.
+      cancelLlmDraftRun();
+      return { status: "ignored", reason: "stale" };
+    }
 
     const nextView = await withDraftEngineOperation((lease) => {
       if (!isFresh()) {

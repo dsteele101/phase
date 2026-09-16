@@ -506,11 +506,11 @@
     "test": "Testar ligação",
     "testing": "A testar…",
     "testOk": "Ligado.",
-    "testNeedsGame": "Começa primeiro um jogo — o teste envia o mesmo pedido de um turno real.",
     "draftToggle": {
       "label": "Usar para os bots do draft",
       "hint": "Os lugares de bot de um draft escolhem com o modelo, usando o contexto de colecções do formato.",
       "profile": "Fornecedor para o draft"
-    }
+    },
+    "testHint": "Envia um pedido real e verifica a resposta tal como o faria um turno de jogo."
   }
 }

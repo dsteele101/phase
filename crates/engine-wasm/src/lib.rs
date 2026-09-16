@@ -3646,6 +3646,44 @@ pub fn llm_provider_catalog() -> JsValue {
     to_js(phase_llm::catalog::provider_catalog())
 }
 
+/// Build the connection-probe request for an endpoint.
+///
+/// Stateless by design: a player configures a provider in Settings, usually
+/// with no game running, and a test that required a live board would be
+/// untestable exactly when it is most needed. The request is built by the same
+/// `build_chat_request` a real decision uses, so a probe that succeeds proves
+/// the endpoint, credential and model the game path will use.
+#[wasm_bindgen(js_name = buildLlmProbeRequest)]
+pub fn build_llm_probe_request(endpoint_json: &str) -> Result<JsValue, JsValue> {
+    let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid LLM endpoint config: {error}")))?;
+    let prompt = phase_llm::connection_probe_prompt();
+    match phase_llm::build_chat_request(&endpoint, &prompt) {
+        Ok(request) => Ok(to_js(&serde_json::json!({ "request": request }))),
+        Err(error) => Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+    }
+}
+
+/// Validate a probe response through the engine's own extraction and decoding.
+///
+/// The transport deliberately returns non-2xx bodies rather than rejecting, so
+/// that a vendor's error message survives to be shown. That makes "bytes came
+/// back" a meaningless success signal -- a rejected key and an unknown model
+/// both arrive as well-formed bodies. This is the authority that says whether a
+/// reply is one the game path could actually use.
+#[wasm_bindgen(js_name = validateLlmProbeResponse)]
+pub fn validate_llm_probe_response(provider_label: &str, response_body: &str) -> JsValue {
+    let provider = phase_llm::LlmProvider::from_label(provider_label);
+    match phase_llm::validate_probe_response(provider, response_body) {
+        Ok(()) => to_js(&serde_json::json!({ "ok": true })),
+        Err(error) => to_js(&serde_json::json!({
+            "ok": false,
+            "error": error.to_string(),
+            "errorKind": error,
+        })),
+    }
+}
+
 /// Build the HTTP request for one LLM-driven AI decision.
 ///
 /// `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`

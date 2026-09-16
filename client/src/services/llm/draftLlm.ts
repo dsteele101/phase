@@ -30,6 +30,73 @@ import { endpointOf, type LlmDraftOutcome, type LlmDraftPickRequest, type LlmPro
  */
 export const LLM_DRAFT_TIMEOUT_MS = 20_000;
 
+/**
+ * Consecutive failed pick rounds a profile may take before the draft stops
+ * calling it for the rest of the session.
+ *
+ * Mirrors the game-side per-seat breaker in `aiController`. Without one, a
+ * provider that is down, rate-limited or simply hanging costs the full request
+ * timeout on EVERY pick, turning one misconfiguration into a draft where each
+ * click stalls for 20 seconds. The draft keeps going throughout — it just uses
+ * the engine bots, which is what it was already falling back to.
+ */
+const MAX_CONSECUTIVE_DRAFT_FAILURES = 3;
+
+/** Consecutive failed rounds per profile id; cleared by the first success. */
+const draftFailures = new Map<string, number>();
+/** Profiles given up on for this session. */
+const draftDisabled = new Set<string>();
+
+/**
+ * The in-flight pick round, so a superseded one can be cut loose.
+ *
+ * A draft pick is a click the player can repeat, undo or navigate away from
+ * while the provider is still thinking. Without this, those calls run to their
+ * full timeout, hold sockets, and land replies for a pack that has already
+ * passed.
+ */
+let activeRun: AbortController | null = null;
+
+/**
+ * Abandon any in-flight LLM pick round.
+ *
+ * Safe to call at any time, including when nothing is running. Called when a
+ * new round starts and by the draft store when a pick is superseded or the
+ * session tears down.
+ */
+export function cancelLlmDraftRun(): void {
+  activeRun?.abort();
+  activeRun = null;
+}
+
+/** Reset the session breaker. Exposed for tests and session teardown. */
+export function resetLlmDraftBreaker(): void {
+  draftFailures.clear();
+  draftDisabled.clear();
+}
+
+/** Whether this profile has been given up on for the session. */
+export function isLlmDraftDisabled(profileId: string): boolean {
+  return draftDisabled.has(profileId);
+}
+
+function recordRound(profileId: string, succeeded: boolean): void {
+  if (succeeded) {
+    draftFailures.delete(profileId);
+    return;
+  }
+  const failures = (draftFailures.get(profileId) ?? 0) + 1;
+  draftFailures.set(profileId, failures);
+  if (failures >= MAX_CONSECUTIVE_DRAFT_FAILURES) {
+    draftDisabled.add(profileId);
+    debugLog(
+      `LLM drafter failed ${failures} pick rounds in a row; the engine bots will `
+        + "draft for the rest of this session",
+      "warn",
+    );
+  }
+}
+
 /** Set code -> printed name, so the format brief reads "Triple Mirrodin". */
 async function setNameMap(): Promise<Record<string, string>> {
   const catalog = await ensureSetCatalog();
@@ -66,6 +133,15 @@ export async function collectLlmDraftResponses(
   stillCurrent: () => boolean,
 ): Promise<LlmDraftResponsePayload[]> {
   if (botSeats.length === 0) return [];
+  // A profile the session has given up on skips the round entirely, so a dead
+  // provider costs no further latency.
+  if (draftDisabled.has(profile.id)) return [];
+
+  // Supersede any round still running for an earlier pick: its replies are for
+  // a pack that has moved on, and the engine would refuse them anyway.
+  cancelLlmDraftRun();
+  const run = new AbortController();
+  activeRun = run;
 
   // Phase 1 -- under lease, read-only. No pick is applied here.
   let requests: LlmDraftPickRequest[];
@@ -80,9 +156,18 @@ export async function collectLlmDraftResponses(
     );
   } catch (error) {
     debugLog(`LLM drafters unavailable; using the engine bots: ${describe(error)}`, "warn");
+    recordRound(profile.id, false);
     return [];
   }
-  if (requests.length === 0 || !stillCurrent()) return [];
+  if (requests.length === 0) {
+    // Nothing to ask is not a provider failure; it is a pod with no eligible
+    // seat. It must not count toward giving up on the profile.
+    return [];
+  }
+  if (!stillCurrent() || run.signal.aborted) {
+    cancelRun(run);
+    return [];
+  }
 
   // Phase 2 -- no lease held. One call per seat, in parallel: the seats pick
   // simultaneously in the rules (CR 905.1a), and serializing them would
@@ -92,6 +177,7 @@ export async function collectLlmDraftResponses(
       try {
         const body = await executeLlmRequest(request.request, {
           timeoutMs: LLM_DRAFT_TIMEOUT_MS,
+          signal: run.signal,
         });
         return {
           seat: request.seat,
@@ -106,7 +192,22 @@ export async function collectLlmDraftResponses(
     }),
   );
 
-  return settled.filter((entry): entry is LlmDraftResponsePayload => entry !== null);
+  const responses = settled.filter((entry): entry is LlmDraftResponsePayload => entry !== null);
+  cancelRun(run);
+
+  // A round that produced nothing counts against the profile; any reply at all
+  // means the endpoint is alive and resets the breaker.
+  recordRound(profile.id, responses.length > 0);
+
+  // A pick superseded mid-flight contributes nothing, even if replies arrived:
+  // they describe a pack this seat no longer holds.
+  if (!stillCurrent() || run.signal.aborted) return [];
+  return responses;
+}
+
+/** Clear `activeRun` only if it still refers to this round. */
+function cancelRun(run: AbortController): void {
+  if (activeRun === run) activeRun = null;
 }
 
 /**

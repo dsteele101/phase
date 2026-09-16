@@ -506,11 +506,11 @@
     "test": "Verbindung testen",
     "testing": "Test läuft …",
     "testOk": "Verbunden.",
-    "testNeedsGame": "Starte zuerst ein Spiel — der Test sendet dieselbe Anfrage wie ein echter Zug.",
     "draftToggle": {
       "label": "Für Draft-Bots verwenden",
       "hint": "Bot-Plätze in einem Draft wählen mit dem Modell, samt Set-Kontext des Formats.",
       "profile": "Anbieter für den Draft"
-    }
+    },
+    "testHint": "Sendet eine echte Anfrage und prüft die Antwort genauso wie ein Spielzug es täte."
   }
 }
