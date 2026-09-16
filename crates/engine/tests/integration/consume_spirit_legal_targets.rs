@@ -15,11 +15,15 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::targeting;
 use engine::game::zones::create_object;
-use engine::types::ability::{StaticDefinition, TargetRef};
+use engine::types::ability::{
+    Effect, FilterProp, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+    TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, CastingVariant, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::{FlashbackCost, Keyword};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -541,14 +545,25 @@ fn soul_burn_accepts_black_and_red_mana_for_x_and_rejects_green() {
 }
 
 #[test]
-fn non_damage_any_target_allows_artifacts_and_lands() {
+fn pipeline_non_damage_any_target_allows_artifacts_and_lands() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, colorless_pool(2));
 
-    // Spell with a non-damage ability targeting TargetFilter::Any
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Tap Anything", false, "Tap target permanent.")
+    let aura1 = scenario
+        .add_spell_to_hand(P0, "Enchant Land", false)
         .with_mana_cost(ManaCost::generic(1))
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Any))
+        .id();
+
+    let aura2 = scenario
+        .add_spell_to_hand(P0, "Enchant Artifact", false)
+        .with_mana_cost(ManaCost::generic(1))
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Any))
         .id();
 
     let mut runner = scenario.build();
@@ -556,27 +571,228 @@ fn non_damage_any_target_allows_artifacts_and_lands() {
 
     let land = add_permanent(state, 104, P1, "Island", CoreType::Land);
     let artifact = add_permanent(state, 105, P1, "Sol Ring", CoreType::Artifact);
-    let creature = add_permanent(state, 101, P1, "Grizzly Bears", CoreType::Creature);
 
-    let ability = &state.objects[&spell].abilities[0];
-    let resolved =
-        engine::types::ability::ResolvedAbility::new(*ability.effect.clone(), vec![], spell, P0);
-    let slots = engine::game::ability_utils::build_target_slots(state, &resolved)
-        .expect("target slots must build");
-    let legal_targets = &slots[0].legal_targets;
+    let outcome1 = runner.cast(aura1).target_object(land).resolve();
+    assert!(
+        outcome1.state().battlefield.contains(&aura1),
+        "Aura must resolve onto battlefield"
+    );
+    assert_eq!(
+        outcome1.state().objects[&aura1].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(land)),
+        "Aura must be attached to land"
+    );
 
+    let outcome2 = runner.cast(aura2).target_object(artifact).resolve();
     assert!(
-        legal_targets.contains(&TargetRef::Object(land)),
-        "Non-damage Any target must allow targeting land"
+        outcome2.state().battlefield.contains(&aura2),
+        "Aura must resolve onto battlefield"
+    );
+    assert_eq!(
+        outcome2.state().objects[&aura2].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(artifact)),
+        "Aura must be attached to artifact"
+    );
+}
+
+#[test]
+fn pipeline_damage_any_target_narrows_while_generic_any_remains_broad() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, colorless_pool(10));
+    scenario.with_life(P1, 20);
+
+    let spell = scenario
+        .add_spell_to_hand(P0, "Direct Bolt", false)
+        .with_mana_cost(ManaCost::generic(1))
+        .with_ability(Effect::DealDamage {
+            target: TargetFilter::Any,
+            amount: QuantityExpr::Fixed { value: 3 },
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let land = add_permanent(runner.state_mut(), 104, P1, "Island", CoreType::Land);
+    let artifact = add_permanent(runner.state_mut(), 105, P1, "Sol Ring", CoreType::Artifact);
+
+    // 1. Assert damage Any target excludes land and artifact per CR 115.4
+    let slots = engine::game::casting::legal_target_slots_for_castable_spell(runner.state(), spell);
+    assert_eq!(slots.len(), 1);
+    assert!(
+        !slots[0].legal_targets.contains(&TargetRef::Object(land)),
+        "Targeting land with damage Any target must be rejected per CR 115.4"
     );
     assert!(
-        legal_targets.contains(&TargetRef::Object(artifact)),
-        "Non-damage Any target must allow targeting artifact"
+        !slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(artifact)),
+        "Targeting artifact with damage Any target must be rejected per CR 115.4"
     );
     assert!(
-        legal_targets.contains(&TargetRef::Object(creature)),
-        "Non-damage Any target must allow targeting creature"
+        slots[0].legal_targets.contains(&TargetRef::Player(P1)),
+        "Targeting player with damage Any target must be legal per CR 115.4"
     );
+
+    // 2. Targeting player succeeds and deals damage
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -3);
+}
+
+#[test]
+fn pipeline_damage_bare_another_target_narrows_to_cr_115_4() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, colorless_pool(10));
+    scenario.with_life(P1, 20);
+    let creature = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let bare_another =
+        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Damage Another", false)
+        .with_mana_cost(ManaCost::generic(1))
+        .with_ability(Effect::DealDamage {
+            target: bare_another,
+            amount: QuantityExpr::Fixed { value: 2 },
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    let land = add_permanent(runner.state_mut(), 104, P1, "Island", CoreType::Land);
+    let artifact = add_permanent(runner.state_mut(), 105, P1, "Sol Ring", CoreType::Artifact);
+
+    // 1. Assert damage bare Another target excludes land and artifact per CR 115.4
+    let slots = engine::game::casting::legal_target_slots_for_castable_spell(runner.state(), spell);
+    assert_eq!(slots.len(), 1);
+    assert!(
+        !slots[0].legal_targets.contains(&TargetRef::Object(land)),
+        "Targeting land with damage bare Another target must be rejected per CR 115.4"
+    );
+    assert!(
+        !slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(artifact)),
+        "Targeting artifact with damage bare Another target must be rejected per CR 115.4"
+    );
+    assert!(
+        slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(creature)),
+        "Targeting creature with damage bare Another target must be legal per CR 115.4"
+    );
+
+    // 2. Targeting creature succeeds
+    let outcome = runner.cast(spell).target_object(creature).resolve();
+    assert!(
+        !outcome.state().battlefield.contains(&creature),
+        "Target creature must die from 2 damage"
+    );
+}
+
+#[test]
+fn consume_spirit_with_colored_reduction_spillover() {
+    // CR 601.2b, CR 601.2f, CR 601.2h, CR 118.7b/c/d:
+    // Consume Spirit cost is {X}{1}{B}. With X=2, base cost is {2}{1}{B} = {3}{B}.
+    // A {B}{B} colored reduction reduces the single {B} shard, and the second {B}
+    // spills over to reduce generic mana by 1.
+    // Total cost becomes 2 generic (0 Black pips).
+    // The 1 spillover generic reduction reduces the X requirement by 1:
+    // So 1 generic is restricted to Black for X, and 1 generic is unrestricted base generic.
+    // The player can pay with 1 Black mana and 1 Colorless mana.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    scenario
+        .add_creature(P0, "Double Black Reducer", 0, 1)
+        .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            },
+            spell_filter: None,
+            dynamic_count: None,
+        }));
+
+    let mut pool = black_pool(1);
+    pool.extend(colorless_pool(1));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).x(2).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_life_delta(P0, 2);
+}
+
+#[test]
+fn consume_spirit_with_variant_gated_reduction() {
+    // CR 601.2b, CR 601.2f, CR 601.2h:
+    // Consume Spirit cast from graveyard via Flashback with X=2.
+    // Base cost {X}{1}{B} with X=2 is {3}{B}.
+    // A reducer gated on StaticCondition::CastingAsVariant { variant: Flashback } reduces generic by {2}.
+    // When cast as Flashback, generic reduction of 2 reduces X by 2, leaving cost {1}{B} (1 unrestricted generic, 1 {B}).
+    // Player can pay with 1 Black mana and 1 Colorless mana.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    scenario
+        .add_creature(P0, "Flashback Reducer", 0, 1)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(2),
+                spell_filter: None,
+                dynamic_count: None,
+            })
+            .condition(StaticCondition::CastingAsVariant {
+                variant: CastingVariant::Flashback,
+            }),
+        );
+
+    let mut pool = black_pool(1);
+    pool.extend(colorless_pool(1));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_graveyard(P0, "Consume Spirit", false)
+        .from_oracle_text(CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .with_keyword(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })))
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(spell)
+        .casting_variant(CastingVariant::Flashback)
+        .x(2)
+        .target_player(P1)
+        .resolve();
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_life_delta(P0, 2);
 }
 
 #[test]

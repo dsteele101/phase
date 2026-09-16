@@ -4489,21 +4489,19 @@ mod tests {
     }
 
     #[test]
-    fn find_legal_targets_any_returns_creatures_and_players() {
+    fn find_legal_targets_any_returns_all_objects_and_players() {
         let (state, c0, c1, land) = setup_with_typed_creatures();
         let targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c0)));
         assert!(targets.contains(&TargetRef::Object(c1)));
-        // CR 115.4: "any target" includes creatures, players, planeswalkers, and battles.
-        // Lands are not legal targets.
-        assert!(!targets.contains(&TargetRef::Object(land)));
+        assert!(targets.contains(&TargetRef::Object(land)));
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
-        assert_eq!(targets.len(), 4); // 2 creatures + 2 players
+        assert_eq!(targets.len(), 5); // 2 creatures + 1 land + 2 players
     }
 
     #[test]
-    fn find_legal_targets_cr_115_4_any_target_and_any_other_target() {
+    fn find_legal_targets_any_and_another_returns_all_battlefield_objects_and_players() {
         let mut state = GameState::new_two_player(42);
         let creature = create_object(
             &mut state,
@@ -4599,23 +4597,25 @@ mod tests {
             &mut state,
             CardId(7),
             PlayerId(0),
-            "Consume Spirit".to_string(),
+            "Source".to_string(),
             Zone::Battlefield,
         );
 
-        // Test TargetFilter::Any
+        // Test TargetFilter::Any: includes all battlefield objects + all players
         let any_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), source);
         assert!(any_targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(any_targets.contains(&TargetRef::Player(PlayerId(1))));
         assert!(any_targets.contains(&TargetRef::Object(creature)));
         assert!(any_targets.contains(&TargetRef::Object(planeswalker)));
         assert!(any_targets.contains(&TargetRef::Object(battle)));
-        assert!(!any_targets.contains(&TargetRef::Object(land)));
-        assert!(!any_targets.contains(&TargetRef::Object(artifact)));
-        assert!(!any_targets.contains(&TargetRef::Object(enchantment)));
-        assert_eq!(any_targets.len(), 5); // 2 players + 3 valid permanents
+        assert!(any_targets.contains(&TargetRef::Object(land)));
+        assert!(any_targets.contains(&TargetRef::Object(artifact)));
+        assert!(any_targets.contains(&TargetRef::Object(enchantment)));
+        assert!(any_targets.contains(&TargetRef::Object(source)));
+        assert_eq!(any_targets.len(), 9); // 2 players + 7 battlefield permanents
 
-        // Test "any other target" (TypedFilter with FilterProp::Another and empty type_filters)
+        // Test "any other target" (TypedFilter with FilterProp::Another and empty type_filters):
+        // includes all battlefield objects except source + all players
         let other_filter =
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]));
         let other_targets = find_legal_targets(&state, &other_filter, PlayerId(0), source);
@@ -4624,11 +4624,11 @@ mod tests {
         assert!(other_targets.contains(&TargetRef::Object(creature)));
         assert!(other_targets.contains(&TargetRef::Object(planeswalker)));
         assert!(other_targets.contains(&TargetRef::Object(battle)));
-        assert!(!other_targets.contains(&TargetRef::Object(land)));
-        assert!(!other_targets.contains(&TargetRef::Object(artifact)));
-        assert!(!other_targets.contains(&TargetRef::Object(enchantment)));
+        assert!(other_targets.contains(&TargetRef::Object(land)));
+        assert!(other_targets.contains(&TargetRef::Object(artifact)));
+        assert!(other_targets.contains(&TargetRef::Object(enchantment)));
         assert!(!other_targets.contains(&TargetRef::Object(source)));
-        assert_eq!(other_targets.len(), 5);
+        assert_eq!(other_targets.len(), 8);
     }
 
     #[test]

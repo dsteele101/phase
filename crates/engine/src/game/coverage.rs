@@ -11066,7 +11066,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 || lower.starts_with("you can\u{2019}t spend mana to cast ")
                 // CR 601.2b / CR 601.2h: "Spend only [colors] mana on X" is parsed to
                 // CastingRestriction::SpendOnlyOnX { colors }.
-                || lower.starts_with("spend only "));
+                || (face
+                    .casting_restrictions
+                    .iter()
+                    .any(|r| matches!(r, crate::types::ability::CastingRestriction::SpendOnlyOnX { .. }))
+                    && crate::parser::oracle_casting::extract_spend_only_on_x_prefix(line).is_some()));
         // Casting option lines ("You may pay X rather than pay...", "If you control a
         // commander, you may cast this spell without paying its mana cost", etc.)
         let covered_by_casting_option = !face.casting_options.is_empty()
@@ -15223,6 +15227,44 @@ mod tests {
         check_silent_drops(
             &Some(ORACLE.to_string()),
             "Pie-Eating Contest",
+            &parse_details,
+            &mut missing,
+        );
+        assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
+    }
+
+    /// Unrecognized spend-only lines (like "Spend only mana produced by basic lands to cast this spell")
+    /// must not be swallowed by a generic "spend only " prefix check when SpendOnlyOnX does not match.
+    #[test]
+    fn unrecognized_spend_only_line_is_still_a_silent_drop() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CastingRestriction, Effect, QuantityExpr, TargetFilter,
+        };
+
+        const ORACLE: &str =
+            "Spend only mana produced by basic lands to cast this spell.\nDraw two cards.";
+
+        let mut face = make_face();
+        // Give face some other casting restriction to prove presence of a casting restriction
+        // does not grant blanket immunity to unrelated "Spend only" lines.
+        face.casting_restrictions
+            .push(CastingRestriction::CantSpendMana);
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .description("Draw two cards.".to_string()),
+        );
+
+        let parse_details = build_parse_details_for_face(&face);
+        let mut missing = Vec::new();
+        check_silent_drops(
+            &Some(ORACLE.to_string()),
+            "Basic Spell",
             &parse_details,
             &mut missing,
         );
