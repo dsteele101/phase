@@ -182,6 +182,15 @@ export const useLlmStore = create<LlmState>()(
           })),
         } as LlmState;
       },
+      // `partialize` stops FUTURE writes from carrying a credential, but a key
+      // already on disk would linger there until the next state change. Forcing
+      // one write immediately after rehydration re-persists through
+      // `partialize` and removes it now, which is the difference between "we
+      // stopped storing keys" and "your stored key is gone".
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        useLlmStore.setState({ profiles: state.profiles.map((profile) => ({ ...profile })) });
+      },
       merge: (persisted, current) => {
         const incoming = (persisted ?? {}) as Partial<LlmState>;
         return {

@@ -146,4 +146,40 @@ describe("llmStore", () => {
 
     expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-anthropic");
   });
+
+  it("removes a credential that a previous build had already written to disk", async () => {
+    // The pre-v1 shape: a persisted record that carries the key.
+    localStorage.setItem(
+      LLM_ENDPOINTS_KEY,
+      JSON.stringify({
+        state: {
+          profiles: [
+            {
+              id: "legacy",
+              name: "Legacy",
+              provider: "OpenAi",
+              baseUrl: null,
+              apiKey: "sk-leaked-from-an-older-build",
+              model: "gpt-5",
+              maxOutputTokens: null,
+              temperature: null,
+              enabled: true,
+            },
+          ],
+          seatBindings: {},
+          draftEnabled: false,
+          draftProfileId: null,
+        },
+      }),
+    );
+
+    await useLlmStore.persist.rehydrate();
+
+    // Scrubbed from disk, not merely ignored in memory.
+    expect(localStorage.getItem(LLM_ENDPOINTS_KEY)).not.toContain("sk-leaked-from-an-older-build");
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "legacy");
+    expect(profile?.apiKey).toBe("");
+    // The profile survives; only the credential is gone.
+    expect(profile?.name).toBe("Legacy");
+  });
 });
