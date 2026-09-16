@@ -1,8 +1,12 @@
-//! Integration tests for Consume Spirit legal targets and CR 115.4.
+//! Integration tests for Consume Spirit legal targets (CR 115.4) and payment restrictions (CR 601.2b, CR 601.2h).
 //!
 //! CR 115.4 & CR Glossary: "any target" refers to a creature, player, planeswalker,
 //! or battle. Other game objects (noncreature artifacts, noncreature enchantments,
 //! lands, stack spells) cannot be chosen.
+//!
+//! CR 601.2b + CR 601.2h: "Spend only black mana on X." Mana spent to pay the {X}
+//! portion of the cost must be black mana. Non-black mana can pay the generic portion
+//! of the printed cost ({1}), but cannot be spent on X.
 //!
 //! Oracle:
 //! "Spend only black mana on X.
@@ -11,7 +15,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::targeting;
 use engine::game::zones::create_object;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{StaticDefinition, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -19,6 +23,7 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::zones::Zone;
 
 const CONSUME_SPIRIT_ORACLE: &str =
@@ -26,6 +31,18 @@ const CONSUME_SPIRIT_ORACLE: &str =
 
 fn black_pool(count: usize) -> Vec<ManaUnit> {
     vec![ManaUnit::new(ManaType::Black, ObjectId(9_999), false, vec![]); count]
+}
+
+fn red_pool(count: usize) -> Vec<ManaUnit> {
+    vec![ManaUnit::new(ManaType::Red, ObjectId(9_998), false, vec![]); count]
+}
+
+fn green_pool(count: usize) -> Vec<ManaUnit> {
+    vec![ManaUnit::new(ManaType::Green, ObjectId(9_996), false, vec![]); count]
+}
+
+fn colorless_pool(count: usize) -> Vec<ManaUnit> {
+    vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_997), false, vec![]); count]
 }
 
 fn add_permanent(
@@ -186,10 +203,18 @@ fn consume_spirit_rejects_illegal_target_land() {
         })
         .expect("Cast announcement should succeed");
 
+    let r2 = if matches!(r1.waiting_for, WaitingFor::ChooseXValue { .. }) {
+        runner
+            .act(GameAction::ChooseX { value: 2 })
+            .expect("ChooseX should succeed")
+    } else {
+        r1
+    };
+
     assert!(
-        matches!(r1.waiting_for, WaitingFor::TargetSelection { .. }),
+        matches!(r2.waiting_for, WaitingFor::TargetSelection { .. }),
         "Expected TargetSelection, got {:?}",
-        r1.waiting_for
+        r2.waiting_for
     );
 
     let result = runner.act(GameAction::ChooseTarget {
@@ -228,10 +253,18 @@ fn consume_spirit_rejects_illegal_target_artifact() {
         })
         .expect("Cast announcement should succeed");
 
+    let r2 = if matches!(r1.waiting_for, WaitingFor::ChooseXValue { .. }) {
+        runner
+            .act(GameAction::ChooseX { value: 2 })
+            .expect("ChooseX should succeed")
+    } else {
+        r1
+    };
+
     assert!(
-        matches!(r1.waiting_for, WaitingFor::TargetSelection { .. }),
+        matches!(r2.waiting_for, WaitingFor::TargetSelection { .. }),
         "Expected TargetSelection, got {:?}",
-        r1.waiting_for
+        r2.waiting_for
     );
 
     let result = runner.act(GameAction::ChooseTarget {
@@ -241,4 +274,256 @@ fn consume_spirit_rejects_illegal_target_artifact() {
         result.is_err(),
         "Targeting Sol Ring (Artifact) for Consume Spirit must be rejected as an illegal target; got {result:?}"
     );
+}
+
+#[test]
+fn consume_spirit_rejects_paying_x_with_non_black_mana() {
+    // CR 601.2b / CR 601.2h: "Spend only black mana on X."
+    // Consume Spirit cost is {X}{1}{B}.
+    // With X=3, total cost is 5 mana: 1 generic, 1 {B}, 3 {B} for X (total 4 Black + 1 generic).
+    // If player has 3 Black mana and 2 Red mana (total 5 mana):
+    // 1 Black pays {B}, leaving only 2 Black for X (which needs 3 Black).
+    // The Red mana cannot pay for X, so payment must be rejected.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut pool = black_pool(3);
+    pool.extend(red_pool(2));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    let result = runner.cast(spell).x(3).target_player(P1).try_resolve();
+    assert!(
+        result.is_err(),
+        "Paying for X with non-black mana must be rejected"
+    );
+}
+
+#[test]
+fn consume_spirit_allows_paying_generic_portion_with_non_black_mana() {
+    // CR 601.2b / CR 601.2h: "Spend only black mana on X."
+    // Consume Spirit cost is {X}{1}{B}.
+    // With X=3, total cost is 4 Black + 1 generic.
+    // If player has 4 Black mana and 1 Colorless/Red mana:
+    // 4 Black pays {B} + 3 {B} on X, and 1 Colorless pays {1} generic.
+    // This must succeed.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+    let mut pool = black_pool(4);
+    pool.extend(colorless_pool(1));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).x(3).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -3);
+    outcome.assert_life_delta(P0, 3);
+}
+
+#[test]
+fn consume_spirit_with_generic_cost_reduction() {
+    // CR 601.2b, CR 601.2f, CR 601.2h:
+    // Consume Spirit cost is {X}{1}{B}. With X=2, base cost is {2}{1}{B} = {3}{B}.
+    // A {2} generic reduction reduces the total cost to {1}{B}.
+    // 1 generic is unrestricted, and 1 {B} is black.
+    // The player should be able to cast with 1 Black mana and 1 Colorless mana.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    scenario
+        .add_creature(P0, "Helm of Awakening", 0, 1)
+        .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(2),
+            spell_filter: None,
+            dynamic_count: None,
+        }));
+
+    let mut pool = black_pool(1);
+    pool.extend(colorless_pool(1));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).x(2).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_life_delta(P0, 2);
+}
+
+#[test]
+fn consume_spirit_with_colored_cost_reduction() {
+    // CR 601.2b, CR 601.2f, CR 601.2h:
+    // Consume Spirit cost is {X}{1}{B}. With X=2, base cost is {2}{1}{B} = {3}{B}.
+    // A {B} colored reduction reduces the {B} pip, leaving {3} generic (2 restricted to Black for X, 1 unrestricted).
+    // Player with 2 Black and 1 Colorless can pay the cost.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 20);
+
+    scenario
+        .add_creature(P0, "Jet Medallion", 0, 1)
+        .with_static_definition(StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            },
+            spell_filter: None,
+            dynamic_count: None,
+        }));
+
+    let mut pool = black_pool(2);
+    pool.extend(colorless_pool(1));
+    scenario.with_mana_pool(P0, pool);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Consume Spirit", false, CONSUME_SPIRIT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).x(2).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -2);
+    outcome.assert_life_delta(P0, 2);
+}
+
+#[test]
+fn soul_burn_accepts_black_and_red_mana_for_x_and_rejects_green() {
+    // CR 601.2b, CR 601.2h: "Spend only black and/or red mana on X."
+    // Soul Burn cost is {X}{2}{R}.
+    // With X=2, total cost is 4 generic + 1 Red (2 generic restricted to Black/Red for X, 2 generic unrestricted).
+    const SOUL_BURN_ORACLE: &str =
+        "Spend only black and/or red mana on X.\nSoul Burn deals X damage to any target and you gain X life.";
+
+    // 1. Paying with 2 Black on X + 2 Colorless generic + 1 Red pip -> Success
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 20);
+        let mut pool = black_pool(2);
+        pool.extend(colorless_pool(2));
+        pool.extend(red_pool(1));
+        scenario.with_mana_pool(P0, pool);
+
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Soul Burn", false, SOUL_BURN_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).x(2).target_player(P1).resolve();
+        outcome.assert_life_delta(P1, -2);
+        outcome.assert_life_delta(P0, 2);
+    }
+
+    // 2. Paying with 2 Red on X + 2 Colorless generic + 1 Red pip (3 Red + 2 Colorless) -> Success
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 20);
+        let mut pool = red_pool(3);
+        pool.extend(colorless_pool(2));
+        scenario.with_mana_pool(P0, pool);
+
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Soul Burn", false, SOUL_BURN_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).x(2).target_player(P1).resolve();
+        outcome.assert_life_delta(P1, -2);
+        outcome.assert_life_delta(P0, 2);
+    }
+
+    // 3. Paying with 1 Black + 1 Red on X + 2 Colorless generic + 1 Red pip -> Success
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 20);
+        let mut pool = black_pool(1);
+        pool.extend(red_pool(2));
+        pool.extend(colorless_pool(2));
+        scenario.with_mana_pool(P0, pool);
+
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Soul Burn", false, SOUL_BURN_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).x(2).target_player(P1).resolve();
+        outcome.assert_life_delta(P1, -2);
+        outcome.assert_life_delta(P0, 2);
+    }
+
+    // 4. Trying to pay for X with 2 Green mana + 2 Colorless generic + 1 Red pip -> Rejected
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut pool = green_pool(2);
+        pool.extend(colorless_pool(2));
+        pool.extend(red_pool(1));
+        scenario.with_mana_pool(P0, pool);
+
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Soul Burn", false, SOUL_BURN_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 2,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+        let result = runner.cast(spell).x(2).target_player(P1).try_resolve();
+        assert!(
+            result.is_err(),
+            "Paying for X in Soul Burn with green mana must be rejected"
+        );
+    }
 }

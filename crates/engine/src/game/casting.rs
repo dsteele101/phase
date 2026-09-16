@@ -2940,6 +2940,8 @@ pub(super) fn build_spell_meta(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Option<SpellMeta> {
+    let (spend_only_on_x_colors, spend_only_on_x_generic_count) =
+        spend_only_on_x_info(state, object_id);
     state.objects.get(&object_id).map(|obj| SpellMeta {
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
@@ -2959,7 +2961,7 @@ pub(super) fn build_spell_meta(
         has_x_in_cost: obj.mana_cost.has_x(),
         // CR 708.4 + CR 702.37c / CR 702.168b: `is_face_down` means "this spell is
         // being CAST FACE DOWN" (morph/disguise — paying {3} to cast as a 2/2
-        // face-down creature spell), NOT merely "the object has `face_down = true`".
+        // face-down creature), NOT merely "the object has `face_down = true`".
         // `spell_is_cast_face_down` is the single authority for that distinction and
         // carries the full CR argument; the spell-filter projection asks the same
         // question there, so the two seams cannot answer it differently. Guarded by
@@ -2971,6 +2973,8 @@ pub(super) fn build_spell_meta(
         cant_spend_mana: obj
             .casting_restrictions
             .contains(&crate::types::ability::CastingRestriction::CantSpendMana),
+        spend_only_on_x_colors,
+        spend_only_on_x_generic_count,
     })
 }
 
@@ -8517,6 +8521,66 @@ pub(super) fn apply_target_dependent_cost_modifiers(
         None,
     ));
     apply_cost_modifications_in_order(mana_cost, &collected);
+}
+
+/// CR 601.2b / CR 601.2f / CR 601.2h: Calculate how many generic mana pips in the
+/// final cost correspond to restricted {X} contributions rather than unrestricted base/tax generic.
+pub(crate) fn compute_spend_only_on_x_generic_count(
+    obj: &GameObject,
+    pending: &PendingCast,
+) -> u32 {
+    let base = pending.base_cost.as_ref().unwrap_or(&obj.mana_cost);
+    let mut unrestricted_generic = match base {
+        ManaCost::Cost { generic, .. } => *generic,
+        _ => 0,
+    };
+    for addition in &pending.declared_mana_additions {
+        if let ManaCost::Cost { generic, .. } = addition {
+            unrestricted_generic += *generic;
+        }
+    }
+    let final_generic = match &pending.cost {
+        ManaCost::Cost { generic, .. } => *generic,
+        _ => 0,
+    };
+    final_generic.saturating_sub(unrestricted_generic)
+}
+
+/// CR 601.2b / CR 601.2h: Return any color restrictions on paying {X} and the count of
+/// generic mana pips that must satisfy the restriction for the given spell.
+pub(crate) fn spend_only_on_x_info(
+    state: &GameState,
+    object_id: ObjectId,
+) -> (Option<Vec<ManaColor>>, u32) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return (None, 0);
+    };
+    let colors = obj.casting_restrictions.iter().find_map(|r| match r {
+        crate::types::ability::CastingRestriction::SpendOnlyOnX { colors } => Some(colors.clone()),
+        _ => None,
+    });
+    let Some(colors) = colors else {
+        return (None, 0);
+    };
+    if let Some((active_oid, count)) = state.active_spend_only_on_x_count {
+        if active_oid == object_id {
+            return (Some(colors), count);
+        }
+    }
+    let pending = state
+        .pending_cast
+        .as_deref()
+        .or_else(|| state.waiting_for.pending_cast_ref());
+    let Some(pending) = pending else {
+        return (Some(colors), 0);
+    };
+    if pending.object_id != object_id {
+        return (Some(colors), 0);
+    }
+    (
+        Some(colors),
+        compute_spend_only_on_x_generic_count(obj, pending),
+    )
 }
 
 /// CR 601.2f: Recompute the FULL concrete pending cost for a known X. Floors

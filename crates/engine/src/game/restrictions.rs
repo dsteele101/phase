@@ -1252,6 +1252,9 @@ fn casting_restriction_applies(
         // Not a timing gate: "can't spend mana" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::CantSpendMana => true,
+        // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::SpendOnlyOnX { .. } => true,
     }
 }
 
