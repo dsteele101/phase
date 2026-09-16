@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const llmMocks = vi.hoisted(() => ({
   executeLlmRequest: vi.fn<
-    (spec: unknown, options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<string>
+    (
+      spec: unknown,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ) => Promise<{ status: number; body: string }>
   >(),
 }));
 
@@ -28,6 +31,7 @@ import {
   cancelLlmDraftRun,
   collectLlmDraftResponses,
   isLlmDraftDisabled,
+  recordLlmDraftSubmission,
   reportLlmDraftOutcomes,
   resetLlmDraftBreaker,
 } from "../draftLlm";
@@ -96,11 +100,11 @@ describe("LLM drafters", () => {
 
   it("returns one reply per seat, tagged with the pack fingerprint it was built from", async () => {
     leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":3}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":3}' });
 
     await expect(collectLlmDraftResponses(PROFILE, [1, 2], () => true)).resolves.toEqual([
-      { seat: 1, fingerprint: "fp-1", provider: "Anthropic", body: '{"choice":3}' },
-      { seat: 2, fingerprint: "fp-2", provider: "Anthropic", body: '{"choice":3}' },
+      { seat: 1, fingerprint: "fp-1", provider: "Anthropic", status: 200, body: '{"choice":3}' },
+      { seat: 2, fingerprint: "fp-2", provider: "Anthropic", status: 200, body: '{"choice":3}' },
     ]);
   });
 
@@ -113,7 +117,7 @@ describe("LLM drafters", () => {
     let heldDuringFetch: boolean | null = null;
     llmMocks.executeLlmRequest.mockImplementation(async () => {
       heldDuringFetch = leaseHeld;
-      return '{"choice":0}';
+      return { status: 200, body: '{"choice":0}' };
     });
 
     await collectLlmDraftResponses(PROFILE, [1], () => true);
@@ -169,7 +173,7 @@ describe("LLM drafters", () => {
   it("still returns the seats that answered when others did not", async () => {
     leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
     llmMocks.executeLlmRequest
-      .mockResolvedValueOnce('{"choice":1}')
+      .mockResolvedValueOnce({ status: 200, body: '{"choice":1}' })
       .mockRejectedValueOnce(new Error("timeout"));
 
     const responses = await collectLlmDraftResponses(PROFILE, [1, 2], () => true);
@@ -210,7 +214,7 @@ describe("LLM drafters", () => {
     let seenSignal: AbortSignal | undefined;
     llmMocks.executeLlmRequest.mockImplementation(async (_spec, options) => {
       seenSignal = options?.signal;
-      return '{"choice":0}';
+      return { status: 200, body: '{"choice":0}' };
     });
 
     await collectLlmDraftResponses(PROFILE, [1], () => true);
@@ -221,7 +225,7 @@ describe("LLM drafters", () => {
 
   it("contains a superseded round rather than letting it reach the provider", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
 
     // Two picks in flight: the second supersedes the first before the first
     // gets past its (awaited) request-building phase.
@@ -252,7 +256,7 @@ describe("LLM drafters", () => {
       if (options?.signal) signals.push(options.signal);
       markDispatched();
       await hung;
-      return '{"choice":0}';
+      return { status: 200, body: '{"choice":0}' };
     });
 
     const first = collectLlmDraftResponses(PROFILE, [1], () => true);
@@ -274,7 +278,7 @@ describe("LLM drafters", () => {
     leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockImplementation(async () => {
       cancelLlmDraftRun();
-      return '{"choice":0}';
+      return { status: 200, body: '{"choice":0}' };
     });
 
     // Replies that arrive after cancellation describe a pack that has passed.
@@ -283,12 +287,12 @@ describe("LLM drafters", () => {
 
   it("discards replies for a pick that went stale mid-flight", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
     let fresh = true;
     const stillCurrent = () => fresh;
     llmMocks.executeLlmRequest.mockImplementation(async () => {
       fresh = false;
-      return '{"choice":0}';
+      return { status: 200, body: '{"choice":0}' };
     });
 
     await expect(collectLlmDraftResponses(PROFILE, [1], stillCurrent)).resolves.toEqual([]);
@@ -312,19 +316,86 @@ describe("LLM drafters", () => {
     expect(llmMocks.executeLlmRequest.mock.calls.length).toBe(callsBefore);
   });
 
-  it("resets the breaker on any successful round", async () => {
+  it("resets the breaker when the engine actually uses a pick", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockRejectedValueOnce(new Error("blip"));
     await collectLlmDraftResponses(PROFILE, [1], () => true);
 
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
     await collectLlmDraftResponses(PROFILE, [1], () => true);
+    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: true }]);
 
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("blip"));
     await collectLlmDraftResponses(PROFILE, [1], () => true);
     await collectLlmDraftResponses(PROFILE, [1], () => true);
 
     // Two failures after a success is below the ceiling.
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  /// The finding: the transport returns HTTP error bodies so a vendor's
+  /// diagnostic survives, so "bytes arrived" said nothing about usability. A
+  /// round of 401s would have reset the breaker forever.
+  it("counts a round the engine refused as a failure, not a success", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockResolvedValue({
+      status: 401,
+      body: '{"error":{"message":"Incorrect API key provided"}}',
+    });
+
+    for (let round = 0; round < 3; round += 1) {
+      const responses = await collectLlmDraftResponses(PROFILE, [1], () => true);
+      // Bytes came back, so the round reaches submit...
+      expect(responses).toHaveLength(1);
+      // ...and the engine refuses every seat, which is what counts.
+      recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
+    }
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
+  });
+
+  it("counts a round as a success when any seat's pick was used", async () => {
+    resetLlmDraftBreaker();
+    recordLlmDraftSubmission(PROFILE.id, [
+      { seat: 1, used: false },
+      { seat: 2, used: true },
+    ]);
+    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
+    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  /// A cancelled or superseded round is not the provider's fault and must be
+  /// recorded neither way — charging it to the breaker would disable a healthy
+  /// profile for clicking quickly.
+  it("does not record a round that went stale mid-flight", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    let fresh = true;
+    llmMocks.executeLlmRequest.mockImplementation(async () => {
+      fresh = false;
+      return { status: 200, body: '{"choice":0}' };
+    });
+
+    for (let round = 0; round < 5; round += 1) {
+      fresh = true;
+      await collectLlmDraftResponses(PROFILE, [1], () => fresh);
+    }
+
+    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+  });
+
+  it("does not record a round abandoned by an explicit cancel", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockImplementation(async () => {
+      cancelLlmDraftRun();
+      return { status: 200, body: '{"choice":0}' };
+    });
+
+    for (let round = 0; round < 5; round += 1) {
+      await collectLlmDraftResponses(PROFILE, [1], () => true);
+    }
+
     expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
   });
 

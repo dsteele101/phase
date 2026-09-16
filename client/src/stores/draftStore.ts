@@ -16,6 +16,7 @@ import {
   botSeatIndices,
   cancelLlmDraftRun,
   collectLlmDraftResponses,
+  recordLlmDraftSubmission,
   reportLlmDraftOutcomes,
   resetLlmDraftBreaker,
 } from "../services/llm/draftLlm";
@@ -706,9 +707,13 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
       }
       switch (request.kind) {
         case "pick": {
-          if (llmResponses.length > 0) {
+          if (llmResponses.length > 0 && llmProfile) {
             const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
             reportLlmDraftOutcomes(outcome.llmOutcomes);
+            // The breaker counts the ENGINE's verdict, not the fact that bytes
+            // arrived: a round of 401s or undecodable replies must count as a
+            // failure, or a broken provider would reset the breaker forever.
+            recordLlmDraftSubmission(llmProfile.id, outcome.llmOutcomes);
             return outcome.view;
           }
           return lease.submitPick(request.instanceId);

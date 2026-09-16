@@ -145,11 +145,15 @@ async function llmActionProposal(
     return null;
   }
 
-  const body = await executeLlmRequest(built.request, { signal });
+  const { status, body } = await executeLlmRequest(built.request, { signal });
+  // Status travels with the body so the engine can refuse a non-2xx reply
+  // however it parses — an error page or gateway failure must never be bound to
+  // a game action.
   const resolved = await adapter.getAiActionProposalFromLlmResponse(
     playerId,
     built.fingerprint,
     profile.provider,
+    status,
     body,
   );
   if (!resolved?.proposal) {

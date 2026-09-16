@@ -20,7 +20,7 @@ const dispatchMocks = vi.hoisted(() => ({
   >(),
 }));
 const llmMocks = vi.hoisted(() => ({
-  executeLlmRequest: vi.fn<() => Promise<string>>(),
+  executeLlmRequest: vi.fn<() => Promise<{ status: number; body: string }>>(),
 }));
 
 vi.mock("../../dispatch", () => ({
@@ -54,6 +54,7 @@ interface TestAdapter {
     playerId: number,
     fingerprint: string,
     provider: string,
+    status: number,
     responseBody: string,
   ) => Promise<AiLlmProposalResult | null>;
 }
@@ -170,7 +171,7 @@ describe("LLM-driven AI seats", () => {
       proposal: llmProposal,
       reasoning: "develop the board",
     }));
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":1}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":1}' });
     storeState.adapter = {
       getAiActionProposal: vi.fn(async () => proposal(PASS, "heuristic")),
       buildLlmDecisionRequest,
@@ -186,10 +187,12 @@ describe("LLM-driven AI seats", () => {
     // Difficulty reaches the engine so it can shape the persona and the amount
     // of the position the model is shown.
     expect(buildLlmDecisionRequest).toHaveBeenCalledWith("Hard", 1, expect.any(String), "[]");
+    // Status travels with the body so the engine can refuse a non-2xx reply.
     expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
       1,
       "fp-1",
       "OpenAi",
+      200,
       '{"choice":1}',
     );
     expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
@@ -223,7 +226,7 @@ describe("LLM-driven AI seats", () => {
   it("falls back to the engine AI when the engine refuses the model's reply", async () => {
     bindSeatToProvider();
     const heuristic = proposal(PASS, "heuristic");
-    llmMocks.executeLlmRequest.mockResolvedValue("I am not sure");
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: "I am not sure" });
     storeState.adapter = {
       getAiActionProposal: vi.fn(async () => heuristic),
       buildLlmDecisionRequest: vi.fn(async () => ({
@@ -308,7 +311,7 @@ describe("LLM-driven AI seats", () => {
       optionCount: 2,
       request: HTTP_SPEC,
     }));
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
     storeState.adapter = {
       getAiActionProposal: vi.fn(async () => proposal(PASS, "heuristic")),
       buildLlmDecisionRequest,
@@ -335,7 +338,7 @@ describe("LLM-driven AI seats", () => {
   /// A seat's private deliberation must not land there.
   it("never writes model reasoning into the public game log", async () => {
     bindSeatToProvider();
-    llmMocks.executeLlmRequest.mockResolvedValue('{"choice":0}');
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
     storeState.adapter = {
       getAiActionProposal: vi.fn(async () => proposal(PASS, "heuristic")),
       buildLlmDecisionRequest: vi.fn(async () => ({
@@ -357,6 +360,49 @@ describe("LLM-driven AI seats", () => {
 
     const logged = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
     expect(logged.some((message) => message.includes("holding removal"))).toBe(false);
+    controller.dispose();
+  });
+
+  /// The finding: a non-2xx reply whose body looks like a completion must not
+  /// become a game action. The engine holds the verdict, so the controller's
+  /// job is to hand it the status — and to fall back when it refuses.
+  it("hands the engine the HTTP status and falls back when it refuses a non-2xx reply", async () => {
+    bindSeatToProvider();
+    const heuristic = proposal(PASS, "heuristic");
+    llmMocks.executeLlmRequest.mockResolvedValue({
+      status: 429,
+      // Deliberately decodable: only the status makes this unusable. Built with
+      // JSON.stringify so the nested JSON-in-JSON needs no hand-written escapes.
+      body: JSON.stringify({ choices: [{ message: { content: '{"choice": 1}' } }] }),
+    });
+    const getAiActionProposalFromLlmResponse = vi.fn(async () => ({
+      proposal: null,
+      error: "HTTP 429: rate limited",
+    }));
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest: vi.fn(async () => ({
+        fingerprint: "fp-1",
+        optionCount: 2,
+        request: HTTP_SPEC,
+      })),
+      getAiActionProposalFromLlmResponse,
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
+      1,
+      "fp-1",
+      "OpenAi",
+      429,
+      expect.any(String),
+    );
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
     controller.dispose();
   });
 });

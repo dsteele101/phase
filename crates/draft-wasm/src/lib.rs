@@ -769,6 +769,9 @@ struct LlmDraftResponse {
     seat: u8,
     fingerprint: String,
     provider: String,
+    /// HTTP status of the provider response. Carried so the engine can refuse a
+    /// non-2xx reply whatever its body looks like.
+    status: u16,
     body: String,
 }
 
@@ -936,7 +939,8 @@ fn resolve_llm_draft_pick(
         return Err(phase_llm::LlmError::StaleDecision);
     };
     let provider = phase_llm::LlmProvider::from_label(&response.provider);
-    let completion = phase_llm::extract_completion_text(provider, &response.body)?;
+    let completion =
+        phase_llm::completion_from_response(provider, response.status, &response.body)?;
     // CR 903.13b: the step's card count is the procedure's, not the model's.
     let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
     phase_llm::select_picks(

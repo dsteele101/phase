@@ -10,6 +10,9 @@ export interface LlmDraftResponsePayload {
   seat: number;
   fingerprint: string;
   provider: string;
+  /** HTTP status, so the engine can refuse a non-2xx reply whatever its body
+   *  looks like. */
+  status: number;
   body: string;
 }
 

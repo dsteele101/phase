@@ -23,7 +23,10 @@ describe("executeLlmRequest", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(executeLlmRequest(spec)).resolves.toBe('{"ok":true}');
+    await expect(executeLlmRequest(spec)).resolves.toEqual({
+      status: 200,
+      body: '{"ok":true}',
+    });
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(spec.url);
@@ -37,11 +40,14 @@ describe("executeLlmRequest", () => {
     expect(init.credentials).toBe("omit");
   });
 
-  it("returns the body of an error response so the engine can surface the vendor's message", async () => {
+  it("returns an error response's body AND status so the engine can rule on both", async () => {
     const body = '{"error":{"message":"Incorrect API key provided"}}';
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body, { status: 401 })));
 
-    await expect(executeLlmRequest(spec)).resolves.toBe(body);
+    // The transport deliberately does not throw: the vendor's diagnostic is the
+    // useful half. But the status must travel with it, because a body alone
+    // cannot be judged — only the engine, holding both, can refuse it.
+    await expect(executeLlmRequest(spec)).resolves.toEqual({ status: 401, body });
   });
 
   it("raises a transport error for an empty body", async () => {
@@ -151,6 +157,6 @@ describe("executeLlmRequest", () => {
       vi.fn(async () => ({ status: 200, body }) as unknown as Response),
     );
 
-    await expect(executeLlmRequest(spec)).resolves.toBe(payload);
+    await expect(executeLlmRequest(spec)).resolves.toEqual({ status: 200, body: payload });
   });
 });

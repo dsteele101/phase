@@ -56,7 +56,7 @@ pub use provider::{
     HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, WireProtocol,
     ACCEPTED_PROVIDER_LABELS,
 };
-pub use wire::{build_chat_request, extract_completion_text};
+pub use wire::{build_chat_request, completion_from_response, extract_completion_text};
 
 #[cfg(feature = "draft")]
 pub use draft_decision::{

@@ -3672,9 +3672,13 @@ pub fn build_llm_probe_request(endpoint_json: &str) -> Result<JsValue, JsValue> 
 /// both arrive as well-formed bodies. This is the authority that says whether a
 /// reply is one the game path could actually use.
 #[wasm_bindgen(js_name = validateLlmProbeResponse)]
-pub fn validate_llm_probe_response(provider_label: &str, response_body: &str) -> JsValue {
+pub fn validate_llm_probe_response(
+    provider_label: &str,
+    status: u16,
+    response_body: &str,
+) -> JsValue {
     let provider = phase_llm::LlmProvider::from_label(provider_label);
-    match phase_llm::validate_probe_response(provider, response_body) {
+    match phase_llm::validate_probe_response(provider, status, response_body) {
         Ok(()) => to_js(&serde_json::json!({ "ok": true })),
         Err(error) => to_js(&serde_json::json!({
             "ok": false,
@@ -3752,6 +3756,7 @@ pub fn get_ai_action_proposal_from_llm_response(
     player_id: u8,
     fingerprint: &str,
     provider_label: &str,
+    status: u16,
     response_body: &str,
 ) -> Result<JsValue, JsValue> {
     let provider = phase_llm::LlmProvider::from_label(provider_label);
@@ -3760,7 +3765,10 @@ pub fn get_ai_action_proposal_from_llm_response(
         let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
         let contract = AiDecisionContract::issue(state, semantic_owner);
 
-        let completion = match phase_llm::extract_completion_text(provider, response_body) {
+        // Status-aware: a non-2xx response is refused however its body parses,
+        // so a gateway or proxy error cannot masquerade as a decision.
+        let completion = match phase_llm::completion_from_response(provider, status, response_body)
+        {
             Ok(text) => text,
             Err(error) => return Ok(llm_failure(&error)),
         };

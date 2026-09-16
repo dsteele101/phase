@@ -175,7 +175,7 @@ export async function collectLlmDraftResponses(
   const settled = await Promise.all(
     requests.map(async (request): Promise<LlmDraftResponsePayload | null> => {
       try {
-        const body = await executeLlmRequest(request.request, {
+        const { status, body } = await executeLlmRequest(request.request, {
           timeoutMs: LLM_DRAFT_TIMEOUT_MS,
           signal: run.signal,
         });
@@ -183,6 +183,7 @@ export async function collectLlmDraftResponses(
           seat: request.seat,
           fingerprint: request.fingerprint,
           provider: profile.provider,
+          status,
           body,
         };
       } catch (error) {
@@ -195,14 +196,41 @@ export async function collectLlmDraftResponses(
   const responses = settled.filter((entry): entry is LlmDraftResponsePayload => entry !== null);
   cancelRun(run);
 
-  // A round that produced nothing counts against the profile; any reply at all
-  // means the endpoint is alive and resets the breaker.
-  recordRound(profile.id, responses.length > 0);
-
   // A pick superseded mid-flight contributes nothing, even if replies arrived:
-  // they describe a pack this seat no longer holds.
+  // they describe a pack this seat no longer holds. It is also not the
+  // provider's fault, so it is recorded neither way -- charging a cancelled
+  // round to the breaker would disable a healthy profile for clicking fast.
   if (!stillCurrent() || run.signal.aborted) return [];
+
+  if (responses.length === 0) {
+    // Every call failed at the transport. That is a real failure and the only
+    // one this function can judge on its own.
+    recordRound(profile.id, false);
+    return [];
+  }
+
+  // Bytes came back, which says nothing about whether they were USABLE: the
+  // transport returns HTTP error bodies so a vendor's diagnostic survives, so a
+  // round of 401s would otherwise look like a success and reset the breaker.
+  // The verdict belongs to the engine and arrives at submit time, via
+  // `recordLlmDraftSubmission`.
   return responses;
+}
+
+/**
+ * Record a round's outcome from the ENGINE's verdict on each seat's reply.
+ *
+ * Called by the draft store once `submitPickWithLlmBotPicks` has ruled. A round
+ * counts as a success only when the engine actually used at least one seat's
+ * pick; a round where every reply was refused -- an error body, an undecodable
+ * completion, a pack that moved on -- counts against the profile, which is what
+ * lets the breaker trip on a provider that is answering but useless.
+ */
+export function recordLlmDraftSubmission(profileId: string, outcomes: LlmDraftOutcome[]): void {
+  recordRound(
+    profileId,
+    outcomes.some((outcome) => outcome.used),
+  );
 }
 
 /** Clear `activeRun` only if it still refers to this round. */

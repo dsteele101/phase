@@ -55,9 +55,9 @@ export async function testLlmEndpoint(
     return { ok: false, code: "requestNotBuilt", detail: built?.error };
   }
 
-  let body: string;
+  let response: { status: number; body: string };
   try {
-    body = await executeLlmRequest(built.request, {
+    response = await executeLlmRequest(built.request, {
       timeoutMs: options.timeoutMs ?? LLM_PROBE_TIMEOUT_MS,
       // Forwarded so a probe for an endpoint the player has since edited,
       // removed, or navigated away from is cut loose instead of running to its
@@ -71,7 +71,12 @@ export async function testLlmEndpoint(
     return { ok: false, code: "unreachable", detail: describe(error) };
   }
 
-  const verdict = wasm.validateLlmProbeResponse(profile.provider, body) as ProbeValidation;
+  // Status travels with the body: a non-2xx reply is refused however it parses.
+  const verdict = wasm.validateLlmProbeResponse(
+    profile.provider,
+    response.status,
+    response.body,
+  ) as ProbeValidation;
   if (verdict?.ok) return { ok: true };
   // The vendor's own message ("Incorrect API key provided", "models/x is not
   // found") is the most useful half and survives untranslated.

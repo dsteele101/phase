@@ -11,7 +11,7 @@
 use crate::error::LlmResult;
 use crate::prompt::{decode_choice, LlmPrompt};
 use crate::provider::LlmProvider;
-use crate::wire::extract_completion_text;
+use crate::wire::completion_from_response;
 
 /// The option count the probe offers. One option means a working model has
 /// exactly one legal answer, so a decode failure is a real signal about the
@@ -36,11 +36,11 @@ pub fn connection_probe_prompt() -> LlmPrompt {
 
 /// Validate a probe response exactly as a game decision would be validated.
 ///
-/// Surfaces, in order: a provider error envelope (bad key, unknown model, rate
-/// limit) with the vendor's own message; an empty completion; and a reply the
-/// engine cannot bind to a legal option.
-pub fn validate_probe_response(provider: LlmProvider, body: &str) -> LlmResult<()> {
-    let completion = extract_completion_text(provider, body)?;
+/// Surfaces, in order: a non-2xx status (with the vendor's own message when the
+/// body carries one); a provider error envelope on an otherwise-2xx response;
+/// an empty completion; and a reply the engine cannot bind to a legal option.
+pub fn validate_probe_response(provider: LlmProvider, status: u16, body: &str) -> LlmResult<()> {
+    let completion = completion_from_response(provider, status, body)?;
     decode_choice(&completion, PROBE_OPTION_COUNT, 1)?;
     Ok(())
 }
@@ -53,7 +53,10 @@ mod tests {
     #[test]
     fn a_well_formed_answer_passes() {
         let body = r#"{"choices":[{"message":{"content":"{\"choice\": 0}"}}]}"#;
-        assert_eq!(validate_probe_response(LlmProvider::OpenAi, body), Ok(()));
+        assert_eq!(
+            validate_probe_response(LlmProvider::OpenAi, 200, body),
+            Ok(())
+        );
     }
 
     /// The case a bytes-came-back check gets wrong: a rejected key arrives as a
@@ -62,7 +65,7 @@ mod tests {
     fn a_provider_error_envelope_fails_with_the_vendors_message() {
         let body = r#"{"error":{"message":"Incorrect API key provided"}}"#;
         assert_eq!(
-            validate_probe_response(LlmProvider::OpenAi, body),
+            validate_probe_response(LlmProvider::OpenAi, 200, body),
             Err(LlmError::Provider {
                 detail: "Incorrect API key provided".to_string()
             })
@@ -75,7 +78,7 @@ mod tests {
         let body =
             r#"{"error":{"message":"models/nope is not found for API version v1beta","code":404}}"#;
         assert!(matches!(
-            validate_probe_response(LlmProvider::Gemini, body),
+            validate_probe_response(LlmProvider::Gemini, 404, body),
             Err(LlmError::Provider { .. })
         ));
     }
@@ -84,7 +87,7 @@ mod tests {
     fn a_malformed_body_fails_rather_than_passing() {
         for body in ["", "not json", "<!doctype html><html>404</html>", "{}"] {
             assert!(
-                validate_probe_response(LlmProvider::OpenAi, body).is_err(),
+                validate_probe_response(LlmProvider::OpenAi, 200, body).is_err(),
                 "must reject: {body:?}"
             );
         }
@@ -94,18 +97,31 @@ mod tests {
     fn an_empty_completion_fails() {
         let body = r#"{"choices":[{"message":{"content":""}}]}"#;
         assert_eq!(
-            validate_probe_response(LlmProvider::OpenAi, body),
+            validate_probe_response(LlmProvider::OpenAi, 200, body),
             Err(LlmError::EmptyCompletion)
         );
     }
 
     /// A reachable endpoint whose model will not answer in the agreed shape is
     /// reported, not passed: the game path would refuse it too.
+    /// A probe must not report Connected for a non-2xx response, even when its
+    /// body would otherwise decode.
+    #[test]
+    fn a_non_2xx_probe_response_fails_even_with_a_decodable_body() {
+        let body = r#"{"choices":[{"message":{"content":"{\"choice\": 0}"}}]}"#;
+        for status in [400, 401, 403, 404, 429, 500] {
+            assert!(
+                validate_probe_response(LlmProvider::OpenAi, status, body).is_err(),
+                "HTTP {status} must not report success"
+            );
+        }
+    }
+
     #[test]
     fn a_reply_the_decoder_cannot_bind_fails() {
         let body = r#"{"choices":[{"message":{"content":"Sure! I would pass priority."}}]}"#;
         assert!(matches!(
-            validate_probe_response(LlmProvider::OpenAi, body),
+            validate_probe_response(LlmProvider::OpenAi, 200, body),
             Err(LlmError::UndecodableChoice { .. })
         ));
     }

@@ -204,7 +204,7 @@ export function formatConfigForCustomRules(custom_rules: any): any;
  * intentionally no endpoint by which model text becomes a `GameAction` without
  * this check.
  */
-export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, response_body: string): any;
+export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -688,7 +688,7 @@ export function take_last_panic_message(): string | undefined;
  * both arrive as well-formed bodies. This is the authority that says whether a
  * reply is one the game path could actually use.
  */
-export function validateLlmProbeResponse(provider_label: string, response_body: string): any;
+export function validateLlmProbeResponse(provider_label: string, status: number, response_body: string): any;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -710,7 +710,7 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
-    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -752,7 +752,7 @@ export interface InitOutput {
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
-    readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number) => any;
+    readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;

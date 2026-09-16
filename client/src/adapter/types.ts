@@ -4758,6 +4758,7 @@ export interface EngineAdapter {
     playerId: number,
     fingerprint: string,
     provider: string,
+    status: number,
     responseBody: string,
   ): Promise<AiLlmProposalResult | null>;
   /** The engine-owned LLM provider/model catalog for the settings UI. */
