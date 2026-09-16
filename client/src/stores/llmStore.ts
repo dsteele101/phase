@@ -165,6 +165,52 @@ function readPersistedProfiles(value: unknown): LlmProfile[] {
   });
 }
 
+/**
+ * Seat bindings recovered from a persisted payload.
+ *
+ * `profileForSeat` indexes this and `removeProfile` calls `Object.entries` on
+ * it, so a `null` or non-object value crashes at the first read rather than at
+ * hydration — which is why it is coerced here rather than guarded at each use.
+ * A key must look like a seat index and a value must be a profile id; anything
+ * else is dropped, since a binding that names neither is usable either way.
+ */
+function readPersistedSeatBindings(value: unknown): Record<number, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const bindings: Record<number, string> = {};
+  for (const [key, profileId] of Object.entries(value as Record<string, unknown>)) {
+    const seatIndex = Number(key);
+    if (!Number.isInteger(seatIndex) || seatIndex < 0) continue;
+    if (typeof profileId !== "string" || !profileId) continue;
+    bindings[seatIndex] = profileId;
+  }
+  return bindings;
+}
+
+/**
+ * The complete persisted slice, normalized.
+ *
+ * Validating `profiles` alone left the rest of the record trusted, and every
+ * field here is read without a guard somewhere downstream. Normalizing the
+ * whole slice in one place keeps "what the store may contain" a single
+ * statement rather than a set of assumptions spread across consumers.
+ */
+function readPersistedState(
+  value: unknown,
+): Pick<LlmState, "profiles" | "seatBindings" | "draftEnabled" | "draftProfileId"> {
+  const record =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    profiles: readPersistedProfiles(record.profiles),
+    seatBindings: readPersistedSeatBindings(record.seatBindings),
+    // Strict: only a real `true` enables drafting, so a truthy string cannot
+    // silently switch an LLM into a pod.
+    draftEnabled: record.draftEnabled === true,
+    draftProfileId: typeof record.draftProfileId === "string" ? record.draftProfileId : null,
+  };
+}
+
 /** Absent, empty and whitespace-only base URLs all mean "the provider default",
  *  so they must compare equal — otherwise clearing a field the player never set
  *  would count as retargeting and wipe a working key. */
@@ -297,10 +343,9 @@ export const useLlmStore = create<LlmState>()(
         }
         const state = persisted as Partial<LlmState>;
         if (version >= 1) return state as LlmState;
-        return {
-          ...state,
-          profiles: readPersistedProfiles(state.profiles),
-        } as LlmState;
+        // `merge` normalizes the whole slice regardless; doing it here too
+        // keeps a v0 record's credential from surviving the migration step.
+        return { ...state, ...readPersistedState(state) } as LlmState;
       },
       // `partialize` stops FUTURE writes from carrying a credential, but a key
       // already on disk would linger there until the next state change. Forcing
@@ -323,18 +368,14 @@ export const useLlmStore = create<LlmState>()(
           });
         });
       },
-      merge: (persisted, current) => {
-        const incoming = (persisted ?? {}) as Partial<LlmState>;
-        return {
-          ...current,
-          ...incoming,
-          // Rehydrated profiles carry no credential by construction; restate it
-          // so a hand-edited storage record cannot smuggle one back in.
-          // `readPersistedProfiles` returns complete records with no
-          // credential, so nothing further is restated here.
-          profiles: readPersistedProfiles(incoming.profiles),
-        };
-      },
+      merge: (persisted, current) => ({
+        // The persisted slice goes through `readPersistedState` rather than
+        // being spread raw: spreading `incoming` let any field the record
+        // happened to carry through untyped, so `{seatBindings: null}` survived
+        // hydration and then crashed at the first read.
+        ...current,
+        ...readPersistedState(persisted),
+      }),
     },
   ),
 );
