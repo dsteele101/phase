@@ -690,7 +690,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     endpointJson: string,
     historyJson: string,
   ): Promise<LlmDecisionRequestResult | null> {
-    this.assertInitialized();
+    this.assertInitialized("buildLlmDecisionRequest");
     try {
       if (this.engine) {
         return await this.engine.buildLlmDecisionRequest(
@@ -717,7 +717,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     provider: string,
     responseBody: string,
   ): Promise<AiLlmProposalResult | null> {
-    this.assertInitialized();
+    this.assertInitialized("getAiActionProposalFromLlmResponse");
     try {
       if (this.engine) {
         return await this.engine.getAiActionProposalFromLlmResponse(
@@ -739,7 +739,7 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   async llmProviderCatalog(): Promise<unknown> {
-    this.assertInitialized();
+    this.assertInitialized("llmProviderCatalog");
     if (this.engine) return await this.engine.llmProviderCatalog();
     return this.fallback!.llmProviderCatalog();
   }
