@@ -185,7 +185,7 @@ pub fn pool_context(pool: &[DraftCardInstance]) -> String {
         by_color
             .entry(key)
             .or_default()
-            .push(format!("{} ({})", card.name, card.cmc));
+            .push(format!("{} ({})", one_line(&card.name), card.cmc));
     }
     let mut out = format!("Your pool ({} cards):\n", pool.len());
     for (color, names) in by_color {
@@ -200,9 +200,11 @@ pub fn card_line(
     db: Option<&CardDatabase>,
     oracle_budget: usize,
 ) -> String {
-    let mut parts = vec![card.name.clone()];
+    // Name and type line are rendered data and are folded to one line each, so
+    // neither can start a line of its own inside the data block.
+    let mut parts = vec![one_line(&card.name)];
     if !card.type_line.is_empty() {
-        parts.push(card.type_line.clone());
+        parts.push(one_line(&card.type_line));
     }
     parts.push(format!("mv {}", card.cmc));
     if !card.colors.is_empty() {
