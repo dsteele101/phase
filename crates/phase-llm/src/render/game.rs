@@ -315,9 +315,13 @@ fn push_history(out: &mut String, history: &[GameLogEntry], limit: usize) {
 /// Response validation does not help here: the text never has to pass as a
 /// decision, only as narrative.
 ///
-/// Nothing externally authored is rendered into a prompt today, so there is no
-/// untrusted section to delimit. If that ever changes, the content belongs in an
-/// explicitly marked, non-instructional block — never inline in the history.
+/// This filter decides what is rendered at all. It is not what decides how the
+/// rendered text is READ: everything this module emits — including public log
+/// lines, whose `LogSegment::PlayerName` text is chosen by other people — is
+/// quoted inside [`crate::prompt::untrusted_block`], under the declaration in
+/// [`crate::prompt::UNTRUSTED_DATA_DECLARATION`]. The two are independent and
+/// both are required. Excluding a channel keeps text out of the prompt; the
+/// fence governs the text that legitimately belongs there.
 fn is_prompt_safe(entry: &GameLogEntry) -> bool {
     matches!(entry.presentation.visibility, LogVisibility::Public)
         && !matches!(entry.category, LogCategory::Debug)
