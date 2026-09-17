@@ -2,6 +2,7 @@ import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constan
 import { useGameStore } from "../../stores/gameStore";
 import { profileForSeat, useLlmStore } from "../../stores/llmStore";
 import { executeLlmRequest } from "../../services/llm/llmClient";
+import { reportLlmFailure } from "../../services/llm/diagnostics";
 import { endpointOf } from "../../services/llm/types";
 import type { AiActionProposal, GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
@@ -141,7 +142,10 @@ async function llmActionProposal(
     JSON.stringify(history),
   );
   if (!built?.request || !built.fingerprint) {
-    if (built?.error) debugLog(`LLM opponent (seat ${llmSeatIndex}): ${built.error}`, "warn");
+    // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
+    // the game log is prompt-renderable. Only the Phase-authored summary is
+    // logged; the detail goes to the console.
+    reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) could not build a request`, built?.error);
     return null;
   }
 
@@ -157,7 +161,7 @@ async function llmActionProposal(
     body,
   );
   if (!resolved?.proposal) {
-    if (resolved?.error) debugLog(`LLM opponent (seat ${llmSeatIndex}): ${resolved.error}`, "warn");
+    reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) reply was refused`, resolved?.error);
     return null;
   }
   // The model's reasoning is deliberately NOT logged. `debugLog` writes a
@@ -432,11 +436,9 @@ export function createAIController(config: AIControllerConfig): AIController {
       llmAbort = abort;
       proposalPromise = llmActionProposal(playerId, difficulty, llmSeatIndex, abort.signal)
         .catch((error) => {
-          debugLog(
-            `LLM opponent (player ${playerId}) failed; using the engine AI: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            "warn",
+          reportLlmFailure(
+            `LLM opponent (player ${playerId}) failed; using the engine AI`,
+            error,
           );
           return null;
         })

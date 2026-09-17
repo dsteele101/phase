@@ -14,6 +14,7 @@ import { withDraftEngineOperation } from "../../adapter/draft-adapter";
 import type { LlmDraftResponsePayload } from "../../adapter/draft-adapter";
 import { ensureSetCatalog } from "../setCatalog";
 import { debugLog } from "../../game/debugLog";
+import { reportLlmFailure } from "./diagnostics";
 import { executeLlmRequest } from "./llmClient";
 import { endpointOf, type LlmDraftOutcome, type LlmDraftPickRequest, type LlmProfile } from "./types";
 
@@ -155,7 +156,7 @@ export async function collectLlmDraftResponses(
     // reject here too, and that is not the provider's fault. Charging it would
     // let abandoning three drafts disable a healthy profile.
     if (run.signal.aborted || !stillCurrent()) return [];
-    debugLog(`LLM drafters unavailable; using the engine bots: ${describe(error)}`, "warn");
+    reportLlmFailure("LLM drafters unavailable; using the engine bots", error);
     recordRound(profile.id, false);
     return [];
   }
@@ -187,7 +188,7 @@ export async function collectLlmDraftResponses(
           body,
         };
       } catch (error) {
-        debugLog(`LLM drafter (seat ${request.seat}) failed: ${describe(error)}`, "warn");
+        reportLlmFailure(`LLM drafter (seat ${request.seat}) failed`, error);
         return null;
       }
     }),
@@ -250,14 +251,13 @@ function cancelRun(run: AbortController): void {
 export function reportLlmDraftOutcomes(outcomes: LlmDraftOutcome[]): void {
   for (const outcome of outcomes) {
     if (!outcome.used && outcome.error) {
-      debugLog(
-        `LLM drafter (seat ${outcome.seat}) fell back to the engine bot: ${outcome.error}`,
-        "warn",
+      // `outcome.error` can carry a provider-authored diagnostic, and the game
+      // log is prompt-renderable, so only the seat is named there.
+      reportLlmFailure(
+        `LLM drafter (seat ${outcome.seat}) fell back to the engine bot`,
+        outcome.error,
       );
     }
   }
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

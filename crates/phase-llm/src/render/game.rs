@@ -13,7 +13,7 @@ use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
-use engine::types::log::{GameLogEntry, LogSegment, LogVisibility};
+use engine::types::log::{GameLogEntry, LogCategory, LogSegment, LogVisibility};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -275,7 +275,10 @@ fn push_history(out: &mut String, history: &[GameLogEntry], limit: usize) {
     }
     // Filter BEFORE windowing so dropped entries do not consume the budget —
     // otherwise a burst of draws would silently shorten the visible history.
-    let visible: Vec<&GameLogEntry> = history.iter().filter(|entry| is_public(entry)).collect();
+    let visible: Vec<&GameLogEntry> = history
+        .iter()
+        .filter(|entry| is_prompt_safe(entry))
+        .collect();
     if visible.is_empty() {
         return;
     }
@@ -293,16 +296,31 @@ fn push_history(out: &mut String, history: &[GameLogEntry], limit: usize) {
 
 /// Whether a log entry may appear in a prompt.
 ///
-/// The engine already classifies every entry, and `LogVisibility` is not a
-/// display hint: `HiddenInformation` marks entries the normal game log must not
-/// disclose — card draws name the exact card via `LogSegment::CardName`
-/// (`engine::game::log::visibility`). A prompt leaves the machine for a
-/// third-party provider, which is strictly weaker than the on-screen log this
-/// classification was written for, so the same bar applies and the engine's own
-/// verdict is what enforces it. A transport handing back an unfiltered log
-/// cannot widen what gets rendered.
-fn is_public(entry: &GameLogEntry) -> bool {
+/// Two independent exclusions, for two different reasons.
+///
+/// `LogVisibility::HiddenInformation` is not a display hint: it marks entries
+/// the normal game log must not disclose — card draws name the exact card via
+/// `LogSegment::CardName` (`engine::game::log::visibility`). A prompt leaves the
+/// machine for a third-party provider, a strictly weaker boundary than the
+/// on-screen log that classification was written for, so the same bar applies.
+///
+/// `LogCategory::Debug` is excluded because it is not a record of the GAME at
+/// all — it is a diagnostic channel the client writes into, and its text can
+/// originate outside this process. A provider's error detail travels as
+/// `LlmError::Provider { detail }`, and a provider, a proxy, or a hostile custom
+/// endpoint controls that string. Were a diagnostic entry renderable, such a
+/// string could be written into the log and then read back to the model as
+/// ordinary history on the next decision — prose that looks like history but is
+/// authored by the very party the response validation exists to distrust.
+/// Response validation does not help here: the text never has to pass as a
+/// decision, only as narrative.
+///
+/// Nothing externally authored is rendered into a prompt today, so there is no
+/// untrusted section to delimit. If that ever changes, the content belongs in an
+/// explicitly marked, non-instructional block — never inline in the history.
+fn is_prompt_safe(entry: &GameLogEntry) -> bool {
     matches!(entry.presentation.visibility, LogVisibility::Public)
+        && !matches!(entry.category, LogCategory::Debug)
 }
 
 /// Flatten an engine-authored log entry's segments into one sentence. The
