@@ -2271,6 +2271,10 @@ pub(crate) fn parent_referent_context_from_events(
         return Some(snapshot);
     }
 
+    if let Some(snapshot) = reveal_until_object_context_from_events(events) {
+        return Some(snapshot);
+    }
+
     if let Some(snapshot) = revealed_object_context_from_events(state, events) {
         return Some(snapshot);
     }
@@ -2503,6 +2507,47 @@ fn stack_pushed_object_context_from_events(
     });
     let first = pushed.next()?;
     pushed.next().is_none().then_some(first)
+}
+
+/// CR 608.2c + CR 701.20a: A `RevealUntil` instruction that stopped on a single
+/// matching card introduces that card as the referent for downstream anaphoric
+/// pronouns ("that card's mana value", Erratic Mutation). Captured from
+/// `EffectResolved`'s subject snapshot.
+fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
+    let mut hits = events.iter().filter_map(|event| match event {
+        GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            subject: Some(subject),
+            ..
+        } => Some(CostPaidObjectSnapshot {
+            object_id: subject.identity.object_id,
+            lki: LKISnapshot {
+                name: subject.name.clone(),
+                token_image_ref: None,
+                power: subject.power,
+                toughness: subject.toughness,
+                base_power: subject.base_power,
+                base_toughness: subject.base_toughness,
+                mana_value: subject.mana_value,
+                controller: subject.controller,
+                owner: subject.owner,
+                card_types: subject.core_types.clone(),
+                subtypes: subject.subtypes.clone(),
+                supertypes: subject.supertypes.clone(),
+                keywords: subject.keywords.clone(),
+                colors: subject.colors.clone(),
+                chosen_attributes: Vec::new(),
+                counters: subject.counters.clone(),
+                tapped: subject.tapped,
+                is_suspected: subject.is_suspected,
+                attachments: Vec::new(),
+            },
+            incarnation: subject.identity.incarnation,
+        }),
+        _ => None,
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
 }
 
 /// CR 608.2c + CR 608.2h + CR 701.20b: A `reveal` instruction introduces an
@@ -16198,6 +16243,8 @@ fn resolve_chain_body(
             // producing no PermanentSacrificed event and leaving
             // effect_context_object = None for the downstream PriorLook Dig.
             && !matches!(sub.effect, Effect::Sacrifice { .. })
+            && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
+                || has_member_driven_repeat(sub.as_ref()))
         {
             // Inject revealed card IDs as targets for sub_abilities following
             // effects that write last_revealed_ids. Parallel to how

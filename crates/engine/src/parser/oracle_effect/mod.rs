@@ -39705,6 +39705,35 @@ pub(crate) fn parse_effect_chain_ir(
                 })
             })
             .or_else(|| {
+                // CR 701.20a + CR 608.2c: A clause disposing of cards revealed by an
+                // earlier `RevealUntil` ("put all cards revealed this way...",
+                // "put the nonland card into your hand and the rest...", "put the revealed cards...")
+                // may be separated from the `RevealUntil` by intervening transparent
+                // instructions that use the revealed card (such as `Pump` on Erratic Mutation,
+                // or `DealDamage` on Explosive Revelation).
+                // Scan `non_absorbed` (nearest-first) for a preceding `RevealUntil` antecedent.
+                // The parser is the detector: only bind if `parse_followup_continuation_ast`
+                // against the candidate `RevealUntil` produces a recognized `RevealUntil` continuation.
+                non_absorbed.iter().find_map(|c| {
+                    let deeper = effective_effect_of(c);
+                    match deeper {
+                        Effect::RevealUntil { .. } => {
+                            match parse_followup_continuation_ast(normalized_text, &deeper, ctx) {
+                                Some(
+                                    continuation @ (ContinuationAst::RevealUntilAllToZone {
+                                        ..
+                                    }
+                                    | ContinuationAst::PutRest { .. }
+                                    | ContinuationAst::RevealUntilKept { .. }),
+                                ) => Some(continuation),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                })
+            })
+            .or_else(|| {
                 // CR 707.10c: a "you may choose new targets for the copy/copies"
                 // sentence still grants the copy's controller retargeting even
                 // when a clause that resolves between the copy and this sentence

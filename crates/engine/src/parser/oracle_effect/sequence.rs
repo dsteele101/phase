@@ -452,6 +452,71 @@ fn parse_reveal_until_conditional_kept(input: &str) -> OracleResult<'_, Continua
     ))
 }
 
+/// CR 701.20a: Parse a whole-clause continuation moving all cards revealed by
+/// an earlier `RevealUntil` to a single destination zone.
+///
+/// Handles:
+/// - "puts those cards into their graveyard"
+/// - "put those cards into your graveyard"
+/// - "put all cards revealed this way on the bottom of your library in any order"
+/// - "put all cards revealed this way on the bottom of your library in a random order"
+/// - "put all cards revealed this way into your hand"
+/// - "put all cards revealed this way into exile"
+/// - "put the revealed cards on the bottom of your library in any order"
+fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let (input, _) = opt(alt((tag::<_, _, E>("then "), tag("and ")))).parse(input)?;
+    let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, E>("those cards"),
+        tag("all cards revealed this way"),
+        tag("all cards revealed in this way"),
+        tag("the revealed cards"),
+    ))
+    .parse(input)?;
+    let (input, destination) = alt((
+        value(
+            Zone::Graveyard,
+            alt((
+                tag::<_, _, E>(" into your graveyard"),
+                tag(" into their graveyard"),
+                tag(" into their owners' graveyards"),
+                tag(" into its owner's graveyard"),
+            )),
+        ),
+        value(
+            Zone::Hand,
+            alt((tag::<_, _, E>(" into your hand"), tag(" into their hand"))),
+        ),
+        value(
+            Zone::Exile,
+            alt((tag::<_, _, E>(" into exile"), tag(" in exile"))),
+        ),
+        value(
+            Zone::Library,
+            alt((
+                tag::<_, _, E>(" on the bottom of your library"),
+                tag(" on the bottom of their library"),
+                tag(" on the bottom of its owner's library"),
+                tag(" on the bottom of their owner's library"),
+                tag(" on the bottom of their owners' libraries"),
+                tag(" into your library"),
+                tag(" into their library"),
+                tag(" into its owner's library"),
+            )),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(alt((
+        tag::<_, _, E>(" in any order"),
+        tag(" in a random order"),
+    )))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, ContinuationAst::RevealUntilAllToZone { destination }))
+}
+
 /// CR 701.20a: Detect the rest-pile zone in a `RevealUntil` continuation
 /// chunk. The "rest" subject may be phrased as "the rest" / "all other cards
 /// revealed this way" / "the other cards" — and may be governed by an
@@ -5656,20 +5721,24 @@ pub(super) fn apply_clause_continuation(
                 *grant_extra_turn_after = true;
             }
         }
-        // CR 701.20a: "puts those cards into [zone]" — both the matching card and
-        // the non-matching cards go to the same zone.
+        // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
+        // into [zone]" — both the matching card and the non-matching cards go to the
+        // same zone. Resolves back to the nearest DigOrRevealUntil antecedent via env
+        // so that intervening transparent instructions (such as Pump on Erratic Mutation
+        // or DealDamage on Explosive Revelation) do not block destination patching.
         ContinuationAst::RevealUntilAllToZone { destination } => {
-            let Some(previous) = defs.last_mut() else {
-                return;
-            };
-            if let Effect::RevealUntil {
-                kept_destination,
-                rest_destination,
-                ..
-            } = &mut *previous.effect
-            {
-                *kept_destination = destination;
-                *rest_destination = destination;
+            let target_idx = env
+                .resolve(
+                    defs,
+                    super::assembly::AntecedentSelector::LastWithRole(
+                        super::assembly::AntecedentRole::DigOrRevealUntil,
+                    ),
+                    None,
+                    super::assembly::OnMiss::Ignore,
+                )
+                .or_else(|| defs.len().checked_sub(1));
+            if let Some(target_idx) = target_idx {
+                patch_reveal_until_all_to_zone_recursively(&mut defs[target_idx], destination);
             }
         }
         // CR 202.3 + CR 608.2c: "If its mana value is <comparator> <dynamic
@@ -5983,6 +6052,26 @@ fn patch_rest_destination_recursively(
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
         patch_rest_destination_recursively(else_def, destination, reorder_all, rest_order);
+    }
+}
+
+/// Recursively patch `kept_destination` and `rest_destination` on RevealUntil effects
+/// reachable from `def` via `sub_ability` or `else_ability`.
+fn patch_reveal_until_all_to_zone_recursively(def: &mut AbilityDefinition, destination: Zone) {
+    if let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &mut *def.effect
+    {
+        *kept_destination = destination;
+        *rest_destination = destination;
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        patch_reveal_until_all_to_zone_recursively(sub, destination);
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        patch_reveal_until_all_to_zone_recursively(else_def, destination);
     }
 }
 
@@ -7929,28 +8018,19 @@ pub(super) fn parse_followup_continuation_ast(
         //     Transmogrify) — the engine's existing rest=Library destination already
         //     random-orders, satisfying the shuffle semantics.
         //   • Third-person "puts" verb form (Polymorph chain).
-        // CR 701.20a: "puts those cards into [zone]" / "put those cards into [zone]"
-        // after RevealUntil — the entire revealed pile (matching card + everything
-        // revealed before it) goes to the same zone. Checked before the PutRest arm
-        // because "those cards" is a distinct semantic from "the rest" and must
-        // override both kept_destination and rest_destination. Used by Balustrade
-        // Spy, Consuming Aberration, Destroy the Evidence, Undercity Informer.
+        // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
+        // into [zone]" after RevealUntil — the entire revealed pile (matching card +
+        // everything revealed before it) goes to the same zone. Checked before the PutRest
+        // arm because "those cards" / "all cards revealed this way" is a distinct
+        // semantic from "the rest" and must override both kept_destination and rest_destination.
+        // Used by Balustrade Spy, Consuming Aberration, Destroy the Evidence, Undercity
+        // Informer, Erratic Mutation.
         Effect::RevealUntil { .. }
-            if nom_primitives::scan_contains(&lower, "puts those cards")
-                || nom_primitives::scan_contains(&lower, "put those cards") =>
+            if parse_reveal_until_all_to_zone_continuation(lower.trim()).is_ok() =>
         {
-            let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
-                || nom_primitives::scan_contains(&lower, "into their graveyard")
-            {
-                Zone::Graveyard
-            } else if nom_primitives::scan_contains(&lower, "into exile")
-                || nom_primitives::scan_contains(&lower, "on the bottom")
-            {
-                Zone::Library
-            } else {
-                Zone::Graveyard
-            };
-            Some(ContinuationAst::RevealUntilAllToZone { destination })
+            parse_reveal_until_all_to_zone_continuation(lower.trim())
+                .ok()
+                .map(|(_, cont)| cont)
         }
         //   • "put the revealed cards" / "put them back" after RevealUntil — the
         //     revealed pile's destination override for the non-matching cards only.

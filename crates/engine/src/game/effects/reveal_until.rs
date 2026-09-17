@@ -138,6 +138,15 @@ pub fn resolve(
         }
     }
 
+    // CR 608.2c: when exactly one card was hit by the until condition, snapshot
+    // it before moving to its destination so chained instructions (e.g. Erratic
+    // Mutation's pump reading "that card's mana value") bind to it.
+    let hit_snapshot = if hit_cards.len() == 1 {
+        state.capture_event_object_snapshot(hit_cards[0])
+    } else {
+        None
+    };
+
     // Build the full list of revealed card IDs for the event.
     let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
     all_revealed.extend(&hit_cards);
@@ -187,7 +196,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
-            subject: None,
+            subject: hit_snapshot.map(Box::new),
         });
         return Ok(());
     }
@@ -201,7 +210,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
-            subject: None,
+            subject: hit_snapshot.map(Box::new),
         });
         state.waiting_for = WaitingFor::RevealUntilKeptChoice {
             player: revealing_player,
@@ -451,7 +460,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RevealUntil,
         source_id: ability.source_id,
-        subject: None,
+        subject: hit_snapshot.map(Box::new),
     });
 
     Ok(())
