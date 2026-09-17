@@ -1372,12 +1372,25 @@ fn tuple_ws_tag(t: &str) -> impl FnMut(&str) -> OracleResult<'_, &str> + '_ {
 /// Parse turn-based conditions.
 fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        value(StaticCondition::DuringYourTurn, tag("it's your turn")),
-        value(StaticCondition::DuringYourTurn, tag("it is your turn")),
+        value(
+            StaticCondition::DuringYourTurn,
+            alt((
+                tag("it's your turn"),
+                tag("it\u{2019}s your turn"),
+                tag("it is your turn"),
+            )),
+        ),
         // "it's not your turn" → Not(DuringYourTurn)
-        map(tag("it's not your turn"), |_| StaticCondition::Not {
-            condition: Box::new(StaticCondition::DuringYourTurn),
-        }),
+        map(
+            alt((
+                tag("it's not your turn"),
+                tag("it\u{2019}s not your turn"),
+                tag("it is not your turn"),
+            )),
+            |_| StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            },
+        ),
         // CR 102.3 + CR 805.4a: "it's an opponent's turn" names an opponent
         // relation, not merely a non-controller active seat. In team games a
         // teammate can be active while the controller's team still has the turn.
@@ -1463,7 +1476,10 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // CR 309.7: Dungeon completion
         value(
             StaticCondition::CompletedADungeon,
-            tag("you've completed a dungeon"),
+            alt((
+                tag("you've completed a dungeon"),
+                tag("you\u{2019}ve completed a dungeon"),
+            )),
         ),
         // CR 103.1: Starting-player status. "you weren't the starting player"
         // (Radiant Smite, Cindercone Smite, Sylvan Smite) is the dominant
@@ -1472,6 +1488,7 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         map(
             alt((
                 tag("you weren't the starting player"),
+                tag("you weren\u{2019}t the starting player"),
                 tag("you were not the starting player"),
             )),
             |_| StaticCondition::Not {
@@ -5880,7 +5897,7 @@ fn parse_library_empty_condition(input: &str) -> OracleResult<'_, StaticConditio
 }
 
 fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("it's "), tag("it is "))).parse(input)?;
+    let (rest, _) = alt((tag("it's "), tag("it\u{2019}s "), tag("it is "))).parse(input)?;
     let (rest, state) = alt((
         value(DayNight::Night, tag("night")),
         value(DayNight::Day, tag("day")),
@@ -5900,7 +5917,11 @@ fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 /// `AbilityCondition::QuantityCheck` in instead-clause assembly.
 fn parse_first_spell_this_game_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((tag("this is "), tag("this spell is "))).parse(input)?;
-    let (rest, _) = tag("the first spell you've cast this game").parse(rest)?;
+    let (rest, _) = alt((
+        tag("the first spell you've cast this game"),
+        tag("the first spell you\u{2019}ve cast this game"),
+    ))
+    .parse(rest)?;
     Ok((
         rest,
         StaticCondition::QuantityComparison {
@@ -5921,7 +5942,7 @@ fn parse_first_spell_this_game_condition(input: &str) -> OracleResult<'_, Static
 /// CR 119: Life gain/loss event conditions.
 /// CR 700.13: Crime tracking.
 fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("you've ").parse(input)?;
+    let (rest, _) = alt((tag("you've "), tag("you\u{2019}ve "))).parse(input)?;
     if let Ok(parsed) = parse_youve_played_land_or_cast_spell_this_turn(rest) {
         return Ok(parsed);
     }
@@ -6891,7 +6912,11 @@ fn parse_you_activated_loyalty_this_turn(input: &str) -> OracleResult<'_, Static
             1,
         ),
         (
-            alt((tag("you activated "), tag("you've activated "))),
+            alt((
+                tag("you activated "),
+                tag("you've activated "),
+                tag("you\u{2019}ve activated "),
+            )),
             tag("a loyalty ability"),
             opt(tag(" of a planeswalker")),
             tag(" this turn"),
@@ -6960,9 +6985,15 @@ fn parse_player_action_this_turn_body(
 fn parse_player_action_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_opponent_action_this_turn,
-        preceded(alt((tag("you've "), tag("you have "), tag("you "))), |i| {
-            parse_player_action_this_turn_body(i, PlayerScope::Controller)
-        }),
+        preceded(
+            alt((
+                tag("you've "),
+                tag("you\u{2019}ve "),
+                tag("you have "),
+                tag("you "),
+            )),
+            |i| parse_player_action_this_turn_body(i, PlayerScope::Controller),
+        ),
     ))
     .parse(input)
 }
@@ -7495,7 +7526,7 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
         .parse(i)
     }
 
-    let (rest, _) = alt((tag("you "), tag("you've "))).parse(input)?;
+    let (rest, _) = alt((tag("you "), tag("you've "), tag("you\u{2019}ve "))).parse(input)?;
     let (rest, lhs) = life_verb(rest)?;
     // CR 119: the connective selects the boolean shape — "and" requires both
     // life changes, "or" requires either — over the shared LifeGained/LifeLost
@@ -7515,7 +7546,12 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
 
 /// Parse "you gained [N or more] life this turn".
 fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you gained "), tag("you've gained "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("you gained "),
+        tag("you've gained "),
+        tag("you\u{2019}ve gained "),
+    ))
+    .parse(input)?;
     // Try "N or more life this turn"
     if let Ok((after_n, n)) = parse_number(rest) {
         let after_n = after_n.trim_start();
@@ -7555,7 +7591,12 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
 /// create a 2/2 black Zombie") silently dropped their condition. Resolves via
 /// the existing `LifeLostThisTurn { Controller }` QuantityRef — no new variants.
 fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you lost "), tag("you've lost "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("you lost "),
+        tag("you've lost "),
+        tag("you\u{2019}ve lost "),
+    ))
+    .parse(input)?;
     // Try "N or more life this turn".
     if let Ok((after_n, n)) = parse_number(rest) {
         let after_n = after_n.trim_start();
@@ -7652,7 +7693,12 @@ fn parse_drawn_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
 }
 
 fn parse_you_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you drew "), tag("you've drawn "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("you drew "),
+        tag("you've drawn "),
+        tag("you\u{2019}ve drawn "),
+    ))
+    .parse(input)?;
     parse_drawn_cards_this_turn(rest)
 }
 
@@ -7661,6 +7707,7 @@ fn parse_opponent_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticCo
         tag("an opponent drew "),
         tag("an opponent has drawn "),
         tag("an opponent's drawn "),
+        tag("an opponent\u{2019}s drawn "),
     ))
     .parse(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
@@ -7680,7 +7727,12 @@ fn parse_opponent_drew_cards_this_turn(input: &str) -> OracleResult<'_, StaticCo
 
 /// Parse "you cast another spell this turn" / "you cast a [type] spell this turn".
 fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you cast "), tag("you've cast "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("you cast "),
+        tag("you've cast "),
+        tag("you\u{2019}ve cast "),
+    ))
+    .parse(input)?;
     if let Ok((rest, condition)) = parse_spell_count_this_turn(rest) {
         return Ok((rest, condition));
     }
@@ -7843,7 +7895,12 @@ fn parse_one_spell_this_turn_filter(input: &str) -> OracleResult<'_, Option<Targ
 }
 
 fn parse_you_cast_both_spell_kinds_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you've cast both "), tag("you cast both "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("you've cast both "),
+        tag("you\u{2019}ve cast both "),
+        tag("you cast both "),
+    ))
+    .parse(input)?;
     let (rest, first_text) = take_until(" and ").parse(rest)?;
     let (rest, _) = tag(" and ").parse(rest)?;
     let (rest, second_text) = take_until(" this turn").parse(rest)?;
@@ -8123,7 +8180,11 @@ pub(crate) fn parse_you_cast_another_spell_filter_this_turn(
     input: &str,
 ) -> OracleResult<'_, Option<TargetFilter>> {
     preceded(
-        alt((tag("you cast another "), tag("you've cast another "))),
+        alt((
+            tag("you cast another "),
+            tag("you've cast another "),
+            tag("you\u{2019}ve cast another "),
+        )),
         parse_another_spell_tail,
     )
     .parse(input)
