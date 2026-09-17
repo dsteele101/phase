@@ -121,6 +121,7 @@ mod chains_of_mephistopheles_discard_draw_or_mill;
 mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
+mod chittering_rats;
 mod chosen_color_object_filter;
 mod chosen_color_rechoose_same_source;
 mod chosen_number_opponent_restriction;
