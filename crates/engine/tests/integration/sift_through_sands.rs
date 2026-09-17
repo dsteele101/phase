@@ -62,6 +62,172 @@ const SIFT_THROUGH_SANDS_USER_ORACLE: &str =
 const SIFT_THROUGH_SANDS_SINGLE_NL_CURLY: &str =
     "Draw two cards, then discard a card.\nIf you’ve cast a spell named Peer Through Depths and a spell named Reach Through Mists this turn, you may search your library for a card named The Unspeakable, put it onto the battlefield, then shuffle.";
 
+fn all_effects(
+    parsed: &engine::parser::oracle::ParsedAbilities,
+) -> Vec<engine::types::ability::Effect> {
+    fn walk(
+        def: &engine::types::ability::AbilityDefinition,
+        out: &mut Vec<engine::types::ability::Effect>,
+    ) {
+        out.push((*def.effect).clone());
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+    }
+    let mut out = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut out);
+    }
+    for trigger in &parsed.triggers {
+        if let Some(execute) = trigger.execute.as_deref() {
+            walk(execute, &mut out);
+        }
+    }
+    out
+}
+
+fn assert_no_unimplemented(parsed: &engine::parser::oracle::ParsedAbilities) {
+    for effect in all_effects(parsed) {
+        assert!(
+            !matches!(effect, engine::types::ability::Effect::Unimplemented { .. }),
+            "no clause may parse to Effect::Unimplemented, found {effect:?}"
+        );
+    }
+}
+
+fn assert_sift_through_sands_single_nl_ast(parsed: &engine::parser::oracle::ParsedAbilities) {
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "Single newline must parse as 1 chained ability"
+    );
+    assert_no_unimplemented(parsed);
+
+    let main = &parsed.abilities[0];
+    assert!(
+        matches!(
+            main.effect.as_ref(),
+            engine::types::ability::Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+                target: engine::types::ability::TargetFilter::Controller,
+            }
+        ),
+        "Main effect must be Draw 2 for controller, got {:?}",
+        main.effect
+    );
+
+    let discard_sub = main
+        .sub_ability
+        .as_ref()
+        .expect("Draw 2 must chain to Discard 1");
+    assert!(
+        matches!(
+            discard_sub.effect.as_ref(),
+            engine::types::ability::Effect::Discard {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
+                ..
+            }
+        ),
+        "First sub-ability must be Discard 1 for controller, got {:?}",
+        discard_sub.effect
+    );
+
+    let search_sub = discard_sub
+        .sub_ability
+        .as_ref()
+        .expect("Discard must chain to SearchLibrary");
+    assert!(
+        search_sub.optional,
+        "SearchLibrary must be marked optional ('you may')"
+    );
+    assert!(
+        matches!(
+            search_sub.effect.as_ref(),
+            engine::types::ability::Effect::SearchLibrary {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                ..
+            }
+        ),
+        "SearchLibrary effect mismatch, got {:?}",
+        search_sub.effect
+    );
+    assert!(
+        matches!(
+            search_sub.condition.as_ref(),
+            Some(engine::types::ability::AbilityCondition::And { conditions }) if conditions.len() == 2
+        ),
+        "SearchLibrary must have compound And condition for prior spells, got {:?}",
+        search_sub.condition
+    );
+}
+
+fn assert_sift_through_sands_user_oracle_ast(parsed: &engine::parser::oracle::ParsedAbilities) {
+    assert_eq!(
+        parsed.abilities.len(),
+        2,
+        "Double newline must parse as 2 sequential abilities"
+    );
+    assert_no_unimplemented(parsed);
+
+    let ability0 = &parsed.abilities[0];
+    assert!(
+        matches!(
+            ability0.effect.as_ref(),
+            engine::types::ability::Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+                target: engine::types::ability::TargetFilter::Controller,
+            }
+        ),
+        "Ability 0 effect must be Draw 2 for controller, got {:?}",
+        ability0.effect
+    );
+
+    let discard_sub = ability0
+        .sub_ability
+        .as_ref()
+        .expect("Ability 0 must chain to Discard 1");
+    assert!(
+        matches!(
+            discard_sub.effect.as_ref(),
+            engine::types::ability::Effect::Discard {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: engine::types::ability::TargetFilter::Controller,
+                ..
+            }
+        ),
+        "Ability 0 sub-ability must be Discard 1 for controller, got {:?}",
+        discard_sub.effect
+    );
+
+    let ability1 = &parsed.abilities[1];
+    assert!(
+        ability1.optional,
+        "Ability 1 (SearchLibrary) must be marked optional ('you may')"
+    );
+    assert!(
+        matches!(
+            ability1.effect.as_ref(),
+            engine::types::ability::Effect::SearchLibrary {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                ..
+            }
+        ),
+        "Ability 1 SearchLibrary effect mismatch, got {:?}",
+        ability1.effect
+    );
+    assert!(
+        matches!(
+            ability1.condition.as_ref(),
+            Some(engine::types::ability::AbilityCondition::And { conditions }) if conditions.len() == 2
+        ),
+        "Ability 1 must have compound And condition for prior spells, got {:?}",
+        ability1.condition
+    );
+}
+
 #[test]
 fn sift_through_sands_single_nl_curly_inspect() {
     let parsed = engine::parser::parse_oracle_text(
@@ -71,13 +237,7 @@ fn sift_through_sands_single_nl_curly_inspect() {
         &["Instant".to_string()],
         &["Arcane".to_string()],
     );
-    println!(
-        "SINGLE NL CURLY abilities count: {}",
-        parsed.abilities.len()
-    );
-    for (i, a) in parsed.abilities.iter().enumerate() {
-        println!("Ability {}: {:#?}", i, a);
-    }
+    assert_sift_through_sands_single_nl_ast(&parsed);
 }
 
 #[test]
@@ -89,10 +249,7 @@ fn sift_through_sands_parses_user_oracle() {
         &["Instant".to_string()],
         &["Arcane".to_string()],
     );
-    println!("Parsed abilities count: {}", parsed.abilities.len());
-    for (i, a) in parsed.abilities.iter().enumerate() {
-        println!("Ability {}: {:?}", i, a);
-    }
+    assert_sift_through_sands_user_oracle_ast(&parsed);
 }
 
 #[test]
@@ -136,9 +293,8 @@ fn sift_through_sands_user_oracle_draws_two() {
 
 #[test]
 fn sift_through_sands_real_card_from_db_draws_two() {
-    let Some(db) = crate::support::shared_card_db() else {
-        return;
-    };
+    let db = crate::support::shared_card_db()
+        .expect("shared_card_db fixture must be available for real card tests");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let sift_id = scenario.add_real_card(
@@ -315,30 +471,33 @@ fn sift_through_sands_with_prior_spells_searches_the_unspeakable() {
 
     println!("After discard: {:?}", r4.waiting_for);
     // Now both Reach Through Mists and Peer Through Depths were cast this turn!
-    // The search ability should be triggered / prompted.
-    let search_waiting = match &r4.waiting_for {
-        WaitingFor::OptionalEffectChoice { .. } => {
-            let res = runner
-                .act(engine::types::actions::GameAction::DecideOptionalEffect { accept: true })
-                .unwrap();
-            res.waiting_for
-        }
-        other => other.clone(),
-    };
+    // The search ability is an optional effect ("you may search your library...") and
+    // must strictly prompt the player with WaitingFor::OptionalEffectChoice.
+    assert!(
+        matches!(r4.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+        "Expected WaitingFor::OptionalEffectChoice, got {:?}",
+        r4.waiting_for
+    );
+    let r5 = runner
+        .act(engine::types::actions::GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
 
-    println!("Search waiting state: {:?}", search_waiting);
-    match search_waiting {
+    match r5.waiting_for {
         WaitingFor::SearchChoice { cards, .. } => {
             assert!(
                 cards.contains(&unspeakable_id),
                 "Library search should find The Unspeakable"
             );
-            let r5 = runner
+            let r6 = runner
                 .act(engine::types::actions::GameAction::SelectCards {
                     cards: vec![unspeakable_id],
                 })
                 .unwrap();
-            println!("After search select: {:?}", r5.waiting_for);
+            assert!(
+                matches!(r6.waiting_for, WaitingFor::Priority { .. }),
+                "Expected priority after searching, got {:?}",
+                r6.waiting_for
+            );
         }
         other => panic!("Expected SearchChoice, got {:?}", other),
     }
