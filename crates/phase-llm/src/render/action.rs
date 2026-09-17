@@ -15,6 +15,8 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use serde_json::Value;
 
+use super::text::one_line;
+
 /// Payload fields whose numeric values name a player rather than an object.
 /// An explicit list, not a heuristic: guessing wrong here would print
 /// "Player 7" for an object id.
@@ -64,10 +66,13 @@ pub fn describe_action(state: &GameState, action: &GameAction) -> String {
         })
         .collect();
 
+    // Folded at the exit, not per leaf: a payload string is humanized word by
+    // word and can still carry a line break, and every leaf would otherwise need
+    // to remember that.
     if details.is_empty() {
         verb
     } else {
-        format!("{verb} ({})", details.join(", "))
+        one_line(&format!("{verb} ({})", details.join(", ")))
     }
 }
 
@@ -88,7 +93,7 @@ pub fn primary_object_name(state: &GameState, action: &GameAction) -> Option<Str
 }
 
 fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
-    state.objects.get(&id).map(|object| object.name.clone())
+    state.objects.get(&id).map(|object| one_line(&object.name))
 }
 
 /// `snake_case` / `CamelCase` -> `Title Case`, with the repository's existing
@@ -198,7 +203,7 @@ pub fn describe_waiting_for(waiting_for: &engine::types::game_state::WaitingFor)
         .and_then(|source| source.get("display_name"))
         .and_then(Value::as_str);
     match source {
-        Some(name) => format!("{kind} (from {name})"),
+        Some(name) => format!("{kind} (from {})", one_line(name)),
         None => kind,
     }
 }

@@ -256,7 +256,7 @@ fn push_exile(out: &mut String, state: &GameState, viewer: PlayerId) {
             let object = state.objects.get(id)?;
             Some(format!(
                 "{} (owned by {})",
-                object.name,
+                one_line(&object.name),
                 seat_label(object.owner, viewer)
             ))
         })
@@ -357,7 +357,7 @@ fn permanent_line(
     let Some(object) = state.objects.get(&id) else {
         return format!("object #{}", id.0);
     };
-    let mut parts = vec![object.name.clone()];
+    let mut parts = vec![one_line(&object.name)];
 
     let type_line = type_line_text(&object.card_types);
     if !type_line.is_empty() {
@@ -423,7 +423,7 @@ fn card_line(
     let Some(object) = state.objects.get(&id) else {
         return format!("object #{}", id.0);
     };
-    let mut parts = vec![object.name.clone()];
+    let mut parts = vec![one_line(&object.name)];
     let cost = mana_cost_text(&object.mana_cost);
     if !cost.is_empty() {
         parts.push(cost);
@@ -477,8 +477,12 @@ fn oracle_text(
     (!collapsed.is_empty()).then(|| clamp_text(&collapsed, options.oracle_text_budget))
 }
 
+/// Every object name this module prints comes through here or through a direct
+/// `one_line(&object.name)`. A name is rendered data and may carry line breaks;
+/// folding it keeps a name from opening a line of its own that reads as a
+/// section heading or a counterfeit `[n]` option.
 fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
-    state.objects.get(&id).map(|object| object.name.clone())
+    state.objects.get(&id).map(|object| one_line(&object.name))
 }
 
 /// Objects a seat can see in a zone. Exposed for callers that want to describe
@@ -488,7 +492,7 @@ pub fn zone_names(state: &GameState, zone: Zone) -> Vec<String> {
         .objects
         .iter()
         .filter(|(_, object)| object.zone == zone)
-        .map(|(_, object)| object.name.clone())
+        .map(|(_, object)| one_line(&object.name))
         .collect()
 }
 
