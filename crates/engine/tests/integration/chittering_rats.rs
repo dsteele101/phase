@@ -4,15 +4,15 @@
 //! Verifies:
 //! - CR 115.1d: Trigger targets opponent upon entering battlefield.
 //! - CR 608.2d: Target opponent chooses a card from their hand at resolution time.
-//! - CR 401.4: Card is put on top of their library without shuffling.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    ControllerRef, Effect, FilterProp, LibraryPosition, QuantityExpr, TargetChoiceTiming,
-    TargetFilter,
+    ControllerRef, Effect, EffectKind, FilterProp, LibraryPosition, QuantityExpr,
+    TargetChoiceTiming, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -173,7 +173,7 @@ fn chittering_rats_etb_prompts_target_opponent_and_moves_card_to_top_of_library(
         })
         .expect("P1 selects card to put on top of library");
 
-    // The chosen card should now be in P1's library at position top (CR 401.4)
+    // The chosen card should now be in P1's library at position top.
     let p1_lib = &commit.state().players[P1.0 as usize].library;
     assert_eq!(
         commit.state().objects[&chosen_card].zone,
@@ -209,8 +209,19 @@ fn chittering_rats_opponent_empty_hand_resolves_cleanly() {
 
     let mut runner = scenario.build();
 
-    // Resolve cast and trigger: with empty hand, resolution completes cleanly at Priority
+    // Resolve cast and trigger: with empty hand, resolution completes cleanly at Priority.
     let outcome = runner.cast(rats).resolve();
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id,
+                ..
+            } if *source_id == rats
+        )),
+        "empty-hand ETB must resolve PutAtLibraryPosition before returning priority"
+    );
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "trigger must resolve cleanly without hanging on empty hand, got {:?}",
@@ -237,7 +248,9 @@ fn chittering_rats_multiplayer_prompts_for_target_opponent() {
         .id();
 
     let mut runner = scenario.build();
+    let p1_hand_cards = runner.state().players[P1.0 as usize].hand.clone();
     let p2_hand_cards = runner.state().players[P2.0 as usize].hand.clone();
+    assert_eq!(p1_hand_cards.len(), 1);
     assert_eq!(p2_hand_cards.len(), 2);
 
     let mut commit = runner.cast(rats).commit();
@@ -342,6 +355,12 @@ fn chittering_rats_multiplayer_prompts_for_target_opponent() {
         assert!(
             cards.contains(id),
             "P2 hand cards must be selectable; got {cards:?}"
+        );
+    }
+    for id in &p1_hand_cards {
+        assert!(
+            !cards.contains(id),
+            "P1 hand cards must NOT be offered to target opponent P2; got {cards:?}"
         );
     }
 

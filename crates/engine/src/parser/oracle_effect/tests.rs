@@ -65991,8 +65991,9 @@ fn into_the_fire_mode_two_any_number_placement_takes_up_to_count_shape() {
     );
 }
 
-/// A player subject owns its outer target slot, while an announced card set in
-/// its positional-library predicate owns the inner slots (CR 115.1c).
+/// Distinct target phrases own distinct target slots (CR 115.3): a player
+/// subject owns the outer slot, while an announced card set in its
+/// positional-library predicate owns the inner slots.
 #[test]
 fn target_opponent_puts_up_to_three_target_cards_keeps_inner_target_set() {
     let parsed = parse_oracle_text(

@@ -282,6 +282,10 @@ pub fn resolve(
                     ability,
                     &target_filter,
                 );
+                // CR 608.2d: a choice offered while an effect resolves is made
+                // while applying that effect. For "target opponent puts", the
+                // relative filter identifies that instructed opponent as the
+                // player who chooses their card.
                 let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
                     ability,
                     choosing_player,
@@ -292,9 +296,10 @@ pub fn resolve(
                         .iter()
                         .copied()
                         .filter(|&id| {
-                            crate::game::filter::matches_target_filter(
+                            crate::game::filter::matches_target_filter_for_zone(
                                 state,
                                 id,
+                                source_zone,
                                 &target_filter,
                                 &ctx,
                             )
@@ -305,9 +310,10 @@ pub fn resolve(
                         .iter()
                         .copied()
                         .filter(|&id| {
-                            crate::game::filter::matches_target_filter(
+                            crate::game::filter::matches_target_filter_for_zone(
                                 state,
                                 id,
+                                source_zone,
                                 &target_filter,
                                 &ctx,
                             )
