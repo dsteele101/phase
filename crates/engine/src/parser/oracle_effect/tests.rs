@@ -41178,7 +41178,7 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
     };
     assert_eq!(*kept_destination, Zone::Library);
     assert_eq!(*rest_destination, Zone::Library);
-    assert_eq!(*rest_order, DigRestOrder::Preserve);
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
 
     let pump = reveal
         .sub_ability

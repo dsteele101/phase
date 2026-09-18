@@ -509,7 +509,7 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
     .parse(input)?;
     let (input, rest_order) = opt(alt((
         value(
-            crate::types::ability::DigRestOrder::Preserve,
+            crate::types::ability::DigRestOrder::PlayerChoice,
             tag::<_, _, E>(" in any order"),
         ),
         value(

@@ -11,8 +11,8 @@ use crate::types::ability::{
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
-    OutsideGameChoiceSource, PayableResource, PendingContinuation,
+    ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, CopyChosenSelection,
+    GameState, OutsideGameChoiceSource, PayableResource, PendingContinuation,
     PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
     ZoneOpponentChooserPurpose,
 };
@@ -26,7 +26,7 @@ use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
-use super::{casting, casting_costs, engine_priority, mana_abilities, public_state};
+use super::{casting, casting_costs, engine_priority, mana_abilities, public_state, zone_pipeline};
 
 /// A fresh mass library-order prompt is valid only for
 /// the exact member identities and origins frozen by its producer. Prompt cards
@@ -894,6 +894,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             }
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::FreeCastWindow { .. },
                 ..
@@ -2752,6 +2753,57 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             effects::ripple::place_on_library_bottom(state, source_id, &order, final_cast, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // CR 701.20a + CR 608.2d: the controller announces the bottom-placement
+        // order for cards put on the bottom of the library in any order.
+        // `order` must be a permutation of the offered pile.
+        (
+            WaitingFor::RevealUntilBottomOrder {
+                player,
+                source_id,
+                cards,
+                clear_markers,
+                emit_reveal_until_resolved,
+                reveal_until_hit_snapshot,
+            },
+            GameAction::SelectCards { cards: order },
+        ) => {
+            let _ = player;
+            if order.len() != cards.len()
+                || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
+                || !order.iter().all(|id| cards.contains(id))
+            {
+                return Err(EngineError::InvalidAction(
+                    "RevealUntil bottom order must be a permutation of the revealed cards"
+                        .to_string(),
+                ));
+            }
+            let completion = BatchCompletion::RevealRestPile {
+                delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
+                player,
+                source_id: Some(source_id),
+                rest_cards: Vec::new(),
+                rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
+                clear_markers,
+                publish_tracked_set: None,
+                publish_tracked_set_cause: None,
+                emit_reveal_until_resolved,
+                reveal_until_hit_snapshot,
+                manifested_for_continuation: None,
+                kept_delivery: Default::default(),
+                continuation_targets: Vec::new(),
+                rest_delivery: Default::default(),
+            };
+            effects::reveal_until::move_rest_then(
+                state,
+                &order,
+                Zone::Library,
+                DigRestOrder::Preserve,
+                Some(completion),
+                events,
+            );
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
@@ -8849,6 +8901,23 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             } else if !rest_cards.is_empty() {
+                // CR 701.20a + CR 608.2d: If the rest cards are being placed on the bottom
+                // of the library in any order (PlayerChoice) and there are 2 or more cards,
+                // pause for the controller to announce their permutation.
+                if rest_destination == Zone::Library
+                    && rest_order == DigRestOrder::PlayerChoice
+                    && rest_cards.len() >= 2
+                {
+                    state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+                        player,
+                        source_id: source_id.unwrap_or(ObjectId(0)),
+                        cards: rest_cards,
+                        clear_markers,
+                        emit_reveal_until_resolved,
+                        reveal_until_hit_snapshot,
+                    };
+                    return zone_pipeline::BatchMoveResult::NeedsChoice;
+                }
                 // CR 701.20a + CR 616.1: Reveal-until rest piles are fully
                 // pipeline-owned, including Library-bottom placement. If a
                 // Library-destination `Moved` replacement pauses here, re-stash

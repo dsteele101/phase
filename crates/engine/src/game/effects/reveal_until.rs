@@ -192,7 +192,7 @@ pub fn resolve(
     });
 
     // Store revealed IDs for downstream reference.
-    state.last_revealed_ids = all_revealed;
+    state.last_revealed_ids = all_revealed.clone();
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
@@ -227,6 +227,73 @@ pub fn resolve(
             revealed_misses,
             rest_destination,
         };
+        return Ok(());
+    }
+
+    // CR 701.20a + CR 608.2d: When all revealed cards are put on the bottom of the library
+    // (kept_destination == Library && rest_destination == Library), handle the entire
+    // revealed pile together. If "in any order" (PlayerChoice) is specified and 2+ cards
+    // were revealed, pause for the controller to announce their chosen bottom order.
+    if kept_destination == Zone::Library && rest_destination == Zone::Library {
+        let clear_markers = all_revealed.clone();
+        if rest_order == DigRestOrder::PlayerChoice && all_revealed.len() >= 2 {
+            state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+                player: revealing_player,
+                source_id: ability.source_id,
+                cards: all_revealed,
+                clear_markers,
+                emit_reveal_until_resolved: Some(ability.source_id),
+                reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
+            };
+            return Ok(());
+        }
+        match move_rest_then(
+            state,
+            &all_revealed,
+            Zone::Library,
+            rest_order,
+            None,
+            events,
+        ) {
+            zone_pipeline::BatchMoveResult::Done => {}
+            zone_pipeline::BatchMoveResult::NeedsChoice => {
+                zone_pipeline::defer_completion_on_pause(
+                    state,
+                    BatchCompletion::RevealRestPile {
+                        delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
+                        player: revealing_player,
+                        source_id: Some(ability.source_id),
+                        rest_cards: Vec::new(),
+                        rest_destination: Zone::Library,
+                        rest_order,
+                        clear_markers,
+                        publish_tracked_set: None,
+                        publish_tracked_set_cause: None,
+                        emit_reveal_until_resolved: Some(ability.source_id),
+                        reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
+                        manifested_for_continuation: None,
+                        kept_delivery: Default::default(),
+                        continuation_targets: Vec::new(),
+                        rest_delivery: Default::default(),
+                    },
+                );
+                return Ok(());
+            }
+        }
+        state
+            .resolve_and_apply_information(
+                &clear_markers,
+                ResolvedInformationAudience::Controller(ability.controller),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Hide,
+            )
+            .expect("reveal-until cleanup must reference live card occurrences");
+
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ability.source_id,
+            subject: hit_snapshot.map(Box::new),
+        });
         return Ok(());
     }
 
@@ -426,6 +493,20 @@ pub fn resolve(
     // over the parked prompt.
     let mut clear_markers = revealed_misses.clone();
     clear_markers.extend(&hit_cards);
+    if rest_destination == Zone::Library
+        && rest_order == DigRestOrder::PlayerChoice
+        && revealed_misses.len() >= 2
+    {
+        state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+            player: revealing_player,
+            source_id: ability.source_id,
+            cards: revealed_misses,
+            clear_markers,
+            emit_reveal_until_resolved: Some(ability.source_id),
+            reveal_until_hit_snapshot: hit_snapshot.map(Box::new),
+        };
+        return Ok(());
+    }
     match move_rest_then(
         state,
         &revealed_misses,
@@ -666,7 +747,9 @@ pub(crate) fn move_rest_then(
             // CR 701.20a keeps the cards revealed until this rest-pile work completes.
             let reqs = match rest_order {
                 DigRestOrder::Random => library_bottom_requests_in_random_order(state, cards),
-                DigRestOrder::Preserve => library_bottom_requests_in_preserve_order(cards),
+                DigRestOrder::Preserve | DigRestOrder::PlayerChoice => {
+                    library_bottom_requests_in_preserve_order(cards)
+                }
             };
             zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
         }

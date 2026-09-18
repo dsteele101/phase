@@ -76,8 +76,9 @@ fn erratic_mutation_single_target_and_cards_to_bottom() {
     outcome.assert_zone(&[land1, land2, nonland], Zone::Library);
 
     // CR 701.20a: Check exact library order after "in any order" bottom placement.
-    // The hit card (nonland) is bottomed first, then the misses (land1, land2) are
-    // placed on bottom in encounter order. Result from top to bottom: [other, nonland, land1, land2].
+    // The driver submits the encounter order [land1, land2, nonland], which are
+    // placed on bottom under the existing card `other`.
+    // Result from top to bottom: [other, land1, land2, nonland].
     {
         let p0_lib = &runner
             .state()
@@ -88,14 +89,103 @@ fn erratic_mutation_single_target_and_cards_to_bottom() {
             .library;
         assert_eq!(
             p0_lib.iter().copied().collect::<Vec<_>>(),
-            vec![other, nonland, land1, land2],
-            "library order must preserve bottom placement of hit then misses in preserve order"
+            vec![other, land1, land2, nonland],
+            "library order must preserve bottom placement of revealed cards in submitted order"
         );
     }
 
     // 3. Check victim P/T: base is 2/5. With +3/-3 from revealed Divination (MV 3), should be 5/2.
     evaluate_layers(runner.state_mut());
     let victim_obj = &runner.state().objects[&victim];
+    assert_eq!(victim_obj.power, Some(5));
+    assert_eq!(victim_obj.toughness, Some(2));
+}
+
+/// CR 608.2d + CR 701.20a: "Put all cards revealed this way on the bottom of your library
+/// in any order." When 2+ cards are revealed and bottomed, the engine pauses with
+/// `WaitingFor::RevealUntilBottomOrder` for the controller to announce their chosen
+/// permutation. Submitting a custom permutation must place the cards on the library bottom
+/// in that exact submitted order.
+#[test]
+fn erratic_mutation_custom_bottom_order_permutation() {
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario.add_creature(P1, "Victim", 2, 5).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Erratic Mutation", true, ERRATIC_MUTATION_ORACLE)
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let other = scenario.add_card_to_library_top(P0, "Deep Card");
+    let nonland = scenario
+        .add_spell_to_library_top(P0, "Divination", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let land2 = scenario
+        .add_spell_to_library_top(P0, "Island", false)
+        .as_land()
+        .id();
+    let land1 = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Cast Erratic Mutation targeting victim and resolve down to the bottom-order choice.
+    let mut committed = runner.cast(spell).target_object(victim).commit();
+    committed.act(GameAction::PassPriority).unwrap();
+    committed.act(GameAction::PassPriority).unwrap();
+
+    // Verify engine paused on WaitingFor::RevealUntilBottomOrder
+    match &committed.state().waiting_for {
+        WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            assert_eq!(cards, &[land1, land2, nonland]);
+        }
+        other_wait => panic!("expected RevealUntilBottomOrder, got {other_wait:?}"),
+    }
+
+    // Submit a custom non-encounter permutation: [nonland, land2, land1]
+    let custom_order = vec![nonland, land2, land1];
+    committed
+        .act(GameAction::SelectCards {
+            cards: custom_order.clone(),
+        })
+        .unwrap();
+
+    // Verify exact library order matches custom submission: [other, nonland, land2, land1]
+    {
+        let p0_lib = &committed
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .library;
+        assert_eq!(
+            p0_lib.iter().copied().collect::<Vec<_>>(),
+            vec![other, nonland, land2, land1],
+            "library bottom must match the custom submitted permutation"
+        );
+    }
+
+    // Check victim P/T: base 2/5 with +3/-3 from Divination (MV 3) -> 5/2.
+    evaluate_layers(committed.state_mut());
+    let victim_obj = &committed.state().objects[&victim];
     assert_eq!(victim_obj.power, Some(5));
     assert_eq!(victim_obj.toughness, Some(2));
 }
