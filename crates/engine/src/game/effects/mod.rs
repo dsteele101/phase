@@ -6449,8 +6449,14 @@ fn node_or_branch_references_tracked_set(
     // CR 608.2c + CR 601.2c: a node that declares its own object targets is the
     // nearest antecedent of its continuation's "that creature" — even when the
     // declaration was empty — so a grant below it never reaches an ancestor's
-    // population (Trygon Prime's declined sub target grants nothing).
-    let child_anaphor = if ability.multi_target.is_some() {
+    // population (Trygon Prime's declined sub target grants nothing). An optional
+    // single target ("up to one target creature") declares one only when it is
+    // chosen on the stack. A resolution-time "up to one" choice declares no
+    // target, so its grant still reads the tracked set.
+    let declares_optional_single_target = ability.optional_targeting
+        && ability.target_choice_timing == TargetChoiceTiming::Stack
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+    let child_anaphor = if ability.multi_target.is_some() || declares_optional_single_target {
         ParentAnaphor::NamesDeclaredTargets
     } else {
         ParentAnaphor::NamesPublisher
@@ -20508,6 +20514,62 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c: a node that declares a single optional object target
+    /// ("up to one target creature", lowered with `optional_targeting` and no
+    /// `multi_target`) is the nearest antecedent of its continuation's "that
+    /// creature". When the player declines that target, the grant affects nothing.
+    /// It must not reach an ancestor's tracked set.
+    #[test]
+    fn optional_single_target_node_is_the_antecedent_of_a_parent_target_grant() {
+        let source = ObjectId(1);
+        let grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut pump = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(grant);
+        // Control: with no declared target on the pump, the grant names the
+        // chain's tracked set, so the instrument fires.
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a ParentTarget grant with no nearer antecedent consumes the tracked set"
+        );
+        pump.optional_targeting = true;
+        assert!(
+            !chain_references_tracked_set(&pump),
+            "an optional single declared target is the grant's antecedent, so the \
+             grant must not consume an ancestor's tracked set"
+        );
+        // A resolution-time "up to one" choice declares no target, so the grant
+        // still names the chain's tracked set.
+        pump.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a resolution-time optional choice declares no target, so the grant \
+             must still consume the tracked set"
         );
     }
 
