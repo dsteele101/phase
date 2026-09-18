@@ -43,7 +43,7 @@ use crate::types::zones::Zone;
 // =========================================================================
 // Contraction & Apostrophe Combinators
 // =========================================================================
-// CR 100.1 / Typography: MTGJSON and Scryfall English Oracle texts use both
+// MTGJSON and Scryfall English Oracle texts use both
 // ASCII straight apostrophes (`'`, U+0027) and typographic right single
 // quotation marks (`’`, U+2019). The combinators below provide composable,
 // parameterized building blocks across the condition grammar so individual
