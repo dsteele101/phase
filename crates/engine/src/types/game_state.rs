@@ -14126,6 +14126,8 @@ pub enum WaitingFor {
         enters_attacking: bool,
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
+        #[serde(default)]
+        rest_order: DigRestOrder,
     },
     /// CR 107.1c + CR 608.2c: After one iteration of a "you may repeat this
     /// process any number of times" effect resolves, the controller chooses

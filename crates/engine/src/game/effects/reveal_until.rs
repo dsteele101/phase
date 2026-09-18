@@ -226,6 +226,7 @@ pub fn resolve(
             enters_attacking,
             revealed_misses,
             rest_destination,
+            rest_order,
         };
         return Ok(());
     }

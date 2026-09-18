@@ -3516,6 +3516,12 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             .target_filter()
             .is_some_and(TargetFilter::references_exiled_by_source)
             && !effect_refs_parent_target(&sub.effect))
+        && !sub.effect.target_filter().is_some_and(|f| {
+            matches!(
+                f,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            )
+        })
 }
 
 /// CR 115.10 + CR 608.2d: a nontargeted zone choice announced while the effect
@@ -4522,8 +4528,10 @@ fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
 
 fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
-        Effect::CastFromZone { target, .. } => Some(target),
-        Effect::PutAtLibraryPosition { target, .. } => Some(target),
+        Effect::CastFromZone { target, .. }
+        | Effect::PutAtLibraryPosition { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::Transform { target, .. } => Some(target),
         _ => None,
     }
 }
@@ -6846,19 +6854,14 @@ fn filter_prop_references_tracked_quantity(prop: &crate::types::ability::FilterP
 }
 
 fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::GrantCastingPermission {
-            target: TargetFilter::TrackedSet { .. },
-            ..
-        } | Effect::CastCopyOfCard {
-            target: TargetFilter::TrackedSet { .. },
-            ..
-        } | Effect::PutAtLibraryPosition {
-            target: TargetFilter::ExiledBySource,
-            ..
-        }
-    )
+    effect.target_filter().is_some_and(|f| {
+        matches!(
+            f,
+            TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+                | TargetFilter::ExiledBySource
+        )
+    })
 }
 
 /// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`
@@ -16237,6 +16240,9 @@ fn resolve_chain_body(
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
+            && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
+                || effect_consumes_parent_object_referent(&sub.effect)
+                || has_member_driven_repeat(sub.as_ref()))
             // CR 701.21a: Sacrifice resolves its own battlefield-scoped eligible
             // pool — injecting library card IDs from a look-only Dig (e.g.
             // Birthing Ritual) would route through effect_object_targets and
@@ -16244,8 +16250,6 @@ fn resolve_chain_body(
             // producing no PermanentSacrificed event and leaving
             // effect_context_object = None for the downstream PriorLook Dig.
             && !matches!(sub.effect, Effect::Sacrifice { .. })
-            && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
-                || has_member_driven_repeat(sub.as_ref()))
         {
             // Inject revealed card IDs as targets for sub_abilities following
             // effects that write last_revealed_ids. Parallel to how

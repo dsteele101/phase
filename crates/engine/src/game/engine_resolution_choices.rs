@@ -2404,6 +2404,7 @@ pub(super) fn handle_resolution_choice(
                 enters_attacking,
                 revealed_misses,
                 rest_destination,
+                rest_order,
             },
             GameAction::DecideOptionalEffect { accept },
         ) => {
@@ -2447,7 +2448,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: Some(source_id),
                                     rest_cards: misses,
                                     rest_destination,
-                                    rest_order: DigRestOrder::Preserve,
+                                    rest_order,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
@@ -2474,11 +2475,14 @@ pub(super) fn handle_resolution_choice(
                     // before this prompt) and surface the parked prompt.
                     if let Some(outcome) = route_kept_card_or_defer(
                         state,
-                        hit_card,
-                        accept_zone,
-                        source_id,
-                        &misses,
-                        rest_destination,
+                        RouteKeptCardContext {
+                            hit_card,
+                            destination: accept_zone,
+                            source_id,
+                            misses: &misses,
+                            rest_destination,
+                            rest_order,
+                        },
                         events,
                     ) {
                         return Ok(outcome);
@@ -2491,35 +2495,57 @@ pub(super) fn handle_resolution_choice(
                 // a non-rest graveyard/exile destination.
                 if let Some(outcome) = route_kept_card_or_defer(
                     state,
-                    hit_card,
-                    decline_zone,
-                    source_id,
-                    &misses,
-                    rest_destination,
+                    RouteKeptCardContext {
+                        hit_card,
+                        destination: decline_zone,
+                        source_id,
+                        misses: &misses,
+                        rest_destination,
+                        rest_order,
+                    },
                     events,
                 ) {
                     return Ok(outcome);
                 }
+            }
+            // CR 701.20a + CR 608.2d: If the rest cards are being placed on the bottom
+            // of the library in any order (PlayerChoice) and there are 2 or more cards,
+            // pause for the controller to announce their permutation.
+            let mut clear_markers = misses.clone();
+            clear_markers.push(hit_card);
+            if rest_destination == Zone::Library
+                && rest_order == DigRestOrder::PlayerChoice
+                && misses.len() >= 2
+            {
+                state.waiting_for = WaitingFor::RevealUntilBottomOrder {
+                    player,
+                    source_id,
+                    cards: misses,
+                    clear_markers,
+                    emit_reveal_until_resolved: None,
+                    reveal_until_hit_snapshot: None,
+                };
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
             }
             // CR 701.20a + CR 614.6: move the rest pile (RIP redirects fire) and
             // run the marker clear + continuation drain as the completion. On a
             // synchronous landing the completion runs inline; on a CR 616.1 pause
             // it defers and the drain runs it once the pile lands. `clear_markers`
             // is the misses plus the kept card (already placed above).
-            let mut clear_markers = misses.clone();
-            clear_markers.push(hit_card);
             match effects::reveal_until::move_rest_then(
                 state,
                 &misses,
                 rest_destination,
-                DigRestOrder::Preserve,
+                rest_order,
                 Some(crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
                     source_id: Some(source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
-                    rest_order: DigRestOrder::Preserve,
+                    rest_order,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
@@ -8078,6 +8104,15 @@ fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
     state.priority_player = player;
 }
 
+struct RouteKeptCardContext<'a> {
+    hit_card: ObjectId,
+    destination: Zone,
+    source_id: ObjectId,
+    misses: &'a [ObjectId],
+    rest_destination: Zone,
+    rest_order: DigRestOrder,
+}
+
 /// CR 614.6 + CR 616.1: Move a reveal-until *kept* card to a non-battlefield
 /// destination (`accept_zone` / `decline_zone`) through the zone-change pipeline
 /// so a `Moved` graveyard→exile redirect (Rest in Peace / Leyline of the Void)
@@ -8093,38 +8128,37 @@ fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
 /// path already emitted `EffectResolved` before this prompt.
 fn route_kept_card_or_defer(
     state: &mut GameState,
-    hit_card: ObjectId,
-    destination: Zone,
-    source_id: ObjectId,
-    misses: &[ObjectId],
-    rest_destination: Zone,
+    cx: RouteKeptCardContext<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Option<ResolutionChoiceOutcome> {
     let player = state
         .objects
-        .get(&hit_card)
+        .get(&cx.hit_card)
         .map(|obj| obj.controller)
         .unwrap_or(state.active_player);
-    let mut req =
-        crate::game::zone_pipeline::ZoneMoveRequest::effect(hit_card, destination, source_id);
-    if destination == Zone::Library {
+    let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+        cx.hit_card,
+        cx.destination,
+        cx.source_id,
+    );
+    if cx.destination == Zone::Library {
         req = req.at_library_position(LibraryPosition::Bottom);
     }
     match crate::game::zone_pipeline::move_object(state, req, events) {
         crate::game::zone_pipeline::ZoneMoveResult::Done => None,
         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-            let mut clear_markers = misses.to_vec();
-            clear_markers.push(hit_card);
+            let mut clear_markers = cx.misses.to_vec();
+            clear_markers.push(cx.hit_card);
             crate::game::zone_pipeline::defer_completion_on_pause(
                 state,
                 crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
-                    source_id: Some(source_id),
-                    rest_cards: misses.to_vec(),
-                    rest_destination,
-                    rest_order: DigRestOrder::Preserve,
+                    source_id: Some(cx.source_id),
+                    rest_cards: cx.misses.to_vec(),
+                    rest_destination: cx.rest_destination,
+                    rest_order: cx.rest_order,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
