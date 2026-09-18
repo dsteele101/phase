@@ -1380,6 +1380,17 @@ pub fn candidate_actions_broad_with_probe(
                 bounded_select_card_candidates(*player, selectable_cards, [max_keep])
             }
         }
+        // CR 401.2 + CR 608.2c: every legal split is a choice of exactly
+        // `top_count` cards from the fixed remainder pile for the top of the
+        // library; the complement implicitly goes to the bottom. Enumerated
+        // with the same bounded combination helper the sibling `DigChoice` arm
+        // uses, so the pool/candidate caps apply identically.
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            top_count,
+            ..
+        } => bounded_select_card_candidates(*player, cards, [(*top_count).min(cards.len())]),
         WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
         WaitingFor::RevealChoice {
             player,

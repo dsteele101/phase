@@ -4771,6 +4771,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         player: prev_player,
         count: prev_count,
         rest_destination: prev_rest,
+        rest_split_top_count: prev_rest_split_top_count,
         rest_order: prev_rest_order,
         reveal: prev_reveal,
         ..
@@ -4887,6 +4888,11 @@ pub(crate) fn try_parse_dig_instead_alternative(
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
+        // CR 608.2c: the "instead" alternative replaces only what its own text
+        // names; it never names a remainder split, so the base Dig's split (if
+        // any) carries into the alternative unchanged, exactly as `prev_rest`
+        // and `prev_reveal` do.
+        rest_split_top_count: prev_rest_split_top_count.clone(),
         rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,

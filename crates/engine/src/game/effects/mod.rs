@@ -3594,6 +3594,11 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             //      events exist — it would snapshot a permanent +0/+0.
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            // CR 401.2 + CR 608.2c: a Telling Time-class remainder split is a
+            // second, later pause in the SAME dig instruction. Anything chained
+            // after the dig must wait for it, or the sub-ability would run
+            // while the remainder is still sitting undistributed.
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
@@ -36691,6 +36696,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
@@ -37444,6 +37450,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,

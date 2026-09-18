@@ -20,6 +20,7 @@ type ArrangePlanarDeckTopChoice = Extract<
 type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DieKeepChoice = Extract<WaitingFor, { type: "DieKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
+type DigRestSplitChoice = Extract<WaitingFor, { type: "DigRestSplitChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type RippleBottomOrder = Extract<WaitingFor, { type: "RippleBottomOrder" }>;
@@ -540,6 +541,105 @@ export function DigModal({ data }: { data: DigChoice["data"] }) {
                   </span>
                 </div>
               )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+/**
+ * CR 401.2 + CR 401.4 + CR 701.20e: the second stage of a Telling Time-class
+ * dig. The remainder pile is fixed and every card in it is going back into the
+ * same library; the player only chooses which `top_count` of them go on top,
+ * in top-to-bottom order. The unselected cards implicitly go to the bottom.
+ *
+ * No game logic here: `cards` and `top_count` are exactly what the engine
+ * resolved and parked, and the complement is not computed client-side — the
+ * engine derives it from the submitted selection.
+ */
+export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<ObjectId[]>([]);
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        if (prev.includes(id)) return prev.filter((other) => other !== id);
+        if (prev.length >= data.top_count) return prev;
+        return [...prev, id];
+      });
+    },
+    [data.top_count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: selected } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = selected.length === data.top_count;
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.dig.titleSplit")}
+      subtitle={t("cardChoice.dig.subtitleSplit", {
+        count: data.top_count,
+        remaining: data.cards.length - data.top_count,
+      })}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={t("cardChoice.buttons.confirmCount", {
+            selected: selected.length,
+            count: data.top_count,
+          })}
+        />
+      }
+    >
+      <ScrollableCardStrip>
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const order = selected.indexOf(id);
+          const isSelected = order !== -1;
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-emerald-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-slate-900/30">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-bold text-white ${
+                    isSelected ? "bg-emerald-500/90" : "bg-slate-600/80"
+                  }`}
+                >
+                  {isSelected
+                    ? t("cardChoice.dig.badgeTop", { order: order + 1 })
+                    : t("cardChoice.dig.badgeBottom")}
+                </span>
+              </div>
             </motion.button>
           );
         })}

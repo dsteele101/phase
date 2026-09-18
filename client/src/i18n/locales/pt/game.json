@@ -1422,7 +1422,12 @@
       "subtitleUpTo_other": "Selecione até {{count}} cartas para colocar {{destination}}",
       "destinationTop": "no topo de seu grimório",
       "destinationBattlefield": "no campo de batalha",
-      "destinationHand": "em sua mão"
+      "destinationHand": "em sua mão",
+      "titleSplit": "Dividir as Cartas Restantes",
+      "subtitleSplit_one": "Selecione {{count}} carta para o topo de seu grimório; a outra {{remaining}} vai para o fundo",
+      "subtitleSplit_other": "Selecione {{count}} cartas para o topo de seu grimório; as outras {{remaining}} vão para o fundo",
+      "badgeTop": "Topo {{order}}",
+      "badgeBottom": "Fundo"
     },
     "surveil": {
       "title": "Vigiar",

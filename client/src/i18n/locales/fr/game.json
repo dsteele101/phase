@@ -1422,7 +1422,12 @@
       "subtitleUpTo_other": "Sélectionnez jusqu'à {{count}} cartes à placer {{destination}}",
       "destinationTop": "au-dessus de votre bibliothèque",
       "destinationBattlefield": "sur le champ de bataille",
-      "destinationHand": "dans votre main"
+      "destinationHand": "dans votre main",
+      "titleSplit": "Répartir les cartes restantes",
+      "subtitleSplit_one": "Sélectionnez {{count}} carte pour le dessus de votre bibliothèque ; l'autre {{remaining}} ira dessous",
+      "subtitleSplit_other": "Sélectionnez {{count}} cartes pour le dessus de votre bibliothèque ; les autres {{remaining}} iront dessous",
+      "badgeTop": "Dessus {{order}}",
+      "badgeBottom": "Dessous"
     },
     "surveil": {
       "title": "Surveillance",

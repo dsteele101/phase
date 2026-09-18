@@ -841,6 +841,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, selectable_cards, exact)
                 || (*up_to && chosen.len() > *keep_count)
         }
+        // CR 401.2 + CR 608.2c: the split names exactly `top_count` cards drawn
+        // from the fixed remainder pile — it is forced, never an "up to", so
+        // the exact-count arm of `selection_mismatch` is the whole gate.
+        (
+            WaitingFor::DigRestSplitChoice {
+                cards, top_count, ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some((*top_count).min(cards.len()))),
         (
             WaitingFor::CollectEvidenceChoice {
                 player: _, cards, ..

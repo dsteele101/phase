@@ -1477,6 +1477,9 @@ pub fn fallback_action(
         // Take the engine's own issued answer instead of restating the rule.
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
+        // CR 401.2: exactly `top_count` cards, never an empty pick — take the
+        // engine's own issued answer rather than a blanket empty selection.
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::SearchChoice { .. }
@@ -3778,6 +3781,26 @@ pub(crate) fn deterministic_choice(
             scored.iter().take(*keep_count).map(|(id, _)| *id).collect()
         };
         return Some(GameAction::SelectCards { cards: kept });
+    }
+
+    // CR 401.2 + CR 401.4: put the most valuable `top_count` of the remainder
+    // on top (they are drawn soonest) and let the rest fall to the bottom —
+    // the same intrinsic-value ordering the sibling dig and surveil arms use.
+    if let WaitingFor::DigRestSplitChoice {
+        cards, top_count, ..
+    } = &state.waiting_for
+    {
+        let mut scored: Vec<_> = cards
+            .iter()
+            .map(|&id| (id, intrinsic_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top: Vec<_> = scored
+            .iter()
+            .take((*top_count).min(cards.len()))
+            .map(|(id, _)| *id)
+            .collect();
+        return Some(GameAction::SelectCards { cards: top });
     }
 
     if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {
@@ -13814,6 +13837,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
@@ -13940,6 +13964,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_split_top_count: None,
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,

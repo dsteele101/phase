@@ -235,6 +235,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
@@ -515,6 +516,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
+        | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
@@ -4145,6 +4147,7 @@ fn selection_projection(
         WaitingFor::DigChoice {
             selectable_cards, ..
         } => selectable_cards.len(),
+        WaitingFor::DigRestSplitChoice { cards, .. } => cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
         WaitingFor::RippleBottomOrder { cards, .. } => cards.len(),
         _ => 0,
@@ -4497,6 +4500,23 @@ fn selection_projection(
                 source_id: *source_id,
             })
         }
+        // CR 401.2 + CR 401.4: the whole remainder pile is offered and the
+        // player names exactly `top_count` of it for the top of the library;
+        // the unnamed rest goes to the bottom, so the client never computes a
+        // second list. Exact bounds — the split is forced, not an "up to".
+        WaitingFor::DigRestSplitChoice {
+            cards,
+            top_count,
+            source_id,
+            ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(*top_count, *top_count),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: *source_id,
+        }),
         WaitingFor::SearchChoice {
             cards,
             count,

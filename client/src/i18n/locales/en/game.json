@@ -1460,7 +1460,12 @@
       "subtitleUpTo_other": "Select up to {{count}} cards to put {{destination}}",
       "destinationTop": "on top of your library",
       "destinationBattlefield": "onto the battlefield",
-      "destinationHand": "into your hand"
+      "destinationHand": "into your hand",
+      "titleSplit": "Split the Remaining Cards",
+      "subtitleSplit_one": "Select {{count}} card for the top of your library; the other {{remaining}} goes on the bottom",
+      "subtitleSplit_other": "Select {{count}} cards for the top of your library; the other {{remaining}} go on the bottom",
+      "badgeTop": "Top {{order}}",
+      "badgeBottom": "Bottom"
     },
     "surveil": {
       "title": "Surveil",
