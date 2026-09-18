@@ -507,14 +507,27 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
         ),
     ))
     .parse(input)?;
-    let (input, _) = opt(alt((
-        tag::<_, _, E>(" in any order"),
-        tag(" in a random order"),
+    let (input, rest_order) = opt(alt((
+        value(
+            crate::types::ability::DigRestOrder::Preserve,
+            tag::<_, _, E>(" in any order"),
+        ),
+        value(
+            crate::types::ability::DigRestOrder::Random,
+            tag(" in a random order"),
+        ),
     )))
     .parse(input)?;
+    let rest_order = rest_order.unwrap_or(crate::types::ability::DigRestOrder::Preserve);
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
-    Ok((input, ContinuationAst::RevealUntilAllToZone { destination }))
+    Ok((
+        input,
+        ContinuationAst::RevealUntilAllToZone {
+            destination,
+            rest_order,
+        },
+    ))
 }
 
 /// CR 701.20a: Detect the rest-pile zone in a `RevealUntil` continuation
@@ -5726,7 +5739,10 @@ pub(super) fn apply_clause_continuation(
         // same zone. Resolves back to the nearest DigOrRevealUntil antecedent via env
         // so that intervening transparent instructions (such as Pump on Erratic Mutation
         // or DealDamage on Explosive Revelation) do not block destination patching.
-        ContinuationAst::RevealUntilAllToZone { destination } => {
+        ContinuationAst::RevealUntilAllToZone {
+            destination,
+            rest_order,
+        } => {
             let target_idx = env
                 .resolve(
                     defs,
@@ -5738,7 +5754,11 @@ pub(super) fn apply_clause_continuation(
                 )
                 .or_else(|| defs.len().checked_sub(1));
             if let Some(target_idx) = target_idx {
-                patch_reveal_until_all_to_zone_recursively(&mut defs[target_idx], destination);
+                patch_reveal_until_all_to_zone_recursively(
+                    &mut defs[target_idx],
+                    destination,
+                    rest_order,
+                );
             }
         }
         // CR 202.3 + CR 608.2c: "If its mana value is <comparator> <dynamic
@@ -6055,23 +6075,29 @@ fn patch_rest_destination_recursively(
     }
 }
 
-/// Recursively patch `kept_destination` and `rest_destination` on RevealUntil effects
+/// Recursively patch `kept_destination`, `rest_destination`, and `rest_order` on RevealUntil effects
 /// reachable from `def` via `sub_ability` or `else_ability`.
-fn patch_reveal_until_all_to_zone_recursively(def: &mut AbilityDefinition, destination: Zone) {
+fn patch_reveal_until_all_to_zone_recursively(
+    def: &mut AbilityDefinition,
+    destination: Zone,
+    rest_order: crate::types::ability::DigRestOrder,
+) {
     if let Effect::RevealUntil {
         kept_destination,
         rest_destination,
+        rest_order: effect_rest_order,
         ..
     } = &mut *def.effect
     {
         *kept_destination = destination;
         *rest_destination = destination;
+        *effect_rest_order = rest_order;
     }
     if let Some(sub) = def.sub_ability.as_deref_mut() {
-        patch_reveal_until_all_to_zone_recursively(sub, destination);
+        patch_reveal_until_all_to_zone_recursively(sub, destination, rest_order);
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
-        patch_reveal_until_all_to_zone_recursively(else_def, destination);
+        patch_reveal_until_all_to_zone_recursively(else_def, destination, rest_order);
     }
 }
 
@@ -11023,6 +11049,7 @@ mod tests {
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,

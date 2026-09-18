@@ -25718,6 +25718,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             matched_disposition: RevealUntilDisposition::RevealOnly,
             kept_destination: Zone::Exile,
             rest_destination: Zone::Library,
+            rest_order: DigRestOrder::Preserve,
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -41169,6 +41170,7 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
     let Effect::RevealUntil {
         kept_destination,
         rest_destination,
+        rest_order,
         ..
     } = &*reveal.effect
     else {
@@ -41176,6 +41178,7 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
     };
     assert_eq!(*kept_destination, Zone::Library);
     assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::Preserve);
 
     let pump = reveal
         .sub_ability
@@ -41215,6 +41218,27 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
         "all-revealed-cards placement must be absorbed by RevealUntil, not emitted as {:?}",
         pump.sub_ability
     );
+}
+
+/// CR 701.20a: All cards revealed on the bottom in a random order.
+#[test]
+fn reveal_until_all_cards_revealed_this_way_random_order() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card. Put all cards revealed this way on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Library);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::Random);
 }
 
 /// CR 701.20a: "reveal until you reveal X nonland cards, where X is the

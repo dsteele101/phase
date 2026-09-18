@@ -6159,6 +6159,11 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+        /// CR 608.2c: When `emit_reveal_until_resolved` is `Some`, carries the
+        /// single-hit event snapshot so the downstream anaphoric referent ("that card's mana value")
+        /// resolves even across replacement/as-enters pauses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reveal_until_hit_snapshot: Option<Box<crate::types::events::EventObjectSnapshot>>,
         /// CR 608.2c + CR 701.62a: a paused manifest-dread entry's
         /// chosen object. The completion drain publishes it as the chain's
         /// fresh tracked set — only once the entry has actually finished
@@ -27371,6 +27376,7 @@ mod resolved_information_tests {
                 matched_disposition: RevealUntilDisposition::RevealOnly,
                 kept_destination: Zone::Library,
                 rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 enter_tapped: EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,

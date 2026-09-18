@@ -2175,6 +2175,7 @@ pub(super) fn handle_resolution_choice(
                             publish_tracked_set: None,
                             publish_tracked_set_cause: None,
                             emit_reveal_until_resolved: None,
+                            reveal_until_hit_snapshot: None,
                             // The entry paused, so the publish below never
                             // runs — the completion drain publishes instead,
                             // once the entry has completed.
@@ -2450,6 +2451,7 @@ pub(super) fn handle_resolution_choice(
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
+                                    reveal_until_hit_snapshot: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
@@ -2509,6 +2511,7 @@ pub(super) fn handle_resolution_choice(
                 state,
                 &misses,
                 rest_destination,
+                DigRestOrder::Preserve,
                 Some(crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
@@ -2520,6 +2523,7 @@ pub(super) fn handle_resolution_choice(
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: None,
+                    reveal_until_hit_snapshot: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
@@ -3995,6 +3999,7 @@ pub(super) fn handle_resolution_choice(
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
+                                    reveal_until_hit_snapshot: None,
                                     manifested_for_continuation: None,
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
@@ -4076,6 +4081,7 @@ pub(super) fn handle_resolution_choice(
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
+                        reveal_until_hit_snapshot: None,
                         manifested_for_continuation: None,
                         kept_delivery: crate::types::game_state::DigKeptDeliveryOutcome::pending(
                             state,
@@ -4147,6 +4153,7 @@ pub(super) fn handle_resolution_choice(
                     publish_tracked_set: Some(publish_set),
                     publish_tracked_set_cause: publish_cause,
                     emit_reveal_until_resolved: None,
+                    reveal_until_hit_snapshot: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
@@ -8070,6 +8077,7 @@ fn route_kept_card_or_defer(
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
                     emit_reveal_until_resolved: None,
+                    reveal_until_hit_snapshot: None,
                     manifested_for_continuation: None,
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
@@ -8754,6 +8762,7 @@ pub(crate) fn run_batch_completion(
             publish_tracked_set,
             publish_tracked_set_cause,
             emit_reveal_until_resolved,
+            reveal_until_hit_snapshot,
             manifested_for_continuation,
             kept_delivery,
             continuation_targets,
@@ -8781,6 +8790,7 @@ pub(crate) fn run_batch_completion(
                     publish_tracked_set,
                     publish_tracked_set_cause,
                     emit_reveal_until_resolved,
+                    reveal_until_hit_snapshot: reveal_until_hit_snapshot.clone(),
                     manifested_for_continuation,
                     kept_delivery,
                     continuation_targets,
@@ -8820,6 +8830,7 @@ pub(crate) fn run_batch_completion(
                     publish_tracked_set,
                     publish_tracked_set_cause,
                     emit_reveal_until_resolved,
+                    reveal_until_hit_snapshot: reveal_until_hit_snapshot.clone(),
                     manifested_for_continuation,
                     kept_delivery,
                     continuation_targets,
@@ -8849,11 +8860,12 @@ pub(crate) fn run_batch_completion(
                     source_id,
                     rest_cards: Vec::new(),
                     rest_destination,
-                    rest_order: DigRestOrder::Preserve,
+                    rest_order,
                     clear_markers,
                     publish_tracked_set: None,
                     publish_tracked_set_cause: None,
                     emit_reveal_until_resolved,
+                    reveal_until_hit_snapshot: reveal_until_hit_snapshot.clone(),
                     manifested_for_continuation,
                     kept_delivery,
                     continuation_targets,
@@ -8863,6 +8875,7 @@ pub(crate) fn run_batch_completion(
                     state,
                     &rest_cards,
                     rest_destination,
+                    rest_order,
                     Some(cleanup),
                     events,
                 );
@@ -8954,8 +8967,16 @@ pub(crate) fn run_batch_completion(
                 events.push(crate::types::events::GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::RevealUntil,
                     source_id,
-                    subject: None,
+                    subject: reveal_until_hit_snapshot,
                 });
+            }
+            if let Some(snapshot) = effects::parent_referent_context_from_events(state, events) {
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame
+                        .pending
+                        .chain
+                        .set_effect_context_object_recursive(snapshot);
+                }
             }
             // CR 608.2c + CR 701.62a: the paused manifest entry has
             // completed by now — publish its object for the parked consumer,
