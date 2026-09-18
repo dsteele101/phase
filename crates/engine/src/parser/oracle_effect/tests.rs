@@ -65991,6 +65991,53 @@ fn into_the_fire_mode_two_any_number_placement_takes_up_to_count_shape() {
     );
 }
 
+/// A player subject owns its outer target slot, while an announced card set in
+/// its positional-library predicate owns the inner slots (CR 115.1c).
+#[test]
+fn target_opponent_puts_up_to_three_target_cards_keeps_inner_target_set() {
+    let parsed = parse_oracle_text(
+        "Target opponent puts up to three target creature cards from their graveyard on top of their library.",
+        "Subject placement probe",
+        &[],
+        &[],
+        &[],
+    );
+    let outer = parsed
+        .abilities
+        .first()
+        .expect("subject placement parses one ability");
+    let Effect::TargetOnly { target } = outer.effect.as_ref() else {
+        panic!("expected outer opponent target, got {:?}", outer.effect);
+    };
+    assert!(
+        matches!(target, TargetFilter::Typed(filter) if filter.controller == Some(ControllerRef::Opponent)),
+        "the player subject remains the outer target, got {target:?}"
+    );
+
+    let inner = outer
+        .sub_ability
+        .as_deref()
+        .expect("the positional placement is nested under the opponent target");
+    assert_eq!(
+        inner.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 })),
+        "the announced card set must remain on the nested placement"
+    );
+    assert_eq!(
+        inner.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "explicit target cards are announced on the stack, not chosen at resolution"
+    );
+    let Effect::PutAtLibraryPosition { count, .. } = inner.effect.as_ref() else {
+        panic!("expected nested placement, got {:?}", inner.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "announced cardinality must not overwrite the placement effect count"
+    );
+}
+
 /// B-5 — Ransack's "put any number of THEM on the bottom" is a pronoun
 /// partition of the Dig continuation: its recipient is the deterministic
 /// anaphor `ParentTarget`, not a population, so the untargeted any-number arm
