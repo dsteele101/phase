@@ -99,6 +99,30 @@ pub(crate) fn parse_youve(input: &str) -> OracleResult<'_, &str> {
     alt((tag("you've"), tag("you\u{2019}ve"))).parse(input)
 }
 
+/// Matches `"haven't"` or `"haven’t"`.
+pub(crate) fn parse_havent(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("haven't"), tag("haven\u{2019}t"))).parse(input)
+}
+
+/// Matches `"didn't"` or `"didn’t"`.
+pub(crate) fn parse_didnt(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("didn't"), tag("didn\u{2019}t"))).parse(input)
+}
+
+/// Matches `"you're"` / `"you’re"` or `"you are"`.
+pub(crate) fn parse_you_are(input: &str) -> OracleResult<'_, &str> {
+    alt((recognize((tag("you"), parse_apostrophe_re)), tag("you are"))).parse(input)
+}
+
+/// Matches `"there's"` / `"there’s"` or `"there is"`.
+pub(crate) fn parse_theres(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        recognize((tag("there"), parse_apostrophe_s)),
+        tag("there is"),
+    ))
+    .parse(input)
+}
+
 /// Matches `"it's"` / `"it’s"` / `"it is"`.
 pub(crate) fn parse_it_is(input: &str) -> OracleResult<'_, &str> {
     alt((recognize((tag("it"), parse_apostrophe_s)), tag("it is"))).parse(input)
@@ -1639,7 +1663,7 @@ fn parse_monarch_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> 
     alt((
         value(
             PlayerScope::Controller,
-            alt((tag("you're "), tag("you are "))),
+            recognize((parse_you_are, tag(" "))),
         ),
         value(
             PlayerScope::ScopedPlayer,
@@ -2849,7 +2873,7 @@ fn parse_event_object_pt_vs_source_comparison(input: &str) -> OracleResult<'_, S
     ))
     .parse(rest)?;
     // RHS: "~'s <stat>" — the ability source's stat.
-    let (rest, _) = tag("~'s ").parse(rest)?;
+    let (rest, _) = (tag("~"), parse_apostrophe_s, tag(" ")).parse(rest)?;
     let (rest, rhs) = parse_pt_ref_scoped(rest, ObjectScope::Source)?;
     Ok((
         rest,
@@ -2885,8 +2909,11 @@ fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
         // ambiguous between a singular-they object and a player possessive.)
         tag("her "),
         tag("his "),
-        tag("enchanted creature's "),
-        tag("equipped creature's "),
+        recognize((
+            alt((tag("enchanted creature"), tag("equipped creature"))),
+            parse_apostrophe_s,
+            tag(" "),
+        )),
     ))
     .parse(input)?;
     // CR 208.1: decouple the property axis (power/toughness) from the linking-
@@ -3316,7 +3343,7 @@ fn parse_subject_property_inequality_form(input: &str) -> OracleResult<'_, Stati
     let consumed = rest.len() - remainder.len();
     let rest = &rest[consumed..];
     // Possessive "'s " + property keyword (must match LHS property).
-    let (rest, _) = tag("'s ").parse(rest)?;
+    let (rest, _) = (parse_apostrophe_s, tag(" ")).parse(rest)?;
     let (rest, rhs_property) = parse_property_keyword(rest)?;
     if lhs_property != rhs_property {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -4078,7 +4105,10 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
             value(ParentTargetReferent::Player, tag("player")),
             value(
                 ParentTargetReferent::PlaneswalkerController,
-                terminated(tag("planeswalker"), tag("'s controller")),
+                terminated(
+                    tag("planeswalker"),
+                    (parse_apostrophe_s, tag(" controller")),
+                ),
             ),
         )),
     )
@@ -5700,11 +5730,14 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// Splitting condition-false vs optional-decline is class-wide engine debt (the
 /// routing lives in the runtime chain resolver, not here).
 fn parse_offered_card_mana_value_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        tag("the spell's"),
-        tag("that spell's"),
-        tag("that card's"),
-        tag("the card's"),
+    let (rest, _) = recognize((
+        alt((
+            tag("the spell"),
+            tag("that spell"),
+            tag("that card"),
+            tag("the card"),
+        )),
+        parse_apostrophe_s,
     ))
     .parse(input)?;
     let (rest, _) = alt((tag(" mana value"), tag(" converted mana cost"))).parse(rest)?;
@@ -7350,15 +7383,24 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     .parse(rest)?;
     // Object: subject × property, with optional "or [other property]" disjunction.
     let (rest, requires_creature_source) = alt((
-        value(true, tag("this creature's ")),
-        value(false, tag("this permanent's ")),
+        value(
+            true,
+            recognize((tag("this creature"), parse_apostrophe_s, tag(" "))),
+        ),
+        value(
+            false,
+            recognize((tag("this permanent"), parse_apostrophe_s, tag(" "))),
+        ),
         // `oracle_util::normalize_card_name_refs` collapses BOTH "this creature"
         // and the card's own printed name to `~`, so this arm alone cannot tell
         // Increment's reminder from a card that writes its own name. The subject
         // can: the reminder's subject reaches a card only from the Increment
         // keyword, a spelled-out subject is the card writing its own sentence,
         // and only the keyword carries CR 702.191a's creature clause.
-        value(is_increment_reminder, tag("~'s ")),
+        value(
+            is_increment_reminder,
+            recognize((tag("~"), parse_apostrophe_s, tag(" "))),
+        ),
     ))
     .parse(rest)?;
     let (rest, first) = alt((
@@ -7553,7 +7595,7 @@ fn parse_combat_context_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_defending_player_controls,
         value(
             StaticCondition::SourceAttackingAlone,
-            tag("it's attacking alone"),
+            (parse_it_is, tag(" attacking alone")),
         ),
     ))
     .parse(input)
@@ -8463,7 +8505,7 @@ fn parse_counter_added_this_turn(input: &str) -> OracleResult<'_, StaticConditio
 /// CR 603.4: These gate triggers on the absence of an event this turn.
 /// Composed as `QuantityComparison(ref EQ 0)` rather than `Not(ref >= 1)`.
 fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you haven't ").parse(input) {
+    if let Ok((rest, _)) = (tag("you "), parse_havent, tag(" ")).parse(input) {
         let (rest, _) = tag("cast ").parse(rest)?;
         let (rest, filter) = parse_one_spell_this_turn_filter(rest)?;
         return Ok((
@@ -8481,7 +8523,7 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
-    let (rest, _) = tag("you didn't ").parse(input)?;
+    let (rest, _) = (tag("you "), parse_didnt, tag(" ")).parse(input)?;
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cast ").parse(rest) {
         let (rest, filter) = parse_one_spell_this_turn_filter(rest)?;
         return Ok((
@@ -8553,7 +8595,12 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
 }
 
 fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
+    let (rest, _) = (
+        alt((tag("~ "), tag("this creature "))),
+        parse_didnt,
+        tag(" "),
+    )
+        .parse(input)?;
     alt((
         value(
             make_source_history_absence(FilterProp::AttackedThisTurn { defender: None }),
@@ -8831,14 +8878,21 @@ fn parse_opponent_had_entered_this_turn(input: &str) -> OracleResult<'_, StaticC
 fn parse_entered_this_turn_under_opponent_control(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
-    let suffix = "entered the battlefield under an opponent's control this turn";
     let player = PlayerScope::Opponent {
         aggregate: AggregateFunction::Max,
     };
-    if let Ok(result) = parse_or_more_entered_count(input, suffix, player.clone()) {
-        return Ok(result);
+    for suffix in [
+        "entered the battlefield under an opponent's control this turn",
+        "entered the battlefield under an opponent\u{2019}s control this turn",
+    ] {
+        if let Ok(result) = parse_or_more_entered_count(input, suffix, player.clone()) {
+            return Ok(result);
+        }
+        if let Ok(result) = parse_entered_this_turn_subject(input, suffix, 1, player.clone()) {
+            return Ok(result);
+        }
     }
-    parse_entered_this_turn_subject(input, suffix, 1, player)
+    Err(oracle_err(input))
 }
 
 /// Parse "there are [fewer than/more than] N [or more / at least N] [things] ..."
@@ -9217,7 +9271,7 @@ fn parse_cards_distinct_quality_exiled_with_source_condition(
 /// Parse "there is a/an X card and a/an Y card in your <zone>" as two
 /// independent zone-count predicates sharing the same zone/scope suffix.
 fn parse_there_exists_compound_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (rest, _) = (parse_theres, tag(" ")).parse(input)?;
     let (rest, _) = parse_article(rest)?;
     let (rest, first_card_types) = parse_single_card_type_before_and(rest)?;
     let (rest, _) = tag(" and ").parse(rest)?;
@@ -9457,7 +9511,7 @@ fn parse_counter_on_source_subject(input: &str) -> OracleResult<'_, &str> {
 /// Unlocks the full class of "has <keyword> as long as there's a <filter> card
 /// in your <zone>" static abilities (e.g. Aang, A Lot to Learn).
 fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (rest, _) = (parse_theres, tag(" ")).parse(input)?;
     let (rest, _) = parse_article(rest)?;
     let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
     Ok((
@@ -10020,16 +10074,14 @@ fn parse_unless_pay_condition(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
     .parse(input)?;
     let (rest, cost) = parse_mana_cost(rest)?;
-    let (rest, scaling) = opt(alt((
-        value(
-            UnlessPayScaling::PerAffectedCreature,
-            tag(" for each creature they control that's blocking it"),
+    let (rest, scaling) = opt(value(
+        UnlessPayScaling::PerAffectedCreature,
+        (
+            tag(" for each creature they control that"),
+            alt((recognize(parse_apostrophe_s), tag(" is"))),
+            tag(" blocking it"),
         ),
-        value(
-            UnlessPayScaling::PerAffectedCreature,
-            tag(" for each creature they control that is blocking it"),
-        ),
-    )))
+    ))
     .parse(rest)?;
     Ok((
         rest,
@@ -10201,8 +10253,8 @@ pub fn parse_zone_changed_this_way_clause_scoped(
     // milled" produce the same existential condition. (Negations stay
     // singular-only: no card prints "aren't"/"weren't ... this way".)
     let (rest, negated) = alt((
-        value(true, tag::<_, _, OracleError<'_>>("wasn't ")),
-        value(true, tag("isn't ")),
+        value(true, (parse_wasnt, tag(" "))),
+        value(true, (parse_isnt, tag(" "))),
         value(true, tag("was not ")),
         value(true, tag("is not ")),
         value(false, tag("was ")),
@@ -23216,6 +23268,52 @@ mod tests {
                 "a player's life total is 10 or less",
                 "a player\u{2019}s life total is 10 or less",
             ),
+            ("it's attacking alone", "it\u{2019}s attacking alone"),
+            (
+                "you haven't cast a spell this turn",
+                "you haven\u{2019}t cast a spell this turn",
+            ),
+            (
+                "you didn't cast a spell this turn",
+                "you didn\u{2019}t cast a spell this turn",
+            ),
+            (
+                "~ didn't attack this turn",
+                "~ didn\u{2019}t attack this turn",
+            ),
+            (
+                "there's a creature card and an artifact card in your graveyard",
+                "there\u{2019}s a creature card and an artifact card in your graveyard",
+            ),
+            (
+                "there's a creature card in your graveyard",
+                "there\u{2019}s a creature card in your graveyard",
+            ),
+            ("you're the monarch", "you\u{2019}re the monarch"),
+            (
+                "it had power greater than ~'s power",
+                "it had power greater than ~’s power",
+            ),
+            (
+                "enchanted creature's power is 4 or greater",
+                "enchanted creature\u{2019}s power is 4 or greater",
+            ),
+            (
+                "that player or that planeswalker's controller has more life than you",
+                "that player or that planeswalker\u{2019}s controller has more life than you",
+            ),
+            (
+                "the spell's mana value is less than or equal to 3",
+                "the spell\u{2019}s mana value is less than or equal to 3",
+            ),
+            (
+                "the amount of mana you spent is greater than this creature's power",
+                "the amount of mana you spent is greater than this creature\u{2019}s power",
+            ),
+            (
+                "a creature entered the battlefield under an opponent's control this turn",
+                "a creature entered the battlefield under an opponent\u{2019}s control this turn",
+            ),
         ];
 
         for (ascii, typographic) in pairs {
@@ -23231,6 +23329,39 @@ mod tests {
             assert_eq!(
                 rest_typo, "",
                 "typographic {typographic:?} must be fully consumed, remaining: {rest_typo:?}"
+            );
+            assert_eq!(
+                ast_ascii, ast_typo,
+                "AST mismatch between {ascii:?} and {typographic:?}"
+            );
+        }
+
+        let this_way_pairs = [
+            (
+                "a creature wasn't put onto the battlefield this way",
+                "a creature wasn\u{2019}t put onto the battlefield this way",
+            ),
+            (
+                "a creature isn't put onto the battlefield this way",
+                "a creature isn\u{2019}t put onto the battlefield this way",
+            ),
+        ];
+
+        for (ascii, typographic) in this_way_pairs {
+            let (rest_ascii, ast_ascii) = parse_entry_this_way_clause(ascii)
+                .unwrap_or_else(|e| panic!("failed to parse ASCII this-way {ascii:?}: {e:?}"));
+            let (rest_typo, ast_typo) =
+                parse_entry_this_way_clause(typographic).unwrap_or_else(|e| {
+                    panic!("failed to parse typographic this-way {typographic:?}: {e:?}")
+                });
+
+            assert_eq!(
+                rest_ascii, "",
+                "ASCII this-way {ascii:?} must be fully consumed, remaining: {rest_ascii:?}"
+            );
+            assert_eq!(
+                rest_typo, "",
+                "typographic this-way {typographic:?} must be fully consumed, remaining: {rest_typo:?}"
             );
             assert_eq!(
                 ast_ascii, ast_typo,
@@ -23298,6 +23429,33 @@ mod tests {
             );
         }
 
+        // Unless-pay tax condition scaling check
+        let unless_pay_pairs = [(
+            "their controller pays {2} for each creature they control that's blocking it",
+            "their controller pays {2} for each creature they control that\u{2019}s blocking it",
+        )];
+
+        for (ascii, typographic) in unless_pay_pairs {
+            let (rest_ascii, ast_ascii) = parse_unless_condition(ascii)
+                .unwrap_or_else(|e| panic!("failed to parse ASCII unless {ascii:?}: {e:?}"));
+            let (rest_typo, ast_typo) = parse_unless_condition(typographic).unwrap_or_else(|e| {
+                panic!("failed to parse typographic unless {typographic:?}: {e:?}")
+            });
+
+            assert_eq!(
+                rest_ascii, "",
+                "ASCII unless {ascii:?} must be fully consumed, remaining: {rest_ascii:?}"
+            );
+            assert_eq!(
+                rest_typo, "",
+                "typographic unless {typographic:?} must be fully consumed, remaining: {rest_typo:?}"
+            );
+            assert_eq!(
+                ast_ascii, ast_typo,
+                "AST mismatch between unless {ascii:?} and {typographic:?}"
+            );
+        }
+
         // Primitive combinator direct assertions
         assert_eq!(parse_apostrophe("'"), Ok(("", "'")));
         assert_eq!(parse_apostrophe("\u{2019}"), Ok(("", "\u{2019}")));
@@ -23319,6 +23477,16 @@ mod tests {
         assert_eq!(parse_hasnt("hasn\u{2019}t"), Ok(("", "hasn\u{2019}t")));
         assert_eq!(parse_youve("you've"), Ok(("", "you've")));
         assert_eq!(parse_youve("you\u{2019}ve"), Ok(("", "you\u{2019}ve")));
+        assert_eq!(parse_havent("haven't"), Ok(("", "haven't")));
+        assert_eq!(parse_havent("haven\u{2019}t"), Ok(("", "haven\u{2019}t")));
+        assert_eq!(parse_didnt("didn't"), Ok(("", "didn't")));
+        assert_eq!(parse_didnt("didn\u{2019}t"), Ok(("", "didn\u{2019}t")));
+        assert_eq!(parse_you_are("you're"), Ok(("", "you're")));
+        assert_eq!(parse_you_are("you\u{2019}re"), Ok(("", "you\u{2019}re")));
+        assert_eq!(parse_you_are("you are"), Ok(("", "you are")));
+        assert_eq!(parse_theres("there's"), Ok(("", "there's")));
+        assert_eq!(parse_theres("there\u{2019}s"), Ok(("", "there\u{2019}s")));
+        assert_eq!(parse_theres("there is"), Ok(("", "there is")));
         assert_eq!(parse_it_is("it's"), Ok(("", "it's")));
         assert_eq!(parse_it_is("it\u{2019}s"), Ok(("", "it\u{2019}s")));
         assert_eq!(parse_it_is("it is"), Ok(("", "it is")));

@@ -95,6 +95,35 @@ fn assert_no_unimplemented(parsed: &engine::parser::oracle::ParsedAbilities) {
     }
 }
 
+fn assert_has_named_spell_cast_condition(
+    conditions: &[engine::types::ability::AbilityCondition],
+    expected_name: &str,
+) {
+    assert!(
+        conditions.iter().any(|c| match c {
+            engine::types::ability::AbilityCondition::QuantityCheck {
+                lhs:
+                    engine::types::ability::QuantityExpr::Ref {
+                        qty:
+                            engine::types::ability::QuantityRef::SpellsCastThisTurn {
+                                filter: Some(engine::types::ability::TargetFilter::Typed(typed)),
+                                ..
+                            },
+                    },
+                comparator: engine::types::ability::Comparator::GE,
+                rhs: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+            } => typed.properties.iter().any(|p| match p {
+                engine::types::ability::FilterProp::Named { name } => {
+                    name.eq_ignore_ascii_case(expected_name)
+                }
+                _ => false,
+            }),
+            _ => false,
+        }),
+        "Expected condition for spell named {expected_name:?}, got {conditions:?}"
+    );
+}
+
 fn assert_sift_through_sands_single_nl_ast(parsed: &engine::parser::oracle::ParsedAbilities) {
     assert_eq!(
         parsed.abilities.len(),
@@ -153,14 +182,22 @@ fn assert_sift_through_sands_single_nl_ast(parsed: &engine::parser::oracle::Pars
         "SearchLibrary effect mismatch, got {:?}",
         search_sub.effect
     );
-    assert!(
-        matches!(
-            search_sub.condition.as_ref(),
-            Some(engine::types::ability::AbilityCondition::And { conditions }) if conditions.len() == 2
+    let conditions = match search_sub.condition.as_ref() {
+        Some(engine::types::ability::AbilityCondition::And { conditions }) => {
+            assert_eq!(
+                conditions.len(),
+                2,
+                "SearchLibrary must have compound And condition for 2 prior spells"
+            );
+            conditions
+        }
+        other => panic!(
+            "SearchLibrary must have compound And condition for prior spells, got {:?}",
+            other
         ),
-        "SearchLibrary must have compound And condition for prior spells, got {:?}",
-        search_sub.condition
-    );
+    };
+    assert_has_named_spell_cast_condition(conditions, "peer through depths");
+    assert_has_named_spell_cast_condition(conditions, "reach through mists");
 }
 
 fn assert_sift_through_sands_user_oracle_ast(parsed: &engine::parser::oracle::ParsedAbilities) {
@@ -218,14 +255,22 @@ fn assert_sift_through_sands_user_oracle_ast(parsed: &engine::parser::oracle::Pa
         "Ability 1 SearchLibrary effect mismatch, got {:?}",
         ability1.effect
     );
-    assert!(
-        matches!(
-            ability1.condition.as_ref(),
-            Some(engine::types::ability::AbilityCondition::And { conditions }) if conditions.len() == 2
+    let conditions = match ability1.condition.as_ref() {
+        Some(engine::types::ability::AbilityCondition::And { conditions }) => {
+            assert_eq!(
+                conditions.len(),
+                2,
+                "Ability 1 must have compound And condition for 2 prior spells"
+            );
+            conditions
+        }
+        other => panic!(
+            "Ability 1 must have compound And condition for prior spells, got {:?}",
+            other
         ),
-        "Ability 1 must have compound And condition for prior spells, got {:?}",
-        ability1.condition
-    );
+    };
+    assert_has_named_spell_cast_condition(conditions, "peer through depths");
+    assert_has_named_spell_cast_condition(conditions, "reach through mists");
 }
 
 #[test]
@@ -507,5 +552,149 @@ fn sift_through_sands_with_prior_spells_searches_the_unspeakable() {
         runner.state().objects[&unspeakable_id].zone,
         engine::types::zones::Zone::Battlefield,
         "The Unspeakable must be on the battlefield!"
+    );
+}
+
+#[test]
+fn sift_through_sands_after_only_peer_through_depths_does_not_search() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let peer = scenario
+        .add_spell_to_hand_from_oracle(P0, "Peer Through Depths", true, "Draw a card.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let sift = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Sift Through Sands",
+            true,
+            SIFT_THROUGH_SANDS_USER_ORACLE,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let unspeakable_id = scenario.add_card_to_library_top(P0, "The Unspeakable");
+    scenario.add_card_to_library_top(P0, "Card 5");
+    scenario.add_card_to_library_top(P0, "Card 4");
+    scenario.add_card_to_library_top(P0, "Card 3");
+    scenario.add_card_to_library_top(P0, "Card 2");
+    scenario.add_card_to_library_top(P0, "Card 1");
+
+    let mut runner = scenario.build();
+
+    // 1. Cast and resolve Peer Through Depths (Reach Through Mists is NOT cast)
+    let r1 = runner.cast(peer).commit().resolve();
+    assert!(
+        matches!(r1.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Peer Through Depths should resolve cleanly to Priority"
+    );
+
+    // 2. Cast and resolve Sift Through Sands
+    let r2 = runner.cast(sift).commit().resolve();
+
+    let discard_card = match r2.final_waiting_for() {
+        WaitingFor::DiscardChoice { cards, count, .. } => {
+            assert_eq!(*count, 1, "Must ask to discard 1 card");
+            assert_eq!(
+                cards.len(),
+                3,
+                "Hand must contain 1 drawn from Peer + 2 drawn from Sift"
+            );
+            cards[0]
+        }
+        other => panic!("Expected WaitingFor::DiscardChoice, got {:?}", other),
+    };
+
+    let r3 = runner
+        .act(engine::types::actions::GameAction::SelectCards {
+            cards: vec![discard_card],
+        })
+        .unwrap();
+
+    // Only Peer Through Depths was cast, so Reach Through Mists was NOT.
+    // The conditional search ability must NOT trigger or prompt.
+    assert!(
+        matches!(r3.waiting_for, WaitingFor::Priority { .. }),
+        "Expected WaitingFor::Priority without optional search prompt, got {:?}",
+        r3.waiting_for
+    );
+
+    // The Unspeakable must remain in the library
+    assert_eq!(
+        runner.state().objects[&unspeakable_id].zone,
+        engine::types::zones::Zone::Library,
+        "The Unspeakable must remain in the library when Reach Through Mists was not cast"
+    );
+}
+
+#[test]
+fn sift_through_sands_after_only_reach_through_mists_does_not_search() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let reach = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reach Through Mists", true, "Draw a card.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let sift = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Sift Through Sands",
+            true,
+            SIFT_THROUGH_SANDS_USER_ORACLE,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let unspeakable_id = scenario.add_card_to_library_top(P0, "The Unspeakable");
+    scenario.add_card_to_library_top(P0, "Card 5");
+    scenario.add_card_to_library_top(P0, "Card 4");
+    scenario.add_card_to_library_top(P0, "Card 3");
+    scenario.add_card_to_library_top(P0, "Card 2");
+    scenario.add_card_to_library_top(P0, "Card 1");
+
+    let mut runner = scenario.build();
+
+    // 1. Cast and resolve Reach Through Mists (Peer Through Depths is NOT cast)
+    let r1 = runner.cast(reach).commit().resolve();
+    assert!(
+        matches!(r1.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Reach Through Mists should resolve cleanly to Priority"
+    );
+
+    // 2. Cast and resolve Sift Through Sands
+    let r2 = runner.cast(sift).commit().resolve();
+
+    let discard_card = match r2.final_waiting_for() {
+        WaitingFor::DiscardChoice { cards, count, .. } => {
+            assert_eq!(*count, 1, "Must ask to discard 1 card");
+            assert_eq!(
+                cards.len(),
+                3,
+                "Hand must contain 1 drawn from Reach + 2 drawn from Sift"
+            );
+            cards[0]
+        }
+        other => panic!("Expected WaitingFor::DiscardChoice, got {:?}", other),
+    };
+
+    let r3 = runner
+        .act(engine::types::actions::GameAction::SelectCards {
+            cards: vec![discard_card],
+        })
+        .unwrap();
+
+    // Only Reach Through Mists was cast, so Peer Through Depths was NOT.
+    // The conditional search ability must NOT trigger or prompt.
+    assert!(
+        matches!(r3.waiting_for, WaitingFor::Priority { .. }),
+        "Expected WaitingFor::Priority without optional search prompt, got {:?}",
+        r3.waiting_for
+    );
+
+    // The Unspeakable must remain in the library
+    assert_eq!(
+        runner.state().objects[&unspeakable_id].zone,
+        engine::types::zones::Zone::Library,
+        "The Unspeakable must remain in the library when Peer Through Depths was not cast"
     );
 }
