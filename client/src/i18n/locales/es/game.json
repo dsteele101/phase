@@ -1424,10 +1424,11 @@
       "destinationBattlefield": "en el campo de batalla",
       "destinationHand": "en tu mano",
       "titleSplit": "Reparte las cartas restantes",
-      "subtitleSplit_one": "Selecciona {{count}} carta para la parte superior de tu biblioteca; la otra {{remaining}} va al fondo",
-      "subtitleSplit_other": "Selecciona {{count}} cartas para la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
+      "subtitleSplit_one": "Ordena las cartas: {{count}} va a la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
+      "subtitleSplit_other": "Ordena las cartas: {{count}} van a la parte superior de tu biblioteca; las otras {{remaining}} van al fondo",
       "badgeTop": "Arriba {{order}}",
-      "badgeBottom": "Fondo"
+      "badgeBottom": "Fondo",
+      "hintSplit": "Arrastra para reordenar · las verdes van arriba (la primera es la superior), las grises al fondo"
     },
     "surveil": {
       "title": "Vigilar",

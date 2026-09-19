@@ -3783,24 +3783,25 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::SelectCards { cards: kept });
     }
 
-    // CR 401.2 + CR 401.4: put the most valuable `top_count` of the remainder
-    // on top (they are drawn soonest) and let the rest fall to the bottom —
-    // the same intrinsic-value ordering the sibling dig and surveil arms use.
-    if let WaitingFor::DigRestSplitChoice {
-        cards, top_count, ..
-    } = &state.waiting_for
-    {
+    // CR 401.2 + CR 401.4: the submission is a full ARRANGEMENT of the
+    // remainder — the leading `top_count` entries take the library top and the
+    // rest take the bottom. Sorting the whole pile by intrinsic value descending
+    // and submitting it verbatim gets both decisions right at once with the
+    // same ordering the sibling dig and surveil arms use:
+    //   * partition — the most valuable `top_count` cards land on top, where
+    //     they are drawn soonest;
+    //   * CR 401.4 order — within the top pile the best card is drawn first,
+    //     and within the bottom pile the better cards sit nearer the rest of
+    //     the library (`route_rest_split_then` appends bottom entries in the
+    //     submitted order, so the last entry ends up bottom-most).
+    if let WaitingFor::DigRestSplitChoice { cards, .. } = &state.waiting_for {
         let mut scored: Vec<_> = cards
             .iter()
             .map(|&id| (id, intrinsic_value(state, id)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let top: Vec<_> = scored
-            .iter()
-            .take((*top_count).min(cards.len()))
-            .map(|(id, _)| *id)
-            .collect();
-        return Some(GameAction::SelectCards { cards: top });
+        let arrangement: Vec<_> = scored.into_iter().map(|(id, _)| id).collect();
+        return Some(GameAction::SelectCards { cards: arrangement });
     }
 
     if let WaitingFor::SurveilChoice { cards, .. } = &state.waiting_for {

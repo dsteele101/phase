@@ -1424,10 +1424,11 @@
       "destinationBattlefield": "na pole bitwy",
       "destinationHand": "do twojej ręki",
       "titleSplit": "Podziel pozostałe karty",
-      "subtitleSplit_one": "Wybierz {{count}} kartę na wierzch twojej biblioteki; druga {{remaining}} trafi na spód",
-      "subtitleSplit_other": "Wybierz {{count}} kart na wierzch twojej biblioteki; pozostałe {{remaining}} trafią na spód",
+      "subtitleSplit_one": "Ułóż karty: {{count}} trafi na wierzch twojej biblioteki, pozostałe {{remaining}} trafią na spód",
+      "subtitleSplit_other": "Ułóż karty: {{count}} trafią na wierzch twojej biblioteki, pozostałe {{remaining}} trafią na spód",
       "badgeTop": "Wierzch {{order}}",
-      "badgeBottom": "Spód"
+      "badgeBottom": "Spód",
+      "hintSplit": "Przeciągnij, aby zmienić kolejność · zielone trafiają na wierzch (pierwsza najwyżej), szare na spód"
     },
     "surveil": {
       "title": "Surveil",

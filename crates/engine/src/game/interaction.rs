@@ -4500,18 +4500,16 @@ fn selection_projection(
                 source_id: *source_id,
             })
         }
-        // CR 401.2 + CR 401.4: the whole remainder pile is offered and the
-        // player names exactly `top_count` of it for the top of the library;
-        // the unnamed rest goes to the bottom, so the client never computes a
-        // second list. Exact bounds — the split is forced, not an "up to".
-        WaitingFor::DigRestSplitChoice {
-            cards,
-            top_count,
-            source_id,
-            ..
-        } => Some(SelectionProjection {
+        // CR 401.2 + CR 401.4 + CR 608.2d: the whole remainder pile is offered
+        // and the player submits a full permutation of it — the leading
+        // `top_count` entries take the top, the rest take the bottom, each in
+        // the submitted order. Exact bounds of `cards.len()`, identical to the
+        // sibling `RippleBottomOrder` arrangement projection above; the client
+        // never computes a second list and never computes the split point
+        // (`top_count` is engine-supplied on the prompt).
+        WaitingFor::DigRestSplitChoice { cards, source_id, .. } => Some(SelectionProjection {
             object_ids: cards.clone(),
-            constraint: count_constraint(*top_count, *top_count),
+            constraint: count_constraint(cards.len(), cards.len()),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Choose,
             action: SelectionAction::SelectCards,

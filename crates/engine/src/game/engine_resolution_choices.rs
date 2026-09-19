@@ -1109,13 +1109,30 @@ pub(crate) fn route_rest_split_then(
 /// owner IS that library's owner, and deriving it here keeps the one source of
 /// that fact next to the move that depends on it.
 ///
-/// A degenerate split raises no prompt, because there is nothing to decide:
-/// `top_count == 0` is a plain bottom-route and `top_count >= pile.len()` is a
-/// plain top-route. Only a genuine partition parks a choice — the same
-/// "prompt only when more than one arrangement exists" rule
-/// `ripple::open_bottom_order_or_place` applies to its own bottom pile, and the
-/// same reason neither routes a CR 401.4 order choice for the single position
-/// it fills.
+/// CR 401.4 governs the prompt condition, and it is about ARRANGEMENT, not
+/// partition: "if an effect puts two or more cards in a specific position in a
+/// library at the same time, the owner of those cards may arrange them in any
+/// order." A unique partition is therefore NOT a unique arrangement. A
+/// degenerate split (`top_count == 0`, or `top_count == pile.len()`) sends the
+/// whole pile to ONE position, and the moment that pile holds two or more
+/// cards CR 401.4 hands its order to the owner — exactly the choice
+/// `ripple::open_bottom_order_or_place` raises for its own all-to-the-bottom
+/// pile at `cards.len() >= 2`.
+///
+/// So the single gate is `pile.len() >= 2`, which subsumes both decisions:
+///
+/// * `pile.len() < 2` — one position, one card (or none). Neither a partition
+///   nor an order exists; route immediately with no prompt.
+/// * `pile.len() >= 2` — at least one real decision exists. Either the
+///   partition is genuine (`0 < top_count < pile.len()`), or it is degenerate
+///   and the single destination position now holds 2+ cards whose order is the
+///   owner's under CR 401.4. Both are answered by the same submission.
+///
+/// The response is a full permutation of `pile` (see
+/// [`validate_dig_rest_split_selection`]), the same contract
+/// `WaitingFor::RippleBottomOrder` already uses for its own "in any order"
+/// pile — one prompt carries both the partition and both piles' orders, rather
+/// than chaining a second and third prompt for the same instruction.
 fn split_rest_pile_or_park(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -1126,11 +1143,12 @@ fn split_rest_pile_or_park(
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     let top_count = top_count.min(pile.len());
-    if top_count == 0 {
-        return route_rest_split_then(state, &[], pile, source_id, Some(completion), events);
-    }
-    if top_count == pile.len() {
-        return route_rest_split_then(state, pile, &[], source_id, Some(completion), events);
+    if pile.len() < 2 {
+        // CR 401.4 does not apply below two cards, and a 0-or-1-card pile has
+        // exactly one legal arrangement. `split_at` is total here because
+        // `top_count` was just clamped to `pile.len()`.
+        let (top, bottom) = pile.split_at(top_count);
+        return route_rest_split_then(state, top, bottom, source_id, Some(completion), events);
     }
     let library_owner = pile
         .first()
@@ -1147,27 +1165,36 @@ fn split_rest_pile_or_park(
     crate::game::zone_pipeline::BatchMoveResult::Done
 }
 
-/// CR 401.2 + CR 608.2c: Validate a `DigRestSplitChoice` response. The pile is
-/// fixed and every card in it is going back into the same library, so the only
-/// thing the player submits is WHICH `top_count` of them go on top. Mirrors
-/// `validate_dig_selection`'s duplicate / membership checks (this state is one
-/// of the freeform selections the multiplayer server forwards unvalidated, so
-/// `apply` is the sole legality boundary) and adds the exact-count check that
-/// `validate_exact_keep_on_top_selection` applies to its own forced selection:
-/// Telling Time's "one on top ... and one on the bottom" is not an "up to".
+/// CR 401.2 + CR 401.4 + CR 608.2c: Validate a `DigRestSplitChoice` response.
+///
+/// The pile is fixed and every card in it is going back into the SAME library,
+/// so the player submits one thing: the full arrangement. The response is a
+/// permutation of `pile` whose first `top_count` entries go on top (topmost
+/// first) and whose remaining entries go to the bottom. That single payload
+/// answers both questions CR asks here — which cards take which position
+/// (CR 608.2d, the effect's own choice) and in what order each position's
+/// cards are arranged (CR 401.4) — and is the same full-permutation contract
+/// `WaitingFor::RippleBottomOrder` uses for its own "in any order" pile.
+///
+/// Requiring the whole pile is also what makes the check total: equal length
+/// plus no duplicates plus full membership IS a permutation, so no card can be
+/// silently stranded or placed twice. Mirrors `validate_dig_selection`'s
+/// duplicate / membership checks — this state is one of the freeform
+/// selections the multiplayer server forwards unvalidated, so `apply` is the
+/// sole legality boundary.
 fn validate_dig_rest_split_selection(
-    top: &[ObjectId],
+    arrangement: &[ObjectId],
     pile: &[ObjectId],
-    top_count: usize,
 ) -> Result<(), EngineError> {
-    if top.len() != top_count {
+    if arrangement.len() != pile.len() {
         return Err(EngineError::InvalidAction(format!(
-            "rest-split selection must contain exactly {top_count} cards, got {}",
-            top.len()
+            "rest-split arrangement must list exactly all {} card(s) of the rest pile, got {}",
+            pile.len(),
+            arrangement.len()
         )));
     }
     let mut seen = std::collections::HashSet::new();
-    for id in top {
+    for id in arrangement {
         if !seen.insert(*id) {
             return Err(EngineError::InvalidAction(
                 "rest-split selection contains a duplicate card".to_string(),
@@ -4012,46 +4039,56 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
-        // CR 401.2 + CR 401.4 + CR 701.20e + CR 608.2c: The looking player
-        // partitions a Telling Time-class remainder between the top and the
-        // bottom of one library. `top_cards` names the cards going on top, in
-        // the order the owner wants them there (CR 401.4); everything else in
-        // the pile goes to the bottom.
+        // CR 401.2 + CR 401.4 + CR 608.2d + CR 701.20e: The looking player
+        // arranges a Telling Time-class remainder across the top and the
+        // bottom of one library. `arrangement` is a full permutation of the
+        // pile: its first `top_count` entries go on top (topmost first, per
+        // CR 608.2d's effect-level choice) and the remainder goes to the
+        // bottom, each pile in exactly the submitted order (CR 401.4).
         (
             WaitingFor::DigRestSplitChoice {
-                player,
+                player: _,
                 library_owner: _,
                 cards,
                 top_count,
                 source_id: split_source_id,
                 completion,
             },
-            GameAction::SelectCards { cards: top_cards },
+            GameAction::SelectCards { cards: arrangement },
         ) => {
-            validate_dig_rest_split_selection(&top_cards, &cards, top_count)?;
-            let bottom_cards: Vec<ObjectId> = cards
-                .iter()
-                .filter(|id| !top_cards.contains(id))
-                .copied()
-                .collect();
-            let had_completion = completion.is_some();
+            validate_dig_rest_split_selection(&arrangement, &cards)?;
+            // VALIDATE BEFORE MUTATING. `completion` carries the dig's entire
+            // deferred tail — `BatchCompletion::RevealRestPile`'s reveal-marker
+            // cleanup, tracked-set publication, continuation wiring and
+            // priority drain. Running the move without it would place the
+            // cards correctly and then silently drop that whole tail, leaving
+            // stale reveal markers and an unpublished tracked set behind a
+            // dig that looked like it completed.
+            //
+            // `None` is reachable and is never legitimate: `game/visibility.rs`
+            // STRIPS `completion` to `None` in every per-player client
+            // projection, so a `None` here is a redacted client view being
+            // echoed back (or a hand-built/corrupt state), not a real pending
+            // dig. Reject it before a single card moves rather than finishing
+            // the split against bookkeeping that is not there.
+            let Some(completion) = completion else {
+                return Err(EngineError::InvalidAction(
+                    "rest-split state has no pending dig completion to finish; \
+                     refusing to move cards against missing bookkeeping"
+                        .to_string(),
+                ));
+            };
+            // Total: `top_count` was clamped to `cards.len()` at park time and
+            // `arrangement` was just proven to be a permutation of `cards`.
+            let (top_cards, bottom_cards) = arrangement.split_at(top_count.min(arrangement.len()));
             route_rest_split_then(
                 state,
-                &top_cards,
-                &bottom_cards,
+                top_cards,
+                bottom_cards,
                 split_source_id,
-                completion.map(|boxed| *boxed),
+                Some(*completion),
                 events,
             );
-            // The carried completion is the dig's own tail and ends by draining
-            // the continuation. A state without one (hand-built or migrated
-            // from an older snapshot) still has to hand priority back, so drain
-            // it here instead of stranding the resolution on a spent prompt.
-            if !had_completion {
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    finish_with_continuation(state, player, events),
-                ));
-            }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

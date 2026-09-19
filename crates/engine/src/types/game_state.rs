@@ -13209,13 +13209,29 @@ pub enum WaitingFor {
         player: PlayerId,
         /// Owner of the library the pile is placed back into.
         library_owner: PlayerId,
-        /// The fixed rest pile. Every id here ends up in `Zone::Library`; only
-        /// each card's `LibraryPosition` (Top or Bottom) is undecided.
+        /// The fixed rest pile. Every id here ends up in `Zone::Library`; what
+        /// is undecided is each card's `LibraryPosition` (Top or Bottom) AND
+        /// the order of the cards within each position (CR 401.4).
+        ///
+        /// The response is `GameAction::SelectCards` carrying a full
+        /// PERMUTATION of this list — the same contract `RippleBottomOrder`
+        /// uses for its own "in any order" pile — not a subset. The first
+        /// `top_count` entries go on top, topmost first; the rest go to the
+        /// bottom in the submitted order. One payload therefore answers both
+        /// the CR 608.2d partition choice and the CR 401.4 arrangement of each
+        /// resulting pile.
         cards: Vec<ObjectId>,
-        /// How many of `cards` must go on top; the remainder go to the bottom.
-        /// Exact, not "up to" — Telling Time's split is forced. Already
-        /// resolved against game state and clamped to `1..cards.len()` at park
-        /// time, so a client never has to interpret a `QuantityExpr`.
+        /// How many of the submitted arrangement's leading entries go on top;
+        /// the remainder go to the bottom. Exact, not "up to" — Telling Time's
+        /// split is forced. Already resolved against game state and clamped to
+        /// `0..=cards.len()` at park time, so a client never has to interpret a
+        /// `QuantityExpr`.
+        ///
+        /// May legally be `0` or `cards.len()`: a DEGENERATE partition still
+        /// parks this prompt whenever `cards.len() >= 2`, because CR 401.4
+        /// gives the owner the order of the 2+ cards landing in that single
+        /// position even though which-goes-where was never in question. Only a
+        /// pile of fewer than two cards skips the prompt entirely.
         top_count: usize,
         source_id: Option<ObjectId>,
         /// The deferred dig tail (reveal-marker cleanup, tracked-set publish,
@@ -13229,6 +13245,13 @@ pub enum WaitingFor {
         /// fields at the resume site would fork that tail into a second copy
         /// that could drift. Engine-internal bookkeeping, not player
         /// information: `game/visibility.rs` strips it from every client view.
+        ///
+        /// `Option` ONLY because that stripping needs a way to say "redacted";
+        /// a genuine pending split always carries one. The resolver therefore
+        /// treats `None` as an invalid state and rejects the submission BEFORE
+        /// moving any card, rather than completing the move and dropping the
+        /// dig's reveal-marker cleanup and tracked-set publication on the
+        /// floor.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         completion: Option<Box<BatchCompletion>>,
     },

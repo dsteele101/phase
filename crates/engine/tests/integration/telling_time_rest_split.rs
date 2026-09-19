@@ -246,12 +246,13 @@ fn telling_time_splits_its_remainder_between_library_top_and_bottom() {
     );
     assert_eq!(runner.state().objects[&to_bottom].zone, Zone::Library);
 
-    // Stage 2: submit the split — one card on top, the other falls to the bottom.
+    // Stage 2: submit the split as a full ARRANGEMENT of the pile (CR 401.4) —
+    // the leading `top_count` entries take the top, the rest take the bottom.
     runner
         .act(GameAction::SelectCards {
-            cards: vec![to_top],
+            cards: vec![to_top, to_bottom],
         })
-        .expect("a one-card top selection must be accepted");
+        .expect("a full two-card arrangement must be accepted");
     runner.advance_until_stack_empty();
 
     let st = runner.state();
@@ -290,93 +291,451 @@ fn telling_time_splits_its_remainder_between_library_top_and_bottom() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 (HOSTILE): malformed split selections are rejected, not absorbed.
+// Shared production-path harness.
 // ---------------------------------------------------------------------------
 
-/// Park a `DigRestSplitChoice` over a two-card remainder with `top_count: 1`.
-fn split_runner() -> (GameRunner, Vec<ObjectId>) {
+/// Cast a synthetic Telling Time-class card for real and drive it up to — and
+/// no further than — the `DigRestSplitChoice` pause, returning the live runner,
+/// the remainder pile in prompt order, and the prompt's `top_count`.
+///
+/// Every hostile / cleanup test below builds its fixture through THIS, so the
+/// state under test is one production actually parks. A hand-assembled
+/// `WaitingFor` can encode a prompt shape production never reaches (and can
+/// carry `completion: None`, which production never parks), which makes any
+/// assertion about it a claim about a state that cannot occur.
+fn production_split_pause(
+    card_name: &str,
+    oracle: &str,
+    library_cards: usize,
+) -> (GameRunner, Vec<ObjectId>, usize) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_spell_to_hand_from_oracle(P0, card_name, false, oracle);
+    builder.with_mana_cost(telling_time_cost());
+    let spell_id = builder.id();
     let mut runner = scenario.build();
-    let a = add_library_card(&mut runner, "Rest A");
-    let b = add_library_card(&mut runner, "Rest B");
-    runner.state_mut().waiting_for = WaitingFor::DigRestSplitChoice {
-        player: P0,
-        library_owner: P0,
-        cards: vec![a, b],
-        top_count: 1,
-        source_id: None,
-        completion: None,
+
+    for index in 0..library_cards {
+        add_library_card(&mut runner, &format!("Lib{index}"));
+    }
+    add_mana(&mut runner, ManaType::Blue, 2);
+
+    let outcome = runner.cast(spell_id).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice { cards, .. } => cards.clone(),
+        other => panic!("expected the keep prompt first, got {other:?}"),
     };
-    (runner, vec![a, b])
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0]],
+        })
+        .expect("keeping one looked-at card must be accepted");
+
+    match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            cards, top_count, ..
+        } => {
+            let pile = cards.clone();
+            let top_count = *top_count;
+            (runner, pile, top_count)
+        }
+        other => panic!("expected DigRestSplitChoice after the keep step, got {other:?}"),
+    }
 }
 
+/// Telling Time's own shape: look at 3, keep 1, remainder of 2 with one on top.
+fn telling_time_split_pause() -> (GameRunner, Vec<ObjectId>, usize) {
+    production_split_pause("Telling Time", TELLING_TIME_ORACLE, 4)
+}
+
+// ---------------------------------------------------------------------------
+// Test 3 (BLOCKER 1a): a multi-card BOTTOM pile gets a CR 401.4 order choice.
+// ---------------------------------------------------------------------------
+
+/// The numeric split grammar admits partitions wider than Telling Time's
+/// 1-to-top / 1-to-bottom. This is the class member with a 3-card bottom pile.
+const WIDE_SPLIT_ORACLE: &str = "Look at the top five cards of your library. \
+Put one of those cards into your hand, one on top of your library, and three on \
+the bottom of your library.";
+
+/// CR 401.4: "If an effect puts two or more cards in a specific position in a
+/// library at the same time, the owner of those cards may arrange them in any
+/// order."
+///
+/// The bottom pile here holds THREE cards, so its internal order is the
+/// owner's to choose — it is not whatever order the cards happened to be
+/// encountered in. The regression assertion submits the bottom segment in
+/// REVERSE of the pile's prompt order and requires the library to reflect that
+/// submitted order.
+///
+/// Before this fix the resolver derived the bottom pile by filtering the pile
+/// in ITS OWN order (`cards.iter().filter(|id| !top.contains(id))`), so the
+/// submitted bottom order was discarded and this test's final ordering
+/// assertion fails on revert.
 #[test]
-fn split_rejects_a_wrong_count_selection() {
-    let (mut runner, pile) = split_runner();
-    // Too many: the split is forced, not an "up to".
+fn a_multi_card_bottom_pile_is_arranged_by_the_owner() {
+    let (mut runner, pile, top_count) = production_split_pause("Wide Split", WIDE_SPLIT_ORACLE, 6);
+    assert_eq!(pile.len(), 4, "look at five, keep one, four remain");
+    assert_eq!(top_count, 1, "one of the remainder goes on top");
+
+    // Deliberately reverse the three bottom-bound cards relative to prompt order.
+    let chosen_top = pile[0];
+    let bottom_in_submitted_order = vec![pile[3], pile[1], pile[2]];
+    let mut arrangement = vec![chosen_top];
+    arrangement.extend(bottom_in_submitted_order.iter().copied());
+
+    runner
+        .act(GameAction::SelectCards { cards: arrangement })
+        .expect("a full four-card arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(
+        library.first(),
+        Some(&chosen_top),
+        "the leading arrangement entry is on TOP"
+    );
+
+    // THE REGRESSION ASSERTION: the last three library slots must read back in
+    // the SUBMITTED bottom order, not in the pile's encounter order.
+    let tail: Vec<ObjectId> = library[library.len() - 3..].to_vec();
+    assert_eq!(
+        tail, bottom_in_submitted_order,
+        "CR 401.4: the owner's submitted bottom order must be honored; \
+         got {tail:?}, wanted {bottom_in_submitted_order:?}"
+    );
+    // PAIRED NEGATIVE: the encounter order really is different, so the
+    // assertion above cannot pass by coincidence.
+    assert_ne!(
+        bottom_in_submitted_order,
+        vec![pile[1], pile[2], pile[3]],
+        "the fixture must submit a bottom order that differs from pile order"
+    );
+    for id in &pile {
+        assert_eq!(
+            runner.state().objects[id].zone,
+            Zone::Library,
+            "no remainder card may leave the library"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 (BLOCKER 1b): a DEGENERATE partition still needs an ORDER choice.
+// ---------------------------------------------------------------------------
+
+/// Same class, but the printed counts ask for two on top and one on the
+/// bottom. Run against a three-card library the dig exhausts, the remainder is
+/// two cards and `top_count` clamps to 2 — a degenerate, unique PARTITION.
+const TOP_HEAVY_SPLIT_ORACLE: &str = "Look at the top three cards of your library. \
+Put one of those cards into your hand, two on top of your library, and one on \
+the bottom of your library.";
+
+/// CR 401.4 again, and the correction this blocker is about: **a unique
+/// partition is not a unique order.**
+///
+/// With a two-card remainder and `top_count == 2` there is exactly one way to
+/// SPLIT the pile — everything goes on top. There are still two ways to
+/// ARRANGE it, and CR 401.4 gives that choice to the owner. The previous code
+/// fast-pathed every degenerate partition straight into the move with no
+/// prompt at all, so the owner silently lost the ordering decision.
+#[test]
+fn a_degenerate_all_top_partition_still_prompts_for_order() {
+    // REGRESSION ASSERTION #1: the prompt exists at all. The old code
+    // short-circuited `top_count == pile.len()` into an immediate route, and
+    // `production_split_pause` panics if no split prompt is parked.
+    let (mut runner, pile, top_count) =
+        production_split_pause("Top Heavy Split", TOP_HEAVY_SPLIT_ORACLE, 3);
+    assert_eq!(pile.len(), 2, "look at three, keep one, two remain");
+    assert_eq!(
+        top_count, 2,
+        "the whole remainder goes on top — the partition is forced"
+    );
+
+    // REGRESSION ASSERTION #2: the submitted order is what lands. Submit the
+    // pile reversed, so encounter order and chosen order disagree.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[1], pile[0]],
+        })
+        .expect("a full two-card arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(
+        library.first(),
+        Some(&pile[1]),
+        "the owner put the SECOND pile card topmost (CR 401.4)"
+    );
+    assert_eq!(
+        library.get(1),
+        Some(&pile[0]),
+        "and the first pile card directly beneath it"
+    );
+}
+
+/// PAIRED NEGATIVE for the prompt gate: a pile of ONE card has neither a
+/// partition nor an order to decide, so it must still route with no prompt.
+/// This is what keeps `a_degenerate_all_top_partition_still_prompts_for_order`
+/// from being satisfied by a blanket "always prompt".
+#[test]
+fn a_single_card_remainder_routes_without_any_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Telling Time", false, TELLING_TIME_ORACLE);
+    builder.with_mana_cost(telling_time_cost());
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+    // Only two cards: the dig looks at both, keeps one, and exactly one card
+    // remains — a single-card remainder.
+    add_library_card(&mut runner, "Only A");
+    add_library_card(&mut runner, "Only B");
+    add_mana(&mut runner, ManaType::Blue, 2);
+
+    let outcome = runner.cast(spell_id).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice { cards, .. } => cards.clone(),
+        other => panic!("expected the keep prompt, got {other:?}"),
+    };
+    assert_eq!(
+        looked_at.len(),
+        2,
+        "a two-card library yields a two-card look"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0]],
+        })
+        .expect("keeping one must be accepted");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "a one-card remainder has exactly one arrangement and must not prompt"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&looked_at[0]].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&looked_at[1]].zone,
+        Zone::Library,
+        "the lone remainder card still went back to the library"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 (BLOCKER 2): the completion contract is validated BEFORE any mutation.
+// ---------------------------------------------------------------------------
+
+/// `game/visibility.rs` strips `completion` to `None` in every per-player
+/// client projection, so a `None` completion on an inbound submission means a
+/// redacted client view was echoed back at the engine (or the state is
+/// corrupt). Either way the dig's deferred tail — `RevealRestPile`'s
+/// reveal-marker cleanup, tracked-set publication and continuation wiring — is
+/// not there to run.
+///
+/// The resolver must reject that BEFORE it moves a card. Moving first and
+/// discovering the missing tail afterwards leaves the library rearranged, the
+/// reveal markers stale and the tracked set unpublished, with no way back.
+#[test]
+fn a_missing_completion_is_rejected_before_any_card_moves() {
+    let (mut runner, pile, _top_count) = telling_time_split_pause();
+
+    // Take the REAL parked prompt and strip only its completion — exactly the
+    // shape `visibility.rs` hands to a client. Everything else (pile, counts,
+    // source, and the pending dig bookkeeping in `state`) stays genuine.
+    let WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        cards,
+        top_count,
+        source_id,
+        completion,
+    } = runner.state().waiting_for.clone()
+    else {
+        unreachable!("the harness just asserted this variant");
+    };
+    assert!(
+        completion.is_some(),
+        "production must park a real completion; if this fails the fixture is \
+         no longer proving anything about the redacted-echo case"
+    );
+    runner.state_mut().waiting_for = WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        cards,
+        top_count,
+        source_id,
+        completion: None,
+    };
+
+    let library_before: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    let zones_before: Vec<Zone> = pile
+        .iter()
+        .map(|id| runner.state().objects[id].zone)
+        .collect();
+
     let err = runner
         .act(GameAction::SelectCards {
-            cards: pile.clone(),
+            cards: vec![pile[0], pile[1]],
         })
-        .expect_err("a two-card top selection must be rejected when top_count is 1");
+        .expect_err("a completion-less split state must be rejected");
     assert!(
-        format!("{err:?}").contains("exactly"),
-        "expected an exact-count rejection, got {err:?}"
+        format!("{err:?}").contains("completion"),
+        "expected a missing-completion rejection, got {err:?}"
     );
-    // REACH GUARD (paired positive): the prompt is still live and a
-    // well-formed selection of the same pile IS accepted, so the rejection
-    // above is about the count and not about an already-spent prompt.
+
+    // NO PARTIAL MUTATION: the library is byte-for-byte what it was.
+    let library_after: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(
+        library_after, library_before,
+        "a rejected split must not have moved anything"
+    );
+    let zones_after: Vec<Zone> = pile
+        .iter()
+        .map(|id| runner.state().objects[id].zone)
+        .collect();
+    assert_eq!(zones_after, zones_before);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "the prompt is not consumed by a rejected submission"
+    );
+}
+
+/// The positive half: with the real completion in place, the split path runs
+/// the FULL `RevealRestPile` contract, not just the continuation drain.
+///
+/// Observable tail effects asserted here:
+///   * tracked-set publication — `publish_fresh_tracked_set` inserts into
+///     `tracked_object_sets` and stamps `chain_tracked_set_id`;
+///   * reveal-marker cleanup — no looked-at card is left marked revealed;
+///   * continuation drain — resolution actually finishes.
+///
+/// Reverting the fix to a bare `finish_with_continuation` after the move drops
+/// the first two and fails this test.
+#[test]
+fn a_valid_completion_runs_the_whole_dig_tail_not_just_the_continuation() {
+    let (mut runner, pile, _top_count) = telling_time_split_pause();
+    let sets_before = runner.state().tracked_object_sets.len();
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[0], pile[1]],
+        })
+        .expect("a full arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    let st = runner.state();
+    assert!(
+        st.tracked_object_sets.len() > sets_before,
+        "the dig tail must publish its tracked set through the split path"
+    );
+    assert!(
+        st.chain_tracked_set_id.is_some(),
+        "the published set must be wired as the chain's tracked set"
+    );
+    for id in &pile {
+        assert!(
+            !st.revealed_cards.contains(id),
+            "reveal markers must be cleared by the completion tail"
+        );
+    }
+    assert!(
+        !matches!(st.waiting_for, WaitingFor::DigRestSplitChoice { .. }),
+        "the continuation must drain off the split prompt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 (HOSTILE): malformed arrangements are rejected at a REAL pause.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn split_rejects_a_partial_arrangement() {
+    let (mut runner, pile, _top_count) = telling_time_split_pause();
+    // A bare subset is the OLD contract. The response must arrange the whole
+    // pile, or a card would be left with no position.
+    let err = runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[0]],
+        })
+        .expect_err("a subset of the pile is not a complete arrangement");
+    assert!(
+        format!("{err:?}").contains("exactly all"),
+        "expected a completeness rejection, got {err:?}"
+    );
+    // REACH GUARD (paired positive): the prompt is still live and the full
+    // arrangement IS accepted, so the rejection is about completeness rather
+    // than an already-spent prompt.
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::DigRestSplitChoice { .. }
     ));
     runner
         .act(GameAction::SelectCards {
-            cards: vec![pile[0]],
+            cards: vec![pile[0], pile[1]],
         })
-        .expect("the correctly sized selection must be accepted");
+        .expect("the complete arrangement must be accepted");
 }
 
 #[test]
 fn split_rejects_an_empty_selection() {
-    let (mut runner, _pile) = split_runner();
+    let (mut runner, _pile, _top_count) = telling_time_split_pause();
     runner
         .act(GameAction::SelectCards { cards: Vec::new() })
         .expect_err("declining is not a legal response to a forced split");
 }
 
+/// Same class again, sized so the remainder is THREE cards with two of them
+/// bound for the top — a genuinely non-degenerate `C(3,2)` partition that
+/// production really pauses on.
+const WIDE_TOP_SPLIT_ORACLE: &str = "Look at the top four cards of your library. \
+Put one of those cards into your hand, two on top of your library, and one on \
+the bottom of your library.";
+
+/// NB: this fixture reaches a GENUINE non-degenerate production pause — a
+/// three-card remainder with `top_count == 2` — rather than hand-installing a
+/// prompt shape. Production auto-routes nothing here, so the rejection under
+/// test is about a real reachable boundary.
+///
+/// The duplicate id keeps the payload the right LENGTH while stranding a card,
+/// which is exactly the input a membership check alone would miss.
 #[test]
-fn split_rejects_a_duplicate_id() {
-    let (mut runner, pile) = split_runner();
-    // Count is right (2 ids) but both are the same card — accepting this would
-    // put one card on top twice and strand the other.
-    runner.state_mut().waiting_for = WaitingFor::DigRestSplitChoice {
-        player: P0,
-        library_owner: P0,
-        cards: pile.clone(),
-        top_count: 2,
-        source_id: None,
-        completion: None,
-    };
+fn split_rejects_a_duplicate_id_at_a_real_pause() {
+    let (mut runner, pile, top_count) =
+        production_split_pause("Wide Top Split", WIDE_TOP_SPLIT_ORACLE, 5);
+    assert_eq!(pile.len(), 3, "look at four, keep one, three remain");
+    assert_eq!(top_count, 2, "a genuine C(3,2) partition choice");
+
     let err = runner
         .act(GameAction::SelectCards {
-            cards: vec![pile[0], pile[0]],
+            cards: vec![pile[0], pile[0], pile[1]],
         })
         .expect_err("a duplicate id must be rejected");
     assert!(
         format!("{err:?}").contains("duplicate"),
         "expected a duplicate rejection, got {err:?}"
     );
+    // REACH GUARD: the prompt survives and a clean permutation is accepted.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[0], pile[1], pile[2]],
+        })
+        .expect("a clean permutation must be accepted");
 }
 
 #[test]
 fn split_rejects_a_foreign_id() {
-    let (mut runner, _pile) = split_runner();
+    let (mut runner, pile, _top_count) = telling_time_split_pause();
     let foreign = add_library_card(&mut runner, "Not In The Pile");
     let err = runner
         .act(GameAction::SelectCards {
-            cards: vec![foreign],
+            cards: vec![pile[0], foreign],
         })
         .expect_err("an id outside the remainder pile must be rejected");
     assert!(
@@ -386,12 +745,13 @@ fn split_rejects_a_foreign_id() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4 (AI): the candidate enumerator lists every legal split.
+// Test 7 (AI): the candidate enumerator lists every legal split, as arrangements.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ai_enumerates_every_legal_split() {
-    let (runner, pile) = split_runner();
+fn ai_enumerates_every_legal_split_as_a_full_arrangement() {
+    let (runner, pile, top_count) = telling_time_split_pause();
+    assert_eq!(top_count, 1);
     let selections: Vec<Vec<ObjectId>> = engine::ai_support::legal_actions(runner.state())
         .into_iter()
         .filter_map(|action| match action {
@@ -402,14 +762,242 @@ fn ai_enumerates_every_legal_split() {
     assert_eq!(
         selections.len(),
         2,
-        "C(2,1) = 2 legal splits, got {selections:?}"
+        "C(2,1) = 2 legal partitions, got {selections:?}"
     );
-    assert!(selections.contains(&vec![pile[0]]));
-    assert!(selections.contains(&vec![pile[1]]));
+    // Each candidate is a FULL arrangement of the pile, so the engine can
+    // apply it without the AI having to know the bottom complement.
+    assert!(selections.contains(&vec![pile[0], pile[1]]));
+    assert!(selections.contains(&vec![pile[1], pile[0]]));
 }
 
 // ---------------------------------------------------------------------------
-// Test 5 (SIBLING REGRESSION): a non-splitting dig is entirely unaffected.
+// Test 8 (BLOCKER 3): remainder precedence across a conditional "instead"
+// alternative — the alternative's own text wins over the base branch's.
+// ---------------------------------------------------------------------------
+
+/// CR 608.2c: "read the whole text and apply the rules of English to the text."
+///
+/// THE DISCRIMINATING HALF of Blocker 3. A conditional "instead" alternative
+/// that names its OWN top/bottom split must keep it. Before this fix
+/// `try_parse_dig_instead_alternative` destructured the alternative's
+/// `rest_split_top_count` into `..` and threw it away, then cloned the base
+/// branch's instead — so an alternative whose own sentence said "one on top of
+/// your library, and one on the bottom of your library" parsed with NO split
+/// and silently routed its whole remainder uniformly.
+///
+/// The fixture inverts the usual arrangement (plain base, splitting
+/// alternative) so the alternative is the only place the split can come from.
+#[test]
+fn an_alternative_branch_keeps_its_own_top_bottom_split() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        "Look at the top three cards of your library. Put two of those cards into \
+         your hand and the rest on the bottom of your library. If you gained life \
+         this turn, you may instead put one of them into your hand, one on top of \
+         your library, and one on the bottom of your library.",
+        "Conditional Split Alternative",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    let digs = collect_dig_chain(&parsed);
+    assert!(
+        digs.len() >= 2,
+        "expected a base Dig plus an alternative Dig, got {digs:?}"
+    );
+
+    let mut saw_alternative = false;
+    let mut saw_base = false;
+    for effect in &digs {
+        let Effect::Dig {
+            keep_count,
+            rest_destination,
+            rest_split_top_count,
+            ..
+        } = effect
+        else {
+            continue;
+        };
+        if *keep_count == Some(1) {
+            // THE REGRESSION ASSERTION: the alternative's own split survives.
+            assert_eq!(
+                *rest_split_top_count,
+                Some(QuantityExpr::Fixed { value: 1 }),
+                "the alternative branch's OWN top/bottom split must be kept, \
+                 not discarded in favour of the base branch's remainder"
+            );
+            assert_eq!(*rest_destination, Some(Zone::Library));
+            saw_alternative = true;
+        } else if *keep_count == Some(2) {
+            // PAIRED NEGATIVE / REACH GUARD: the plain base branch really is
+            // split-free, so the assertion above cannot be reading the base.
+            assert_eq!(
+                *rest_split_top_count, None,
+                "the base branch names one uniform remainder position"
+            );
+            saw_base = true;
+        }
+    }
+    assert!(
+        saw_alternative && saw_base,
+        "fixture must reach BOTH branches; alternative={saw_alternative}, \
+         base={saw_base}"
+    );
+}
+
+/// Walk an ability and its `else_ability` chain, collecting every `Effect::Dig`.
+fn collect_dig_chain(parsed: &engine::parser::oracle::ParsedAbilities) -> Vec<&Effect> {
+    let mut digs: Vec<&Effect> = Vec::new();
+    for ability in &parsed.abilities {
+        let mut current = Some(ability);
+        while let Some(node) = current {
+            if matches!(*node.effect, Effect::Dig { .. }) {
+                digs.push(node.effect.as_ref());
+            }
+            current = node.else_ability.as_deref();
+        }
+    }
+    digs
+}
+
+/// CHARACTERIZATION (not a revert-discriminating regression test — see below).
+///
+/// The complementary precedence rule: when the alternative names a UNIFORM
+/// remainder destination, it must not inherit a split from the base branch.
+///
+/// This assertion is currently satisfied both with and without the precedence
+/// fix, and deliberately does not claim otherwise. Reason, verified by
+/// instrumenting `try_parse_dig_instead_alternative`: when that function runs,
+/// the `previous` ability it reads is still the RAW look-only Dig
+/// (`destination: None, keep_count: None, rest_destination: None,
+/// rest_split_top_count: None`). The base branch's split is patched on later,
+/// by `apply_clause_continuation` in `parser/oracle_effect/sequence.rs`. So
+/// `prev_rest_split_top_count` is `None` on every path through this site that
+/// current Oracle grammar can reach, and the old unconditional clone had
+/// nothing to contaminate the alternative WITH.
+///
+/// The fix is kept because the precedence it encodes is the correct reading of
+/// CR 608.2c and because the sibling `alt_rest` / `alt_rest_order` fields at
+/// the same site already follow it; this test pins the resulting contract so a
+/// future change to continuation ordering cannot regress it unnoticed.
+#[test]
+fn an_alternative_with_an_explicit_uniform_remainder_carries_no_split() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        "Look at the top three cards of your library. Put one of those cards into \
+         your hand, one on top of your library, and one on the bottom of your \
+         library. If you gained life this turn, you may instead put two of them \
+         into your hand and the rest on the bottom of your library.",
+        "Conditional Split Override",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    // The alternative Dig is the one carrying the appended condition; the base
+    // Dig is wired behind it as the else-branch.
+    let digs = collect_dig_chain(&parsed);
+    assert!(
+        digs.len() >= 2,
+        "expected a base Dig plus an alternative Dig, got {digs:?}"
+    );
+
+    let mut saw_split_base = false;
+    let mut saw_uniform_alternative = false;
+    for effect in &digs {
+        let Effect::Dig {
+            keep_count,
+            rest_destination,
+            rest_split_top_count,
+            ..
+        } = effect
+        else {
+            continue;
+        };
+        if *keep_count == Some(2) {
+            // The alternative branch named a single uniform remainder
+            // position, so it must carry NO split.
+            assert_eq!(
+                *rest_split_top_count, None,
+                "an explicit uniform remainder must override the base branch's \
+                 split, not inherit it"
+            );
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Library),
+                "the alternative's own remainder destination is the library bottom"
+            );
+            saw_uniform_alternative = true;
+        } else if *keep_count == Some(1) {
+            // PAIRED POSITIVE / REACH GUARD: the base branch really does carry
+            // a split, so the assertion above is proving an override rather
+            // than passing because nothing was ever set.
+            assert_eq!(
+                *rest_split_top_count,
+                Some(QuantityExpr::Fixed { value: 1 }),
+                "the base branch keeps its own top/bottom split"
+            );
+            saw_split_base = true;
+        }
+    }
+    assert!(
+        saw_split_base && saw_uniform_alternative,
+        "fixture must reach BOTH branches; base={saw_split_base}, \
+         alternative={saw_uniform_alternative}"
+    );
+}
+
+/// RUNTIME half of the same claim: the alternative branch's parsed effect is
+/// what the resolver runs, so a cleared split means the remainder is routed
+/// uniformly with NO `DigRestSplitChoice` pause. Driving the alternative
+/// through `apply()` proves the parsed shape actually changes behavior.
+#[test]
+fn a_dig_whose_split_was_overridden_routes_uniformly_at_runtime() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+    let a = add_library_card(&mut runner, "Alt A");
+    let b = add_library_card(&mut runner, "Alt B");
+    let c = add_library_card(&mut runner, "Alt C");
+    // The alternative branch's resolved shape: keep 2, remainder uniformly to
+    // the library bottom, `rest_split_top_count: None`.
+    runner.state_mut().waiting_for = WaitingFor::DigChoice {
+        player: P0,
+        library_owner: P0,
+        cards: vec![a, b, c],
+        keep_count: 2,
+        up_to: false,
+        selectable_cards: vec![a, b, c],
+        kept_destination: Some(Zone::Hand),
+        rest_destination: Some(Zone::Library),
+        rest_split_top_count: None,
+        rest_order: engine::types::ability::DigRestOrder::Preserve,
+        source_id: None,
+        enter_tapped: false,
+        enters_attacking: false,
+    };
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![a, b] })
+        .expect("keeping two of three must be accepted");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "an overridden split must never raise the split prompt"
+    );
+    runner.advance_until_stack_empty();
+    let st = runner.state();
+    assert_eq!(st.objects[&c].zone, Zone::Library);
+    assert_eq!(
+        st.players[0].library.iter().copied().last(),
+        Some(c),
+        "the remainder went uniformly to the library BOTTOM"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 (SIBLING REGRESSION): a non-splitting dig is entirely unaffected.
 // ---------------------------------------------------------------------------
 
 /// `rest_split_top_count: None` must still auto-route the whole remainder to
