@@ -1610,22 +1610,31 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         library_owner,
         ref cards,
         top_count,
+        bottom_count: _,
+        scope,
         source_id,
         completion: _,
     } = state.waiting_for
     {
-        filtered.waiting_for = WaitingFor::DigRestSplitChoice {
+        // `player` is the prompt's acting authority in every scope (the chooser
+        // for a partition prompt, the library's owner for a CR 401.4
+        // arrangement prompt), so it is also the one viewer who must be able to
+        // tell the pile's cards apart in order to answer. Re-derived through
+        // the constructor so `bottom_count` cannot drift from the redacted
+        // `cards` list.
+        filtered.waiting_for = WaitingFor::new_dig_rest_split(
             player,
             library_owner,
-            cards: if can_view_private_for_player(player) {
+            if can_view_private_for_player(player) {
                 cards.clone()
             } else {
                 cards.iter().map(|_| ObjectId(0)).collect()
             },
             top_count,
+            scope,
             source_id,
-            completion: None,
-        };
+            None,
+        );
     }
 
     if let WaitingFor::ScryChoice {

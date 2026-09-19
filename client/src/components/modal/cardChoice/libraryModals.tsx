@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { motion, Reorder } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -564,9 +564,22 @@ export function DigModal({ data }: { data: DigChoice["data"] }) {
  * `cards.length` is a normal, expected prompt — the partition is forced but
  * the order still isn't.
  *
- * No game logic here: `cards` and `top_count` are exactly what the engine
- * resolved and parked, the split point is rendered from the engine-supplied
- * `top_count`, and nothing about the outcome is computed client-side.
+ * Drag is not the ONLY way to reorder: each card carries focusable
+ * move-earlier / move-later buttons (also driven by Left/Right arrow keys
+ * while a card's row has focus), so a keyboard-only player can reach every
+ * arrangement — including moving a card across the top/bottom boundary to pick
+ * a different partition — without a pointer.
+ *
+ * `data.scope` narrows what the controls may express: an `order_only` prompt
+ * belongs to the library's OWNER, whose CR 401.4 choice is the order WITHIN
+ * each already-settled pile, so moves that would cross the boundary are
+ * disabled rather than submitted and rejected. The engine is still the
+ * authority — this only keeps the UI from offering an illegal action.
+ *
+ * No game logic here: `cards`, `top_count`, `bottom_count` and `scope` are
+ * exactly what the engine resolved and parked, the split point is rendered
+ * from the engine-supplied `top_count`, and nothing about the outcome is
+ * computed client-side.
  *
  * Selection state is seeded from `data.cards` at mount. `CardChoiceModal`
  * passes a prompt-identity `key` derived from the pile so React REMOUNTS this
@@ -586,6 +599,31 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
     dispatch({ type: "SelectCards", data: { cards: order } });
   }, [dispatch, order]);
 
+  // CR 401.4: an `order_only` prompt may reorder within a pile but must not
+  // move a card across the top/bottom boundary — that partition belongs to
+  // another player and is already spent.
+  const boundaryIsLocked = data.scope === "order_only";
+  const canMove = useCallback(
+    (from: number, to: number) => {
+      if (to < 0 || to >= order.length) return false;
+      if (!boundaryIsLocked) return true;
+      return from < data.top_count === to < data.top_count;
+    },
+    [boundaryIsLocked, data.top_count, order.length],
+  );
+  const move = useCallback(
+    (from: number, to: number) => {
+      if (!canMove(from, to)) return;
+      setOrder((current) => {
+        const next = [...current];
+        const [card] = next.splice(from, 1);
+        next.splice(to, 0, card);
+        return next;
+      });
+    },
+    [canMove],
+  );
+
   if (!objects) return null;
 
   return (
@@ -593,7 +631,7 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
       title={t("cardChoice.dig.titleSplit")}
       subtitle={t("cardChoice.dig.subtitleSplit", {
         count: data.top_count,
-        remaining: data.cards.length - data.top_count,
+        remaining: data.bottom_count,
       })}
       maxWidthClassName="max-w-[38rem] sm:max-w-[48rem] lg:max-w-[58rem]"
       footer={<ConfirmButton onClick={handleConfirm} />}
@@ -611,6 +649,7 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
             const obj = objects[id];
             if (!obj) return null;
             const goesOnTop = index < data.top_count;
+            const cardName = obj.name;
             return (
               <Reorder.Item
                 key={id}
@@ -618,6 +657,19 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
                 value={id}
                 className="relative flex shrink-0 cursor-grab flex-col items-center gap-2 active:cursor-grabbing"
                 whileDrag={{ scale: 1.05, zIndex: 20 }}
+                // Keyboard parity with drag: arrow keys move the focused card
+                // one slot earlier/later, which is what changes BOTH the
+                // partition (when the move crosses the `top_count` boundary)
+                // and the within-pile order.
+                onKeyDown={(event: ReactKeyboardEvent) => {
+                  if (event.key === "ArrowLeft") {
+                    event.preventDefault();
+                    move(index, index - 1);
+                  } else if (event.key === "ArrowRight") {
+                    event.preventDefault();
+                    move(index, index + 1);
+                  }
+                }}
               >
                 <div
                   className={`relative rounded-lg ring-2 transition ${
@@ -642,13 +694,35 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
                     </span>
                   </div>
                 </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label={t("cardChoice.dig.moveEarlier", { card: cardName })}
+                    disabled={!canMove(index, index - 1)}
+                    onClick={() => move(index, index - 1)}
+                    className="rounded bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    {"←"}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("cardChoice.dig.moveLater", { card: cardName })}
+                    disabled={!canMove(index, index + 1)}
+                    onClick={() => move(index, index + 1)}
+                    className="rounded bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    {"→"}
+                  </button>
+                </div>
               </Reorder.Item>
             );
           })}
         </Reorder.Group>
       </div>
       <p className="mt-1 shrink-0 text-center text-xs text-slate-400">
-        {t("cardChoice.dig.hintSplit")}
+        {boundaryIsLocked
+          ? t("cardChoice.dig.hintSplitOrderOnly")
+          : t("cardChoice.dig.hintSplit")}
       </p>
     </ChoiceOverlay>
   );

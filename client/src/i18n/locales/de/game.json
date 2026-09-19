@@ -1428,7 +1428,10 @@
       "subtitleSplit_other": "Ordne die Karten an: {{count}} kommen oben auf deine Bibliothek, die übrigen {{remaining}} kommen nach unten",
       "badgeTop": "Oben {{order}}",
       "badgeBottom": "Unten",
-      "hintSplit": "Zum Umsortieren ziehen · grüne Karten kommen nach oben (ganz links zuoberst), graue nach unten"
+      "hintSplit": "Zum Umsortieren ziehen · grüne Karten kommen nach oben (ganz links zuoberst), graue nach unten",
+      "moveEarlier": "{{card}} nach vorne verschieben",
+      "moveLater": "{{card}} nach hinten verschieben",
+      "hintSplitOrderOnly": "Ziehen oder die Pfeiltasten nutzen, um innerhalb jedes Stapels umzusortieren · welche Karten nach oben kommen, hat ein anderer Spieler gewählt"
     },
     "surveil": {
       "title": "Überwachen",

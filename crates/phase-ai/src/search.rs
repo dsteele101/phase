@@ -3794,13 +3794,36 @@ pub(crate) fn deterministic_choice(
     //     and within the bottom pile the better cards sit nearer the rest of
     //     the library (`route_rest_split_then` appends bottom entries in the
     //     submitted order, so the last entry ends up bottom-most).
-    if let WaitingFor::DigRestSplitChoice { cards, .. } = &state.waiting_for {
-        let mut scored: Vec<_> = cards
-            .iter()
-            .map(|&id| (id, intrinsic_value(state, id)))
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let arrangement: Vec<_> = scored.into_iter().map(|(id, _)| id).collect();
+    //
+    // CR 401.4: when the partition is already settled (`OrderOnly` — the acting
+    // player is the library's owner, not the chooser), sorting the WHOLE pile
+    // would move cards across the top/bottom boundary and be rejected. Sort
+    // each pile independently instead, which keeps the same "best first"
+    // heuristic inside the partition the chooser fixed.
+    if let WaitingFor::DigRestSplitChoice {
+        cards,
+        top_count,
+        scope,
+        ..
+    } = &state.waiting_for
+    {
+        let by_value_desc = |segment: &[engine::types::identifiers::ObjectId]| {
+            let mut scored: Vec<_> = segment
+                .iter()
+                .map(|&id| (id, intrinsic_value(state, id)))
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        let arrangement = if scope.partition_is_open() {
+            by_value_desc(cards)
+        } else {
+            let split_at = (*top_count).min(cards.len());
+            let (top, bottom) = cards.split_at(split_at);
+            let mut arrangement = by_value_desc(top);
+            arrangement.extend(by_value_desc(bottom));
+            arrangement
+        };
         return Some(GameAction::SelectCards { cards: arrangement });
     }
 

@@ -1466,7 +1466,10 @@
       "subtitleSplit_other": "Arrange these cards: {{count}} go on top of your library, the other {{remaining}} go on the bottom",
       "badgeTop": "Top {{order}}",
       "badgeBottom": "Bottom",
-      "hintSplit": "Drag to reorder · green cards go on top (leftmost is topmost), grey cards go on the bottom"
+      "hintSplit": "Drag to reorder · green cards go on top (leftmost is topmost), grey cards go on the bottom",
+      "moveEarlier": "Move {{card}} earlier",
+      "moveLater": "Move {{card}} later",
+      "hintSplitOrderOnly": "Drag or use the arrow buttons to reorder within each pile · another player chose which cards go on top"
     },
     "surveil": {
       "title": "Surveil",

@@ -23,9 +23,11 @@
 //!     `ZoneMoveRequest::effect(..).at_library_position(..)` primitive as the
 //!     uniform `route_rest_partition_then`; only the position varies.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
-use engine::types::ability::{Effect, QuantityExpr};
+use engine::types::ability::{
+    DigRestOrder, DigRestSplitScope, DigSource, Effect, QuantityExpr, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -57,11 +59,21 @@ fn add_mana(runner: &mut GameRunner, ty: ManaType, count: usize) {
 /// Put a plain non-land card into P0's library (pushed on top of the existing
 /// library contents, so the last one added is deepest-added-last).
 fn add_library_card(runner: &mut GameRunner, name: &str) -> ObjectId {
+    add_library_card_for(runner, P0, name)
+}
+
+/// Same, for an arbitrary library owner — the cross-player fixtures need P1 to
+/// own the cards so `library_owner` and the dig's chooser genuinely differ.
+fn add_library_card_for(
+    runner: &mut GameRunner,
+    owner: engine::types::player::PlayerId,
+    name: &str,
+) -> ObjectId {
     let card_id = CardId(runner.state().next_object_id);
     let id = create_object(
         runner.state_mut(),
         card_id,
-        P0,
+        owner,
         name.to_string(),
         Zone::Library,
     );
@@ -551,8 +563,10 @@ fn a_missing_completion_is_rejected_before_any_card_moves() {
         library_owner,
         cards,
         top_count,
+        scope,
         source_id,
         completion,
+        ..
     } = runner.state().waiting_for.clone()
     else {
         unreachable!("the harness just asserted this variant");
@@ -562,14 +576,15 @@ fn a_missing_completion_is_rejected_before_any_card_moves() {
         "production must park a real completion; if this fails the fixture is \
          no longer proving anything about the redacted-echo case"
     );
-    runner.state_mut().waiting_for = WaitingFor::DigRestSplitChoice {
+    runner.state_mut().waiting_for = WaitingFor::new_dig_rest_split(
         player,
         library_owner,
         cards,
         top_count,
+        scope,
         source_id,
-        completion: None,
-    };
+        None,
+    );
 
     let library_before: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
     let zones_before: Vec<Zone> = pile
@@ -879,12 +894,11 @@ fn collect_dig_chain(parsed: &engine::parser::oracle::ParsedAbilities) -> Vec<&E
 /// This does NOT cover the second call site (`oracle.rs`'s
 /// `previous_spell = emitter.last_ability_definition()`), where `previous` is
 /// a fully-assembled prior ability whose `rest_split_top_count` CAN be
-/// non-`None` (e.g. a two-line card: line 1 a complete split-Dig, line 2 a
-/// separate ability-word "instead" override). No fixture exercises that
-/// cross-line path. The precedence fix itself
-/// (`alt_rest_split_top_count.or_else(...)`) is generic over both call sites
-/// and is the CR-608.2c-correct answer either way, so this is a coverage gap
-/// in this characterization, not a known defect.
+/// non-`None`. That site is where the precedence fix is actually load-bearing,
+/// and it is now covered by its own discriminating fixtures:
+/// `a_cross_line_uniform_override_clears_the_inherited_split`,
+/// `a_cross_line_override_keeps_its_own_split`, and the runtime
+/// `a_cross_line_uniform_override_routes_uniformly_at_runtime`.
 ///
 /// The fix is kept because the precedence it encodes is the correct reading of
 /// CR 608.2c and because the sibling `alt_rest` / `alt_rest_order` fields at
@@ -956,12 +970,23 @@ fn an_alternative_with_an_explicit_uniform_remainder_carries_no_split() {
     );
 }
 
-/// RUNTIME half of the same claim: the alternative branch's parsed effect is
-/// what the resolver runs, so a cleared split means the remainder is routed
-/// uniformly with NO `DigRestSplitChoice` pause. Driving the alternative
-/// through `apply()` proves the parsed shape actually changes behavior.
+/// STATE-LEVEL CONTRACT, deliberately NOT a regression test for the parser
+/// precedence fix.
+///
+/// It installs a `DigChoice` directly, so it never runs the parser and cannot
+/// fail if `try_parse_dig_instead_alternative`'s precedence is reverted. What
+/// it does pin is one narrow resolver contract the sibling
+/// `non_splitting_dig_still_auto_routes_its_whole_remainder` does not cover:
+/// `rest_split_top_count: None` with a LIBRARY rest destination routes the
+/// whole remainder to the bottom with no split prompt (that sibling uses a
+/// graveyard destination, which cannot reach the split gate at all).
+///
+/// The discriminating runtime tests for the precedence fix are
+/// `a_conditional_alternative_with_its_own_split_splits_at_runtime` and
+/// `a_cross_line_uniform_override_routes_uniformly_at_runtime` below, which
+/// parse real Oracle text and cast it.
 #[test]
-fn a_dig_whose_split_was_overridden_routes_uniformly_at_runtime() {
+fn a_library_bound_remainder_with_no_split_routes_uniformly() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mut runner = scenario.build();
@@ -1057,4 +1082,669 @@ fn non_splitting_dig_still_auto_routes_its_whole_remainder() {
         "the whole remainder still goes uniformly to rest_destination"
     );
     assert_eq!(st.objects[&c].zone, Zone::Graveyard);
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 (BLOCKER 1): the CR 401.4 ORDERING authority is the library's OWNER,
+// which is not always the player the effect gave the partition to.
+// ---------------------------------------------------------------------------
+
+/// Build and cast a synthetic cross-player dig: "Look at the top `count` cards
+/// of TARGET PLAYER's library. Put one of them into your hand, `top` on top of
+/// that player's library, and the rest on the bottom."
+///
+/// No printed card prints this shape today, so the `Effect::Dig` is assembled
+/// here — but it is assembled as a real ability on a real card and driven
+/// through the real cast pipeline (`GameRunner::cast(..).resolve()`), so every
+/// prompt under test is one production actually parks. Hand-installing a
+/// `WaitingFor` would assert about a state the engine may never produce, which
+/// is exactly the defect this blocker is about.
+fn cross_player_split_cast(
+    count: i32,
+    top: i32,
+    library_cards: usize,
+) -> (GameRunner, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_spell_to_hand(P0, "Borrowed Foresight", true);
+    builder.with_mana_cost(telling_time_cost());
+    builder.with_ability(Effect::Dig {
+        // "target player's library" — the axis that makes the chooser (P0, the
+        // spell's controller) and the library's owner (P1) different players.
+        player: TargetFilter::Player,
+        count: QuantityExpr::Fixed { value: count },
+        destination: Some(Zone::Hand),
+        keep_count: Some(1),
+        keep_count_expr: None,
+        up_to: false,
+        filter: TargetFilter::Any,
+        rest_destination: Some(Zone::Library),
+        rest_split_top_count: Some(QuantityExpr::Fixed { value: top }),
+        rest_order: DigRestOrder::Preserve,
+        reveal: false,
+        enter_tapped: false,
+        enters_attacking: false,
+        source: DigSource::Library,
+    });
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    for index in 0..library_cards {
+        add_library_card_for(&mut runner, P1, &format!("Theirs{index}"));
+    }
+    add_mana(&mut runner, ManaType::Blue, 2);
+
+    let outcome = runner.cast(spell_id).target_player(P1).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice {
+            cards,
+            library_owner,
+            player,
+            ..
+        } => {
+            assert_eq!(*library_owner, P1, "the dig reads P1's library");
+            assert_eq!(*player, P0, "P0 is the chooser");
+            cards.clone()
+        }
+        other => panic!("expected the keep prompt first, got {other:?}"),
+    };
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0]],
+        })
+        .expect("keeping one looked-at card must be accepted");
+    (runner, looked_at)
+}
+
+/// CR 401.4: "If an effect puts two or more cards in a specific position in a
+/// library at the same time, **the owner of those cards** may arrange them in
+/// any order."
+///
+/// The reviewer's minimal case. P0 digs P1's library and the whole three-card
+/// remainder goes to the BOTTOM (`top_count == 0`), so there is no partition
+/// decision at all — the only decision left is CR 401.4's arrangement, and it
+/// belongs to P1.
+///
+/// THE REGRESSION ASSERTION is the acting player: before this fix the prompt
+/// was parked for `player` (P0, the chooser) unconditionally, so P0 both made a
+/// decision that was never theirs and P1's submission was refused.
+#[test]
+fn a_degenerate_cross_player_split_asks_the_library_owner_for_the_order() {
+    let (mut runner, _looked_at) = cross_player_split_cast(4, 0, 5);
+
+    let (acting, owner, pile, scope) = match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            scope,
+            ..
+        } => (*player, *library_owner, cards.clone(), *scope),
+        other => panic!("expected a split prompt after the keep step, got {other:?}"),
+    };
+    assert_eq!(pile.len(), 3, "look at four, keep one, three remain");
+    assert_eq!(owner, P1);
+    // THE REGRESSION ASSERTION.
+    assert_eq!(
+        acting, P1,
+        "CR 401.4 gives the arrangement of a 2+ card pile to the OWNER of those \
+         cards (P1), not to the player the effect chose for (P0)"
+    );
+    assert_eq!(
+        scope,
+        DigRestSplitScope::OrderOnly,
+        "a forced partition leaves only the CR 401.4 arrangement"
+    );
+    // PAIRED NEGATIVE: the acting-authority census agrees, so the multiplayer
+    // server routes the prompt to P1 too rather than just this assertion
+    // reading a field nobody consults.
+    assert_eq!(
+        runner.state().waiting_for.acting_authority(),
+        engine::types::game_state::ActingAuthority::One(P1),
+        "the engine's own acting-authority answer must name the owner, not the \
+         chooser — this is what routes the prompt in multiplayer"
+    );
+
+    // (b) the final library order is what the OWNER submitted. Reverse the
+    // pile so encounter order and submitted order disagree.
+    let submitted = vec![pile[2], pile[0], pile[1]];
+    runner
+        .act(GameAction::SelectCards {
+            cards: submitted.clone(),
+        })
+        .expect("the owner's full arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[1].library.iter().copied().collect();
+    let tail: Vec<ObjectId> = library[library.len() - 3..].to_vec();
+    assert_eq!(
+        tail, submitted,
+        "the bottom pile must read back in the owner's submitted order"
+    );
+    assert_ne!(
+        submitted, pile,
+        "the fixture must submit an order that differs from the pile order"
+    );
+}
+
+/// The complementary half: when the partition IS a genuine choice, it stays
+/// with the chooser (CR 608.2d — the effect says "*you* put ... on top") and
+/// only the CR 401.4 arrangement moves to the owner. Two prompts, two actors.
+#[test]
+fn a_genuine_cross_player_split_partitions_then_hands_the_order_to_the_owner() {
+    // Look at 5, keep 1 -> a 4-card remainder, 2 on top and 2 on the bottom:
+    // a real partition AND both resulting piles need a CR 401.4 order.
+    let (mut runner, _looked_at) = cross_player_split_cast(5, 2, 6);
+
+    let (acting, pile, scope) = match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            scope,
+            ..
+        } => (*player, cards.clone(), *scope),
+        other => panic!("expected a partition prompt, got {other:?}"),
+    };
+    assert_eq!(pile.len(), 4);
+    assert_eq!(
+        acting, P0,
+        "CR 608.2d: the partition is the chooser's decision"
+    );
+    assert_eq!(scope, DigRestSplitScope::PartitionOnly);
+
+    // P0 partitions: pile[3] and pile[0] take the top.
+    let partition = vec![pile[3], pile[0], pile[2], pile[1]];
+    runner
+        .act(GameAction::SelectCards {
+            cards: partition.clone(),
+        })
+        .expect("the chooser's partition must be accepted");
+
+    // THE REGRESSION ASSERTION: a SECOND prompt, addressed to the owner.
+    let (order_actor, order_pile, order_scope, order_top) = match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            scope,
+            top_count,
+            ..
+        } => (*player, cards.clone(), *scope, *top_count),
+        other => panic!("expected an owner-addressed order prompt, got {other:?}"),
+    };
+    assert_eq!(
+        order_actor, P1,
+        "CR 401.4: each 2+ card pile is arranged by the library's owner"
+    );
+    assert_eq!(order_scope, DigRestSplitScope::OrderOnly);
+    assert_eq!(
+        order_pile, partition,
+        "the settled partition is carried over"
+    );
+    assert_eq!(order_top, 2);
+
+    // HOSTILE: the owner may reorder within a pile but may not re-partition —
+    // that decision was P0's and is already spent.
+    let err = runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[1], pile[2], pile[0], pile[3]],
+        })
+        .expect_err("the owner must not be able to change which cards go on top");
+    assert!(
+        format!("{err:?}").contains("may not change which cards are on top"),
+        "expected a partition-preservation rejection, got {err:?}"
+    );
+
+    // The owner swaps the order WITHIN each pile; that is legal and binding.
+    let owner_order = vec![partition[1], partition[0], partition[3], partition[2]];
+    runner
+        .act(GameAction::SelectCards {
+            cards: owner_order.clone(),
+        })
+        .expect("a within-pile reorder must be accepted");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[1].library.iter().copied().collect();
+    assert_eq!(
+        &library[..2],
+        &owner_order[..2],
+        "the top pile reads back in the OWNER's order, topmost first"
+    );
+    assert_eq!(
+        &library[library.len() - 2..],
+        &owner_order[2..],
+        "and so does the bottom pile"
+    );
+}
+
+/// PAIRED NEGATIVE / NO-CHANGE GUARD for the common case: when the chooser IS
+/// the library's owner (every printed card today, Telling Time included), both
+/// decisions are the same player's and exactly ONE prompt is parked. This is
+/// what keeps the cross-player fix from silently adding a second prompt to
+/// Telling Time.
+#[test]
+fn a_same_player_split_still_answers_both_decisions_in_one_prompt() {
+    let (mut runner, pile, _top_count) =
+        production_split_pause("Wide Top Split", WIDE_TOP_SPLIT_ORACLE, 5);
+    match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            scope,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*library_owner, P0);
+            assert_eq!(
+                *scope,
+                DigRestSplitScope::PartitionAndOrder,
+                "one player owns both decisions, so one prompt answers both"
+            );
+        }
+        other => panic!("expected a split prompt, got {other:?}"),
+    }
+    // A single submission finishes the split — no second prompt appears.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[2], pile[0], pile[1]],
+        })
+        .expect("the full arrangement must be accepted");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "a same-player split must not chain a second arrangement prompt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11 (BLOCKER 3): the "instead"-alternative precedence at BOTH call
+// sites, proven through the real parser and — where the branch is reachable —
+// a real cast.
+// ---------------------------------------------------------------------------
+
+/// Walk an ability's `sub_ability` chain, collecting every `Effect::Dig`. The
+/// CROSS-LINE binder (`oracle.rs`'s `previous_spell =
+/// emitter.last_ability_definition()` call site) parks the alternative as the
+/// printed Dig's `sub_ability`, where `collect_dig_chain`'s `else_ability` walk
+/// cannot see it.
+fn cross_line_alternative_dig(parsed: &engine::parser::oracle::ParsedAbilities) -> &Effect {
+    let base = parsed
+        .abilities
+        .first()
+        .expect("the two-line card must publish one bound ability, not two siblings");
+    assert!(
+        matches!(*base.effect, Effect::Dig { .. }),
+        "line 1 must stay the printed Dig, got {:?}",
+        base.effect
+    );
+    let sub = base
+        .sub_ability
+        .as_ref()
+        .expect("the ability-word override must BIND to the Dig as its sub_ability");
+    assert!(
+        matches!(
+            sub.condition,
+            Some(engine::types::ability::AbilityCondition::ConditionInstead { .. })
+        ),
+        "CR 614.15: the override is a ConditionInstead branch, got {:?}",
+        sub.condition
+    );
+    sub.effect.as_ref()
+}
+
+fn dig_split(effect: &Effect) -> Option<QuantityExpr> {
+    match effect {
+        Effect::Dig {
+            rest_split_top_count,
+            ..
+        } => rest_split_top_count.clone(),
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
+
+/// Line 1 is a complete split-Dig (Telling Time's own shape); line 2 is a
+/// separate ability-word "instead" override naming a UNIFORM remainder.
+const CROSS_LINE_UNIFORM_OVERRIDE: &str = "Look at the top three cards of your library. \
+Put one of those cards into your hand, one on top of your library, and one on the bottom \
+of your library.\nSpell mastery — If there are two or more instant and/or sorcery cards \
+in your graveyard, put two of those cards into your hand and the rest on the bottom of \
+your library instead.";
+
+/// Line 1 is a plain uniform-remainder Dig; line 2's override names its OWN
+/// top/bottom split.
+const CROSS_LINE_OWN_SPLIT_OVERRIDE: &str = "Look at the top four cards of your library. \
+Put one of those cards into your hand and the rest on the bottom of your library.\n\
+Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, \
+put one of those cards into your hand, two on top of your library, and one on the bottom \
+of your library instead.";
+
+/// CR 608.2c, at the CROSS-LINE call site (`parser/oracle.rs`'s
+/// `previous_spell = emitter.last_ability_definition()`).
+///
+/// This is the site the prior round's characterization test explicitly left
+/// unexercised. Unlike the intra-chain site, `previous` here is a
+/// FULLY-ASSEMBLED prior ability, so its `rest_split_top_count` really is
+/// `Some(1)` when `try_parse_dig_instead_alternative` runs — which makes the
+/// old unconditional `prev_rest_split_top_count.clone()` actively wrong rather
+/// than merely redundant.
+///
+/// THE REGRESSION ASSERTION: the override named a single uniform remainder
+/// position, so it must carry NO split. Reverting the precedence to the
+/// unconditional clone gives the alternative the base line's `Some(1)`.
+#[test]
+fn a_cross_line_uniform_override_clears_the_inherited_split() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        CROSS_LINE_UNIFORM_OVERRIDE,
+        "Cross Line Uniform Override",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let base = parsed.abilities[0].effect.as_ref();
+    // REACH GUARD / PAIRED POSITIVE: the base line really does carry a split,
+    // so there is something for the alternative to have wrongly inherited.
+    assert_eq!(
+        dig_split(base),
+        Some(QuantityExpr::Fixed { value: 1 }),
+        "line 1 must keep its own top/bottom split"
+    );
+    assert_eq!(
+        dig_split(cross_line_alternative_dig(&parsed)),
+        None,
+        "an explicit uniform remainder on the override must override the base \
+         line's split, not inherit it"
+    );
+}
+
+/// The complementary precedence rule at the same cross-line site: an override
+/// that names its OWN split keeps it.
+///
+/// THE REGRESSION ASSERTION: reverting to the unconditional
+/// `prev_rest_split_top_count.clone()` discards the override's own `Some(2)`
+/// and substitutes the base line's `None`.
+#[test]
+fn a_cross_line_override_keeps_its_own_split() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        CROSS_LINE_OWN_SPLIT_OVERRIDE,
+        "Cross Line Own Split Override",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    // REACH GUARD: the base line is split-free, so the assertion below cannot
+    // be reading an inherited value.
+    assert_eq!(dig_split(parsed.abilities[0].effect.as_ref()), None);
+    assert_eq!(
+        dig_split(cross_line_alternative_dig(&parsed)),
+        Some(QuantityExpr::Fixed { value: 2 }),
+        "the override's OWN top/bottom split must survive the rebuild"
+    );
+}
+
+/// Cast a synthetic conditional-Dig card for real, with `graveyard_spells`
+/// instants already in P0's graveyard so a "spell mastery" style condition can
+/// be turned on or off, and `creatures` creatures on the battlefield for the
+/// "if you control a creature" condition.
+fn cast_conditional_dig(
+    name: &str,
+    oracle: &str,
+    library_cards: usize,
+    graveyard_spells: usize,
+    creatures: usize,
+) -> (GameRunner, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for index in 0..graveyard_spells {
+        scenario.add_spell_to_graveyard(P0, &format!("Spent Instant {index}"), true);
+    }
+    for index in 0..creatures {
+        scenario.add_creature(P0, &format!("Witness {index}"), 1, 1);
+    }
+    let mut builder = scenario.add_spell_to_hand_from_oracle(P0, name, true, oracle);
+    builder.with_mana_cost(telling_time_cost());
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+    for index in 0..library_cards {
+        add_library_card(&mut runner, &format!("Cond{index}"));
+    }
+    add_mana(&mut runner, ManaType::Blue, 2);
+
+    let outcome = runner.cast(spell_id).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice { cards, .. } => cards.clone(),
+        other => panic!("expected the keep prompt first, got {other:?}"),
+    };
+    (runner, looked_at)
+}
+
+/// Base branch names a uniform remainder; the CONDITIONAL ALTERNATIVE names its
+/// own top/bottom split. This is the runtime half of
+/// `an_alternative_branch_keeps_its_own_top_bottom_split` (which only asserted
+/// AST shape) for the INTRA-CHAIN call site.
+const CONDITIONAL_OWN_SPLIT: &str = "Look at the top three cards of your library. \
+Put two of those cards into your hand and the rest on the bottom of your library. \
+If you control a creature, you may instead put one of them into your hand, one on top \
+of your library, and one on the bottom of your library.";
+
+/// CR 608.2c: parse real Oracle text, CAST it, and assert where the cards
+/// actually land.
+///
+/// With a creature on the battlefield the conditional alternative is the branch
+/// that runs, so its OWN split must produce a real `DigRestSplitChoice` and a
+/// real top/bottom placement.
+///
+/// THE REGRESSION ASSERTION is the prompt plus the final library order:
+/// reverting `try_parse_dig_instead_alternative` to discard the alternative's
+/// `rest_split_top_count` leaves the alternative split-free, so no split prompt
+/// is ever parked and `act` on the arrangement fails outright.
+#[test]
+fn a_conditional_alternative_with_its_own_split_splits_at_runtime() {
+    let (mut runner, looked_at) = cast_conditional_dig(
+        "Conditional Split Alternative",
+        CONDITIONAL_OWN_SPLIT,
+        4,
+        0,
+        1,
+    );
+    assert_eq!(looked_at.len(), 3, "look at the top three");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0]],
+        })
+        .expect("the alternative keeps exactly ONE card, not the base branch's two");
+
+    // THE REGRESSION ASSERTION #1: the alternative's split reached the resolver.
+    let pile = match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            cards, top_count, ..
+        } => {
+            assert_eq!(*top_count, 1, "one of the remainder goes on top");
+            cards.clone()
+        }
+        other => {
+            panic!("the alternative branch's own split must raise a split prompt, got {other:?}")
+        }
+    };
+    assert_eq!(pile.len(), 2);
+
+    // REGRESSION ASSERTION #2: the cards land where the arrangement says.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile[1], pile[0]],
+        })
+        .expect("a full arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    let st = runner.state();
+    let library: Vec<ObjectId> = st.players[0].library.iter().copied().collect();
+    assert_eq!(st.objects[&looked_at[0]].zone, Zone::Hand);
+    assert_eq!(library.first(), Some(&pile[1]), "chosen card on TOP");
+    assert_eq!(library.last(), Some(&pile[0]), "the other on the BOTTOM");
+}
+
+/// PAIRED NEGATIVE for the test above: with NO creature the CONDITION is false,
+/// so the base branch runs — it keeps two and routes its whole remainder
+/// uniformly, with no split prompt. Without this, the test above could pass
+/// against a parser that put a split on both branches.
+#[test]
+fn the_base_branch_of_the_same_card_routes_uniformly_at_runtime() {
+    let (mut runner, looked_at) = cast_conditional_dig(
+        "Conditional Split Alternative",
+        CONDITIONAL_OWN_SPLIT,
+        4,
+        0,
+        0,
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0], looked_at[1]],
+        })
+        .expect("the base branch keeps TWO cards");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "the base branch names one uniform remainder position and must not split"
+    );
+    runner.advance_until_stack_empty();
+    let st = runner.state();
+    assert_eq!(
+        st.players[0].library.iter().copied().last(),
+        Some(looked_at[2]),
+        "the remainder went uniformly to the library BOTTOM"
+    );
+}
+
+/// RUNTIME discrimination for the CROSS-LINE call site: the same two-line card
+/// as `a_cross_line_uniform_override_clears_the_inherited_split`, cast for real
+/// with spell mastery ON so the override is the branch that runs.
+///
+/// THE REGRESSION ASSERTION: the override's uniform remainder must route with
+/// NO split prompt. Reverting the precedence makes the override inherit line
+/// 1's `Some(1)`, which parks a `DigRestSplitChoice` the card's own text never
+/// asks for — and this test fails on the very next line.
+#[test]
+fn a_cross_line_uniform_override_routes_uniformly_at_runtime() {
+    let (mut runner, looked_at) = cast_conditional_dig(
+        "Cross Line Uniform Override",
+        CROSS_LINE_UNIFORM_OVERRIDE,
+        4,
+        2,
+        0,
+    );
+    assert_eq!(looked_at.len(), 3, "line 1's source (top three) is reused");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0], looked_at[1]],
+        })
+        .expect("spell mastery is on, so the override keeps TWO cards");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "the override's explicit uniform remainder must not inherit line 1's split"
+    );
+    runner.advance_until_stack_empty();
+    let st = runner.state();
+    assert_eq!(st.objects[&looked_at[0]].zone, Zone::Hand);
+    assert_eq!(st.objects[&looked_at[1]].zone, Zone::Hand);
+    assert_eq!(
+        st.players[0].library.iter().copied().last(),
+        Some(looked_at[2]),
+        "the whole remainder went uniformly to the library BOTTOM"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 (COVERAGE): the client-facing projection carries the WHOLE prompt.
+// ---------------------------------------------------------------------------
+
+/// `game/visibility.rs` rebuilds `DigRestSplitChoice` field-by-field for each
+/// viewer, which is exactly the seam where a newly added field gets silently
+/// dropped on its way to a client. This pins the round trip end to end:
+/// production pause -> viewer projection -> JSON -> back, for the viewer who
+/// must answer the prompt.
+///
+/// No field-loss defect is known today; this is the coverage that makes the
+/// next one loud instead of silent.
+#[test]
+fn the_split_prompt_survives_the_viewer_projection_and_a_json_round_trip() {
+    let (runner, pile, top_count) =
+        production_split_pause("Wide Top Split", WIDE_TOP_SPLIT_ORACLE, 5);
+    assert_eq!(pile.len(), 3);
+    assert_eq!(top_count, 2);
+
+    let projected = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    let json = serde_json::to_string(&projected.waiting_for).expect("prompt must serialize");
+    let restored: WaitingFor = serde_json::from_str(&json).expect("prompt must deserialize");
+
+    match restored {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            top_count: restored_top,
+            bottom_count,
+            scope,
+            source_id,
+            completion,
+        } => {
+            assert_eq!(player, P0, "the acting player survives");
+            assert_eq!(library_owner, P0, "the CR 401.4 authority survives");
+            assert_eq!(cards, pile, "the acting viewer sees real card identities");
+            assert_eq!(restored_top, top_count);
+            // NON-BLOCKING 2: the bottom half of the prompt's own description
+            // is engine-supplied, so the client formats rather than derives.
+            assert_eq!(
+                bottom_count,
+                pile.len() - top_count,
+                "the engine states the bottom count instead of leaving the \
+                 client to compute `cards.length - top_count`"
+            );
+            assert_eq!(scope, DigRestSplitScope::PartitionAndOrder);
+            assert!(source_id.is_some(), "the prompt's source survives");
+            // The one field that is deliberately NOT shipped: engine-internal
+            // bookkeeping holding the same private ids.
+            assert!(
+                completion.is_none(),
+                "the deferred dig tail is engine-internal and must be stripped"
+            );
+        }
+        other => panic!("expected DigRestSplitChoice, got {other:?}"),
+    }
+}
+
+/// PAIRED NEGATIVE: a viewer who is NOT the acting player still receives a
+/// prompt of the right SHAPE — same counts, same scope — but with the card
+/// identities redacted (CR 701.20e: the remainder was shown only to the
+/// looking player). The engine-supplied counts must not be redacted with them,
+/// or the observer's UI would have to derive them back.
+#[test]
+fn a_non_acting_viewer_sees_the_counts_but_not_the_identities() {
+    let (runner, pile, top_count) =
+        production_split_pause("Wide Top Split", WIDE_TOP_SPLIT_ORACLE, 5);
+    let projected = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    match &projected.waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            cards,
+            top_count: seen_top,
+            bottom_count,
+            scope,
+            ..
+        } => {
+            assert_eq!(cards.len(), pile.len(), "the pile SIZE is public");
+            assert!(
+                cards.iter().all(|id| *id == ObjectId(0)),
+                "an opponent must not learn which cards are in the pile"
+            );
+            assert_eq!(*seen_top, top_count);
+            assert_eq!(*bottom_count, pile.len() - top_count);
+            assert_eq!(*scope, DigRestSplitScope::PartitionAndOrder);
+        }
+        other => panic!("expected DigRestSplitChoice, got {other:?}"),
+    }
 }

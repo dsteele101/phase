@@ -1428,7 +1428,10 @@
       "subtitleSplit_other": "Ułóż karty: {{count}} trafią na wierzch twojej biblioteki, pozostałe {{remaining}} trafią na spód",
       "badgeTop": "Wierzch {{order}}",
       "badgeBottom": "Spód",
-      "hintSplit": "Przeciągnij, aby zmienić kolejność · zielone trafiają na wierzch (pierwsza najwyżej), szare na spód"
+      "hintSplit": "Przeciągnij, aby zmienić kolejność · zielone trafiają na wierzch (pierwsza najwyżej), szare na spód",
+      "moveEarlier": "Przesuń {{card}} wcześniej",
+      "moveLater": "Przesuń {{card}} później",
+      "hintSplitOrderOnly": "Przeciągnij lub użyj strzałek, aby zmienić kolejność w obrębie każdego stosu · to, które karty trafią na wierzch, wybrał inny gracz"
     },
     "surveil": {
       "title": "Surveil",

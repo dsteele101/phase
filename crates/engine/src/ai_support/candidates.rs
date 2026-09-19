@@ -1395,6 +1395,25 @@ pub fn candidate_actions_broad_with_probe(
         // orders both piles by intrinsic value when it actually picks. This
         // mirrors `RippleBottomOrder` above, which likewise enumerates one
         // arrangement rather than every permutation.
+        //
+        // CR 401.4: an `OrderOnly` prompt has no partition left to enumerate —
+        // the acting player is the library's OWNER and may only reorder within
+        // each already-settled pile. Enumerating combinations there would emit
+        // actions the resolver rejects, so it offers the one canonical
+        // arrangement (the pile as parked), matching the "order within a pile
+        // is not enumerated" rule above.
+        WaitingFor::DigRestSplitChoice {
+            player,
+            cards,
+            scope,
+            ..
+        } if !scope.partition_is_open() => vec![candidate(
+            GameAction::SelectCards {
+                cards: cards.clone(),
+            },
+            TacticalClass::Selection,
+            Some(*player),
+        )],
         WaitingFor::DigRestSplitChoice {
             player,
             cards,

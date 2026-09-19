@@ -14844,6 +14844,59 @@ impl DigRestOrder {
     }
 }
 
+/// CR 608.2d vs CR 401.4: WHICH of a Telling Time-class remainder split's two
+/// decisions a given `WaitingFor::DigRestSplitChoice` prompt still carries, and
+/// therefore WHOSE decision it is.
+///
+/// A split bundles two rules-distinct choices with two distinct owners:
+///
+/// * the PARTITION — which cards take the library top and which take the
+///   bottom. CR 608.2d makes this the choice of the player the effect gives it
+///   to ("*you* ... put one on top of your library"), i.e. the dig's chooser.
+/// * the ARRANGEMENT — the order of the cards landing in each position.
+///   CR 401.4: "If an effect puts two or more cards in a specific position in a
+///   library at the same time, **the owner of those cards** may arrange them in
+///   any order." That is the LIBRARY'S OWNER, who need not be the chooser.
+///
+/// For every printed card today the two players coincide (Telling Time digs
+/// "your library"), so the common case answers both in one prompt. Splitting
+/// the vocabulary keeps a cross-player dig ("look at the top three cards of
+/// target player's library ...") from silently handing CR 401.4's arrangement
+/// to the chooser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestSplitScope {
+    /// The acting player is BOTH the chooser and the library's owner, so this
+    /// one prompt answers the CR 608.2d partition and the CR 401.4 arrangement
+    /// together. The default, and the only scope a same-player dig ever parks.
+    #[default]
+    PartitionAndOrder,
+    /// The acting player is the chooser but NOT the library's owner. Only the
+    /// CR 608.2d partition — the SET of cards in the leading `top_count`
+    /// entries — is binding here; the within-pile order they submit is
+    /// discarded and re-asked of the owner as an [`Self::OrderOnly`] prompt
+    /// whenever a resulting pile holds two or more cards.
+    PartitionOnly,
+    /// The acting player is the library's OWNER and the partition is already
+    /// settled. CR 401.4 is all that is left, so the submission must be a
+    /// permutation that keeps the same cards in the leading `top_count`
+    /// entries — the owner may reorder within each pile but may not move a
+    /// card across the top/bottom boundary, which was never their decision.
+    OrderOnly,
+}
+
+impl DigRestSplitScope {
+    /// True when the submission's leading `top_count` entries are free to be
+    /// any subset (the partition is still open), false when they are pinned to
+    /// the already-settled top pile.
+    pub fn partition_is_open(self) -> bool {
+        matches!(
+            self,
+            DigRestSplitScope::PartitionAndOrder | DigRestSplitScope::PartitionOnly
+        )
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
 /// card set from. `Library` (the default) reads from the top of the library;
 /// `PriorLook` reads from `GameState::private_look_ids`, which was populated

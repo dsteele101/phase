@@ -1428,7 +1428,10 @@
       "subtitleSplit_other": "Organisez les cartes : {{count}} iront sur le dessus de votre bibliothèque, les {{remaining}} autres iront dessous",
       "badgeTop": "Dessus {{order}}",
       "badgeBottom": "Dessous",
-      "hintSplit": "Glissez pour réorganiser · les vertes vont dessus (la première tout en haut), les grises dessous"
+      "hintSplit": "Glissez pour réorganiser · les vertes vont dessus (la première tout en haut), les grises dessous",
+      "moveEarlier": "Déplacer {{card}} vers l’avant",
+      "moveLater": "Déplacer {{card}} vers l’arrière",
+      "hintSplitOrderOnly": "Glissez ou utilisez les flèches pour réorganiser dans chaque pile · un autre joueur a choisi les cartes qui vont dessus"
     },
     "surveil": {
       "title": "Surveillance",

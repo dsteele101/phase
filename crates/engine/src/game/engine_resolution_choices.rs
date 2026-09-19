@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
-    LibraryPosition, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ResolvedAbility,
-    TargetRef,
+    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, DigRestSplitScope, Effect, EffectKind,
+    GuessOutcome, LibraryPosition, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -1133,6 +1133,20 @@ pub(crate) fn route_rest_split_then(
 /// `WaitingFor::RippleBottomOrder` already uses for its own "in any order"
 /// pile — one prompt carries both the partition and both piles' orders, rather
 /// than chaining a second and third prompt for the same instruction.
+///
+/// WHO answers it depends on whether the two decisions have the same owner:
+///
+/// * `player == library_owner` (every printed card today — a dig of "your
+///   library") — one [`DigRestSplitScope::PartitionAndOrder`] prompt, exactly
+///   as before.
+/// * `player != library_owner` (a dig of "target player's library") — the two
+///   decisions belong to two different players and must be asked separately.
+///   CR 608.2d gives the partition to the chooser and CR 401.4 gives each 2+
+///   card pile's arrangement to the LIBRARY'S OWNER, so a genuine partition
+///   parks [`DigRestSplitScope::PartitionOnly`] for the chooser first, and a
+///   degenerate one (`top_count == 0` or `== pile.len()`, where the partition
+///   was never a decision) skips straight to the owner's
+///   [`DigRestSplitScope::OrderOnly`] prompt.
 fn split_rest_pile_or_park(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -1154,14 +1168,26 @@ fn split_rest_pile_or_park(
         .first()
         .and_then(|id| state.objects.get(id))
         .map_or(player, |obj| obj.owner);
-    state.waiting_for = WaitingFor::DigRestSplitChoice {
+    // CR 608.2d + CR 401.4: one prompt only while one player owns both
+    // decisions. Otherwise the partition is the chooser's and the arrangement
+    // is the owner's, and a degenerate partition is no decision at all — so
+    // there is nothing to ask the chooser and the owner is asked directly.
+    let scope = if player == library_owner {
+        DigRestSplitScope::PartitionAndOrder
+    } else if top_count == 0 || top_count == pile.len() {
+        DigRestSplitScope::OrderOnly
+    } else {
+        DigRestSplitScope::PartitionOnly
+    };
+    state.waiting_for = WaitingFor::new_dig_rest_split(
         player,
         library_owner,
-        cards: pile.to_vec(),
+        pile.to_vec(),
         top_count,
+        scope,
         source_id,
-        completion: Some(Box::new(completion)),
-    };
+        Some(Box::new(completion)),
+    );
     crate::game::zone_pipeline::BatchMoveResult::Done
 }
 
@@ -1185,6 +1211,8 @@ fn split_rest_pile_or_park(
 fn validate_dig_rest_split_selection(
     arrangement: &[ObjectId],
     pile: &[ObjectId],
+    top_count: usize,
+    scope: DigRestSplitScope,
 ) -> Result<(), EngineError> {
     if arrangement.len() != pile.len() {
         return Err(EngineError::InvalidAction(format!(
@@ -1203,6 +1231,27 @@ fn validate_dig_rest_split_selection(
         if !pile.contains(id) {
             return Err(EngineError::InvalidAction(
                 "rest-split selection contains a card that is not in the rest pile".to_string(),
+            ));
+        }
+    }
+    // CR 401.4 only: the partition was already settled by the chooser, so this
+    // prompt's acting player (the library's owner) may reorder WITHIN each pile
+    // but may not move a card across the top/bottom boundary — that was never
+    // their decision to make. `pile` is stored top-pile-first, so the leading
+    // `top_count` entries of both lists must name the same SET.
+    if !scope.partition_is_open() {
+        let settled_top: std::collections::HashSet<_> =
+            pile[..top_count.min(pile.len())].iter().copied().collect();
+        let submitted_top: std::collections::HashSet<_> = arrangement
+            [..top_count.min(arrangement.len())]
+            .iter()
+            .copied()
+            .collect();
+        if settled_top != submitted_top {
+            return Err(EngineError::InvalidAction(
+                "rest-split arrangement may reorder each pile but may not change which cards \
+                 are on top; the partition was already chosen by another player"
+                    .to_string(),
             ));
         }
     }
@@ -4047,16 +4096,18 @@ pub(super) fn handle_resolution_choice(
         // bottom, each pile in exactly the submitted order (CR 401.4).
         (
             WaitingFor::DigRestSplitChoice {
-                player: _,
-                library_owner: _,
+                player: split_player,
+                library_owner,
                 cards,
                 top_count,
+                bottom_count: _,
+                scope,
                 source_id: split_source_id,
                 completion,
             },
             GameAction::SelectCards { cards: arrangement },
         ) => {
-            validate_dig_rest_split_selection(&arrangement, &cards)?;
+            validate_dig_rest_split_selection(&arrangement, &cards, top_count, scope)?;
             // VALIDATE BEFORE MUTATING. `completion` carries the dig's entire
             // deferred tail — `BatchCompletion::RevealRestPile`'s reveal-marker
             // cleanup, tracked-set publication, continuation wiring and
@@ -4080,7 +4131,35 @@ pub(super) fn handle_resolution_choice(
             };
             // Total: `top_count` was clamped to `cards.len()` at park time and
             // `arrangement` was just proven to be a permutation of `cards`.
-            let (top_cards, bottom_cards) = arrangement.split_at(top_count.min(arrangement.len()));
+            let split_at = top_count.min(arrangement.len());
+            // CR 401.4: the chooser has now fixed WHICH cards take each
+            // position, but they are not the owner of these cards, so the
+            // order within any 2+ card pile is still the owner's to choose.
+            // Hand the same pile straight on as an owner-addressed
+            // arrangement prompt, carrying the dig's deferred tail verbatim —
+            // the identical `completion` hand-off `split_rest_pile_or_park`
+            // performs, one prompt later.
+            if scope == DigRestSplitScope::PartitionOnly
+                && (split_at >= 2 || arrangement.len() - split_at >= 2)
+            {
+                debug_assert_ne!(
+                    split_player, library_owner,
+                    "PartitionOnly is only parked when the chooser is not the owner"
+                );
+                state.waiting_for = WaitingFor::new_dig_rest_split(
+                    split_player,
+                    library_owner,
+                    arrangement,
+                    split_at,
+                    DigRestSplitScope::OrderOnly,
+                    split_source_id,
+                    Some(completion),
+                );
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+            let (top_cards, bottom_cards) = arrangement.split_at(split_at);
             route_rest_split_then(
                 state,
                 top_cards,
