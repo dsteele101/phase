@@ -867,14 +867,24 @@ fn collect_dig_chain(parsed: &engine::parser::oracle::ParsedAbilities) -> Vec<&E
 ///
 /// This assertion is currently satisfied both with and without the precedence
 /// fix, and deliberately does not claim otherwise. Reason, verified by
-/// instrumenting `try_parse_dig_instead_alternative`: when that function runs,
-/// the `previous` ability it reads is still the RAW look-only Dig
-/// (`destination: None, keep_count: None, rest_destination: None,
-/// rest_split_top_count: None`). The base branch's split is patched on later,
-/// by `apply_clause_continuation` in `parser/oracle_effect/sequence.rs`. So
-/// `prev_rest_split_top_count` is `None` on every path through this site that
-/// current Oracle grammar can reach, and the old unconditional clone had
-/// nothing to contaminate the alternative WITH.
+/// instrumenting `try_parse_dig_instead_alternative`: for the intra-chain call
+/// site in `parser/oracle_effect/mod.rs` (`prev_temp`, built from
+/// `prev_clause.parsed.effect` before Phase-1 assembly patches
+/// `rest_split_top_count` onto the base branch), the `previous` ability it
+/// reads is still the RAW look-only Dig (`destination: None, keep_count:
+/// None, rest_destination: None, rest_split_top_count: None`), so
+/// `prev_rest_split_top_count` is `None` there and the old unconditional
+/// clone had nothing to contaminate the alternative WITH.
+///
+/// This does NOT cover the second call site (`oracle.rs`'s
+/// `previous_spell = emitter.last_ability_definition()`), where `previous` is
+/// a fully-assembled prior ability whose `rest_split_top_count` CAN be
+/// non-`None` (e.g. a two-line card: line 1 a complete split-Dig, line 2 a
+/// separate ability-word "instead" override). No fixture exercises that
+/// cross-line path. The precedence fix itself
+/// (`alt_rest_split_top_count.or_else(...)`) is generic over both call sites
+/// and is the CR-608.2c-correct answer either way, so this is a coverage gap
+/// in this characterization, not a known defect.
 ///
 /// The fix is kept because the precedence it encodes is the correct reading of
 /// CR 608.2c and because the sibling `alt_rest` / `alt_rest_order` fields at
