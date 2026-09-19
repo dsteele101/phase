@@ -81,4 +81,35 @@ describe("RevealUntilBottomOrderModal", () => {
       data: { cards: [10, 11] },
     });
   });
+
+  it("allows reordering cards with move buttons and dispatches changed permutation", () => {
+    setWaitingFor(
+      {
+        type: "RevealUntilBottomOrder",
+        data: {
+          player: 0,
+          source_id: 1,
+          cards: [10, 11],
+        },
+      },
+      {
+        10: makeObject(10, "Lightning Bolt"),
+        11: makeObject(11, "Counterspell"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    const moveRightButtons = screen.getAllByRole("button", { name: /Move right/i });
+    expect(moveRightButtons[0]).not.toBeDisabled();
+    fireEvent.click(moveRightButtons[0]);
+
+    const confirmButton = screen.getByRole("button", { name: /Done|Confirm/i });
+    fireEvent.click(confirmButton);
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [11, 10] },
+    });
+  });
 });

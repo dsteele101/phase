@@ -299,3 +299,171 @@ fn erratic_mutation_replacement_pause_preserves_mana_value_referent() {
         "toughness must be 2 (5 - 3 from hit card MV across replacement pause)"
     );
 }
+
+/// CR 701.20a + CR 608.2c: "Put those land cards onto the battlefield tapped and
+/// the rest on the bottom of your library in a random order." The rest pile must
+/// be placed on the bottom in random order (not pausing for player choice and not preserving top order).
+#[test]
+fn the_ring_goes_south_battlefield_tapped_and_random_bottom_rest() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let legendary = scenario
+        .add_creature(P0, "Frodo Baggins", 2, 2)
+        .as_legendary()
+        .id();
+
+    let oracle = "The Ring tempts you. Then reveal cards from the top of your library until you reveal X land cards, where X is the number of legendary creatures you control. Put those land cards onto the battlefield tapped and the rest on the bottom of your library in a random order.";
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "The Ring Goes South", false, oracle)
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let land = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .id();
+    let spell2 = scenario
+        .add_spell_to_library_top(P0, "Divination", false)
+        .id();
+    let spell1 = scenario
+        .add_spell_to_library_top(P0, "Lightning Bolt", false)
+        .id();
+
+    let mut runner = scenario.build();
+
+    let mut committed = runner.cast(spell).commit();
+    committed
+        .act(engine::types::actions::GameAction::PassPriority)
+        .unwrap();
+    committed
+        .act(engine::types::actions::GameAction::PassPriority)
+        .unwrap();
+
+    // The Ring tempts you prompts for Ring Bearer choice
+    if let engine::types::game_state::WaitingFor::ChooseRingBearer { .. } =
+        committed.state().waiting_for
+    {
+        committed
+            .act(engine::types::actions::GameAction::ChooseRingBearer { target: legendary })
+            .unwrap();
+    }
+
+    // Resolution completes: land enters battlefield tapped, spell1 and spell2 are bottomed (under deep) in random order.
+    assert_eq!(committed.state().objects[&land].zone, Zone::Battlefield);
+    assert!(committed.state().objects[&land].tapped);
+
+    let p0_lib = &committed
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library;
+    assert_eq!(p0_lib[0], deep);
+    assert!(p0_lib.contains(&spell1));
+    assert!(p0_lib.contains(&spell2));
+    assert_eq!(p0_lib.len(), 3);
+}
+
+/// CR 608.2c + CR 607.1: A compound exile chain (e.g. ExileTop followed by GrantCastingPermission
+/// with TargetFilter::TrackedSet) must grant casting permissions over the entire tracked set,
+/// not just the last exiled card from the final ExileTop step.
+#[test]
+fn compound_exile_grants_casting_permission_over_full_tracked_set() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, CastingPermission, Effect, LibraryPosition, TargetFilter,
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Build a custom compound exile spell:
+    // 1. Exile top 2 cards
+    // 2. Grant casting permission over TargetFilter::TrackedSet
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+            position: LibraryPosition::Top,
+            face_down: false,
+        },
+    );
+    ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::ExileWithAltCost {
+                cost: ManaCost::zero(),
+                cost_provenance: engine::types::ability::ExileGrantCostProvenance::Alternative,
+                cast_transformed: false,
+                constraint: None,
+                granted_to: None,
+                resolution_cleanup: None,
+                duration: None,
+                source_id: None,
+                graveyard_replacement: None,
+                mana_spend_permission: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+            },
+            target: TargetFilter::TrackedSet {
+                id: engine::types::identifiers::TrackedSetId(0),
+            },
+            grantee: engine::types::ability::PermissionGrantee::AbilityController,
+        },
+    )));
+
+    let spell = scenario
+        .add_spell_to_hand(P0, "Impulse Exile", false)
+        .with_ability_definition(ability)
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let card2 = scenario
+        .add_spell_to_library_top(P0, "Card Two", false)
+        .id();
+    let card1 = scenario
+        .add_spell_to_library_top(P0, "Card One", false)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).resolve();
+
+    let state = outcome.state();
+    assert_eq!(state.objects[&card1].zone, Zone::Exile);
+    assert_eq!(state.objects[&card2].zone, Zone::Exile);
+
+    // Both cards must have casting permissions granted
+    assert!(
+        state.objects[&card1]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::ExileWithAltCost { granted_to: Some(p_id), .. } if *p_id == P0)),
+        "card1 must have casting permission granted from tracked set"
+    );
+    assert!(
+        state.objects[&card2]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::ExileWithAltCost { granted_to: Some(p_id), .. } if *p_id == P0)),
+        "card2 must have casting permission granted from tracked set"
+    );
+}

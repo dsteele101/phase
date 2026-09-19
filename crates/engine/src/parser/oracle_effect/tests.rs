@@ -40379,6 +40379,7 @@ fn reveal_until_ring_goes_south_land_cards_to_battlefield_tapped() {
                 filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
                 kept_destination: Zone::Battlefield,
                 rest_destination: Zone::Library,
+                rest_order: crate::types::ability::DigRestOrder::Random,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 ..

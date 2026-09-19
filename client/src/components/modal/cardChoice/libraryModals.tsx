@@ -303,6 +303,19 @@ export function RevealUntilBottomOrderModal({
   const scrollRef = useHorizontalScroll<HTMLDivElement>({ drag: false });
   const [order, setOrder] = useState<ObjectId[]>(data.cards);
 
+  const move = useCallback(
+    (from: number, to: number) => {
+      if (to < 0 || to >= order.length) return;
+      setOrder((prev) => {
+        const next = [...prev];
+        const [item] = next.splice(from, 1);
+        next.splice(to, 0, item);
+        return next;
+      });
+    },
+    [order.length],
+  );
+
   if (!objects) return null;
 
   return (
@@ -351,6 +364,34 @@ export function RevealUntilBottomOrderModal({
                     {index + 1}
                   </div>
                 </div>
+                {order.length > 1 && (
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      aria-label={t("cardChoice.revealUntilBottom.moveLeft")}
+                      disabled={index === 0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        move(index, index - 1);
+                      }}
+                      className="rounded bg-slate-700/80 px-2 py-0.5 text-xs text-white transition hover:bg-slate-600 disabled:opacity-30"
+                    >
+                      ←
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("cardChoice.revealUntilBottom.moveRight")}
+                      disabled={index === order.length - 1}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        move(index, index + 1);
+                      }}
+                      className="rounded bg-slate-700/80 px-2 py-0.5 text-xs text-white transition hover:bg-slate-600 disabled:opacity-30"
+                    >
+                      →
+                    </button>
+                  </div>
+                )}
               </Reorder.Item>
             );
           })}

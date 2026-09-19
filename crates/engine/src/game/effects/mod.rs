@@ -4531,7 +4531,8 @@ fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter>
         Effect::CastFromZone { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
         | Effect::ChangeZone { target, .. }
-        | Effect::Transform { target, .. } => Some(target),
+        | Effect::Transform { target, .. }
+        | Effect::Reveal { target, .. } => Some(target),
         _ => None,
     }
 }
@@ -6854,14 +6855,23 @@ fn filter_prop_references_tracked_quantity(prop: &crate::types::ability::FilterP
 }
 
 fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
-    effect.target_filter().is_some_and(|f| {
+    let matches_filter = |f: &TargetFilter| {
         matches!(
             f,
             TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
                 | TargetFilter::ExiledBySource
         )
-    })
+    };
+    if effect.target_filter().is_some_and(matches_filter) {
+        return true;
+    }
+    match effect {
+        Effect::GrantCastingPermission { target, .. } | Effect::CastCopyOfCard { target, .. } => {
+            matches_filter(target)
+        }
+        _ => false,
+    }
 }
 
 /// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`

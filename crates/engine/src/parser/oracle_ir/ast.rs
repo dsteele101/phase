@@ -534,6 +534,11 @@ pub(crate) enum ContinuationAst {
         /// "put that card …" form (`KeepEach`).
         any_number: bool,
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c + CR 701.20a: Rest-pile ordering. Defaults to
+        /// `Random` for library rest piles under CR 701.20a, or `PlayerChoice`
+        /// when "in any order" is specified.
+        #[serde(default)]
+        rest_order: crate::types::ability::DigRestOrder,
         /// CR 110.2a: "under your control" on the kept-card clause.
         enters_under: Option<ControllerRef>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is

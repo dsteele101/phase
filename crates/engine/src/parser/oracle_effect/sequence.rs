@@ -581,6 +581,21 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     Some(Zone::Library)
 }
 
+/// CR 701.20a + CR 608.2c: Detect both rest-pile zone and rest ordering for RevealUntil.
+fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRestOrder) {
+    let rest_zone = parse_reveal_until_rest_zone(lower);
+    let rest_order = if nom_primitives::scan_contains(lower, "in a random order") {
+        DigRestOrder::Random
+    } else if nom_primitives::scan_contains(lower, "in any order") {
+        DigRestOrder::PlayerChoice
+    } else if rest_zone == Some(Zone::Library) {
+        DigRestOrder::Random
+    } else {
+        DigRestOrder::Preserve
+    };
+    (rest_zone, rest_order)
+}
+
 /// Whole-line dig continuation "put the rest on the bottom of your library
 /// [in a random order | in any order]" following a `ChooseFromZone`.
 ///
@@ -5655,6 +5670,7 @@ pub(super) fn apply_clause_continuation(
             enters_attacking: attacking,
             any_number,
             rest_destination: rest_dest,
+            rest_order: rest_ord,
             enters_under,
             optional_decline,
         } => {
@@ -5666,6 +5682,7 @@ pub(super) fn apply_clause_continuation(
                 enter_tapped,
                 enters_attacking,
                 rest_destination,
+                rest_order,
                 kept_optional_to,
                 matched_disposition,
                 enters_under: effect_enters_under,
@@ -5687,6 +5704,8 @@ pub(super) fn apply_clause_continuation(
                     if let Some(rest) = rest_dest {
                         *rest_destination = rest;
                     }
+                    *rest_order = rest_ord;
+                    *effect_enters_under = enters_under;
                     return;
                 }
                 match optional_decline {
@@ -5719,6 +5738,7 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rest) = rest_dest {
                     *rest_destination = rest;
                 }
+                *rest_order = rest_ord;
                 *effect_enters_under = enters_under;
             }
         }
@@ -6064,11 +6084,17 @@ fn patch_rest_destination_recursively(
             *dig_rest_order = rest_order;
         }
         Effect::RevealUntil {
-            rest_destination, ..
+            rest_destination,
+            rest_order: effect_rest_order,
+            ..
         } => {
             *rest_destination = destination;
+            *effect_rest_order = rest_order;
         }
         _ => {}
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        patch_rest_destination_recursively(sub, destination, reorder_all, rest_order);
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
         patch_rest_destination_recursively(else_def, destination, reorder_all, rest_order);
@@ -7954,7 +7980,7 @@ pub(super) fn parse_followup_continuation_ast(
                 } else {
                     (Zone::Hand, false, false)
                 };
-            let rest_destination = parse_reveal_until_rest_zone(&lower);
+            let (rest_destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             // "under your control" stamps the controller of the kept cards; absent
             // the clause they enter under the revealing player's control by default.
             // Mirrors the singular "put that card" arm so the set-disposition path
@@ -7970,6 +7996,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking,
                 any_number: true,
                 rest_destination,
+                rest_order,
                 enters_under,
                 optional_decline: None,
             })
@@ -8006,7 +8033,7 @@ pub(super) fn parse_followup_continuation_ast(
                     // Default "into your hand"
                     (Zone::Hand, false, false)
                 };
-            let rest = parse_reveal_until_rest_zone(&lower);
+            let (rest, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
             // makes the kept destination a controller choice. The decline zone is
             // the explicit "if you don't, put it into your hand" (→ Hand) or the
@@ -8032,6 +8059,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_attacking,
                 any_number: false,
                 rest_destination: rest,
+                rest_order,
                 enters_under,
                 optional_decline,
             })
@@ -11049,7 +11077,7 @@ mod tests {
             matched_disposition: RevealUntilDisposition::KeepEach,
             kept_destination: Zone::Hand,
             rest_destination: Zone::Library,
-            rest_order: crate::types::ability::DigRestOrder::Preserve,
+            rest_order: crate::types::ability::DigRestOrder::Random,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,
@@ -11067,10 +11095,11 @@ mod tests {
                 Some(ContinuationAst::RevealUntilKept {
                     destination: Zone::Battlefield,
                     enter_tapped: true,
+                    rest_order: crate::types::ability::DigRestOrder::Random,
                     ..
                 })
             ),
-            "expected RevealUntilKept to battlefield tapped, got {result:?}"
+            "expected RevealUntilKept to battlefield tapped with random rest order, got {result:?}"
         );
     }
 
