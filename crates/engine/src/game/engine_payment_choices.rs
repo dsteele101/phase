@@ -1455,6 +1455,18 @@ pub(super) fn handle_unless_payment(
                         .unwrap_or_default(),
                     _ => state.battlefield.iter().copied().collect(),
                 };
+                // CR 118.12: eligibility is governed ENTIRELY by the parsed
+                // `filter` (which already encodes whatever ownership/control
+                // restriction the printed text actually specifies — "you
+                // control" via `tf.controller`, a possessive source zone via
+                // `FilterProp::Owned`, or nothing at all for an unrestricted
+                // noun like Drake Familiar's "an enchantment"). Do NOT impose
+                // an additional blanket `obj.controller == player` restriction
+                // here — that duplicated (and for zone-qualified costs,
+                // silently replaced) the filter's own scoping and made an
+                // unrestricted return-cost impossible to pay with an
+                // opponent-controlled object, even though the Oracle text
+                // named no such restriction.
                 let filter_ref = filter.as_ref();
                 let eligible: Vec<ObjectId> = zone_objects
                     .iter()
@@ -1463,8 +1475,7 @@ pub(super) fn handle_unless_payment(
                             .objects
                             .get(id)
                             .map(|obj| {
-                                obj.controller == player
-                                    && !obj.is_emblem
+                                !obj.is_emblem
                                     && filter_ref.is_none_or(|f| {
                                         crate::game::filter::matches_target_filter(
                                             state, **id, f, &ctx,

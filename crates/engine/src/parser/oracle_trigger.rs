@@ -5067,6 +5067,10 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
 /// - "another creature you control to its owner's hand"
 /// - "an untapped island you control to its owner's hand"
 /// - "a non-lair land you control to its owner's hand"
+/// - "a basic land card from your graveyard to your hand"
+/// - "an enchantment to its owner's hand" (Drake Familiar — no controller
+///   restriction; any enchantment on the battlefield, yours or an
+///   opponent's, may be returned)
 fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
     let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
@@ -5103,13 +5107,29 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     // Derive from_zone from FilterProp::InZone that parse_target absorbed from zone suffixes.
     let from_zone = filter.extract_in_zone();
 
-    // Ensure controller scoping — parse_target sets it from "you control" but
-    // some forms omit it (e.g., "a basic land card from your graveyard").
+    // Ensure ownership scoping for zone-qualified returns. `parse_target` sets
+    // `tf.controller` from an explicit "you control" (a battlefield CONTROL
+    // predicate — correct for that phrasing, CR 608.2c), but a possessive
+    // source zone ("a basic land card **from your graveyard**") carries no
+    // "you control" of its own even though the zone itself is the player's.
+    // CR 108.4: a card outside the battlefield or stack has no controller, so
+    // that case must be scoped by OWNERSHIP instead — `with_owner_scope`
+    // stamps `FilterProp::Owned`, which `matches_filter_prop` compares against
+    // the object's `owner` field regardless of zone. The bare `TargetFilter::
+    // Controller` variant this used to wrap the filter in is a PLAYER
+    // reference (used only as an unless-payer designation), not an
+    // object-matching predicate — `filter_inner_for_object` returns `false`
+    // for it unconditionally, so that wrapping made every zone-qualified
+    // return-cost filter unsatisfiable.
+    //
+    // A BARE battlefield noun with neither "you control" nor a possessive
+    // zone (Drake Familiar — "an enchantment to its owner's hand") carries NO
+    // ownership restriction in the printed text and must stay unscoped — any
+    // enchantment on the battlefield, yours or an opponent's, is eligible.
     let filter = match &filter {
         TargetFilter::Typed(tf) if tf.controller.is_some() => filter,
-        _ => TargetFilter::And {
-            filters: vec![TargetFilter::Controller, filter],
-        },
+        _ if from_zone.is_some() => with_owner_scope(filter, ControllerRef::You),
+        _ => filter,
     };
 
     Some(AbilityCost::ReturnToHand {
