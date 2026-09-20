@@ -516,6 +516,37 @@ fn privately_looked_at_ids(
     visible
 }
 
+/// CR 401.2 + CR 401.4 + CR 701.20e: may `viewer` legitimately see the FACE of one card
+/// sitting in a hidden pile they have been asked to ACT on?
+///
+/// CR 401.2 states the two library prohibitions separately ("players can't look at OR
+/// change the order of cards in a library") and CR 401.4 lifts only the ordering one, so
+/// being the acting authority on a pile is never itself permission to see it. The answer
+/// is exactly the three look channels a dig records, and this is their single authority:
+///
+///  * [`is_visible_revealed_card`] carries two of them — `state.revealed_cards` (a
+///    CR 701.20a public reveal-dig) and `state.viewer_knows_card_identity` (a remembered
+///    CR 701.20e private look, written by `remember_card_identities`);
+///  * [`privately_looked_at_ids`] carries the third — the still-open look-only window
+///    (`private_look_player` / `DigSource::PriorLook`) and active search sessions.
+///
+/// These are the same three the `dig_visible` comment in
+/// [`identity_projection_for_viewer`] enumerates as the pile's whole visibility story.
+/// Exported so an out-of-crate consumer that must ACT on a hidden pile — the AI's
+/// `DigRestSplitChoice` arranger, which runs on the UNFILTERED `GameState` and would
+/// otherwise sort by true card value — asks this question instead of growing a fourth,
+/// silently drifting copy of the check.
+pub fn viewer_may_see_hidden_pile_card(
+    state: &GameState,
+    viewer: PlayerId,
+    obj_id: ObjectId,
+) -> bool {
+    let can_view_private_for_player =
+        |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
+    is_visible_revealed_card(state, viewer, obj_id)
+        || privately_looked_at_ids(state, viewer, &can_view_private_for_player).contains(&obj_id)
+}
+
 /// Which of the three shipped identity leaves applies to one object in one viewer's
 /// projection.
 ///
