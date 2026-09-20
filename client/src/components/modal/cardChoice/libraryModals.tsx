@@ -623,6 +623,29 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
     },
     [canMove],
   );
+  // CR 401.4: the same boundary the move buttons enforce, applied to DRAG.
+  // A drag hands back a whole permutation rather than a (from, to) pair, so
+  // the check is on the RESULT: during `order_only` the leading `top_count`
+  // entries must still name the same SET the engine settled, which is exactly
+  // the engine-side rule in `validate_dig_rest_split_selection`. A drag across
+  // the boundary is dropped, leaving the pile where it was.
+  //
+  // The engine already rejects a boundary-crossing submission, so this is UX
+  // only — it stops the player from ASSEMBLING an arrangement that could only
+  // be refused, instead of letting them build one and bounce off Confirm.
+  const handleReorder = useCallback(
+    (next: ObjectId[]) => {
+      if (!boundaryIsLocked) {
+        setOrder(next);
+        return;
+      }
+      const settledTop = new Set(data.cards.slice(0, data.top_count));
+      const proposedTop = next.slice(0, data.top_count);
+      if (proposedTop.some((id) => !settledTop.has(id))) return;
+      setOrder(next);
+    },
+    [boundaryIsLocked, data.cards, data.top_count],
+  );
 
   if (!objects) return null;
 
@@ -641,7 +664,7 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
           as="div"
           axis="x"
           values={order}
-          onReorder={setOrder}
+          onReorder={handleReorder}
           layoutScroll
           className="mx-auto flex w-max items-center gap-2 px-1 py-2 lg:gap-3"
         >

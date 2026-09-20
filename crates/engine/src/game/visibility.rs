@@ -650,13 +650,27 @@ pub(crate) fn identity_projection_for_viewer(
         };
 
     // CR 701.20e: the looked-at pile is shown only to the looking player, and
-    // that stays true for the follow-up split prompt — the remainder is still
-    // in the library and still known only to them (CR 701.20b).
+    // the `DigChoice` prompt's `player` IS that looker — `effects::dig` parks it
+    // as `ability.controller`, the same player it hands the look to.
+    //
+    // The follow-up `DigRestSplitChoice` deliberately has NO arm here. Its
+    // `player` is the prompt's ACTING authority, which CR 401.4 makes the
+    // library's OWNER for a `DigRestSplitScope::OrderOnly` prompt — a different
+    // player than the looker whenever the dig read someone else's library.
+    // CR 401.2 states the two prohibitions separately ("players can't look at
+    // OR change the order of cards in a library") and CR 401.4 lifts only the
+    // ordering one, so submitting the arrangement is not permission to see the
+    // faces: that owner arranges BLIND, by position and id.
+    //
+    // The pile's face visibility is therefore left entirely to the look
+    // permissions the dig itself recorded, all of which are already in the OR
+    // chain below: `state.viewer_knows_card_identity` (written by
+    // `remember_card_identities` for a private "look at" dig),
+    // `private_look_visible` (the look-only / `DigSource::PriorLook` window),
+    // and `state.revealed_cards` (a CR 701.20a `reveal: true` dig, which IS
+    // public and must stay visible to the arranging owner).
     let dig_visible: HashSet<ObjectId> = match state.waiting_for {
         WaitingFor::DigChoice {
-            player, ref cards, ..
-        }
-        | WaitingFor::DigRestSplitChoice {
             player, ref cards, ..
         } => {
             if can_view_private_for_player(player) {
@@ -1618,10 +1632,20 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     {
         // `player` is the prompt's acting authority in every scope (the chooser
         // for a partition prompt, the library's owner for a CR 401.4
-        // arrangement prompt), so it is also the one viewer who must be able to
-        // tell the pile's cards apart in order to answer. Re-derived through
-        // the constructor so `bottom_count` cannot drift from the redacted
-        // `cards` list.
+        // arrangement prompt), so it is the one viewer who needs the real ID
+        // LIST: the response is a full permutation of it, and a redacted list
+        // of `ObjectId(0)` placeholders cannot name the cards it reorders.
+        //
+        // Carrying the ids is NOT carrying the faces, and the two must not be
+        // conflated (CR 401.2 prohibits looking and reordering separately;
+        // CR 401.4 lifts only the reordering half). Whether this player may see
+        // what is PRINTED on each of these cards is decided independently, by
+        // the look permissions the dig recorded — see the `dig_visible` comment
+        // above. An `OrderOnly` owner who never looked arranges blind: real
+        // ids, `Hidden Card` faces.
+        //
+        // Re-derived through the constructor so `bottom_count` cannot drift
+        // from the redacted `cards` list.
         filtered.waiting_for = WaitingFor::new_dig_rest_split(
             player,
             library_owner,

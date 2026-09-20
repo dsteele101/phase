@@ -1104,6 +1104,20 @@ fn cross_player_split_cast(
     top: i32,
     library_cards: usize,
 ) -> (GameRunner, Vec<ObjectId>) {
+    // CR 701.20e: the default cross-player fixture LOOKS (private), so P0 is the
+    // only player the pile is shown to.
+    cross_player_split_cast_revealing(count, top, library_cards, false)
+}
+
+/// Same fixture, parameterized on the dig's `reveal` flag — the one axis that
+/// decides WHO the looked-at pile is shown to (CR 701.20a public reveal vs.
+/// CR 701.20e private look). The visibility tests need both sides of it.
+fn cross_player_split_cast_revealing(
+    count: i32,
+    top: i32,
+    library_cards: usize,
+    reveal: bool,
+) -> (GameRunner, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mut builder = scenario.add_spell_to_hand(P0, "Borrowed Foresight", true);
@@ -1121,7 +1135,7 @@ fn cross_player_split_cast(
         rest_destination: Some(Zone::Library),
         rest_split_top_count: Some(QuantityExpr::Fixed { value: top }),
         rest_order: DigRestOrder::Preserve,
-        reveal: false,
+        reveal,
         enter_tapped: false,
         enters_attacking: false,
         source: DigSource::Library,
@@ -1522,9 +1536,20 @@ fn cast_conditional_dig(
 /// own top/bottom split. This is the runtime half of
 /// `an_alternative_branch_keeps_its_own_top_bottom_split` (which only asserted
 /// AST shape) for the INTRA-CHAIN call site.
+///
+/// NON-BLOCKING 1: the alternative is worded MANDATORILY ("instead put"), not
+/// optionally ("you may instead put"). This fixture is cast and driven to a
+/// real prompt, and the engine's own "may" election for an optional
+/// alternative is a separate, preexisting gap that is out of scope here — the
+/// alternative-clause parser strips the optional prefix without modeling the
+/// choice to decline, so a "you may instead" fixture would reach `DigChoice`
+/// with no election offered and quietly test the WRONG thing. Mandatory
+/// wording isolates the remainder-precedence behavior this test exists for.
+/// (The AST-shape-only fixtures above keep their "you may instead" wording:
+/// they never resolve, so the missing election cannot confound them.)
 const CONDITIONAL_OWN_SPLIT: &str = "Look at the top three cards of your library. \
 Put two of those cards into your hand and the rest on the bottom of your library. \
-If you control a creature, you may instead put one of them into your hand, one on top \
+If you control a creature, instead put one of them into your hand, one on top \
 of your library, and one on the bottom of your library.";
 
 /// CR 608.2c: parse real Oracle text, CAST it, and assert where the cards
@@ -1746,5 +1771,119 @@ fn a_non_acting_viewer_sees_the_counts_but_not_the_identities() {
             assert_eq!(*scope, DigRestSplitScope::PartitionAndOrder);
         }
         other => panic!("expected DigRestSplitChoice, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 (BLOCKER): ordering authority is not looking permission.
+// ---------------------------------------------------------------------------
+
+/// CR 401.2: "Players can't look at or change the order of cards in a
+/// library." Looking and ordering are two separate prohibitions, and CR 401.4
+/// lifts only the ORDERING one ("the owner of those cards may arrange them in
+/// any order"). CR 701.20e keeps the looking permission where the dig put it:
+/// "the card is shown only to the specified player."
+///
+/// So a cross-player `OrderOnly` prompt addressed to P1 (the owner, per
+/// CR 401.4) must let P1 arrange the pile BLIND — by position and id, not by
+/// identity — because the dig that looked at those cards was P0's and was
+/// private (`reveal: false`).
+#[test]
+fn an_order_only_prompt_does_not_show_the_arranging_owner_the_card_faces() {
+    let (runner, looked_at) = cross_player_split_cast(4, 0, 5);
+    let pile: Vec<ObjectId> = looked_at[1..].to_vec();
+    assert_eq!(pile.len(), 3);
+
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    match &p1_view.waiting_for {
+        WaitingFor::DigRestSplitChoice { player, cards, .. } => {
+            assert_eq!(*player, P1, "the fixture must reach the owner's prompt");
+            // P1 keeps the real id list — arranging is done by POSITION, and a
+            // blind arrangement still has to name the cards it permutes.
+            assert_eq!(
+                *cards, pile,
+                "the acting owner needs the real ids to submit a permutation"
+            );
+        }
+        other => panic!("expected the owner's split prompt, got {other:?}"),
+    }
+    // THE REGRESSION ASSERTION: the faces stay hidden from the arranger.
+    for id in &pile {
+        assert_eq!(
+            p1_view.objects[id].name, "Hidden Card",
+            "CR 401.4 grants P1 the ORDER of these cards, not permission to \
+             look at them (CR 401.2 + CR 701.20e) — P1 must arrange blind"
+        );
+    }
+}
+
+/// PAIRED POSITIVE (same pause, the other viewer): the player who actually
+/// looked keeps seeing the faces. CR 701.20e's "specified player" is P0, and
+/// nothing about handing the CR 401.4 arrangement to P1 takes P0's look back.
+#[test]
+fn the_looking_player_still_sees_the_pile_during_the_owners_order_prompt() {
+    let (runner, looked_at) = cross_player_split_cast(4, 0, 5);
+    let pile: Vec<ObjectId> = looked_at[1..].to_vec();
+
+    let p0_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    for (index, id) in pile.iter().enumerate() {
+        assert_ne!(
+            p0_view.objects[id].name, "Hidden Card",
+            "the looking player must keep seeing pile card {index}"
+        );
+    }
+}
+
+/// PAIRED POSITIVE (legitimately visible cards): with `reveal: true` the dig is
+/// a CR 701.20a public reveal, so the same `OrderOnly` prompt must show P1 the
+/// faces. This is the control that proves the fix keys on LOOK PERMISSION
+/// rather than blanket-hiding every pile a non-looker is asked to arrange.
+#[test]
+fn a_revealed_cross_player_pile_stays_visible_to_the_arranging_owner() {
+    let (runner, looked_at) = cross_player_split_cast_revealing(4, 0, 5, true);
+    let pile: Vec<ObjectId> = looked_at[1..].to_vec();
+
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert!(
+        matches!(
+            p1_view.waiting_for,
+            WaitingFor::DigRestSplitChoice { player: P1, .. }
+        ),
+        "the fixture must still reach the owner's prompt"
+    );
+    for (index, id) in pile.iter().enumerate() {
+        assert_ne!(
+            p1_view.objects[id].name, "Hidden Card",
+            "CR 701.20a: a revealed pile is public, so pile card {index} must \
+             stay visible — the fix must not blanket-hide legitimately \
+             visible cards"
+        );
+    }
+}
+
+/// GUARD for the same-player case the fix must not regress: when the looker and
+/// the arranger are the same player (every printed card today, Telling Time
+/// included), that player has both permissions and must still see the faces of
+/// the pile they are arranging. The fix removes `DigRestSplitChoice`'s own
+/// visibility arm and leans on the look permission the dig recorded; this pins
+/// that the remaining channel actually covers the common case.
+#[test]
+fn a_same_player_split_still_shows_its_own_looker_the_pile() {
+    let (runner, pile, _top_count) =
+        production_split_pause("Wide Top Split", WIDE_TOP_SPLIT_ORACLE, 5);
+    let p0_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    assert!(
+        matches!(
+            p0_view.waiting_for,
+            WaitingFor::DigRestSplitChoice { player: P0, .. }
+        ),
+        "the fixture must park the same-player split prompt for P0"
+    );
+    for (index, id) in pile.iter().enumerate() {
+        assert_ne!(
+            p0_view.objects[id].name, "Hidden Card",
+            "CR 701.20e: P0 looked at pile card {index}, so P0 keeps seeing it \
+             while arranging it"
+        );
     }
 }
