@@ -5109,7 +5109,7 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
 
     // Ensure ownership scoping for zone-qualified returns. `parse_target` sets
     // `tf.controller` from an explicit "you control" (a battlefield CONTROL
-    // predicate — correct for that phrasing, CR 608.2c), but a possessive
+    // predicate — correct for that phrasing), but a possessive
     // source zone ("a basic land card **from your graveyard**") carries no
     // "you control" of its own even though the zone itself is the player's.
     // CR 108.4: a card outside the battlefield or stack has no controller, so
