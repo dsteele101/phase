@@ -495,7 +495,7 @@ pub(crate) fn grant_search_found_permission_after_delivery(
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
-                cast_cost_raise: None,
+                cast_cost_modifier: None,
                 alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
@@ -10053,6 +10053,7 @@ mod tests {
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
                 mana_spend_permission: None,
+                cast_cost_modifier: None,
             });
 
         let window = WaitingFor::CastOffer {
@@ -10164,7 +10165,7 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
                     alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,

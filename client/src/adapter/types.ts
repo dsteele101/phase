@@ -1299,14 +1299,47 @@ export interface ResolutionCastCleanup {
   delayed_trigger_receipts?: ResolutionCastDelayedTriggerReceipt[];
 }
 
+export type CastCostModifier = {
+  /** CR 601.2f: direction only — the engine never serializes a `Minimum`
+   *  here; a cost floor is a board-wide static, not a per-grant rider. */
+  mode: "Raise" | "Reduce";
+  amount: ManaCost;
+};
+
 export type CastingPermission =
   | { type: "AdventureCreature" }
   | {
       type: "ExileWithAltCost";
       cost: ManaCost;
       resolution_cleanup?: ResolutionCastCleanup;
+      /** CR 601.2f: "Spells you cast this way cost {N} more/less to cast."
+       *  Absent when the grant carries no such rider. Display only — the
+       *  engine has already applied it to every cost it reports. */
+      cast_cost_modifier?: CastCostModifier;
     }
-  | { type: "PlayFromExile"; duration: string }
+  | {
+      /** Non-mana alternative cost carried by the same exile-cast grant. */
+      type: "ExileWithAltAbilityCost";
+      cost: SerializedAbilityCost;
+      /** Optional engine-enforced condition for using this grant. */
+      constraint?: Record<string, unknown>;
+      /** Player to whom the engine granted this permission. */
+      granted_to?: PlayerId;
+      /** Grant lifetime; unit variants serialize as strings and payload variants as objects. */
+      duration?: string | Record<string, unknown>;
+      /** Source whose identity can bound the grant's duration. */
+      source_id?: ObjectId;
+      /** CR 601.2f: see `ExileWithAltCost.cast_cost_modifier`. */
+      cast_cost_modifier?: CastCostModifier;
+    }
+  | {
+      type: "PlayFromExile";
+      duration: string;
+      /** CR 601.2f: see `ExileWithAltCost.cast_cost_modifier`. CR 305.1: a
+       *  land played under this same grant is never a spell and is
+       *  unaffected by it. */
+      cast_cost_modifier?: CastCostModifier;
+    }
   | { type: "ExileWithEnergyCost" }
   | { type: "WarpExile"; castable_after_turn: number };
 
@@ -3039,7 +3072,11 @@ export type GameEvent =
   | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
-  | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }
+  // `new_total` is the player's life total once this change is applied, supplied
+  // by the engine (`LifeTotalReading`, serialized transparently) so a mid-animation
+  // display can show intermediate totals. Absent on an event from a peer older than
+  // the field; fall back to the state snapshot.
+  | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number; new_total?: number } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
   | { type: "PermanentTapped"; data: { object_id: ObjectId } }
   | { type: "PlayerLost"; data: { player_id: PlayerId } }

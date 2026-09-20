@@ -6652,6 +6652,7 @@ mod tests {
             enters_with_counter: None,
             enters_with_modifications: vec![],
             mana_spend_permission: None,
+            cast_cost_modifier: None,
         };
         let grant = |graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
             Effect::GrantCastingPermission {
@@ -9760,6 +9761,7 @@ mod tests {
             GameEvent::LifeChanged {
                 player_id,
                 amount: -1,
+                ..
             } if *player_id == PlayerId(0)
         )));
         assert!(events
