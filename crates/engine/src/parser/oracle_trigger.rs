@@ -5107,31 +5107,20 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     // Derive from_zone from FilterProp::InZone that parse_target absorbed from zone suffixes.
     let from_zone = filter.extract_in_zone();
 
-    // Ensure ownership scoping for zone-qualified returns. `parse_target` sets
-    // `tf.controller` from an explicit "you control" (a battlefield CONTROL
-    // predicate — correct for that phrasing), but a possessive
-    // source zone ("a basic land card **from your graveyard**") carries no
-    // "you control" of its own even though the zone itself is the player's.
-    // CR 108.4: a card outside the battlefield or stack has no controller, so
-    // that case must be scoped by OWNERSHIP instead — `with_owner_scope`
-    // stamps `FilterProp::Owned`, which `matches_filter_prop` compares against
-    // the object's `owner` field regardless of zone. The bare `TargetFilter::
-    // Controller` variant this used to wrap the filter in is a PLAYER
-    // reference (used only as an unless-payer designation), not an
-    // object-matching predicate — `filter_inner_for_object` returns `false`
-    // for it unconditionally, so that wrapping made every zone-qualified
-    // return-cost filter unsatisfiable.
-    //
-    // A BARE battlefield noun with neither "you control" nor a possessive
-    // zone (Drake Familiar — "an enchantment to its owner's hand") carries NO
-    // ownership restriction in the printed text and must stay unscoped — any
-    // enchantment on the battlefield, yours or an opponent's, is eligible.
-    let filter = match &filter {
-        TargetFilter::Typed(tf) if tf.controller.is_some() => filter,
-        _ if from_zone.is_some() => with_owner_scope(filter, ControllerRef::You),
-        _ => filter,
-    };
-
+    // NO additional ownership/controller scoping is applied here — `parse_target`
+    // (specifically its zone-suffix combinator, `parse_zone_suffix` in
+    // `oracle_target.rs`) already encodes exactly the ownership the printed
+    // phrase specifies, per-qualifier: "you control" / "your graveyard" sets
+    // `tf.controller = Some(You)`; "an opponent's graveyard" / "target player's
+    // graveyard" / "their graveyard" stamp `FilterProp::Owned{Opponent /
+    // TargetPlayer / ScopedPlayer}`; a bare/indefinite/definite zone ("a
+    // graveyard", "the graveyard") or no zone at all (Drake Familiar — "an
+    // enchantment to its owner's hand") carries NO ownership restriction and is
+    // left exactly as parsed. A prior version of this function force-added a
+    // controller/owner scope onto every zone-qualified filter, which wrongly
+    // narrowed an unrestricted zone (any player's graveyard) down to only the
+    // payer's — the same class of bug Drake Familiar's battlefield case had,
+    // just one level down in the zone-possessive grammar.
     Some(AbilityCost::ReturnToHand {
         count,
         filter: Some(filter),

@@ -15195,7 +15195,59 @@ fn trigger_unless_you_return_from_graveyard() {
                 _ => false,
             };
             assert!(has_land, "filter should include Land, got {:?}", filter);
+            // CR 118.12: "your graveyard" is a possessive zone qualifier —
+            // `parse_zone_suffix` folds it into `tf.controller = Some(You)`,
+            // the same battlefield CONTROL predicate "you control" produces.
+            // No additional scoping is (or should be) layered on top of this.
+            match filter {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "'your graveyard' should scope the filter to the payer, got {:?}",
+                    tf.controller
+                ),
+                other => panic!("expected a bare Typed filter, got {:?}", other),
+            }
         }
+        other => panic!("cost should be ReturnToHand, got {:?}", other),
+    }
+}
+
+#[test]
+fn trigger_unless_you_return_from_unqualified_graveyard_has_no_ownership_restriction() {
+    // CR 118.12: an UNQUALIFIED source zone ("a graveyard", no possessive)
+    // names no owner — unlike Harvest Wurm's "your graveyard" above, this
+    // must carry NEITHER `tf.controller` NOR a `FilterProp::Owned` restriction,
+    // per `parse_zone_suffix`'s bare/indefinite-zone arm (`oracle_target.rs`).
+    // A synthetic building-block shape (no printed card omits the possessive
+    // here), added alongside the Harvest Wurm case as the discriminating
+    // control for the zone-ownership fix.
+    let def = parse_trigger_line(
+        "When ~ enters, sacrifice it unless you return a basic land card from a graveyard to your hand.",
+        "Unqualified Graveyard Test",
+    );
+    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+    match &unless_pay.cost {
+        AbilityCost::ReturnToHand {
+            filter: Some(filter),
+            ..
+        } => match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller, None,
+                    "an unqualified zone must not be scoped by controller, got {:?}",
+                    tf.controller
+                );
+                assert!(
+                    !tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Owned { .. })),
+                    "an unqualified zone must not be scoped by ownership, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected a bare Typed filter, got {:?}", other),
+        },
         other => panic!("cost should be ReturnToHand, got {:?}", other),
     }
 }

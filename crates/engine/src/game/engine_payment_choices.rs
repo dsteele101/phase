@@ -1446,14 +1446,24 @@ pub(super) fn handle_unless_payment(
                 let source = pending_effect.source_id;
                 let ctx =
                     crate::game::filter::FilterContext::from_source_with_controller(source, player);
+                // The zone population is scanned ACROSS ALL PLAYERS — the
+                // parsed `filter` is the single authority for narrowing it
+                // (e.g. "your graveyard" stamps `tf.controller = Some(You)`;
+                // "an opponent's graveyard" stamps `FilterProp::Owned{Opponent}`;
+                // a bare/possessive-less zone phrase, like an unrestricted
+                // "a graveyard", carries no ownership restriction at all — see
+                // `parse_zone_suffix` in `oracle_target.rs`). Pre-restricting
+                // this scan to the payer's own zone (as a prior version did)
+                // silently narrowed an unrestricted source zone to the payer's
+                // own, even though the printed text named no such restriction.
                 let zone_objects: Vec<ObjectId> = match from_zone {
-                    Some(Zone::Graveyard) => state
-                        .players
+                    Some(zone) => state
+                        .objects
                         .iter()
-                        .find(|p| p.id == player)
-                        .map(|p| p.graveyard.iter().copied().collect())
-                        .unwrap_or_default(),
-                    _ => state.battlefield.iter().copied().collect(),
+                        .filter(|(_, obj)| obj.zone == *zone)
+                        .map(|(id, _)| *id)
+                        .collect(),
+                    None => state.battlefield.iter().copied().collect(),
                 };
                 // CR 118.12: eligibility is governed ENTIRELY by the parsed
                 // `filter` (which already encodes whatever ownership/control

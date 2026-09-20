@@ -18,6 +18,16 @@
 //!    player` on every eligible-object scan, which would have kept an
 //!    opponent's enchantment ineligible even after the parser fix.
 //!
+//! A follow-up review round found the same class of bug one level down, in
+//! the ZONE-possessive grammar ("...from a graveyard" vs "...from your
+//! graveyard"): a first-pass fix force-added ownership scoping to every
+//! zone-qualified return cost, which wrongly narrowed an UNQUALIFIED zone
+//! phrase ("a graveyard" — any player's) down to only the payer's own zone.
+//! `unqualified_graveyard_return_may_use_any_players_graveyard` below is the
+//! production-pipeline discriminator for that case, run alongside the
+//! existing "from your graveyard" coverage (`unless_return_to_hand_from_
+//! graveyard_collects_graveyard_cards`, `engine_payment_choices.rs`).
+//!
 //! This drives the REAL parse → cast → ETB trigger → unless-payment →
 //! bounce-choice pipeline (per the `card-test` skill), so it catches runtime
 //! defects an AST-shape test cannot.
@@ -44,6 +54,16 @@ const DRAKE_FAMILIAR: &str = "Flying\nWhen this creature enters, sacrifice it \
 /// Oracle text actually prints it.
 const GLINT_HAWK: &str = "Flying\nWhen this creature enters, sacrifice it unless you \
     return an artifact you control to its owner's hand.";
+
+/// Synthetic building-block card (not a printed card — this Oracle grammar
+/// generalizes the "unless you return ... from your graveyard" shape, and no
+/// printed card happens to omit the possessive) exercising an UNQUALIFIED
+/// source zone: "a graveyard" names no owner, unlike Harvest Wurm's "your
+/// graveyard". Per `parse_zone_suffix` (`oracle_target.rs`), a bare/
+/// indefinite zone phrase carries no ownership restriction at all — any
+/// player's graveyard is eligible.
+const UNQUALIFIED_GRAVEYARD_RETURN: &str = "When ~ enters, sacrifice it \
+    unless you return a card from a graveyard to your hand.";
 
 struct Board {
     runner: GameRunner,
@@ -268,4 +288,80 @@ fn harvest_wurm_can_pay_with_an_owned_graveyard_basic_land() {
     assert_eq!(runner.state().objects[&land].zone, Zone::Hand);
     assert_eq!(runner.state().objects[&opponent_land].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&wurm].zone, Zone::Battlefield);
+}
+
+/// CR 118.12a: An UNQUALIFIED source zone ("a graveyard", no possessive)
+/// carries no ownership restriction, so a card in the OPPONENT's graveyard
+/// must be an eligible payment — even though `from_zone` alone can't tell the
+/// runtime zone scan whose graveyard it's scanning. This is the production
+/// counterpart to `unless_return_to_hand_from_graveyard_collects_graveyard_
+/// cards` (which only ever staged the payer's own graveyard, so it could not
+/// have caught this): before the fix, the parser force-added
+/// `FilterProp::Owned{You}` to every zone-qualified filter, and the runtime
+/// additionally pre-restricted the zone scan to the payer's own graveyard —
+/// either bug alone would have kept the opponent's card ineligible.
+#[test]
+fn unqualified_graveyard_return_may_use_any_players_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let opponents_card = scenario
+        .add_creature_to_graveyard(P1, "Opponent's Graveyard Card", 1, 1)
+        .id();
+
+    let creature = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Unqualified Graveyard Return Test",
+            2,
+            2,
+            UNQUALIFIED_GRAVEYARD_RETURN,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(creature).resolve();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPayment { player, .. } if player == P0
+        ),
+        "the ETB must offer the unless-payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the controller may choose to pay");
+
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessBounceChoice { permanents, .. } => {
+            assert!(
+                permanents.contains(&opponents_card),
+                "a card in the OPPONENT's graveyard must be offered — the \
+                 unqualified zone phrase names no owner, got {:?}",
+                permanents
+            );
+        }
+        other => panic!("expected UnlessBounceChoice, got {:?}", other),
+    }
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![opponents_card],
+        })
+        .expect("returning the opponent's graveyard card pays the unless-cost");
+
+    assert_eq!(
+        runner.state().objects[&opponents_card].zone,
+        Zone::Hand,
+        "the returned card must reach its owner's hand"
+    );
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "the creature must survive once the unless-cost is paid"
+    );
 }
