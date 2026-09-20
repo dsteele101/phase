@@ -193,11 +193,29 @@ impl LlmEndpointConfig {
         // every hop on the path. Loopback is exempt because the traffic never
         // reaches a network -- that is the local-model case (Ollama, LM Studio)
         // the OpenAI-compatible provider exists for.
-        if !self.api_key.trim().is_empty() && !credential_transport_is_safe(&base) {
+        // The endpoint must be ONE spelling, and it must be the spelling the
+        // browser resolves without consulting the page. See
+        // [`absolute_endpoint_parts`].
+        let Some((scheme, authority)) = absolute_endpoint_parts(&base) else {
             return Err(LlmError::Configuration {
                 detail: format!(
-                    "refusing to send an API key to {base}: the endpoint must be an \
-                     absolute https:// URL (an http:// endpoint on localhost is exempt)"
+                    "{base} is not an absolute endpoint URL; it must begin with \
+                     https:// (or http:// for a server on localhost)"
+                ),
+            });
+        };
+        if !matches!(scheme.as_str(), "http" | "https") {
+            return Err(LlmError::Configuration {
+                detail: format!("{base} must use https:// (or http:// on localhost)"),
+            });
+        }
+        // A credential must never leave the machine in clear text.
+        if !self.api_key.trim().is_empty() && scheme == "http" && !is_loopback_authority(authority)
+        {
+            return Err(LlmError::Configuration {
+                detail: format!(
+                    "refusing to send an API key over plaintext HTTP to {base}; \
+                     use https:// (a local endpoint on localhost is exempt)"
                 ),
             });
         }
@@ -205,68 +223,48 @@ impl LlmEndpointConfig {
     }
 }
 
-/// Whether a credential may be sent to `url` at all.
+/// Split an endpoint into its scheme and authority, accepting ONLY the
+/// canonical `scheme://authority` spelling.
 ///
-/// An ALLOW-LIST, and deliberately so. The previous form asked the opposite
-/// question -- "does this look like plaintext http?" -- by searching for a
-/// literal `://`. That is a spelling test, and a spelling test can only ever
-/// deny the spellings someone thought of: `http:example.com` and
-/// `http:/example.com` carry no `://`, so they were reported safe, while the
-/// browser's own URL parser resolves both to `http://example.com` and `fetch`
-/// sends the Authorization header there in clear. Backslashes
-/// (`http:\\example.com`), longer slash runs, and embedded tabs reach the same
-/// host by the same route.
+/// The previous round replaced a `://` substring search with a hand-written
+/// subset of the WHATWG parser, so that `http:localhost:11434/v1` was read the
+/// way `new URL()` reads it with NO base — as the host `localhost`. That is not
+/// how the browser reads it. `fetch` resolves against the page's base URL, and
+/// WHATWG's special-relative-or-authority state says that when the input's
+/// scheme equals the base's scheme and no `//` follows, the input is RELATIVE.
+/// On a page served from `http://example.com/app/`, the approved "loopback"
+/// endpoint therefore resolves to
+/// `http://example.com/app/localhost:11434/v1/chat/completions` — a plaintext
+/// non-loopback request carrying the Authorization header, approved by a guard
+/// that had judged a different URL entirely.
 ///
-/// Stating what is PERMITTED closes the class instead of the two reported
-/// spellings: only an absolute `https:` URL, or an absolute `http:` URL whose
-/// host is loopback, can carry a credential. Everything else -- an unparseable
-/// string, a relative or protocol-relative path whose scheme would be inherited
-/// from the page, any other scheme -- is refused, because none of them can be
-/// shown to keep the key off the wire.
-fn credential_transport_is_safe(url: &str) -> bool {
-    let Some((scheme, authority)) = canonical_scheme_and_authority(url) else {
-        return false;
-    };
-    match scheme.as_str() {
-        "https" => true,
-        // CR-free reasoning: loopback traffic never reaches a network, which is
-        // the local-model case (Ollama, LM Studio) this provider exists for.
-        "http" => is_loopback_authority(&authority),
-        _ => false,
-    }
-}
-
-/// The scheme and authority a browser's URL parser would compute, before
-/// `fetch` ever sees the string.
+/// The same seam made an https endpoint contact the wrong host without any
+/// plaintext involved: `https:api.example.com/v1` under an https page base
+/// resolves to `https://app.example.com/x/api.example.com/v1`.
 ///
-/// Follows the three WHATWG URL rules that make a spelling test unsound:
-/// 1. tab, CR and LF are removed from ANYWHERE in the input;
-/// 2. leading and trailing C0 controls and spaces are trimmed;
-/// 3. for a *special* scheme -- `http` and `https` among them -- any run of `/`
-///    or `\` after `scheme:`, INCLUDING NONE AT ALL, leads to the authority.
+/// So this does not add another spelling exception. It removes them all. Only
+/// `scheme://authority` is accepted, which is the one form whose meaning cannot
+/// depend on the page: `//` after the scheme sends the parser to the authority
+/// state and the base is never consulted. Validation and transmission then
+/// describe the same URL by construction, rather than by a subset parser
+/// agreeing with the browser.
 ///
-/// So `http:example.com`, `http:/example.com`, `http:\\example.com` and
-/// `http:///example.com` all name the host `example.com`, exactly as
-/// `http://example.com` does. Verified against `new URL(..)`; the regression
-/// tests below carry the observed normalizations.
-fn canonical_scheme_and_authority(url: &str) -> Option<(String, String)> {
-    let cleaned: String = url
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
-    let trimmed = cleaned.trim_matches(|c: char| c <= ' ');
-    let (scheme, rest) = trimmed.split_once(':')?;
-    // A scheme is ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ). Anything else
-    // means there was no scheme and the colon belongs to the path or a port,
-    // which makes this a relative URL, not an absolute one.
+/// Anything else is refused with a message naming the required form, which is
+/// also what the settings UI shows and what every catalog default already is.
+fn absolute_endpoint_parts(url: &str) -> Option<(String, &str)> {
+    let (scheme, authority) = url.split_once("://")?;
+    // ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ), per RFC 3986.
     let mut characters = scheme.chars();
     if !characters.next().is_some_and(|c| c.is_ascii_alphabetic())
         || !characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     {
         return None;
     }
-    let authority = rest.trim_start_matches(['/', '\\']);
-    Some((scheme.to_ascii_lowercase(), authority.to_string()))
+    // `https://` with nothing after it names no host.
+    if authority.starts_with(['/', '?', '#']) || authority.is_empty() {
+        return None;
+    }
+    Some((scheme.to_ascii_lowercase(), authority))
 }
 
 /// Whether an authority names this machine.
@@ -276,8 +274,8 @@ fn canonical_scheme_and_authority(url: &str) -> Option<(String, String)> {
 /// Userinfo is stripped first so `http://127.0.0.1@evil.example` — which
 /// actually resolves to `evil.example` — is not mistaken for loopback.
 fn is_loopback_authority(rest: &str) -> bool {
-    // `\\` ends the authority exactly as `/` does, for the same reason it began
-    // it: a special-scheme URL treats the two interchangeably.
+    // `\\` ends the authority exactly as `/` does: a special-scheme URL treats
+    // the two interchangeably.
     let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
     // Everything before the last '@' is userinfo, not the host.
     let host_port = authority
@@ -664,6 +662,7 @@ mod tests {
             "example.com/v1",
             "/api/llm-proxy",
             "ftp://example.com/v1",
+            "https://",
             "",
         ] {
             assert!(
@@ -673,11 +672,17 @@ mod tests {
         }
     }
 
-    /// The tightening must not cost the legitimate cases. Loopback and https
-    /// stay reachable in the same unusual spellings, because the parser resolves
-    /// those to a safe origin just as faithfully.
+    /// INVERTED from the previous round, which asserted these were allowed.
+    ///
+    /// They were approved because a hand-written parser read them the way
+    /// `new URL()` does with NO base. `fetch` has a base — the page — and under
+    /// WHATWG's special-relative-or-authority rule a same-scheme input with no
+    /// `//` is RELATIVE. So `http:localhost:11434/v1` on a page served from
+    /// `http://example.com/app/` is not loopback at all; it is
+    /// `http://example.com/app/localhost:11434/v1`, plaintext, non-loopback,
+    /// carrying the key. Approving them was the defect.
     #[test]
-    fn noncanonical_spellings_of_loopback_and_https_are_still_allowed() {
+    fn base_dependent_spellings_of_loopback_and_https_are_refused() {
         for url in [
             "http:localhost:11434/v1",
             "http:/127.0.0.1:1234/v1",
@@ -685,7 +690,27 @@ mod tests {
             "https:api.example.com/v1",
             "HTTPS:api.example.com/v1",
         ] {
-            assert_eq!(keyed(url), Ok(()), "must allow a key over: {url:?}");
+            assert!(
+                matches!(keyed(url), Err(LlmError::Configuration { .. })),
+                "must refuse a base-dependent spelling: {url:?}"
+            );
+        }
+    }
+
+    /// The canonical positive controls: these keep working, and they are the
+    /// only form the settings UI and every catalog default produce.
+    #[test]
+    fn canonical_https_and_loopback_endpoints_are_allowed() {
+        for url in [
+            "https://api.example.com/v1",
+            "HTTPS://API.EXAMPLE.COM/v1",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://127.1.2.3:1234/v1",
+            "http://[::1]:8080/v1",
+            "http://ollama.localhost/v1",
+        ] {
+            assert_eq!(keyed(url), Ok(()), "must allow: {url:?}");
         }
     }
 
@@ -726,21 +751,139 @@ mod tests {
         }
     }
 
-    /// A keyless local server keeps working in these spellings too: the rule
-    /// protects a credential, it does not ban plaintext.
+    /// A keyless endpoint still may not be base-dependent. No credential is at
+    /// stake, but the host the engine validated would not be the host contacted
+    /// — the request would silently go to a path on the page's own origin. The
+    /// canonical plaintext spelling keeps working: the rule protects a
+    /// credential, it does not ban plaintext.
     #[test]
-    fn a_keyless_endpoint_is_unaffected_by_the_spelling_rules() {
-        for url in ["http:gpu-box.internal:8000/v1", "//gpu-box.internal/v1"] {
-            let config = LlmEndpointConfig {
+    fn a_keyless_endpoint_must_still_be_absolute() {
+        let keyless = |url: &str| {
+            LlmEndpointConfig {
                 provider: LlmProvider::OpenAiCompatible,
                 base_url: Some(url.to_string()),
                 api_key: String::new(),
                 model: "llama-3".to_string(),
                 max_output_tokens: None,
                 temperature: None,
-            };
-            assert_eq!(config.validate(), Ok(()), "keyless must pass: {url:?}");
+            }
+            .validate()
+        };
+        assert_eq!(keyless("http://gpu-box.internal:8000/v1"), Ok(()));
+        for url in ["http:gpu-box.internal:8000/v1", "//gpu-box.internal/v1"] {
+            assert!(
+                matches!(keyless(url), Err(LlmError::Configuration { .. })),
+                "keyless must refuse a base-dependent spelling: {url:?}"
+            );
         }
+    }
+
+    /// The regression the previous round lacked: the property asserted at the
+    /// REQUEST BOUNDARY, under a real document base, using an established URL
+    /// implementation rather than this module's own reading.
+    ///
+    /// The earlier tests normalized with no base, which is precisely the case
+    /// that does not occur — `fetch` always resolves against the page. This
+    /// resolves each emitted request URL the way a browser would, from three
+    /// document bases including an HTTP-served page, and requires the host
+    /// contacted to be the host `validate` approved.
+    #[test]
+    fn every_emitted_request_url_resolves_to_the_validated_host_from_any_document_base() {
+        use url::Url;
+
+        // An HTTP-served app is the case that broke: a same-scheme base is what
+        // makes a `//`-less input relative.
+        let bases = [
+            None,
+            Some("http://example.com/app/"),
+            Some("https://app.example.com/x/"),
+        ];
+        let prompt = crate::prompt::LlmPrompt {
+            system: "s".to_string(),
+            user: "u".to_string(),
+        };
+
+        for (provider, endpoint, expected_host) in [
+            (
+                LlmProvider::OpenAiCompatible,
+                "http://localhost:11434/v1",
+                "localhost",
+            ),
+            (
+                LlmProvider::OpenAiCompatible,
+                "http://127.0.0.1:1234/v1",
+                "127.0.0.1",
+            ),
+            (
+                LlmProvider::OpenAi,
+                "https://api.openai.com/v1",
+                "api.openai.com",
+            ),
+            (
+                LlmProvider::Anthropic,
+                "https://api.anthropic.com/v1",
+                "api.anthropic.com",
+            ),
+            (
+                LlmProvider::Gemini,
+                "https://generativelanguage.googleapis.com/v1beta",
+                "generativelanguage.googleapis.com",
+            ),
+        ] {
+            let config = LlmEndpointConfig {
+                provider,
+                base_url: Some(endpoint.to_string()),
+                api_key: "sk-secret".to_string(),
+                model: "m".to_string(),
+                max_output_tokens: None,
+                temperature: None,
+            };
+            let spec = crate::wire::build_chat_request(&config, &prompt)
+                .unwrap_or_else(|error| panic!("{endpoint} must build: {error:?}"));
+
+            for base in bases {
+                let resolved = match base {
+                    Some(base) => Url::options()
+                        .base_url(Some(&Url::parse(base).expect("base parses")))
+                        .parse(&spec.url),
+                    None => Url::parse(&spec.url),
+                }
+                .unwrap_or_else(|error| panic!("{endpoint} from base {base:?}: {error:?}"));
+
+                assert_eq!(
+                    resolved.host_str(),
+                    Some(expected_host),
+                    "{endpoint} resolved to the wrong host from base {base:?}: {resolved}"
+                );
+                // A loopback approval must stay loopback, and an https approval
+                // must stay encrypted, from every base.
+                if endpoint.starts_with("https://") {
+                    assert_eq!(resolved.scheme(), "https", "{endpoint} lost https");
+                }
+            }
+        }
+    }
+
+    /// The same property, stated as the negative it protects: were a
+    /// base-dependent spelling ever approved again, this shows what it would
+    /// mean — the emitted URL resolving onto the page's own origin, with the
+    /// credential attached.
+    #[test]
+    fn a_base_dependent_spelling_would_resolve_off_loopback_which_is_why_it_is_refused() {
+        use url::Url;
+
+        let page = Url::parse("http://example.com/app/").expect("base parses");
+        let resolved = page
+            .join("http:localhost:11434/v1/chat/completions")
+            .expect("joins");
+        assert_eq!(resolved.host_str(), Some("example.com"));
+        assert_eq!(resolved.scheme(), "http");
+
+        // Which is exactly why the config that would have emitted it is refused.
+        assert!(matches!(
+            keyed("http:localhost:11434/v1"),
+            Err(LlmError::Configuration { .. })
+        ));
     }
 
     #[test]
