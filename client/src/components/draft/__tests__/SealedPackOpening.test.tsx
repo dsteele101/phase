@@ -68,28 +68,48 @@ const VIEW: DraftPlayerView = {
         cmc: 2,
         type_line: "Creature — Cat",
       }, count: 1, instance_ids: ["creature"] }] },
-      { kind: "instant", total: 1, cards: [{ card: {
-        instance_id: "instant",
-        name: "Shock",
-        set_code: "m19",
-        collector_number: "156",
-        rarity: "common",
-        colors: ["R"],
-        cmc: 1,
-        type_line: "Instant",
-      }, count: 1, instance_ids: ["instant"] }] },
+      { kind: "instant", total: 2, cards: [
+        {
+          card: {
+            instance_id: "instant",
+            name: "Shock",
+            set_code: "m19",
+            collector_number: "156",
+            rarity: "common",
+            colors: ["R"],
+            cmc: 1,
+            type_line: "Instant",
+          },
+          count: 1,
+          instance_ids: ["instant"],
+        },
+        {
+          card: {
+            instance_id: "sorcery",
+            name: "Lightning Bolt",
+            set_code: "m19",
+            collector_number: "157",
+            rarity: "common",
+            colors: ["R"],
+            cmc: 1,
+            type_line: "Instant",
+          },
+          count: 1,
+          instance_ids: ["sorcery"],
+        },
+      ] },
     ],
     cmc_groups: [],
     rarity_groups: [],
     type_filter_options: [],
     color_filter_options: [],
-    color_counts: { white: 1, blue: 0, black: 0, red: 1, green: 0 },
+    color_counts: { white: 1, blue: 0, black: 0, red: 2, green: 0 },
     workspace_capabilities: {
       rarity_group_order: ["mythic", "rare", "uncommon", "common", "rarity_other"],
     },
     workspace_row_classification: {
       creature_instance_ids: ["creature"],
-      noncreature_instance_ids: ["instant"],
+      noncreature_instance_ids: ["instant", "sorcery"],
     },
   },
   sealed_packs: [],
@@ -135,7 +155,7 @@ describe("SealedPackOpening", () => {
     fireEvent.click(screen.getByRole("button", { name: "View your pool" }));
     expect(await screen.findByRole("heading", { name: "Your sealed pool" })).toBeInTheDocument();
     expect(screen.getByText("Creature (1)")).toBeInTheDocument();
-    expect(screen.getByText("Instant (1)")).toBeInTheDocument();
+    expect(screen.getByText("Instant (2)")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Build deck" }));
     expect(onComplete).toHaveBeenCalledOnce();
@@ -176,6 +196,10 @@ describe("SealedPackOpening", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View your pool" }));
     expect(await screen.findByRole("heading", { name: "Your sealed pool" })).toBeInTheDocument();
+    expect(screen.getByText("Creature (1)")).toBeInTheDocument();
+    expect(screen.getByText("Instant (2)")).toBeInTheDocument();
+    expect(screen.getAllByText("Shock")).toHaveLength(2);
+    expect(screen.getAllByText("Lightning Bolt")).toHaveLength(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Build deck" }));
     expect(onComplete).toHaveBeenCalledOnce();
@@ -214,5 +238,7 @@ describe("SealedPackOpening", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View your pool" }));
     expect(await screen.findByRole("heading", { name: "Your sealed pool" })).toBeInTheDocument();
+    expect(screen.getAllByText("Shock")).toHaveLength(2);
+    expect(screen.getAllByText("Lightning Bolt")).toHaveLength(2);
   });
 });
