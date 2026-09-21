@@ -41147,10 +41147,11 @@ fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
     );
 }
 
-/// CR 701.20a + CR 608.2c: Erratic Mutation has a pump instruction between
+/// CR 701.20a + CR 608.2c + CR 401.4: Erratic Mutation has a pump instruction between
 /// the RevealUntil and "Put all cards revealed this way on the bottom of your library in any order."
 /// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library
-/// (kept_destination=Library, rest_destination=Library). The placement clause must be absorbed into
+/// (kept_destination=Library, rest_destination=Library); CR 401.4 lets its owner arrange that pile.
+/// The placement clause must be absorbed into
 /// RevealUntil, NOT emitted as a trailing PutAtLibraryPosition sibling that prompts for a second target.
 #[test]
 fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {

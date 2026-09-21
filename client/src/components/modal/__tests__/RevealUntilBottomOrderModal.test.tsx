@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
+import type { GameObject, ViewerInteraction, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { buildGameObject } from "../../../test/factories/gameObjectFactory.ts";
@@ -26,7 +26,11 @@ function makeObject(id: number, name: string): GameObject {
   });
 }
 
-function setWaitingFor(waitingFor: WaitingFor, objects: Record<string, GameObject>) {
+function setWaitingFor(
+  waitingFor: WaitingFor,
+  objects: Record<string, GameObject>,
+  viewerInteraction?: ViewerInteraction,
+) {
   const state = buildGameState({
     players: [buildPlayer({ id: 0, library: [10, 11] }), buildPlayer({ id: 1 })],
     objects,
@@ -37,7 +41,19 @@ function setWaitingFor(waitingFor: WaitingFor, objects: Record<string, GameObjec
     gameMode: "online",
     gameState: state,
     waitingFor,
+    viewerInteraction,
   });
+}
+
+function selectInteraction(id: string): ViewerInteraction {
+  return {
+    opportunities: [
+      {
+        interactionId: id,
+        response: { type: "schema", data: { spec: { type: "select" } } },
+      },
+    ],
+  } as unknown as ViewerInteraction;
 }
 
 describe("RevealUntilBottomOrderModal", () => {
@@ -110,6 +126,28 @@ describe("RevealUntilBottomOrderModal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [11, 10] },
+    });
+  });
+
+  it("resets the order for a new interaction with the same cards", () => {
+    const waitingFor: WaitingFor = {
+      type: "RevealUntilBottomOrder",
+      data: { player: 0, source_id: 1, cards: [10, 11] },
+    };
+    const objects = {
+      10: makeObject(10, "Lightning Bolt"),
+      11: makeObject(11, "Counterspell"),
+    };
+    setWaitingFor(waitingFor, objects, selectInteraction("session.1.1"));
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Move right/i })[0]);
+    setWaitingFor(waitingFor, objects, selectInteraction("session.1.2"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Done|Confirm/i }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "SelectCards",
+      data: { cards: [10, 11] },
     });
   });
 });

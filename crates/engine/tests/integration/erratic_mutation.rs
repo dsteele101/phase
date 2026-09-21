@@ -418,6 +418,7 @@ fn compound_exile_grants_casting_permission_over_full_tracked_set() {
                 mana_spend_permission: None,
                 enters_with_counter: None,
                 enters_with_modifications: Vec::new(),
+                cast_cost_modifier: None,
             },
             target: TargetFilter::TrackedSet {
                 id: engine::types::identifiers::TrackedSetId(0),
