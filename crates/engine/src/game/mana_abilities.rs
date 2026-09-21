@@ -12962,6 +12962,111 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 
+    // Regression for storage lands (Saltcrusted Steppe class): "Remove X storage
+    // counters from ~: Add X mana in any combination of colors" must bind the
+    // announced counter-removal count to BOTH the cost (chosen_counter_count)
+    // AND the produced `Ref(Variable("X"))` quantity (chosen_x). Previously
+    // only chosen_counter_count was set, so the counters were removed but the
+    // Variable("X") mana count resolved to 0 and no mana was produced.
+    #[test]
+    fn storage_land_variable_x_mana_ability_produces_chosen_amount() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8003),
+            player,
+            "Storage Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                            color_options: vec![ManaColor::Green, ManaColor::White],
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![AbilityCost::RemoveCounter {
+                        count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                        counter_type: CounterMatch::OfType(storage.clone()),
+                        target: None,
+                        selection: crate::types::ability::CounterCostSelection::SingleObject,
+                    }],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+            },
+        )
+        .expect("storage mana ability should prompt for a counter count");
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("chosen counter count should resume mana production");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "removing 2 storage counters must leave 1 remaining"
+        );
+
+        // CR 605.3a: an AnyCombination choice with multiple color options
+        // surfaces a mana-color prompt rather than auto-resolving. Submit the
+        // choice and confirm the produced amount matches the announced X (2),
+        // not the unresolved Variable("X") default of 0.
+        match &state.waiting_for {
+            WaitingFor::ChooseManaColor { .. } => {}
+            other => panic!("expected ChooseManaColor prompt, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::Combination(vec![
+                    ManaType::Green,
+                    ManaType::White,
+                ]),
+                count: 1,
+            },
+        )
+        .expect("mana color choice should resolve production");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green)
+                + state.players[0].mana_pool.count_color(ManaType::White),
+            2,
+            "Add X mana must produce X (2) mana units bound to the removed counter count"
+        );
+    }
+
     #[test]
     fn gemstone_mine_unpayable_without_counters() {
         let mut state = GameState::new_two_player(42);
