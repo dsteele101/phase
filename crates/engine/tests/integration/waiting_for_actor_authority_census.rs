@@ -757,15 +757,22 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the prompt cannot advance without that player's
     // `GameAction::SelectDieRolls`.
-    // 136 -> 137 is adjudicated: CR 701.20a + CR 608.2d RevealUntil bottom order
-    // ("put the rest of the revealed cards on the bottom of your library in any order")
-    // added `RevealUntilBottomOrder`. It names one acting `player` (the revealing player)
+    // 136 -> 137 is adjudicated: CR 601.2f's caster-elected cost-reduction
+    // ordering added `OrderCostReductions`. It names one acting `player` —
+    // CR 601.2f gives the choice to "the player" determining the total cost,
+    // i.e. the caster — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that caster's `GameAction::OrderCostReductions` (or a
+    // `GameAction::CancelCast`).
+    // 137 -> 138 is adjudicated: CR 401.4's library-order choice added
+    // `RevealUntilBottomOrder` for a RevealUntil bottom placement. It names one
+    // acting `player` (the revealing player)
     // and is classified by `WaitingFor::acting_authority` as
     // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance without
     // that player's `GameAction::SelectCards`.
-    if declared.len() != 137 {
+    if declared.len() != 138 {
         failures.push(format!(
-            "PIN declared.len()={} != 137.\n\
+            "PIN declared.len()={} != 138.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

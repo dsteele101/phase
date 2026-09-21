@@ -3355,6 +3355,41 @@ fn bind_forwarded_result_targets_for_legacy_effect(child: &mut ResolvedAbility) 
     }
 }
 
+/// CR 608.2c + CR 609.3: Resume a chain whose forwarded result is COMPLETE but
+/// EMPTY — the producer ran and moved no object, so an instruction anchored to
+/// that object has no referent and must not silently fall back to an inherited
+/// target or to the ability's own source.
+///
+/// Shared by the two seams that reach that state, which keep their own
+/// DETECTION and delegate only this correction:
+///   * a `forward_result` producer whose move yielded nothing, and
+///   * a zone-choice partition whose complement was exhausted — recorded by
+///     `engine_resolution_choices.rs` as `forwarded_result_context = Some([])`,
+///     the same completed-but-empty vocabulary.
+///
+/// Prunes exactly the dependent nodes, re-stamps the completed-but-empty
+/// context so a nested consumer reads the same fact, and resumes at the first
+/// independent sibling rather than terminating the printed instruction. The
+/// stamped result is unconditionally empty: both callers are guarded on the
+/// forwarded set already being empty, so there is nothing to carry.
+fn resolve_sub_with_missing_forward_result(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    sub: &ResolvedAbility,
+    effect_context_object: Option<&CostPaidObjectSnapshot>,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    if let Some(mut remaining) = without_missing_forward_result_dependencies(sub) {
+        apply_parent_chain_context(&mut remaining, ability, effect_context_object, state);
+        remaining.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(state, &[]),
+        ));
+        resolve_ability_chain(state, &remaining, events, depth + 1)?;
+    }
+    Ok(())
+}
+
 fn apply_parent_chain_context(
     child: &mut ResolvedAbility,
     parent: &ResolvedAbility,
@@ -6504,8 +6539,14 @@ fn node_or_branch_references_tracked_set(
     // CR 608.2c + CR 601.2c: a node that declares its own object targets is the
     // nearest antecedent of its continuation's "that creature" — even when the
     // declaration was empty — so a grant below it never reaches an ancestor's
-    // population (Trygon Prime's declined sub target grants nothing).
-    let child_anaphor = if ability.multi_target.is_some() {
+    // population (Trygon Prime's declined sub target grants nothing). An optional
+    // single target ("up to one target creature") declares one only when it is
+    // chosen on the stack. A resolution-time "up to one" choice declares no
+    // target, so its grant still reads the tracked set.
+    let declares_optional_single_target = ability.optional_targeting
+        && ability.target_choice_timing == TargetChoiceTiming::Stack
+        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+    let child_anaphor = if ability.multi_target.is_some() || declares_optional_single_target {
         ParentAnaphor::NamesDeclaredTargets
     } else {
         ParentAnaphor::NamesPublisher
@@ -7039,6 +7080,45 @@ pub(crate) fn this_way_cause_for_zone(destination: Zone) -> Option<ThisWayCause>
     }
 }
 
+/// CR 608.2c + CR 611.2c: a targeted `Pump` is an antecedent of a following plural
+/// anaphor only when every instruction between it and that anaphor is itself a
+/// `Pump` and the anaphor is a continuous grant or pump over the chain tracked set
+/// ("... gets +2/+2, and up to one other target creature gets +1/+1. Those creatures
+/// gain vigilance until end of turn.").
+///
+/// The gate's reason is NARROW, and is written narrowly on purpose: this arm exists
+/// ONLY to feed the tracked set that the parse-layer stamp points a grant or pump at.
+/// It is NOT a claim that every other consumer names some other population. On
+/// Triton Tactics and Colossal Heroics ("Untap those creatures") the pump IS the
+/// antecedent. Those cards are preserved by a different mechanism: a consumer bound
+/// to `TargetFilter::ParentTarget` reads the ability's declared targets and never
+/// consults the tracked set, because `effect.rs` gates that fallback on
+/// `ability.targets.is_empty()`. Publishing there would REPLACE a population that is
+/// already right, so this arm declines and base behaviour stands. Urge to Feed
+/// ("... on each of those Vampires") is the witness for a consumer that really does
+/// name its own population.
+fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
+    let mut node = ability.sub_ability.as_deref();
+    while let Some(next) = node {
+        match &next.effect {
+            Effect::Pump {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            } => return true,
+            Effect::Pump { .. } => node = next.sub_ability.as_deref(),
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                return static_abilities.iter().any(|static_def| {
+                    matches!(static_def.affected, Some(TargetFilter::TrackedSet { .. }))
+                })
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn affected_objects_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -7110,8 +7190,8 @@ fn affected_objects_from_events(
         // CR 611.2c (issue #6857): the set of objects a resolution-generated
         // continuous effect modifies is determined when that effect BEGINS and
         // never changes afterwards, so the population these heads froze is the
-        // antecedent a following "those creatures" names (CR 608.2c). Unlike
-        // every other producer here they move nothing and emit no per-object
+        // antecedent a following "those creatures" names (CR 608.2c). Like the
+        // targeted `Pump` arm, they move nothing and emit no per-object
         // event, so without their own arm the `_ =>` `ZoneChanged` harvest
         // publishes an EMPTY set — the WRONG set, not merely an unhelpful one —
         // and "Untap those creatures" (CR 701.26b) binds nothing.
@@ -7153,6 +7233,32 @@ fn affected_objects_from_events(
         Effect::GiveControl { target, .. } if is_sole_chain_producer(state, ability) => {
             gain_control::give_control_object_targets(state, ability, target)
         }
+        // CR 611.2c + CR 608.2c: a targeted P/T modification affects exactly the
+        // objects its target instance declared, fixed when the effect begins, so
+        // those objects are what a following "those creatures" names. Chain
+        // unification in `publish_tracked_set` unions several such instructions; a
+        // declined "up to one" instance declared none and adds none (CR 115.6).
+        //
+        // This arm deliberately OMITS `is_sole_chain_producer`, unlike its three
+        // neighbours. Leg 2 ("no later producer in publisher position") is INVERTED
+        // for this shape by design: several targeted `Pump`s legitimately union into
+        // ONE antecedent, so each is a later producer relative to the one before it
+        // and the guard would make every pump decline. That is measured — re-adding
+        // it turns Arm the Cathars' runtime row red. Legs 1 and 3 (no earlier
+        // producer; the `DetachedRemainder` player-scope fan-out) are dropped with
+        // MEASURED zero reach: the gate above admits only a pure `Pump` run ending in
+        // a tracked-set consumer, which corpus-wide is 3 nodes on 1 card. Do NOT
+        // "harmonise" this arm with its neighbours.
+        Effect::Pump {
+            target: TargetFilter::Typed(_),
+            ..
+        } if pump_run_feeds_tracked_set_grant(ability) => fallback_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
         Effect::GainControl { .. } => fallback_targets
             .iter()
             .filter_map(|target| match target {
@@ -12718,30 +12824,43 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// reverted is the mistake it was introduced to prevent.
 /// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
 /// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
-/// triggers the tail installed — every record whose installation instance is
-/// at or past `first_new_instance`, the counter value read before the tail
-/// ran. The offer's decline withdraws exactly these
-/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`). No-op
-/// when the head left any other state.
-fn record_tail_installs_on_paid_offer(state: &mut GameState, first_new_instance: u64) {
-    let new_instances: Vec<_> = state
+/// triggers the tail installed. The receipt is selected by the producer-issued
+/// owner already stamped by the sole installer, not by a counter range or
+/// equivalent-looking source/card fields; nested and later installations are
+/// ownerless once that marker is consumed.
+fn record_tail_installs_on_paid_offer(
+    state: &mut GameState,
+    offer_id: crate::types::identifiers::ResolutionCastOfferId,
+) {
+    let receipts: Vec<_> = state
         .delayed_triggers
         .iter()
         .filter_map(|trigger| trigger.provenance.origin())
-        .map(|origin| origin.instance)
-        .filter(|instance| instance.0 >= first_new_instance)
+        .filter(|origin| origin.offer_id == Some(offer_id))
+        .map(
+            |origin| crate::types::ability::ResolutionCastDelayedTriggerReceipt {
+                offer_id,
+                token: origin.token,
+                instance: origin.instance,
+                source_id: origin.source_id,
+            },
+        )
         .collect();
-    if new_instances.is_empty() {
+    if receipts.is_empty() {
         return;
     }
     if let WaitingFor::CastOffer {
-        kind: CastOfferKind::GraveyardPaidCast {
-            installed_triggers, ..
-        },
+        kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
         ..
     } = &mut state.waiting_for
     {
-        installed_triggers.extend(new_instances);
+        if cleanup.offer_id == Some(offer_id) {
+            for receipt in receipts {
+                if !cleanup.delayed_trigger_receipts.contains(&receipt) {
+                    cleanup.delayed_trigger_receipts.push(receipt);
+                }
+            }
+        }
     }
 }
 
@@ -15269,12 +15388,37 @@ fn resolve_chain_body(
                 ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
-                    // CR 603.7: every delayed trigger this tail installs is
-                    // recorded on the open paid offer by installation instance,
-                    // so a declined offer can withdraw exactly those records.
-                    let first_new_instance = state.next_delayed_trigger_instance;
-                    resolve_ability_chain(state, &tail, events, depth + 1)?;
-                    record_tail_installs_on_paid_offer(state, first_new_instance);
+                    // A paid offer owns only its immediate, direct synchronous
+                    // trigger tail. Snapshot its producer ID before resolving;
+                    // do not infer ownership from whichever prompt may be open
+                    // after the call returns.
+                    let paid_offer_id = match &state.waiting_for {
+                        WaitingFor::CastOffer {
+                            kind: CastOfferKind::GraveyardPaidCast { cleanup, .. },
+                            ..
+                        } => cleanup.offer_id.filter(|offer_id| offer_id.0 != 0),
+                        _ => None,
+                    };
+                    if matches!(tail.effect, Effect::CreateDelayedTrigger { .. }) {
+                        let offer_id = paid_offer_id.ok_or_else(|| {
+                            EffectError::InvalidParam(
+                                "paid resolution offer has no producer identity".to_string(),
+                            )
+                        })?;
+                        state.active_paid_resolution_offer_tail = Some(offer_id);
+                        let result = resolve_ability_chain(state, &tail, events, depth + 1);
+                        // Clear before propagating every success/error/paused
+                        // result so no later or nested trigger can inherit it.
+                        state.active_paid_resolution_offer_tail = None;
+                        // If the direct trigger installed before a later chain
+                        // error, retain its receipt before returning that error:
+                        // the state has already acquired an owner-bearing live
+                        // root and its offer must still be able to withdraw it.
+                        record_tail_installs_on_paid_offer(state, offer_id);
+                        result?;
+                    } else {
+                        resolve_ability_chain(state, &tail, events, depth + 1)?;
+                    }
                 }
             }
             return Ok(());
@@ -16062,6 +16206,33 @@ fn resolve_chain_body(
             }
         }
 
+        // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
+        // complement, and that binding is EMPTY — the pick exhausted the eligible
+        // pool, so "the other" names no object at all
+        // (`engine_resolution_choices.rs`'s partition forward records it as
+        // `forwarded_result_context = Some([])`, the same completed-but-empty
+        // vocabulary the `forward_result` seam below uses). An instruction that
+        // needs that absent object does as much as possible — nothing — while the
+        // rest of the printed instruction still happens, so reuse the shared
+        // missing-forward-result authority to drop exactly the dependent nodes and
+        // resume at the first independent sibling. Without this the empty `targets`
+        // vec is indistinguishable from "unassigned" and the seams below hand the
+        // clause the CHOSEN half (or, once `targets` stays empty, the ability
+        // source) as its referent.
+        if sub.targets.is_empty()
+            && bound_result_is_empty(sub)
+            && ability_chain_depends_on_missing_forward_result(sub)
+        {
+            return resolve_sub_with_missing_forward_result(
+                state,
+                ability,
+                sub,
+                effect_context_object.as_ref(),
+                events,
+                depth,
+            );
+        }
+
         // Apply forward_result: moved object becomes sub's source.
         //
         // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
@@ -16131,19 +16302,14 @@ fn resolve_chain_body(
             // dependent sequential siblings and resume at the first independent
             // sibling instead of terminating the entire printed instruction
             // chain.
-            if let Some(mut remaining) = without_missing_forward_result_dependencies(sub) {
-                apply_parent_chain_context(
-                    &mut remaining,
-                    ability,
-                    effect_context_object.as_ref(),
-                    state,
-                );
-                remaining.context.forwarded_result_context = Some(Box::new(
-                    ForwardedResultContext::from_object_ids(state, &forwarded_objects),
-                ));
-                resolve_ability_chain(state, &remaining, events, depth + 1)?;
-            }
-            return Ok(());
+            return resolve_sub_with_missing_forward_result(
+                state,
+                ability,
+                sub,
+                effect_context_object.as_ref(),
+                events,
+                depth,
+            );
         } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
             let attachment_candidates = if forwarded_objects.is_empty() {
@@ -16488,6 +16654,25 @@ fn resolve_chain_body(
     }
 
     Ok(())
+}
+
+/// CR 608.2c + CR 609.3: Whether a producer already bound this node's referent
+/// to the empty set.
+///
+/// `SpellContext::forwarded_result_context` is the single vocabulary for
+/// "a producer ran": `None` means none did, and `Some([])` is a completed
+/// producer whose result is no objects — a fact an empty `targets` vec cannot
+/// express, since that is also what an unassigned node looks like. Both the
+/// `forward_result` seam and the zone-choice partition forward record their
+/// empty results this way, so the chain walker can tell a genuinely empty
+/// referent apart from one that was never assigned and must not substitute an
+/// inherited target for it.
+fn bound_result_is_empty(ability: &ResolvedAbility) -> bool {
+    ability
+        .context
+        .forwarded_result_context
+        .as_deref()
+        .is_some_and(|context| context.targets.is_empty())
 }
 
 /// CR 608.2c + CR 603.7c: Detect a dependency on a missing forward-result
@@ -18523,6 +18708,7 @@ mod tests {
                     },
                     mana_spend_permission: None,
                     additional_cost: None,
+                    cast_cost_modifier: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -18634,6 +18820,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::LifeChanged {
             player_id: PlayerId(1),
             amount: -1,
+            new_total: crate::types::events::LifeTotalReading::default(),
         });
         assert!(ability_with_event_context_targets(&state, &ability)
             .targets
@@ -19166,6 +19353,7 @@ mod tests {
             token: DelayedTriggerToken(7),
             instance: DelayedTriggerInstanceId(11),
             source_id: ObjectId(13),
+            offer_id: None,
         });
         state.resolving_trigger_firing = Some(live);
 
@@ -20531,6 +20719,62 @@ mod tests {
         assert!(
             ability_or_branch_references_tracked_set(&ability),
             "repeat_for: TrackedSetSize must mark the ability as referencing the tracked set"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c: a node that declares a single optional object target
+    /// ("up to one target creature", lowered with `optional_targeting` and no
+    /// `multi_target`) is the nearest antecedent of its continuation's "that
+    /// creature". When the player declines that target, the grant affects nothing.
+    /// It must not reach an ancestor's tracked set.
+    #[test]
+    fn optional_single_target_node_is_the_antecedent_of_a_parent_target_grant() {
+        let source = ObjectId(1);
+        let grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut pump = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(grant);
+        // Control: with no declared target on the pump, the grant names the
+        // chain's tracked set, so the instrument fires.
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a ParentTarget grant with no nearer antecedent consumes the tracked set"
+        );
+        pump.optional_targeting = true;
+        assert!(
+            !chain_references_tracked_set(&pump),
+            "an optional single declared target is the grant's antecedent, so the \
+             grant must not consume an ancestor's tracked set"
+        );
+        // A resolution-time "up to one" choice declares no target, so the grant
+        // still names the chain's tracked set.
+        pump.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert!(
+            chain_references_tracked_set(&pump),
+            "a resolution-time optional choice declares no target, so the grant \
+             must still consume the tracked set"
         );
     }
 
@@ -26981,6 +27225,7 @@ mod tests {
                         enters_with_counter: None,
                         enters_with_modifications: Vec::new(),
                         mana_spend_permission: None,
+                        cast_cost_modifier: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -27085,6 +27330,7 @@ mod tests {
                         enters_with_counter: None,
                         enters_with_modifications: Vec::new(),
                         mana_spend_permission: None,
+                        cast_cost_modifier: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -27162,6 +27408,7 @@ mod tests {
                     enters_with_counter: None,
                     enters_with_modifications: Vec::new(),
                     mana_spend_permission: None,
+                    cast_cost_modifier: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -29065,7 +29312,7 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
                     alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
@@ -33121,7 +33368,7 @@ mod tests {
                     card_filter: None,
                     single_use_group: None,
                     single_use: false,
-                    cast_cost_raise: None,
+                    cast_cost_modifier: None,
                     alt_ability_cost: None,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 },
@@ -36714,6 +36961,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
         );
         let ability = build_resolved_from_def(&pure_peek_definition(cast, 1), source, PlayerId(0));
@@ -36782,6 +37030,7 @@ mod tests {
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
                     additional_cost: None,
+                    cast_cost_modifier: None,
                 },
             )
             .optional();
@@ -36905,6 +37154,7 @@ mod tests {
                         driver,
                         mana_spend_permission: None,
                         additional_cost: None,
+                        cast_cost_modifier: None,
                     },
                     vec![],
                     ObjectId(900),
@@ -36940,6 +37190,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![],
             ObjectId(900),
@@ -37108,6 +37359,7 @@ mod tests {
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
             vec![TargetRef::Object(spell)],
             source,
@@ -37147,6 +37399,7 @@ mod tests {
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
                     additional_cost: None,
+                    cast_cost_modifier: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -37272,6 +37525,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
         )
         .optional();
@@ -37394,6 +37648,7 @@ mod tests {
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
                 additional_cost: None,
+                cast_cost_modifier: None,
             },
         );
         let dig_def = AbilityDefinition::new(

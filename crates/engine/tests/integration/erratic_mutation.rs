@@ -1,5 +1,7 @@
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::actions::GameAction;
+use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -465,5 +467,60 @@ fn compound_exile_grants_casting_permission_over_full_tracked_set() {
             .iter()
             .any(|p| matches!(p, CastingPermission::ExileWithAltCost { granted_to: Some(p_id), .. } if *p_id == P0)),
         "card2 must have casting permission granted from tracked set"
+    );
+}
+
+/// CR 401.4: synthetic grammar fixture, not a printed card. Omitting an order
+/// instruction must still let the owner order two cards placed on the bottom.
+#[test]
+fn reveal_until_unspecified_bottom_order_is_owner_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Unspecified Bottom Order Test",
+            true,
+            "Reveal cards from the top of your library until you reveal a nonland card. Put that card into your hand and the rest on the bottom of your library.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let hit = scenario.add_spell_to_library_top(P0, "Hit", false).id();
+    let second = scenario
+        .add_spell_to_library_top(P0, "Second Land", false)
+        .as_land()
+        .id();
+    let first = scenario
+        .add_spell_to_library_top(P0, "First Land", false)
+        .as_land()
+        .id();
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(spell).commit();
+    committed.act(GameAction::PassPriority).unwrap();
+    committed.act(GameAction::PassPriority).unwrap();
+    match &committed.state().waiting_for {
+        WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            assert_eq!(cards, &[first, second]);
+        }
+        other => panic!("expected owner ordering choice, got {other:?}"),
+    }
+    assert_eq!(committed.state().objects[&hit].zone, Zone::Hand);
+    committed
+        .act(GameAction::SelectCards {
+            cards: vec![second, first],
+        })
+        .unwrap();
+    let library = &committed
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library;
+    assert_eq!(
+        library.iter().copied().collect::<Vec<_>>(),
+        vec![deep, second, first]
     );
 }
