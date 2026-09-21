@@ -248,7 +248,7 @@ export function SealedPackOpening({ view, onComplete }: SealedPackOpeningProps) 
               {t("sealedOpening.subtitle", { count: view.pack_count })}
             </p>
           </div>
-          {!openAllMode && packIndex < packs.length && (
+          {!openAllMode && !opened && packIndex < packs.length && (
             <button
               type="button"
               onClick={() => setOpenAllMode(true)}
