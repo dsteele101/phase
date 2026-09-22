@@ -261,6 +261,104 @@ fn composite_counter_choice_cost_mixing_any_and_typed_leaves_is_demoted_to_unimp
     }
 }
 
+/// Companion to the reach-guard matrix above, through the PRODUCTION pipeline
+/// rather than a hand-built `ParsedAbilities`: proves real Oracle text
+/// actually lowers to the mixed Any + typed `RemoveCounter` composite this
+/// demotion targets, and that `parse_oracle_text` — which runs
+/// `demote_unsupported_composite_counter_choice_costs` internally, alongside
+/// every other post-lowering demotion pass — retains the
+/// `Effect::unimplemented("counter_choice_cost_mixes_any_with_typed", ..)`
+/// marker on the resulting ability. The unit test above proves the demoter's
+/// OWN matching logic against six planted shapes without depending on cost
+/// parsing at all; this test is the missing link that a parser or lowering
+/// regression could otherwise leave real Oracle input silently "supported"
+/// while that unit test stays green, since it never calls `parse_oracle_cost`
+/// or `parse_oracle_pipeline`.
+///
+/// No real printed card uses this cost shape — it does not correspond to any
+/// class of Magic card, only to the synthetic combination the review
+/// identified as structurally ambiguous — so the Oracle text below is
+/// invented to exercise the parser on the two sub-costs, not transcribed
+/// from a printed card.
+#[test]
+fn oracle_text_mixing_any_and_typed_counter_choice_costs_parses_to_demoted_ability() {
+    let oracle = "{T}: Add {C}.\n\
+{T}, Remove X counters from ~, Remove any number of storage counters from ~: Add {C}.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Counter Choice Fixture Land",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+
+    let mixed = parsed
+        .abilities
+        .iter()
+        .find(|ability| {
+            matches!(
+                &ability.cost,
+                Some(AbilityCost::Composite { costs })
+                    if costs.iter().any(|cost| matches!(cost, AbilityCost::RemoveCounter { .. }))
+            )
+        })
+        .expect("the second line's composite cost must parse as an activated ability");
+
+    // Confirm the parser actually built the shape under test — a lone-`Any`
+    // or lone-typed misparse of either clause would make the demotion
+    // assertion below vacuous.
+    match mixed.cost.as_ref().expect("composite cost") {
+        AbilityCost::Composite { costs } => {
+            assert!(
+                costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::RemoveCounter {
+                        counter_type: CounterMatch::Any,
+                        target: None,
+                        ..
+                    }
+                )),
+                "expected an untyped self-RemoveCounter leaf, got {costs:?}"
+            );
+            assert!(
+                costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::RemoveCounter {
+                        counter_type: CounterMatch::OfType(counter_type),
+                        target: None,
+                        ..
+                    } if *counter_type == CounterType::Generic("storage".to_string())
+                )),
+                "expected a storage-typed self-RemoveCounter leaf, got {costs:?}"
+            );
+        }
+        other => panic!("expected Composite cost, got {other:?}"),
+    }
+
+    assert!(
+        matches!(
+            mixed.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "counter_choice_cost_mixes_any_with_typed"
+        ),
+        "production parsing of the mixed Any+typed composite must demote to \
+         the shared strict-failure marker, got {:?}",
+        mixed.effect
+    );
+
+    // Reach guard: the sibling `{T}: Add {C}.` mana ability (a single `Tap`
+    // cost, no `RemoveCounter` at all) must be untouched by this pass.
+    let tap_only = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&ability.cost, Some(AbilityCost::Tap)))
+        .expect("the first line's plain tap ability must also parse");
+    assert!(
+        matches!(tap_only.effect.as_ref(), Effect::Mana { .. }),
+        "an unrelated tap-only mana ability must not be demoted, got {:?}",
+        tap_only.effect
+    );
+}
+
 /// A forced diagonal for CopyChosenHost provenance. Two eligible chooser gaps
 /// and two CopyChosen statics prove the document relation binds the first
 /// source-order pair exactly once; the later copy ability proves the transformed
