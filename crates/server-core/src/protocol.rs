@@ -268,6 +268,11 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
@@ -380,6 +385,13 @@ pub enum ClientMessage {
         /// Enable ranked rating updates for this room.
         #[serde(default)]
         ranked: bool,
+        /// Room code pre-minted by a caller (the Discord LFG bot) that the host
+        /// claims instead of a server-minted one; `None` keeps server minting.
+        /// Twin of the lobby field added in lobby protocol 10. A server that
+        /// predates it ignores it and mints its own, which the client detects
+        /// as `GameCreated.game_code != requested`.
+        #[serde(default)]
+        requested_code: Option<String>,
         /// Host-private Cube draft source for a native Full-server game. This
         /// deliberately belongs to the Full session, never the lobby broker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1110,10 +1122,10 @@ impl ServerMessage {
         }
     }
 
-    pub fn deck_rejected(message: impl Into<String>) -> Self {
+    pub fn error_with_code(code: ServerErrorCode, message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
-            code: Some(ServerErrorCode::DeckRejected),
+            code: Some(code),
         }
     }
 }
@@ -1593,6 +1605,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: Some(vec![
                 "Cube Card".into(),
                 "Cube Card".into(),
@@ -2153,6 +2166,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -2516,6 +2530,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: None,
             booster_pack_pool: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -2523,6 +2538,58 @@ mod tests {
         match parsed {
             ClientMessage::CreateGameWithSettings { host_peer_id, .. } => {
                 assert_eq!(host_peer_id, Some("peer-host-abc".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_requested_code_roundtrips() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: DeckData::default(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: Some("AB12CD".to_string()),
+            booster_pack_pool: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code.as_deref(), Some("AB12CD"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_requested_code_defaults_to_none() {
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { requested_code, .. } => {
+                assert_eq!(requested_code, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -3249,22 +3316,18 @@ mod tests {
     }
 
     /// `PendingManaAbility::chosen_counter_count: Option<u32>` retyped to
-    /// `chosen_counter_counts: Vec<u32>` (#9207): a composite mana-ability
-    /// cost with more than one chosen-count `RemoveCounter` leaf now carries
-    /// an independently-announced amount per leaf instead of collapsing them
-    /// into one scalar. The new field carries no serde default and is never
-    /// omitted on write, so a v76 peer's payload — which can only carry the
-    /// old, differently-named scalar field — is a missing-field parse error
-    /// rather than a silently reopened choice prompt; it must be refused
-    /// before it receives v77 state.
+    /// `chosen_counter_counts: Vec<u32>` (#9207), so independently announced
+    /// counter-removal amounts survive composite mana-ability payment. The
+    /// changed required field name makes a v77 GameState payload fail to
+    /// deserialize and therefore requires v78 before state delivery.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_77_for_chosen_counter_counts_retype() {
-        assert_eq!(PROTOCOL_VERSION, 77);
+    fn protocol_version_is_78_for_chosen_counter_counts_retype() {
+        assert_eq!(PROTOCOL_VERSION, 78);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3275,7 +3338,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_77_for_chosen_counter_counts_retype` stays
+    /// `protocol_version_is_78_for_chosen_counter_counts_retype` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

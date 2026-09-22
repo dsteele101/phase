@@ -79,7 +79,7 @@ use crate::analysis::resource::{
     object_class, CounterClass, ObjectClass, ResourceAxis, UnboundedMarkKind,
 };
 use crate::game::bracket_estimate::CommanderBracketTier;
-use crate::game::combat::{AttackTarget, CombatState};
+use crate::game::combat::{AttackTarget, BlockHistoryPair, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
 use crate::game::game_object::{AttachTarget, BackFaceData, CaseState, GameObject, PhaseStatus};
@@ -6546,6 +6546,14 @@ pub enum PendingCounterPostAction {
         subtype: String,
         ability: Box<ResolvedAbility>,
     },
+    /// CR 701.71a: a token-creation replacement paused the Jace token's
+    /// creation; once it settles, choose a Jace token and put `count` loyalty
+    /// counters on it. `count` is N, already determined (CR 608.2h).
+    ContinueEmpowerJaceAfterTokenCreation {
+        controller: PlayerId,
+        source_id: ObjectId,
+        count: u32,
+    },
     InjectPredefinedTokenAbilities {
         object_id: ObjectId,
     },
@@ -8232,14 +8240,14 @@ pub struct PendingManaAbility {
     ///
     /// A retype like this is normally version-backed rather than left silent
     /// — see the `chosen_tappers_pre_option_wire_shape_is_rejected` doc block
-    /// above for the precedent this follows: `PROTOCOL_VERSION` moved to 77
+    /// above for the precedent this follows: `PROTOCOL_VERSION` moved to 78
     /// (#9207) for the same reason. This field intentionally carries NO
     /// `#[serde(default)]` and NO `skip_serializing_if`, unlike the scalar
     /// `chosen_counter_count: Option<u32>` field it replaces: a `Vec` field
     /// (unlike `Option`) already fails deserialization on a missing key
     /// without any extra machinery, so simply never omitting it on write (an
     /// empty `Vec` serializes as `[]`, not skipped) is enough to make an old
-    /// pre-77 payload — which carries the old field name and can therefore
+    /// pre-78 payload — which carries the old field name and can therefore
     /// never populate this one — a loud parse failure instead of a silently
     /// empty (and therefore wrongly reopened) choice stage. Pinned by
     /// `chosen_counter_counts_missing_field_wire_shape_is_rejected` in this
@@ -13395,6 +13403,17 @@ pub enum WaitingFor {
         player: PlayerId,
         choices: Vec<ObjectId>,
     },
+    /// CR 701.71a + CR 608.2d: choose a Jace planeswalker token you control.
+    /// Raised only when two or more candidates exist (one candidate
+    /// auto-collapses). `count` is N, determined once before the token-creation
+    /// step (CR 608.2h), so the handler places exactly that many loyalty
+    /// counters on the chosen token without re-reading the board.
+    EmpowerJaceChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        choices: Vec<ObjectId>,
+        count: u32,
+    },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
     ChooseOneOfBranch {
@@ -15490,6 +15509,7 @@ impl WaitingFor {
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
+            WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -15651,6 +15671,7 @@ impl WaitingFor {
             | WaitingFor::OutsideGameChoice { player, .. }
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
+            | WaitingFor::EmpowerJaceChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
@@ -19451,6 +19472,14 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub creature_attacked_defenders_this_turn: HashMap<ObjectId, HashSet<PlayerId>>,
+    /// CR 509.1g + CR 400.7 + CR 500.8: The turn-scoped counterpart to
+    /// `CombatState::creature_blocked_attackers_this_combat`, accumulated across
+    /// every combat phase of the turn — effects can add phases to a turn
+    /// (CR 500.8), so this ledger is not limited to a single combat's worth of
+    /// records.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub creature_blocked_attackers_this_turn: HashSet<BlockHistoryPair>,
     /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -24887,22 +24916,45 @@ impl GameState {
     pub fn opponent_attacked(
         &self,
         subject: AttackSubject,
-        scope: crate::types::ability::AttackScope,
+        scope: crate::types::ability::CombatHistoryScope,
         controller: PlayerId,
         source_id: ObjectId,
         target: PlayerId,
     ) -> bool {
-        use crate::types::ability::{AttackScope, AttackSubject};
+        use crate::types::ability::{AttackSubject, CombatHistoryScope};
         match (subject, scope) {
-            (AttackSubject::You, AttackScope::ThisTurn) => self.has_attacked(controller, target),
-            (AttackSubject::Source, AttackScope::ThisTurn) => {
+            (AttackSubject::You, CombatHistoryScope::ThisTurn) => {
+                self.has_attacked(controller, target)
+            }
+            (AttackSubject::Source, CombatHistoryScope::ThisTurn) => {
                 self.creature_attacked_player_this_turn(source_id, target)
             }
-            (AttackSubject::You, AttackScope::ThisCombat) => {
+            (AttackSubject::You, CombatHistoryScope::ThisCombat) => {
                 self.player_attacked_player_this_combat(controller, target)
             }
-            (AttackSubject::Source, AttackScope::ThisCombat) => {
+            (AttackSubject::Source, CombatHistoryScope::ThisCombat) => {
                 self.creature_attacked_player_this_combat(source_id, target)
+            }
+        }
+    }
+
+    /// CR 509.1g + CR 400.7: Did exactly `blocker` block exactly `attacker` within `scope`?
+    pub fn creature_blocked_attacker(
+        &self,
+        blocker: ObjectIncarnationRef,
+        attacker: ObjectIncarnationRef,
+        scope: crate::types::ability::CombatHistoryScope,
+    ) -> bool {
+        use crate::types::ability::CombatHistoryScope;
+        let pair = BlockHistoryPair { blocker, attacker };
+        match scope {
+            CombatHistoryScope::ThisCombat => self.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .creature_blocked_attackers_this_combat
+                    .contains(&pair)
+            }),
+            CombatHistoryScope::ThisTurn => {
+                self.creature_blocked_attackers_this_turn.contains(&pair)
             }
         }
     }
@@ -25148,6 +25200,7 @@ impl GameState {
             attacked_defenders_this_turn: HashMap::new(),
             attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
+            creature_blocked_attackers_this_turn: HashSet::new(),
             combat_phases_started_this_turn: 0,
             end_steps_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
@@ -27384,6 +27437,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         attacked_defenders_this_turn: _,
         attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
+        creature_blocked_attackers_this_turn: _,
         combat_phases_started_this_turn: _,
         end_steps_started_this_turn: _,
         creatures_attacked_this_turn: _,
@@ -27721,6 +27775,8 @@ impl PartialEq for GameState {
             && self.attacked_defenders_last_turn == other.attacked_defenders_last_turn
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
+            && self.creature_blocked_attackers_this_turn
+                == other.creature_blocked_attackers_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.end_steps_started_this_turn == other.end_steps_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
@@ -33117,7 +33173,7 @@ mod tests {
     /// number of" leaf) carries an independently-announced amount per leaf
     /// instead of collapsing them into one scalar. The field intentionally
     /// carries NO `#[serde(default)]` and no `skip_serializing_if`, backed by
-    /// `lobby_broker::PROTOCOL_VERSION` 77 / `WIRE_PROTOCOL_VERSION` 59 — the
+    /// `lobby_broker::PROTOCOL_VERSION` 78 / `WIRE_PROTOCOL_VERSION` 60 — the
     /// same convention entry 23 (`PayableResource::ManaGeneric`) established
     /// and `chosen_tappers_pre_option_wire_shape_is_rejected` above pins for
     /// the sibling `chosen_tappers` retype.
@@ -33128,7 +33184,7 @@ mod tests {
     /// `#[serde(default)]`), a bare `Vec` field already fails deserialization
     /// on a missing key with no extra machinery — so simply never skipping it
     /// on write is enough. This test proves that through the actual
-    /// production restore path (`PersistedGameState`): a pre-77 payload,
+    /// production restore path (`PersistedGameState`): a pre-78 payload,
     /// which can only carry the OLD scalar field under the old name and
     /// therefore never populates this one, must be a loud parse failure
     /// rather than silently defaulting to an empty choice list and reopening

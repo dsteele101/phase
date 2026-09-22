@@ -106,16 +106,20 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  59 — game_setup and state_update carry GameState, whose
- *       PendingManaAbility.chosen_counter_count: Option<u32> retyped to
- *       chosen_counter_counts: Vec<u32> (#9207) — a composite mana-ability
- *       cost with more than one chosen-count RemoveCounter leaf now carries
- *       an independently-announced amount per leaf. The field carries no
- *       serde default and is never omitted on write, so a pre-bump payload
- *       (which can only carry the old, differently-named scalar field) is a
- *       missing-field parse error rather than a silently reopened prompt.
- *       Since game_setup and reconnect_ack carry GameState, first contact
- *       rejects the version skew. Bumped in lockstep with PROTOCOL_VERSION 77.
+ *  60 — `PendingManaAbility::chosen_counter_count: Option<u32>` retyped to
+ *       `chosen_counter_counts: Vec<u32>` (#9207). A composite mana ability
+ *       now carries independently announced counter-removal amounts; a v59
+ *       GameState has the old required scalar field and cannot decode as v60.
+ *       Bumped in lockstep with full-game protocol 78.
+ *  59 — Prospective: no GameState shape change lands in this bump. Moved
+ *       ahead of new GameFormat variants — the same precedent as 32's CommanderDraft variant: the
+ *       break, when it lands, will be conditional on a new variant actually
+ *       being serialized in a game_setup/state_update payload, not
+ *       unconditional like FormatConfig.deck_size's 32 retype. First
+ *       contact stays exact-match on both roles (guest `hostVersion !==
+ *       WIRE_PROTOCOL_VERSION`, host `guestVersion !== WIRE_PROTOCOL_VERSION`),
+ *       so no older peer ever completes a pairing that could carry a v59
+ *       payload.
  *  57 — game_setup and state_update carry GameState, whose paid resolution
  *       cleanup, receipt, and delayed-install origin now carry a
  *       producer-issued offer owner. A v56 peer cannot preserve cross-offer
@@ -405,7 +409,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 59 as const;
+export const WIRE_PROTOCOL_VERSION = 60 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
