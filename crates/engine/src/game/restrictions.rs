@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
-    CastingRestriction, CommanderOwnership, ControllerRef, FilterProp, ParsedCondition,
-    QuantityExpr, SpellCastingOptionKind, TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
+    CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
+    SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -999,10 +999,14 @@ fn has_activate_as_instant_permission(
     ability_index: usize,
     gates: &ActivationRestrictionStaticGates,
 ) -> bool {
-    let Some(ability) = state
-        .objects
-        .get(&source_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
+    // CR 702.6a: use the same effective-ability lookup as activation itself
+    // (`activation_ability_definition`), not the raw stored `obj.abilities`
+    // list — a runtime-granted Equip ability (e.g. from a keyword-granting
+    // effect) lives past the end of that list and is synthesized on demand,
+    // so reading `obj.abilities` directly would silently miss it and deny
+    // the permission to every dynamically granted Equip ability.
+    let Some(ability) =
+        super::casting::activation_ability_definition(state, source_id, ability_index)
     else {
         return false;
     };
@@ -1039,7 +1043,7 @@ fn has_activate_as_instant_permission(
             // `cost_category` is only consulted when there's no tag to match.
             match keyword {
                 Some(keyword) => {
-                    if ability_tag.map(AbilityTag::keyword_str) != Some(keyword.as_str()) {
+                    if ability_tag != Some(*keyword) {
                         return false;
                     }
                 }

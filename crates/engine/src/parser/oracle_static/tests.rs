@@ -11651,7 +11651,7 @@ fn static_equip_abilities_activate_as_instant() {
         def.mode,
         StaticMode::ActivateAsInstant {
             cost_category: CostCategory::ManaOnly,
-            keyword: Some("equip".to_string()),
+            keyword: Some(AbilityTag::Equip),
         }
     );
     assert_eq!(
@@ -11672,7 +11672,7 @@ fn static_boast_abilities_activate_as_instant() {
         def.mode,
         StaticMode::ActivateAsInstant {
             cost_category: CostCategory::ManaOnly,
-            keyword: Some("boast".to_string()),
+            keyword: Some(AbilityTag::Boast),
         }
     );
 }

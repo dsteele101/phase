@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
-    QuantityRef, TargetFilter,
+    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
+    QuantityExpr, QuantityRef, TargetFilter,
 };
 use super::events::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
@@ -1340,7 +1340,7 @@ pub enum StaticMode {
     ActivateAsInstant {
         cost_category: CostCategory,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        keyword: Option<String>,
+        keyword: Option<AbilityTag>,
     },
     /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
     /// matching non-mana cost to cast spells or activate abilities.
@@ -3061,7 +3061,11 @@ impl fmt::Display for StaticMode {
                 cost_category,
                 keyword,
             } => match keyword {
-                Some(kw) => write!(f, "ActivateAsInstant({cost_category:?},{kw})"),
+                Some(kw) => write!(
+                    f,
+                    "ActivateAsInstant({cost_category:?},{})",
+                    kw.keyword_str()
+                ),
                 None => write!(f, "ActivateAsInstant({cost_category:?})"),
             },
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
@@ -3538,10 +3542,10 @@ impl FromStr for StaticMode {
                     },
                     Some(other) => {
                         if let Some((category, kw)) = other.split_once(',') {
-                            match category {
-                                "ManaOnly" => StaticMode::ActivateAsInstant {
+                            match (category, AbilityTag::from_keyword_str(kw)) {
+                                ("ManaOnly", Some(tag)) => StaticMode::ActivateAsInstant {
                                     cost_category: CostCategory::ManaOnly,
-                                    keyword: Some(kw.to_string()),
+                                    keyword: Some(tag),
                                 },
                                 _ => StaticMode::Other(s.to_string()),
                             }

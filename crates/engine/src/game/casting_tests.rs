@@ -41107,7 +41107,7 @@ mod loyalty_gate {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::ActivateAsInstant {
                     cost_category: CostCategory::ManaOnly,
-                    keyword: Some("equip".to_string()),
+                    keyword: Some(AbilityTag::Equip),
                 })
                 .affected(TargetFilter::Typed(TypedFilter::permanent())),
             );
@@ -41149,7 +41149,7 @@ mod loyalty_gate {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::ActivateAsInstant {
                     cost_category: CostCategory::ManaOnly,
-                    keyword: Some("equip".to_string()),
+                    keyword: Some(AbilityTag::Equip),
                 })
                 .affected(TargetFilter::Typed(TypedFilter::permanent())),
             );
@@ -41159,6 +41159,74 @@ mod loyalty_gate {
         assert!(
             can_activate_ability_now(&state, PlayerId(0), equipment, 0),
             "CR 702.6a: tag-keyed permission must not depend on the ability's cost category"
+        );
+    }
+
+    /// CR 602.5e + CR 702.6a: The permission must also reach a RUNTIME-GRANTED
+    /// Equip ability (e.g. from an effect that grants "equip {2}"), not just a
+    /// printed one stored in `obj.abilities`. Production activation legality
+    /// resolves the effective ability through `activation_ability_definition`,
+    /// which appends synthesized abilities (`runtime_granted_equip_abilities`)
+    /// past the end of the stored list; reading `obj.abilities` directly (as
+    /// the timing-permission check previously did) would silently miss any
+    /// ability index past that list and always deny the permission to a
+    /// granted Equip.
+    #[test]
+    fn shikari_static_allows_runtime_granted_equip_ability_at_instant_timing() {
+        let mut state = setup_game_at_main_phase();
+        let equipment_id = CardId(state.next_object_id);
+        let equipment = create_object(
+            &mut state,
+            equipment_id,
+            PlayerId(0),
+            "Granted-Equip Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            // No printed abilities and no base Equip keyword — this Equip
+            // exists ONLY as a live (granted) keyword, so it can be found
+            // only through the runtime-synthesis path, not `obj.abilities`.
+            assert!(obj.abilities.is_empty());
+            obj.keywords.push(Keyword::Equip(ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            }));
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some(AbilityTag::Equip),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        // Equip's real effect (Attach to target creature you control) needs a
+        // legal target on the battlefield or activation is illegal for a
+        // reason unrelated to timing.
+        let creature_id = CardId(state.next_object_id);
+        let creature = create_object(
+            &mut state,
+            creature_id,
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        set_opponent_combat_priority(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        // Ability index 0 resolves past the (empty) printed list into the
+        // runtime-granted equip ability — see `activation_ability_definition`.
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), equipment, 0),
+            "CR 702.6a: Shikari's permission must reach a runtime-granted equip ability, not just a printed one"
         );
     }
 
@@ -41199,7 +41267,7 @@ mod loyalty_gate {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::ActivateAsInstant {
                     cost_category: CostCategory::ManaOnly,
-                    keyword: Some("equip".to_string()),
+                    keyword: Some(AbilityTag::Equip),
                 })
                 .affected(TargetFilter::Typed(TypedFilter::permanent())),
             );
