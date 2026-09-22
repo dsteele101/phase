@@ -1320,8 +1320,21 @@ pub enum StaticMode {
     /// activated abilities in the specified cost category to be activated at
     /// instant timing. The affected permanent filter lives on `StaticDefinition`.
     /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
+    ///
+    /// `cost_category` alone is coarse: for a mana-cost ability class (equip,
+    /// fortify, reconfigure — all `CostCategory::ManaOnly`) it would over-grant
+    /// instant-speed permission to every mana-only-cost ability on the affected
+    /// permanent, mana abilities included. `keyword`, when present, narrows the
+    /// match to one `AbilityTag` (e.g. `"equip"`) on top of the cost-category
+    /// check, mirroring `ReduceAbilityCost`'s tag-keyed matching. `None` keeps
+    /// the original cost-category-only match (Wandering Emperor's loyalty
+    /// permission, where `PaysLoyalty` is already unambiguous). Leonin Shikari's
+    /// class: "You may activate equip abilities any time you could cast an
+    /// instant."
     ActivateAsInstant {
         cost_category: CostCategory,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keyword: Option<String>,
     },
     /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
     /// matching non-mana cost to cast spells or activate abilities.
@@ -2613,8 +2626,12 @@ impl Hash for StaticMode {
                 keyword.hash(state);
                 new_limit.hash(state);
             }
-            StaticMode::ActivateAsInstant { cost_category } => {
+            StaticMode::ActivateAsInstant {
+                cost_category,
+                keyword,
+            } => {
                 cost_category.hash(state);
+                keyword.hash(state);
             }
             StaticMode::CrewContribution { kind, actions } => {
                 kind.hash(state);
@@ -3034,9 +3051,13 @@ impl fmt::Display for StaticMode {
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
             }
-            StaticMode::ActivateAsInstant { cost_category } => {
-                write!(f, "ActivateAsInstant({cost_category:?})")
-            }
+            StaticMode::ActivateAsInstant {
+                cost_category,
+                keyword,
+            } => match keyword {
+                Some(kw) => write!(f, "ActivateAsInstant({cost_category:?},{kw})"),
+                None => write!(f, "ActivateAsInstant({cost_category:?})"),
+            },
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
@@ -3507,8 +3528,22 @@ impl FromStr for StaticMode {
                 match inner {
                     Some("PaysLoyalty") => StaticMode::ActivateAsInstant {
                         cost_category: CostCategory::PaysLoyalty,
+                        keyword: None,
                     },
-                    _ => StaticMode::Other(s.to_string()),
+                    Some(other) => {
+                        if let Some((category, kw)) = other.split_once(',') {
+                            match category {
+                                "ManaOnly" => StaticMode::ActivateAsInstant {
+                                    cost_category: CostCategory::ManaOnly,
+                                    keyword: Some(kw.to_string()),
+                                },
+                                _ => StaticMode::Other(s.to_string()),
+                            }
+                        } else {
+                            StaticMode::Other(s.to_string())
+                        }
+                    }
+                    None => StaticMode::Other(s.to_string()),
                 }
             }
             "RaiseCost" => StaticMode::ModifyCost {

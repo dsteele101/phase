@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
-    CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
-    SpellCastingOptionKind, TargetFilter, TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
+    CastingRestriction, CommanderOwnership, ControllerRef, FilterProp, ParsedCondition,
+    QuantityExpr, SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1015,6 +1015,8 @@ fn has_activate_as_instant_permission(
         return false;
     }
 
+    let ability_tag = ability.ability_tag;
+
     crate::game::perf_counters::record_restriction_static_exact_scan();
     crate::game::functioning_abilities::battlefield_active_statics(state).any(
         |(static_source, def)| {
@@ -1023,12 +1025,22 @@ fn has_activate_as_instant_permission(
             }
             let StaticMode::ActivateAsInstant {
                 cost_category: permitted_category,
-            } = def.mode
+                keyword,
+            } = &def.mode
             else {
                 return false;
             };
-            if !cost_categories.contains(&permitted_category) {
+            if !cost_categories.contains(permitted_category) {
                 return false;
+            }
+            // CR 702.6a class-narrowing: when the static names an ability tag
+            // (Leonin Shikari's "equip abilities"), the activating ability must
+            // carry that same tag — otherwise a shared cost category (e.g.
+            // ManaOnly, which mana abilities also carry) would over-grant.
+            if let Some(keyword) = keyword {
+                if ability_tag.map(AbilityTag::keyword_str) != Some(keyword.as_str()) {
+                    return false;
+                }
             }
             def.affected.as_ref().is_some_and(|filter| {
                 super::filter::matches_target_filter(

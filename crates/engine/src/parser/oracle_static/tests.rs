@@ -11635,10 +11635,32 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
         def.mode,
         StaticMode::ActivateAsInstant {
             cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
+}
+
+#[test]
+fn static_equip_abilities_activate_as_instant() {
+    let def =
+        parse_static_line("You may activate equip abilities any time you could cast an instant.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::ManaOnly,
+            keyword: Some("equip".to_string()),
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.condition, None);
 }
 
 // CR 400.7: Crew Captain — "This creature has indestructible as long as it

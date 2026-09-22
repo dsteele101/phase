@@ -40458,8 +40458,11 @@ mod loyalty_gate {
         affected: TargetFilter,
         condition: Option<StaticCondition>,
     ) {
-        let mut def = StaticDefinition::new(StaticMode::ActivateAsInstant { cost_category })
-            .affected(affected);
+        let mut def = StaticDefinition::new(StaticMode::ActivateAsInstant {
+            cost_category,
+            keyword: None,
+        })
+        .affected(affected);
         if let Some(condition) = condition {
             def = def.condition(condition);
         }
@@ -40915,6 +40918,7 @@ mod loyalty_gate {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::ActivateAsInstant {
                     cost_category: CostCategory::PaysLoyalty,
+                    keyword: None,
                 })
                 .affected(TargetFilter::SelfRef)
                 .condition(StaticCondition::SourceEnteredThisTurn),
