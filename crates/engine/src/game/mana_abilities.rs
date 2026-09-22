@@ -1,9 +1,9 @@
 use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
-    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
-    QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
+    CardSelectionMode, ChoiceValue, ChosenAttribute, ContinuousModification,
+    CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
+    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
@@ -2206,11 +2206,11 @@ pub(super) fn advance_mana_ability_activation(
         }
     }
 
-    // CR 107.1c + CR 605.3a: "Remove any number of <type> counters" in a
-    // mana-ability cost requires choosing the count before costs are paid and
-    // mana is produced.
+    // CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any number
+    // of" counters): a mana-ability cost using either chosen-count sentinel
+    // requires choosing the count before costs are paid and mana is produced.
     if pending.chosen_counter_count.is_none() {
-        if let Some(counter_type) = any_number_self_remove_counter_cost(&ability_def.cost) {
+        if let Some(counter_type) = chosen_count_self_remove_counter_cost(&ability_def.cost) {
             let max = removable_counter_count_for_mana_cost(state, pending.source_id, counter_type);
             return Ok(WaitingFor::PayAmountChoice {
                 player: pending.player,
@@ -4044,8 +4044,8 @@ where
                 ));
             }
         }
-        // CR 122.1 + CR 601.2b: Standalone RemoveCounter-on-self mana-ability
-        // cost (Pentad Prism, Crystalline Crawler, Druids' Repository class).
+        // CR 601.2b: Standalone RemoveCounter-on-self mana-ability cost
+        // (Pentad Prism, Crystalline Crawler, Druids' Repository class).
         Some(AbilityCost::RemoveCounter {
             count,
             counter_type,
@@ -4053,11 +4053,16 @@ where
             ..
         }) => {
             let count = match *count {
-                // CR 107.3i + CR 601.2b: literal "Remove X counters" (Saltcrusted
-                // Steppe class) and "any number of" counters (Pentad Prism class)
-                // are both player-announced variable counts, chosen before costs
-                // are paid; only the phrasing differs.
-                REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER => chosen_counter_count
+                // CR 107.3a (literal "Remove X counters", e.g. Saltcrusted
+                // Steppe) and CR 107.1c (literal "any number of" counters, e.g.
+                // Pentad Prism) are two distinct rules with two distinct Oracle
+                // phrasings, but both require a player-chosen count announced
+                // before costs are paid, so both sentinels read that one
+                // pre-announced value here. `is_chosen_remove_counter_cost_count`
+                // is the single predicate for "this sentinel needs a choice" —
+                // do not re-derive the equivalence by matching both sentinels
+                // in an `|` arm, which would imply they share one rule.
+                count if is_chosen_remove_counter_cost_count(count) => chosen_counter_count
                     .ok_or_else(|| {
                         EngineError::InvalidAction(
                             "Missing counter count for mana ability".to_string(),
@@ -4593,24 +4598,27 @@ pub fn handle_pay_mana_ability_mana(
     advance_mana_ability_activation(state, updated, events)
 }
 
-// CR 107.3i + CR 601.2b: literal "Remove X counters" and "any number of"
-// counters are both player-announced variable counts requiring a
+// CR 601.2b: a self-RemoveCounter mana-ability cost whose count is one of the
+// chosen-count sentinels (`is_chosen_remove_counter_cost_count`) requires a
 // pre-payment choice — see the matching arm in `pay_mana_ability_cost_step`.
-fn any_number_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
+// Named neutrally (not "any_number") because the sentinel set spans two
+// distinct rules with two distinct Oracle phrasings: literal "Remove X
+// counters" (CR 107.3a) and literal "any number of" counters (CR 107.1c).
+fn chosen_count_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
     match cost.as_ref()? {
         AbilityCost::RemoveCounter {
-            count: REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER,
+            count,
             counter_type,
             target: None,
             ..
-        } => Some(counter_type),
+        } if is_chosen_remove_counter_cost_count(*count) => Some(counter_type),
         AbilityCost::Composite { costs } => costs.iter().find_map(|cost| match cost {
             AbilityCost::RemoveCounter {
-                count: REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER,
+                count,
                 counter_type,
                 target: None,
                 ..
-            } => Some(counter_type),
+            } if is_chosen_remove_counter_cost_count(*count) => Some(counter_type),
             _ => None,
         }),
         _ => None,

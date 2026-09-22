@@ -3006,13 +3006,18 @@ pub(super) fn handle_resolution_choice(
                 // correct mana-ability cost axis — a removed-counter count
                 // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179e).
                 match resource {
-                    // CR 107.3a + CR 107.3i: storage lands (Saltcrusted Steppe
-                    // class) bind the announced "remove X counters" count to BOTH
-                    // the counter-removal cost and the produced "Add X mana"
-                    // quantity ref — CR 107.3i requires every instance of X on the
-                    // object to share the same announced value, so both fields
-                    // must be set or the mana production resolves X to 0 despite
-                    // the counters being removed successfully.
+                    // CR 107.3a + CR 107.3i: for a literal "Remove X counters"
+                    // mana-ability cost (Saltcrusted Steppe class), CR 107.3i
+                    // requires every instance of X on the object to share the
+                    // one announced value, so the announced amount must bind to
+                    // BOTH the counter-removal cost and the "Add X mana"
+                    // quantity ref, or the mana production resolves X to 0
+                    // despite the counters being removed successfully. Also
+                    // reached by the literal "any number of" counters sentinel
+                    // (CR 107.1c, e.g. Pentad Prism), which has no `X` in its
+                    // Oracle text — setting `chosen_x` there is inert, since
+                    // that class's effect reads the removed-counter count via
+                    // `QuantityRef::PreviousEffectAmount`, never `Variable("X")`.
                     PayableResource::Counters => {
                         pending.chosen_counter_count = Some(amount);
                         pending.chosen_x = Some(amount);
