@@ -516,6 +516,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.
+ * 77 — PendingManaAbility::chosen_counter_count: Option<u32> retyped to
+ *      chosen_counter_counts: Vec<u32> (#9207) in
+ *      crates/lobby-broker/src/protocol.rs, so a composite mana-ability
+ *      cost with more than one chosen-count RemoveCounter leaf can carry an
+ *      independently-announced amount per leaf. The new field carries no
+ *      serde default and is never omitted on write, so a pre-77 payload
+ *      (which can only carry the old, differently-named scalar field) fails
+ *      deserialization instead of silently reopening an already-answered
+ *      prompt.
  * 75 — ResolutionCastCleanup, its delayed-trigger receipts, and each
  *      receipt-eligible delayed-install origin carry the producer-issued paid
  *      offer owner. Older peers cannot preserve cross-offer isolation through
@@ -529,7 +538,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 76;
+export const PROTOCOL_VERSION = 77;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

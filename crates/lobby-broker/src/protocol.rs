@@ -56,6 +56,22 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 77 — `PendingManaAbility::chosen_counter_count: Option<u32>` retyped to
+///      `chosen_counter_counts: Vec<u32>` (#9207), so a composite mana-ability
+///      cost with more than one chosen-count `RemoveCounter` leaf (a literal
+///      "Remove X counters" leaf alongside an independent "any number of"
+///      leaf) can carry one independently-announced amount per leaf instead
+///      of collapsing them into a single scalar. Same precedent as 68
+///      (`chosen_tappers`): the new field carries NO `#[serde(default)]` and
+///      is never omitted on write (an empty `Vec` serializes as `[]`), so a
+///      pre-77 payload — which can only carry the old, differently-named
+///      scalar field — fails deserialization instead of silently defaulting
+///      to an empty choice list and reopening an already-answered prompt.
+///      `ManaAbilityCostCursor` also gained `next_counter_choice: usize`
+///      (`#[serde(default)]`, a plain capability addition): a resumed pre-77
+///      cursor is already unreachable once its sibling `PendingManaAbility`
+///      fails to parse, so this field does not need its own hard-fail guard.
+///
 /// 76 — CR 601.2f caster-elected cost-reduction ordering:
 ///      `WaitingFor::OrderCostReductions` and `GameAction::OrderCostReductions`
 ///      are new variants on two `#[serde(tag = "type", content = "data")]`
@@ -567,7 +583,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 76;
+pub const PROTOCOL_VERSION: u32 = 77;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1689,12 +1705,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 76);
+        assert_eq!(PROTOCOL_VERSION, 77);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 75);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 76);
     }
 
     #[test]

@@ -12,7 +12,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +5: CR 601.2f caster-elected cost-reduction ordering adds a parse bump on top.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 5;
+// +6: PendingManaAbility.chosen_counter_count retyped to chosen_counter_counts
+// (#9207) adds another parse bump — see PROTOCOL_VERSION 77's changelog entry
+// in crates/lobby-broker/src/protocol.rs.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 6;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -40,7 +43,10 @@ const EXPECTED_MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING = 6;
 // stayed green — a v(n-1) host and a v(n) guest would then complete a
 // handshake and only fail when the incompatible payload arrived.
 const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 4;
+// +5: the same chosen_counter_counts retype (#9207) that moves
+// EXPECTED_PROTOCOL_VERSION also changes GameState, so this P2P wire surface
+// moves in lockstep too.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 5;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
