@@ -131,6 +131,136 @@ fn unsupported_ability_ir_lowering_preserves_generic_and_structural_payloads() {
     assert_eq!(structural.description.as_deref(), Some("unsupported line"));
 }
 
+/// CR 118.3 + CR 601.2h review follow-up (PR #9207): a composite mana-ability
+/// cost mixing an `Any`-type chosen-count `RemoveCounter` leaf with a typed
+/// (`OfType`) chosen-count leaf has no sound reservation model at runtime —
+/// `mana_abilities::advance_mana_ability_activation` refuses to activate it.
+/// The parser must not silently present this shape as an ordinary supported
+/// ability: `demote_unsupported_composite_counter_choice_costs` must demote
+/// its effect to `Effect::unimplemented`, keeping the coverage report and the
+/// runtime behavior in agreement. An ability with only ONE such leaf, or two
+/// leaves of the SAME kind (both `OfType` of the same type, or both `Any`),
+/// must be left untouched — those shapes remain fully supported.
+#[test]
+fn composite_counter_choice_cost_mixing_any_and_typed_leaves_is_demoted_to_unimplemented() {
+    fn mana_ability(cost: AbilityCost) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Fixed {
+                    colors: vec![crate::types::mana::ManaColor::Green],
+                    contribution: crate::types::ability::ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(cost)
+    }
+    fn remove_counter_leaf(count: u32, counter_type: CounterMatch) -> AbilityCost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: None,
+            selection: crate::types::ability::CounterCostSelection::SingleObject,
+        }
+    }
+
+    let storage = CounterMatch::OfType(CounterType::Generic("storage".to_string()));
+    let charge = CounterMatch::OfType(CounterType::Generic("charge".to_string()));
+
+    let mut parsed = parse_oracle_text("", "Counter Choice Fixture", &[], &[], &[]);
+    // 0 — the shape under test: Any mixed with a typed leaf. Must be demoted.
+    parsed.abilities.push(mana_ability(AbilityCost::Composite {
+        costs: vec![
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_X,
+                CounterMatch::Any,
+            ),
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_ANY_NUMBER,
+                storage.clone(),
+            ),
+        ],
+    }));
+    // 1 — reach guard: a single Any leaf alone must NOT be demoted.
+    parsed.abilities.push(mana_ability(remove_counter_leaf(
+        crate::types::ability::REMOVE_COUNTER_COST_ANY_NUMBER,
+        CounterMatch::Any,
+    )));
+    // 2 — reach guard: a single typed leaf alone must NOT be demoted.
+    parsed.abilities.push(mana_ability(remove_counter_leaf(
+        crate::types::ability::REMOVE_COUNTER_COST_X,
+        storage.clone(),
+    )));
+    // 3 — reach guard: two SAME-type typed leaves (Saltcrusted-Steppe-adjacent
+    // shape from the sibling regression in mana_abilities.rs) must NOT be
+    // demoted — this composite has a sound exact reservation.
+    parsed.abilities.push(mana_ability(AbilityCost::Composite {
+        costs: vec![
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_X,
+                storage.clone(),
+            ),
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_ANY_NUMBER,
+                storage.clone(),
+            ),
+        ],
+    }));
+    // 4 — reach guard: two DIFFERENT-type typed leaves must NOT be demoted —
+    // no ambiguity, they draw from disjoint pools.
+    parsed.abilities.push(mana_ability(AbilityCost::Composite {
+        costs: vec![
+            remove_counter_leaf(crate::types::ability::REMOVE_COUNTER_COST_X, storage),
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_ANY_NUMBER,
+                charge,
+            ),
+        ],
+    }));
+    // 5 — reach guard: two Any leaves must NOT be demoted — an exact
+    // aggregate reservation is sound for this pair.
+    parsed.abilities.push(mana_ability(AbilityCost::Composite {
+        costs: vec![
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_X,
+                CounterMatch::Any,
+            ),
+            remove_counter_leaf(
+                crate::types::ability::REMOVE_COUNTER_COST_ANY_NUMBER,
+                CounterMatch::Any,
+            ),
+        ],
+    }));
+
+    demote_unsupported_composite_counter_choice_costs(&mut parsed);
+
+    assert!(
+        matches!(
+            parsed.abilities[0].effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "counter_choice_cost_mixes_any_with_typed"
+        ),
+        "an Any-plus-typed composite must be demoted, got {:?}",
+        parsed.abilities[0].effect
+    );
+    for (index, label) in [
+        (1, "a lone Any leaf"),
+        (2, "a lone typed leaf"),
+        (3, "two same-type typed leaves"),
+        (4, "two different-type typed leaves"),
+        (5, "two Any leaves"),
+    ] {
+        assert!(
+            matches!(parsed.abilities[index].effect.as_ref(), Effect::Mana { .. }),
+            "{label} must NOT be demoted, got {:?}",
+            parsed.abilities[index].effect
+        );
+    }
+}
+
 /// A forced diagonal for CopyChosenHost provenance. Two eligible chooser gaps
 /// and two CopyChosen statics prove the document relation binds the first
 /// source-order pair exactly once; the later copy ability proves the transformed

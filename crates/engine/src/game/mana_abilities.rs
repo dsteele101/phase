@@ -2207,34 +2207,31 @@ pub(super) fn advance_mana_ability_activation(
     }
 
     // CR 118.3 + CR 601.2h: a composite cost mixing an `Any`-type chosen-count
-    // `RemoveCounter` leaf with ANOTHER chosen-count leaf (of any type) has no
+    // `RemoveCounter` leaf with a TYPED (`OfType`) chosen-count leaf has no
     // sound reservation model and is deliberately left unsupported rather than
-    // mishandled. Reserving the `Any` leaf's full announced amount against a
-    // later `OfType` leaf's typed availability (as `counter_match_overlaps`
-    // does for a same-type pair, where it IS exact — both leaves draw from
-    // literally the same pool) is overly conservative here: e.g. 3 storage +
-    // 2 charge counters, an earlier `Any` choice of 3, then a later
-    // `OfType(charge)` choice — removing 3 storage then 2 charge pays BOTH
-    // leaves, but the naive reservation reads the second leaf's max as
-    // `2.saturating_sub(3) == 0` and refuses a legal payment. The reverse —
-    // relaxing the reservation instead — is worse: `remove_counters_for_mana_cost`'s
-    // `Any` arm has no player-directed type allocation, so it would iterate
-    // the object's counter types in an unspecified order and could greedily
-    // consume the LATER leaf's typed counters while paying the `Any` leaf,
-    // silently failing a payment that should have succeeded. Neither the
-    // over-reject nor the under-pay direction is acceptable, and expressing
-    // a real typed allocation carried from prompt through payment is not
-    // justified with no card in the engine's inventory using this shape — so
-    // this combination fails closed at legality time instead: this makes the
-    // whole ability report as not activatable
-    // (`can_activate_mana_ability_by_simulation` treats any `Err` here as
-    // "cannot activate"), rather than either silently misbehaving.
-    if chosen_count_remove_counter_leaves_mix_any_with_another(&ability_def.cost) {
-        return Err(EngineError::InvalidAction(
-            "A composite mana-ability cost combining an \"any number of\" chosen-count \
-             RemoveCounter leaf with another chosen-count RemoveCounter leaf is not supported"
-                .to_string(),
-        ));
+    // mishandled — see `chosen_count_remove_counter_leaves_mix_any_with_typed`'s
+    // doc comment for the full bin-packing rationale (briefly: reserving the
+    // `Any` leaf's amount against the typed leaf can wrongly refuse a legal
+    // payment, e.g. 3 storage + 2 charge counters with an `Any` choice of 3
+    // then a charge choice of 2; NOT reserving it risks the untyped `Any`
+    // removal consuming the counters the typed leaf needed instead). This
+    // predicate is shared with the parser
+    // (`demote_unsupported_composite_counter_choice_costs` in `oracle.rs`),
+    // which must not accept this shape as an ordinary supported cost, so the
+    // two layers can never disagree about which shape is unsupported.
+    //
+    // Two `OfType` leaves of the same type, or two `Any` leaves, are NOT
+    // matched here and remain fully supported: both members of either pair
+    // draw from literally the same pool, so `reserved_overlapping_counter_count`
+    // below reserves them exactly, with no allocation ambiguity.
+    if let Some(cost) = &ability_def.cost {
+        if crate::types::ability::chosen_count_remove_counter_leaves_mix_any_with_typed(cost) {
+            return Err(EngineError::InvalidAction(
+                "A composite mana-ability cost combining an \"any number of\" counter-choice \
+                 leaf of unspecified type with a typed counter-choice leaf is not supported"
+                    .to_string(),
+            ));
+        }
     }
 
     // CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any number
@@ -4719,22 +4716,6 @@ fn chosen_count_self_remove_counter_leaves(cost: &Option<AbilityCost>) -> Vec<&C
         .collect()
 }
 
-// CR 118.3 + CR 601.2h: whether this cost's chosen-count self-RemoveCounter
-// leaves combine an `Any`-type leaf with another chosen-count leaf (of any
-// type) — the one shape this engine deliberately leaves unsupported rather
-// than resolve via reservation, because an `Any` leaf has no committed
-// counter-type identity until `remove_counters_for_mana_cost` actually pays
-// it (see the call site in `advance_mana_ability_activation` for the full
-// bin-packing rationale: reserving the `Any` leaf's amount against a later
-// `OfType` leaf is too conservative to admit a legal payment, and NOT
-// reserving it risks the `Any` leaf's unordered removal consuming counters
-// the later typed leaf needed). Two `OfType` leaves — same type or
-// different — have no such ambiguity and are unaffected.
-fn chosen_count_remove_counter_leaves_mix_any_with_another(cost: &Option<AbilityCost>) -> bool {
-    let leaves = chosen_count_self_remove_counter_leaves(cost);
-    leaves.len() > 1 && leaves.iter().any(|leaf| matches!(leaf, CounterMatch::Any))
-}
-
 // CR 118.3 + CR 601.2h: whether two `RemoveCounter` counter-type matchers can
 // draw from overlapping counters on the same object. `Any` overlaps every
 // type (including another `Any`); two `OfType` matchers overlap only when
@@ -4748,11 +4729,12 @@ fn counter_match_overlaps(a: &CounterMatch, b: &CounterMatch) -> bool {
 
 // CR 118.3 + CR 601.2h: a player can't pay a cost without the resources to
 // pay it in full. When a composite cost carries more than one chosen-count
-// `RemoveCounter` leaf of the SAME `OfType` (an `Any` leaf alongside anything
-// is refused earlier — `chosen_count_remove_counter_leaves_mix_any_with_another`
-// — before this function is ever reached, since an `Any` leaf's removal
-// isn't reservable this way), the amount already announced for an EARLIER
-// leaf of that type must be reserved before sizing a LATER leaf's prompt —
+// `RemoveCounter` leaf that draws from the SAME pool — two `OfType` leaves of
+// the same type, or two `Any` leaves (an `Any` mixed with a DIFFERENT
+// `OfType` leaf is refused earlier — `chosen_count_remove_counter_leaves_mix_any_with_typed`
+// — before this function is ever reached, since that specific pairing isn't
+// reservable this way) — the amount already announced for an EARLIER
+// overlapping leaf must be reserved before sizing a LATER leaf's prompt —
 // otherwise two leaves could each announce up to the object's full available
 // count against counters that can only be removed once, and payment would
 // silently underpay the later leaf via `remove_counters_for_mana_cost`'s
@@ -13652,6 +13634,128 @@ mod tests {
         );
     }
 
+    // Regression: TWO `Any`-type chosen-count leaves share one aggregate pool
+    // across every counter type on the object, so — unlike an `Any` leaf
+    // mixed with a TYPED leaf — their announced amounts can be reserved
+    // exactly by total, with no per-type allocation needed: whichever
+    // counters actually get removed for the first leaf, the object still has
+    // (total available - first leaf's amount) counters left for the second,
+    // regardless of which types they are. This is the case
+    // `chosen_count_remove_counter_leaves_mix_any_with_typed` does NOT
+    // reject, and it must stay fully payable.
+    #[test]
+    fn two_any_type_chosen_count_remove_counter_leaves_share_one_aggregate_pool() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8009),
+            player,
+            "Dual Any Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            obj.counters.insert(charge.clone(), 2);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::Any,
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::Any,
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+            },
+        )
+        .expect("the first Any leaf should prompt for its own count");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => {
+                assert_eq!(
+                    *max, 5,
+                    "the first Any leaf sees all 5 counters across both types"
+                );
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        // Announce 3 for the first Any leaf.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 3 },
+        )
+        .expect("announcing 3 for the first Any leaf must be legal");
+
+        // The second Any leaf's max must reserve exactly the first leaf's 3,
+        // leaving 2 — the aggregate reservation this engine DOES support.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(
+                    *max, 2,
+                    "the second Any leaf must see exactly the aggregate remainder (5 - 3 = 2)"
+                );
+            }
+            other => panic!("expected a reservation-capped second PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the full aggregate remainder must be payable for the second Any leaf");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0)
+                + state.objects[&land]
+                    .counters
+                    .get(&charge)
+                    .copied()
+                    .unwrap_or(0),
+            0,
+            "all 5 counters across both types must be removed by the two Any leaves"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
     // Regression (defense in depth): even if a `PendingManaAbility` somehow
     // reaches payment with `chosen_counter_counts` announcing MORE than the
     // object's actual counters across overlapping leaves — bypassing the
@@ -13762,7 +13866,7 @@ mod tests {
     // Regression: a composite cost mixing an `Any`-type chosen-count
     // `RemoveCounter` leaf with an unrelated `OfType` chosen-count leaf has
     // no sound reservation model (see
-    // `chosen_count_remove_counter_leaves_mix_any_with_another`'s doc
+    // `chosen_count_remove_counter_leaves_mix_any_with_typed`'s doc
     // comment for the full bin-packing rationale) and is deliberately
     // unsupported. With 3 storage counters and 2 charge counters, an
     // Any-typed choice of 3 followed by a charge choice of 2 IS a legal
