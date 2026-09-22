@@ -1321,15 +1321,21 @@ pub enum StaticMode {
     /// instant timing. The affected permanent filter lives on `StaticDefinition`.
     /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
     ///
-    /// `cost_category` alone is coarse: for a mana-cost ability class (equip,
-    /// fortify, reconfigure — all `CostCategory::ManaOnly`) it would over-grant
-    /// instant-speed permission to every mana-only-cost ability on the affected
-    /// permanent, mana abilities included. `keyword`, when present, narrows the
-    /// match to one `AbilityTag` (e.g. `"equip"`) on top of the cost-category
-    /// check, mirroring `ReduceAbilityCost`'s tag-keyed matching. `None` keeps
-    /// the original cost-category-only match (Wandering Emperor's loyalty
-    /// permission, where `PaysLoyalty` is already unambiguous). Leonin Shikari's
-    /// class: "You may activate equip abilities any time you could cast an
+    /// `cost_category` alone is coarse: a mana-cost ability class (equip,
+    /// fortify, reconfigure — all `CostCategory::ManaOnly`) would over-grant
+    /// instant-speed permission to every mana-only-cost ability on the
+    /// affected permanent, mana abilities included, and would wrongly *deny*
+    /// the permission to a same-tag ability with a non-mana cost (a
+    /// sacrifice-cost equip-like ability still carries `AbilityTag::Equip`
+    /// per CR 702.6a). `keyword`, when present, replaces the cost-category
+    /// match with an `AbilityTag` match (e.g. `"equip"`) — the tagged class
+    /// is defined by what the ability *is*, not what it costs — mirroring
+    /// `ReduceAbilityCost`'s tag-keyed matching. `cost_category` is then an
+    /// unused placeholder (kept non-`Option` for the untagged case's
+    /// back-compat serialization). `None` keeps the original
+    /// cost-category-only match (Wandering Emperor's loyalty permission,
+    /// where `PaysLoyalty` is already unambiguous). Leonin Shikari's class:
+    /// "You may activate equip abilities any time you could cast an
     /// instant."
     ActivateAsInstant {
         cost_category: CostCategory,

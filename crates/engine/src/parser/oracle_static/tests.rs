@@ -11656,11 +11656,25 @@ fn static_equip_abilities_activate_as_instant() {
     );
     assert_eq!(
         def.affected,
-        Some(TargetFilter::Typed(
-            TypedFilter::permanent().controller(ControllerRef::You)
-        ))
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
     );
     assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_boast_abilities_activate_as_instant() {
+    // Same composable grammar as equip — any taggable ability class parses
+    // through the same combinator, not a card-specific branch.
+    let def =
+        parse_static_line("You may activate boast abilities any time you could cast an instant.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::ManaOnly,
+            keyword: Some("boast".to_string()),
+        }
+    );
 }
 
 // CR 400.7: Crew Captain — "This creature has indestructible as long as it

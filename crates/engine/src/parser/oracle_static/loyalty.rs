@@ -1,11 +1,12 @@
 // CR 606.3 — planeswalker loyalty activation statics.
-// CR 602.5e + CR 702.6a — equip activation timing statics.
+// CR 602.5e + CR 702.6a — tagged-ability-class activation timing statics.
 
+use super::cost_mod::parse_taggable_ability_keyword;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
-use crate::types::ability::{AbilityTag, ControllerRef, TypedFilter};
+use crate::types::ability::TypedFilter;
 
 pub(crate) fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
     value(
@@ -55,32 +56,41 @@ pub(crate) fn parse_loyalty_activation_timing_permission(
 }
 
 /// CR 602.5e + CR 702.6a: "You may activate equip abilities any time you could
-/// cast an instant." (Leonin Shikari). Unlike the loyalty form above, this
-/// permission isn't scoped to the source's own abilities — it applies to
-/// every equip ability its controller could activate, on any permanent they
-/// control (`affected` matches by controller, not by identity). Equip's cost
-/// shape is `CostCategory::ManaOnly`, which alone would also cover mana
-/// abilities; `keyword: Some("equip")` narrows the match to the `AbilityTag`
-/// equip abilities carry (CR 702.6a).
-pub(crate) fn parse_equip_activation_timing_permission(
+/// cast an instant." (Leonin Shikari) and its class — any "You may activate
+/// [tagged] abilities any time you could cast an instant" permission keyed to
+/// one of the taggable ability classes ([`parse_taggable_ability_keyword`]:
+/// equip, power-up, exhaust, outlast, boast), composed rather than hard-coded
+/// to equip alone so an equivalent card for another tagged class needs no new
+/// parser branch. Unlike the loyalty form above, this permission isn't scoped
+/// to the source's own abilities — it applies to every ability of the tagged
+/// class its controller could activate, on any permanent (CR 702.6a doesn't
+/// require the permission-granter to control the Equipment; the *player*
+/// scope — the static's controller must be the activator — is already
+/// enforced at the runtime check site, so `affected` only needs the
+/// permanent/tag axis, not a redundant controller filter). `cost_category`
+/// stays `ManaOnly` as a placeholder value: the runtime ignores it whenever
+/// `keyword` is set, since CR 702.6a doesn't require Equip's cost to be mana
+/// (a reconfigure- or sacrifice-cost equip-like ability still carries the tag).
+pub(crate) fn parse_tagged_ability_activation_timing_permission(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) =
-            tag("you may activate equip abilities any time you could cast an instant").parse(i)?;
+    let keyword = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("you may activate ").parse(i)?;
+        let (i, keyword) = parse_taggable_ability_keyword(i)?;
+        let (i, _) = tag(" abilities any time you could cast an instant").parse(i)?;
         let (i, _) = opt(tag(".")).parse(i)?;
-        all_consuming(value((), tag(""))).parse(i)
-    })?;
+        let (i, _) = all_consuming(value((), tag(""))).parse(i)?;
+        Ok((i, keyword))
+    })
+    .map(|(keyword, _)| keyword)?;
 
     Some(
         StaticDefinition::new(StaticMode::ActivateAsInstant {
             cost_category: CostCategory::ManaOnly,
-            keyword: Some(AbilityTag::Equip.keyword_str().to_string()),
+            keyword: Some(keyword.to_string()),
         })
-        .affected(TargetFilter::Typed(
-            TypedFilter::permanent().controller(ControllerRef::You),
-        ))
+        .affected(TargetFilter::Typed(TypedFilter::permanent()))
         .description(text.to_string()),
     )
 }

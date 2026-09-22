@@ -41060,6 +41060,158 @@ mod loyalty_gate {
         );
     }
 
+    /// Build an equip ability tagged `AbilityTag::Equip`, so tag-keyed statics
+    /// (Leonin Shikari's class) can match it regardless of its cost shape.
+    /// `cost` is parameterized so the mana- and non-mana-cost cases share one
+    /// builder (CR 702.6a defines Equip by its activated-ability form, not by
+    /// what it costs).
+    fn make_equip_ability(cost: AbilityCost) -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(cost);
+        def.ability_tag = Some(AbilityTag::Equip);
+        def.activation_restrictions
+            .push(ActivationRestriction::AsSorcery);
+        def
+    }
+
+    /// CR 602.5e + CR 702.6a: Leonin Shikari's class — a tag-keyed
+    /// `ActivateAsInstant` static must grant instant-speed timing to an equip
+    /// ability with a plain mana cost, the common case (Equipment's own equip
+    /// ability).
+    #[test]
+    fn shikari_static_allows_mana_cost_equip_ability_at_instant_timing() {
+        let mut state = setup_game_at_main_phase();
+        let equipment_id = CardId(state.next_object_id);
+        let equipment = create_object(
+            &mut state,
+            equipment_id,
+            PlayerId(0),
+            "Test Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.abilities = Arc::new(vec![make_equip_ability(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            })]);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some("equip".to_string()),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        set_opponent_combat_priority(&mut state);
+        // Affordability is a separate legality axis from timing (CR 118.3);
+        // fund the {2} generic cost so a failure here can only be the timing
+        // permission under test, not a missing-mana false negative.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), equipment, 0),
+            "CR 702.6a: a tag-keyed ActivateAsInstant static must allow a mana-cost equip ability at instant timing"
+        );
+    }
+
+    /// CR 602.5e + CR 702.6a: The tagged-class permission must not be gated on
+    /// `CostCategory` — an equip ability with a NON-mana cost (e.g. paying
+    /// life) still carries `AbilityTag::Equip` and must still gain the
+    /// permission, even though the static's placeholder `cost_category` field
+    /// is `ManaOnly`.
+    #[test]
+    fn shikari_static_allows_non_mana_cost_equip_ability_at_instant_timing() {
+        let mut state = setup_game_at_main_phase();
+        let equipment_id = CardId(state.next_object_id);
+        let equipment = create_object(
+            &mut state,
+            equipment_id,
+            PlayerId(0),
+            "Costly Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.abilities = Arc::new(vec![make_equip_ability(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            })]);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some("equip".to_string()),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        set_opponent_combat_priority(&mut state);
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), equipment, 0),
+            "CR 702.6a: tag-keyed permission must not depend on the ability's cost category"
+        );
+    }
+
+    /// CR 602.5e + CR 702.6a: A mana-cost ability that is NOT tagged Equip
+    /// (e.g. a plain mana ability sharing `CostCategory::ManaOnly`) must stay
+    /// denied under Shikari's static — the tag match, not the cost category,
+    /// is what scopes the permission to equip abilities specifically.
+    #[test]
+    fn shikari_static_does_not_leak_to_untagged_mana_ability() {
+        let mut state = setup_game_at_main_phase();
+        let permanent_id = CardId(state.next_object_id);
+        let permanent = create_object(
+            &mut state,
+            permanent_id,
+            PlayerId(0),
+            "Untagged Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&permanent).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            });
+            def.activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+            obj.abilities = Arc::new(vec![def]);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ActivateAsInstant {
+                    cost_category: CostCategory::ManaOnly,
+                    keyword: Some("equip".to_string()),
+                })
+                .affected(TargetFilter::Typed(TypedFilter::permanent())),
+            );
+        }
+        set_opponent_combat_priority(&mut state);
+
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), permanent, 0),
+            "an untagged mana-cost ability must not gain instant timing from an equip-tagged permission"
+        );
+    }
+
     #[test]
     fn priority_loyalty_candidates_share_activation_restriction_static_gate() {
         let mut state = setup_game_at_main_phase();

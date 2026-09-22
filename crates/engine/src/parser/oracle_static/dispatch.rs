@@ -909,7 +909,7 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    if let Some(def) = parse_equip_activation_timing_permission(&tp, &text) {
+    if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
         return Some(def);
     }
 

@@ -1030,16 +1030,23 @@ fn has_activate_as_instant_permission(
             else {
                 return false;
             };
-            if !cost_categories.contains(permitted_category) {
-                return false;
-            }
             // CR 702.6a class-narrowing: when the static names an ability tag
-            // (Leonin Shikari's "equip abilities"), the activating ability must
-            // carry that same tag — otherwise a shared cost category (e.g.
-            // ManaOnly, which mana abilities also carry) would over-grant.
-            if let Some(keyword) = keyword {
-                if ability_tag.map(AbilityTag::keyword_str) != Some(keyword.as_str()) {
-                    return false;
+            // (Leonin Shikari's "equip abilities"), match the activating
+            // ability's `AbilityTag` directly instead of its cost category.
+            // The tagged class isn't defined by cost shape — an Equip ability
+            // with a non-mana cost (e.g. a sacrifice cost) still carries
+            // `AbilityTag::Equip` and must still gain the permission — so
+            // `cost_category` is only consulted when there's no tag to match.
+            match keyword {
+                Some(keyword) => {
+                    if ability_tag.map(AbilityTag::keyword_str) != Some(keyword.as_str()) {
+                        return false;
+                    }
+                }
+                None => {
+                    if !cost_categories.contains(permitted_category) {
+                        return false;
+                    }
                 }
             }
             def.affected.as_ref().is_some_and(|filter| {
