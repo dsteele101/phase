@@ -15192,6 +15192,7 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -15296,6 +15297,7 @@ fn persistent_exile_play_permission_matrix_form() {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -15328,6 +15330,7 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -15406,6 +15409,7 @@ fn persistent_exile_play_permission_look_at_variant() {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected persistent any-time Play permission, got {:?}",
         def.mode
@@ -15434,6 +15438,7 @@ fn persistent_exile_cast_permission_azula_flash_and_any_mana() {
             grants_flash: true,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected persistent Cast permission with flash + any-mana, got {:?}",
         def.mode
@@ -15506,6 +15511,7 @@ fn persistent_exile_play_permission_valgavoth_alternative_pay_life() {
                 mode: CastCostMode::Alternative,
             }),
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected persistent Play permission with an alternative pay-life cost, got {:?}",
         def.mode
@@ -16179,6 +16185,7 @@ fn exile_cast_permission_soul_jar_persistent_creature_pool() {
             grants_flash: false,
             extra_cost: None,
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         },
         "expected persistent ExileCastPermission, got {:?}",
         def.mode

@@ -45780,6 +45780,7 @@ fn add_exile_cast_permission_source_with(
         grants_flash: false,
         extra_cost: None,
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(affected);
     let obj = state.objects.get_mut(&source).unwrap();
@@ -46090,6 +46091,7 @@ fn an_additional_rider_static_still_authorizes_disguise() {
                 mode: crate::types::statics::CastCostMode::Additional,
             }),
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         })
         .affected(TargetFilter::Any);
         state
@@ -46734,6 +46736,7 @@ fn an_elected_object_grant_does_not_inherit_an_overlapping_static_extra_cost() {
                 mode: CastCostMode::Additional,
             }),
             enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
         })
         .affected(TargetFilter::Any);
         state
@@ -47017,6 +47020,7 @@ fn add_exile_cast_permission_source_with_extra_cost(
         grants_flash: false,
         extra_cost,
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(TargetFilter::Any);
     state
@@ -48316,6 +48320,7 @@ fn add_exile_cast_source_with_spend_permission(
         grants_flash: true,
         extra_cost: None,
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(TargetFilter::Any);
     state
@@ -48357,6 +48362,7 @@ fn add_valgavoth_exile_cast_source(state: &mut GameState, player: PlayerId) -> O
             mode: crate::types::statics::CastCostMode::Alternative,
         }),
         enters_with_counter: None,
+        grantee: crate::types::statics::ExileCastGrantee::SourceController,
     })
     .affected(TargetFilter::Any);
     state

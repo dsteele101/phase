@@ -13204,8 +13204,37 @@ fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
 /// the parser seam, mirroring the lifegain-replacement and CR 615.5 prevention
 /// follow-up paths.
 fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition) {
+    rewrite_exile_would_be_drawn_card_to_exile_top(def);
     rewrite_reveal_top_player_to_post_replacement_target(def);
     rewrite_replacement_event_recipient_to_post_replacement_target(def);
+}
+
+/// CR 121.1 + CR 614.6: "that player exiles that card instead" (Uba Mask) —
+/// at the head of a draw replacement, "that card" is the card the player would
+/// have drawn, i.e. the top card of the drawing player's own library. The
+/// generic effect parser has no replaced draw in scope and lowers the anaphor
+/// to `ChangeZone { target: ParentTarget }`, which names no object once the
+/// continuation runs (the draw never happened, so nothing was put anywhere).
+/// Rewrite it to exile the drawing player's top library card. Only the chain
+/// head is rewritten: a later link's "that card" refers to whatever an earlier
+/// link produced (Zur's Weirding reveals first).
+fn rewrite_exile_would_be_drawn_card_to_exile_top(def: &mut AbilityDefinition) {
+    if let Effect::ChangeZone {
+        origin: None | Some(Zone::Library),
+        destination: Zone::Exile,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = def.effect.as_ref()
+    {
+        *def.effect = Effect::ExileTop {
+            player: TargetFilter::PostReplacementDamageTarget,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            // CR 406.3: exiled cards are face up by default ("exiles that card
+            // face up").
+            face_down: false,
+        };
+    }
 }
 
 /// CR 614.6 + CR 701.20a: "they reveal it" in a draw replacement reveals the top
