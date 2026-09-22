@@ -125,6 +125,23 @@ describe("llmStore", () => {
     expect(isProfileUsable(profile)).toBe(false);
   });
 
+  /// The LLM failure breaker (`services/llm/breaker.ts`) keys its counts on the
+  /// profile RECORD, treating each record as one committed revision. That holds
+  /// only while an edit replaces exactly the edited record: replacing a sibling
+  /// would silently hand that sibling's tripped seats a fresh start.
+  it("replaces only the edited profile record, leaving every other record as it was", () => {
+    const edited = addUsable("edited");
+    const untouched = addUsable("untouched");
+    const before = useLlmStore.getState().profiles;
+    const byId = (profiles: LlmProfile[], id: string) => profiles.find((p) => p.id === id);
+
+    useLlmStore.getState().updateProfile(edited, { apiKey: "sk-new" });
+
+    const after = useLlmStore.getState().profiles;
+    expect(byId(after, edited)).not.toBe(byId(before, edited));
+    expect(byId(after, untouched)).toBe(byId(before, untouched));
+  });
+
   it("keeps the credential when the provider is unchanged", () => {
     const id = useLlmStore
       .getState()

@@ -297,6 +297,96 @@ describe("LLM-driven AI seats", () => {
     controller.dispose();
   });
 
+  /// Drives one seat to the failure ceiling against a provider that always
+  /// fails, and returns the pieces a follow-up needs to see whether the seat
+  /// is tried again.
+  async function tripSeat() {
+    const heuristic = proposal(PASS, "heuristic");
+    const llmProposal = proposal(CAST, "llm-bound");
+    const buildLlmDecisionRequest = vi.fn(async () => ({
+      fingerprint: "fp-1",
+      optionCount: 2,
+      request: HTTP_SPEC,
+    }));
+    const getAiActionProposalFromLlmResponse = vi.fn(async () => ({
+      proposal: llmProposal,
+    }));
+    llmMocks.executeLlmRequest.mockRejectedValue(new Error("provider down"));
+    // "stale" makes the controller re-query the same decision, so one seat
+    // keeps asking without the game having to advance.
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse,
+    };
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    for (let attempt = 0; attempt < 6; attempt += 1) await runOnce();
+
+    // Precondition: the seat reached the ceiling and stopped asking.
+    expect(buildLlmDecisionRequest).toHaveBeenCalledTimes(3);
+    for (let attempt = 0; attempt < 3; attempt += 1) await runOnce();
+    expect(buildLlmDecisionRequest).toHaveBeenCalledTimes(3);
+
+    return { controller, buildLlmDecisionRequest, llmProposal };
+  }
+
+  /// The finding: breaker state was keyed on the player id and consulted
+  /// before the binding was re-read, so rebinding a tripped seat to a working
+  /// profile stayed silenced for the rest of the game.
+  it("tries a replacement profile once a tripped seat is rebound to it", async () => {
+    bindSeatToProvider();
+    const { controller, buildLlmDecisionRequest, llmProposal } = await tripSeat();
+
+    const replacement = useLlmStore
+      .getState()
+      .addProfile({ name: "Replacement", model: "gpt-5-mini", apiKey: "k2", enabled: true });
+    useLlmStore.getState().bindSeat(0, replacement);
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":1}' });
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    await runOnce();
+    await runOnce();
+
+    // Asked again after the ceiling, and against the NEW binding.
+    expect(buildLlmDecisionRequest.mock.calls.length).toBeGreaterThan(3);
+    const [, , endpointJson] = (buildLlmDecisionRequest.mock.calls as unknown[][])[3] ?? [];
+    expect(JSON.parse(String(endpointJson))).toMatchObject({ model: "gpt-5-mini" });
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
+    controller.dispose();
+  });
+
+  it("tries the same profile again once the player edits it", async () => {
+    bindSeatToProvider();
+    const { controller, buildLlmDecisionRequest, llmProposal } = await tripSeat();
+
+    const [profile] = useLlmStore.getState().profiles;
+    useLlmStore.getState().updateProfile(profile!.id, { apiKey: "fixed" });
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":1}' });
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    await runOnce();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest.mock.calls.length).toBeGreaterThan(3);
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
+    controller.dispose();
+  });
+
+  it("tries the same profile again once the player switches it off and on", async () => {
+    bindSeatToProvider();
+    const { controller, buildLlmDecisionRequest } = await tripSeat();
+
+    const [profile] = useLlmStore.getState().profiles;
+    useLlmStore.getState().updateProfile(profile!.id, { enabled: false });
+    useLlmStore.getState().updateProfile(profile!.id, { enabled: true });
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).toHaveBeenCalledTimes(4);
+    controller.dispose();
+  });
+
   it("never sends the API key anywhere but the engine's request builder", async () => {
     bindSeatToProvider();
     const buildLlmDecisionRequest = vi.fn<

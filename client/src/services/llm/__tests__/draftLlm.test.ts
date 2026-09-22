@@ -28,7 +28,7 @@ vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 import {
   cancelLlmDraftRun,
   collectLlmDraftResponses,
-  isLlmDraftDisabled,
+  isLlmDraftSeatDisabled,
   recordLlmDraftSubmission,
   reportLlmDraftOutcomes,
   resetLlmDraftBreaker,
@@ -60,7 +60,7 @@ function pickRequest(seat: number, fingerprint: string) {
     fingerprint,
     optionCount: 15,
     requiredPickCount: 1,
-    request: REQUEST,
+    request: { ...REQUEST, url: `${REQUEST.url}/seat-${seat}` },
   };
 }
 
@@ -299,7 +299,7 @@ describe("LLM drafters", () => {
     await expect(collectLlmDraftResponses(PROFILE, stillCurrent)).resolves.toEqual([]);
   });
 
-  // ── Per-profile failure breaker ──────────────────────────────────────────
+  // ── Per-(profile revision, seat) failure breaker ─────────────────────────
 
   it("gives up on a profile after consecutive failed rounds and stops calling it", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
@@ -308,7 +308,7 @@ describe("LLM drafters", () => {
     for (let round = 0; round < 3; round += 1) {
       await collectLlmDraftResponses(PROFILE, () => true);
     }
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(true);
 
     const callsBefore = llmMocks.executeLlmRequest.mock.calls.length;
     await collectLlmDraftResponses(PROFILE, () => true);
@@ -324,14 +324,14 @@ describe("LLM drafters", () => {
 
     llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
     await collectLlmDraftResponses(PROFILE, () => true);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: true }]);
+    recordLlmDraftSubmission(PROFILE, [{ seat: 1, used: true }]);
 
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("blip"));
     await collectLlmDraftResponses(PROFILE, () => true);
     await collectLlmDraftResponses(PROFILE, () => true);
 
     // Two failures after a success is below the ceiling.
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(false);
   });
 
   /// The finding: the transport returns HTTP error bodies so a vendor's
@@ -349,22 +349,74 @@ describe("LLM drafters", () => {
       // Bytes came back, so the round reaches submit...
       expect(responses).toHaveLength(1);
       // ...and the engine refuses every seat, which is what counts.
-      recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
+      recordLlmDraftSubmission(PROFILE, [{ seat: 1, used: false }]);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(true);
   });
 
-  it("counts a round as a success when any seat's pick was used", async () => {
-    resetLlmDraftBreaker();
-    recordLlmDraftSubmission(PROFILE.id, [
-      { seat: 1, used: false },
-      { seat: 2, used: true },
-    ]);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
+  /// The finding: breaker state lived on the profile id and a round counted as
+  /// a success when ANY seat's pick was used, so a healthy sibling reset a
+  /// failing seat on every round and it was retried forever. Each seat is now
+  /// judged by its own outcomes.
+  it("gives up on a seat the engine keeps refusing while a sibling on the same profile succeeds", async () => {
+    leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    for (let round = 0; round < 3; round += 1) {
+      const responses = await collectLlmDraftResponses(PROFILE, () => true);
+      expect(responses.map((response) => response.seat)).toEqual([1, 2]);
+      recordLlmDraftSubmission(PROFILE, [
+        { seat: 1, used: false },
+        { seat: 2, used: true },
+      ]);
+    }
+
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(true);
+    expect(isLlmDraftSeatDisabled(PROFILE, 2)).toBe(false);
+
+    // The next pick spends a request on the healthy seat only; seat 1 is left
+    // to the engine bot.
+    llmMocks.executeLlmRequest.mockClear();
+    const responses = await collectLlmDraftResponses(PROFILE, () => true);
+    expect(responses.map((response) => response.seat)).toEqual([2]);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up on a seat whose calls keep timing out while a sibling on the same profile answers", async () => {
+    leaseReturning([pickRequest(1, "fp-1"), pickRequest(2, "fp-2")]);
+    llmMocks.executeLlmRequest.mockImplementation(async (spec) => {
+      if ((spec as { url: string }).url.endsWith("/seat-1")) throw new Error("timeout");
+      return { status: 200, body: '{"choice":0}' };
+    });
+
+    for (let round = 0; round < 3; round += 1) {
+      const responses = await collectLlmDraftResponses(PROFILE, () => true);
+      expect(responses.map((response) => response.seat)).toEqual([2]);
+      recordLlmDraftSubmission(PROFILE, [{ seat: 2, used: true }]);
+    }
+
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(true);
+    expect(isLlmDraftSeatDisabled(PROFILE, 2)).toBe(false);
+  });
+
+  /// The count belongs to the configuration that failed. An edited profile is a
+  /// new record, and must be tried again rather than inherit the old verdict.
+  it("gives an edited profile a fresh start on a seat the previous revision lost", async () => {
+    leaseReturning([pickRequest(1, "fp-1")]);
+    llmMocks.executeLlmRequest.mockRejectedValue(new Error("bad key"));
+    for (let round = 0; round < 3; round += 1) {
+      await collectLlmDraftResponses(PROFILE, () => true);
+    }
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(true);
+
+    const edited: LlmProfile = { ...PROFILE, apiKey: "fixed" };
+    expect(isLlmDraftSeatDisabled(edited, 1)).toBe(false);
+
+    llmMocks.executeLlmRequest.mockClear();
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    await expect(collectLlmDraftResponses(edited, () => true)).resolves.toHaveLength(1);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(1);
   });
 
   /// A cancelled or superseded round is not the provider's fault and must be
@@ -383,7 +435,7 @@ describe("LLM drafters", () => {
       await collectLlmDraftResponses(PROFILE, () => fresh);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(false);
   });
 
   it("does not record a round abandoned by an explicit cancel", async () => {
@@ -397,7 +449,7 @@ describe("LLM drafters", () => {
       await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(false);
   });
 
   /// A pod with no eligible seat is not a provider failure and must not count
@@ -409,7 +461,7 @@ describe("LLM drafters", () => {
       await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(false);
   });
 
   /// The finding: a run the draft lifecycle cancelled rejects in the
@@ -426,7 +478,7 @@ describe("LLM drafters", () => {
       await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(false);
   });
 
   /// A genuine build failure with the run still live IS the provider's problem
@@ -438,7 +490,7 @@ describe("LLM drafters", () => {
       await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(true);
   });
 
   it("does not charge the breaker for a preflight failure on a stale pick", async () => {
@@ -448,6 +500,6 @@ describe("LLM drafters", () => {
       await collectLlmDraftResponses(PROFILE, () => false);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(isLlmDraftSeatDisabled(PROFILE, 1)).toBe(false);
   });
 });

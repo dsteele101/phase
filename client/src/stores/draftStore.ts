@@ -776,7 +776,7 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
             // The breaker counts the ENGINE's verdict, not the fact that bytes
             // arrived: a round of 401s or undecodable replies must count as a
             // failure, or a broken provider would reset the breaker forever.
-            recordLlmDraftSubmission(llmProfile.id, outcome.llmOutcomes);
+            recordLlmDraftSubmission(llmProfile, outcome.llmOutcomes);
             return outcome.view;
           }
           return lease.submitPick(request.instanceId);

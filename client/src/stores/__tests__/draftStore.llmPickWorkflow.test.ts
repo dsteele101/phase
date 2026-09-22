@@ -65,7 +65,7 @@ vi.mock("../../services/llm/llmClient", () => ({ executeLlmRequest: transport.ex
 vi.mock("../../services/setCatalog", () => ({ ensureSetCatalog: async () => ({}) }));
 vi.mock("../../game/debugLog", () => ({ debugLog: vi.fn() }));
 
-import { isLlmDraftDisabled, resetLlmDraftBreaker } from "../../services/llm/draftLlm";
+import { isLlmDraftSeatDisabled, resetLlmDraftBreaker } from "../../services/llm/draftLlm";
 import { useDraftStore } from "../draftStore";
 import { useLlmStore } from "../llmStore";
 
@@ -121,6 +121,13 @@ function view(pool: DraftCardInstance[] = []): DraftPlayerView {
 }
 
 const PROFILE_ID = "llm-draft";
+
+/** Whether the breaker has given up on seat 1 for the profile as stored NOW. */
+function seatOneDisabled(): boolean {
+  const profile = useLlmStore.getState().profiles.find((candidate) => candidate.id === PROFILE_ID);
+  if (!profile) throw new Error("test profile missing");
+  return isLlmDraftSeatDisabled(profile, 1);
+}
 
 /** The engine-authored pick request for a bot seat. */
 const PICK_REQUEST = {
@@ -185,7 +192,7 @@ describe("LLM draft pick workflow", () => {
     expect(useDraftStore.getState().view?.pool.map((c) => c.instance_id)).toEqual(["picked"]);
 
     // 3. The engine's refusal — not the arrival of bytes — drove the breaker.
-    expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
+    expect(seatOneDisabled()).toBe(false);
   });
 
   it("trips the breaker after repeated engine refusals and then stops calling the provider", async () => {
@@ -203,7 +210,7 @@ describe("LLM draft pick workflow", () => {
       await useDraftStore.getState().pickCard(`pick-${round}`);
     }
 
-    expect(isLlmDraftDisabled(PROFILE_ID)).toBe(true);
+    expect(seatOneDisabled()).toBe(true);
 
     // Once given up on, the provider is not called again and the pick goes
     // through the ordinary engine-bot path.
@@ -213,6 +220,31 @@ describe("LLM draft pick workflow", () => {
 
     expect(transport.executeLlmRequest.mock.calls.length).toBe(callsBefore);
     expect(wasm.submit_pick).toHaveBeenCalledWith("after");
+  });
+
+  /// The breaker's verdict is about the configuration that failed. Fixing the
+  /// profile through the real store action is a new revision, and the next pick
+  /// must try the provider again rather than stay silenced for the session.
+  it("tries the provider again once the player edits the profile the breaker gave up on", async () => {
+    transport.executeLlmRequest.mockResolvedValue({
+      status: 401,
+      body: JSON.stringify({ error: { message: "Incorrect API key provided" } }),
+    });
+    wasm.submitPickWithLlmBotPicks.mockImplementation(() => ({
+      view: view([card("picked")]),
+      llmOutcomes: [{ seat: 1, used: false, error: "HTTP 401: Incorrect API key provided" }],
+    }));
+    for (let round = 0; round < 3; round += 1) {
+      await useDraftStore.getState().pickCard(`pick-${round}`);
+    }
+    expect(seatOneDisabled()).toBe(true);
+
+    useLlmStore.getState().updateProfile(PROFILE_ID, { apiKey: "sk-fixed" });
+
+    expect(seatOneDisabled()).toBe(false);
+    const callsBefore = transport.executeLlmRequest.mock.calls.length;
+    await useDraftStore.getState().pickCard("after-fix");
+    expect(transport.executeLlmRequest.mock.calls.length).toBe(callsBefore + 1);
   });
 
   it("keeps the profile healthy when the engine uses the pick", async () => {
@@ -227,7 +259,7 @@ describe("LLM draft pick workflow", () => {
 
     await useDraftStore.getState().pickCard("picked");
 
-    expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
+    expect(seatOneDisabled()).toBe(false);
     expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
     // The ordinary path is not also taken.
     expect(wasm.submit_pick).not.toHaveBeenCalled();
