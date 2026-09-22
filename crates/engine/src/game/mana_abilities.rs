@@ -3,7 +3,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
     ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
     QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
@@ -4053,9 +4053,16 @@ where
             ..
         }) => {
             let count = match *count {
-                REMOVE_COUNTER_COST_ANY_NUMBER => chosen_counter_count.ok_or_else(|| {
-                    EngineError::InvalidAction("Missing counter count for mana ability".to_string())
-                })?,
+                // CR 107.3i + CR 601.2b: literal "Remove X counters" (Saltcrusted
+                // Steppe class) and "any number of" counters (Pentad Prism class)
+                // are both player-announced variable counts, chosen before costs
+                // are paid; only the phrasing differs.
+                REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER => chosen_counter_count
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "Missing counter count for mana ability".to_string(),
+                        )
+                    })?,
                 REMOVE_COUNTER_COST_ALL => {
                     removable_counter_count_for_mana_cost(state, source_id, counter_type)
                 }
@@ -4586,17 +4593,20 @@ pub fn handle_pay_mana_ability_mana(
     advance_mana_ability_activation(state, updated, events)
 }
 
+// CR 107.3i + CR 601.2b: literal "Remove X counters" and "any number of"
+// counters are both player-announced variable counts requiring a
+// pre-payment choice — see the matching arm in `pay_mana_ability_cost_step`.
 fn any_number_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
     match cost.as_ref()? {
         AbilityCost::RemoveCounter {
-            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+            count: REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER,
             counter_type,
             target: None,
             ..
         } => Some(counter_type),
         AbilityCost::Composite { costs } => costs.iter().find_map(|cost| match cost {
             AbilityCost::RemoveCounter {
-                count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                count: REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type,
                 target: None,
                 ..
@@ -5214,6 +5224,7 @@ mod tests {
         ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
         QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
         TriggerDefinition, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        REMOVE_COUNTER_COST_X,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -13003,8 +13014,14 @@ mod tests {
                     },
                 )
                 .cost(AbilityCost::Composite {
+                    // Saltcrusted Steppe's Oracle text is "Remove X storage
+                    // counters", which the parser lowers to the literal-X
+                    // sentinel (`REMOVE_COUNTER_COST_X`), NOT the "any number of"
+                    // sentinel — the two are distinct parses (oracle_cost.rs)
+                    // that must both reach the same announced-count prompt/
+                    // payment path.
                     costs: vec![AbilityCost::RemoveCounter {
-                        count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                        count: REMOVE_COUNTER_COST_X,
                         counter_type: CounterMatch::OfType(storage.clone()),
                         target: None,
                         selection: crate::types::ability::CounterCostSelection::SingleObject,
@@ -13038,10 +13055,10 @@ mod tests {
             "removing 2 storage counters must leave 1 remaining"
         );
 
-        // CR 605.3a: an AnyCombination choice with multiple color options
-        // surfaces a mana-color prompt rather than auto-resolving. Submit the
-        // choice and confirm the produced amount matches the announced X (2),
-        // not the unresolved Variable("X") default of 0.
+        // An AnyCombination choice with multiple color options surfaces a
+        // mana-color prompt rather than auto-resolving (`mana_choice_prompt`).
+        // Submit the choice and confirm the produced amount matches the
+        // announced X (2), not the unresolved Variable("X") default of 0.
         match &state.waiting_for {
             WaitingFor::ChooseManaColor { .. } => {}
             other => panic!("expected ChooseManaColor prompt, got {other:?}"),
