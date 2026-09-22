@@ -3,7 +3,7 @@ use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     CardSelectionMode, ChoiceValue, ChosenAttribute, ContinuousModification,
     CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
-    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL,
+    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::ability_visit::{
     visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
@@ -596,7 +596,7 @@ pub(super) fn resolve_mana_ability_excluding(
         chosen_tappers: None,
         chosen_discards: Vec::new(),
         chosen_mana_payment: None,
-        chosen_counter_count: None,
+        chosen_counter_counts: Vec::new(),
         chosen_x: None,
         collected_evidence: Vec::new(),
         chosen_exiled: Vec::new(),
@@ -968,7 +968,7 @@ pub fn activate_mana_ability(
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -2209,19 +2209,29 @@ pub(super) fn advance_mana_ability_activation(
     // CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any number
     // of" counters): a mana-ability cost using either chosen-count sentinel
     // requires choosing the count before costs are paid and mana is produced.
-    if pending.chosen_counter_count.is_none() {
-        if let Some(counter_type) = chosen_count_self_remove_counter_cost(&ability_def.cost) {
-            let max = removable_counter_count_for_mana_cost(state, pending.source_id, counter_type);
-            return Ok(WaitingFor::PayAmountChoice {
-                player: pending.player,
-                resource: PayableResource::Counters,
-                min: 0,
-                max,
-                accumulated: 0,
-                source_id: pending.source_id,
-                pending_mana_ability: Some(Box::new(pending)),
-            });
-        }
+    // Walked via the SAME recursive flatten payment uses
+    // (`append_mana_ability_cost_components`) rather than a hand-rolled
+    // one-level-deep matcher, so a chosen-count `RemoveCounter` nested inside
+    // more than one level of `Composite` (e.g. a static cost tax wraps the
+    // base cost in an outer `Composite`) is still found — otherwise payment
+    // would reach a leaf with no prior prompt and fail with "Missing counter
+    // count for mana ability". A composite cost with more than one such leaf
+    // (a literal-X leaf alongside an unrelated "any number of" leaf) prompts
+    // for each leaf in turn, appending one independent entry per leaf to
+    // `chosen_counter_counts` rather than collapsing them into one value.
+    if let Some(counter_type) =
+        next_unchosen_remove_counter_leaf(&ability_def.cost, &pending.chosen_counter_counts)
+    {
+        let max = removable_counter_count_for_mana_cost(state, pending.source_id, counter_type);
+        return Ok(WaitingFor::PayAmountChoice {
+            player: pending.player,
+            resource: PayableResource::Counters,
+            min: 0,
+            max,
+            accumulated: 0,
+            source_id: pending.source_id,
+            pending_mana_ability: Some(Box::new(pending)),
+        });
     }
 
     // CR 605.3a + CR 602.2b + CR 601.2g-h + CR 107.4e: Resolve the mana
@@ -2377,6 +2387,7 @@ fn mana_ability_cost_cursor(
         next_discard: 0,
         next_exiled: 0,
         next_sacrificed: 0,
+        next_counter_choice: 0,
         selected_exile_remaining: None,
         selected_sacrifice_remaining: None,
         // CR 603.2 + CR 603.3b: A nested child starts with an empty frame-local
@@ -2494,6 +2505,11 @@ fn ensure_mana_ability_selection_cursor_consumed(
             "Too many permanents selected for mana ability sacrifice cost".to_string(),
         ));
     }
+    if cursor.next_counter_choice != pending.chosen_counter_counts.len() {
+        return Err(EngineError::InvalidAction(
+            "Too many counter-count choices announced for mana ability cost".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -2585,6 +2601,17 @@ fn advance_mana_ability_selection_cursor(
                 ));
             };
             cursor.next_sacrificed += count as usize;
+        }
+        // CR 601.2b: a chosen-count self-RemoveCounter leaf consumes exactly
+        // one entry from `chosen_counter_counts`, regardless of the amount
+        // announced — unlike `next_discard`/`next_sacrificed`, which advance
+        // by the paid quantity, this cursor advances by leaf count.
+        AbilityCost::RemoveCounter {
+            count,
+            target: None,
+            ..
+        } if is_chosen_remove_counter_cost_count(*count) => {
+            cursor.next_counter_choice += 1;
         }
         _ => {}
     }
@@ -2966,6 +2993,15 @@ fn pay_mana_ability_cost_component(
                 // modified.
                 current_action_event_start: cost_event_start,
             };
+            // CR 601.2b: index into `chosen_counter_counts` by this cursor's
+            // own `next_counter_choice`, not a single blanket scalar — a
+            // composite cost may carry more than one chosen-count
+            // `RemoveCounter` leaf (see `next_unchosen_remove_counter_leaf`),
+            // each needing its own independently-announced value.
+            let chosen_counter_count = pending
+                .chosen_counter_counts
+                .get(cursor.next_counter_choice)
+                .copied();
             let prior_waiting_for = state.waiting_for.clone();
             let component_progress = match pay_mana_ability_cost_with_choices(
                 state,
@@ -2978,7 +3014,7 @@ fn pay_mana_ability_cost_component(
                 &mut discards,
                 &mut sacrificed,
                 pending.chosen_mana_payment.as_deref(),
-                pending.chosen_counter_count,
+                chosen_counter_count,
                 pending.chosen_x,
                 &excluded_sources,
                 cursor.sub_cost_demand.as_ref(),
@@ -4598,21 +4634,21 @@ pub fn handle_pay_mana_ability_mana(
     advance_mana_ability_activation(state, updated, events)
 }
 
-// CR 601.2b: a self-RemoveCounter mana-ability cost whose count is one of the
-// chosen-count sentinels (`is_chosen_remove_counter_cost_count`) requires a
-// pre-payment choice — see the matching arm in `pay_mana_ability_cost_step`.
-// Named neutrally (not "any_number") because the sentinel set spans two
-// distinct rules with two distinct Oracle phrasings: literal "Remove X
+// CR 601.2b: every self-RemoveCounter mana-ability cost leaf whose count is
+// one of the chosen-count sentinels (`is_chosen_remove_counter_cost_count`),
+// in the SAME order `append_mana_ability_cost_components` flattens them for
+// payment. Named neutrally (not "any_number") because the sentinel set spans
+// two distinct rules with two distinct Oracle phrasings: literal "Remove X
 // counters" (CR 107.3a) and literal "any number of" counters (CR 107.1c).
-fn chosen_count_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
-    match cost.as_ref()? {
-        AbilityCost::RemoveCounter {
-            count,
-            counter_type,
-            target: None,
-            ..
-        } if is_chosen_remove_counter_cost_count(*count) => Some(counter_type),
-        AbilityCost::Composite { costs } => costs.iter().find_map(|cost| match cost {
+fn chosen_count_self_remove_counter_leaves(cost: &Option<AbilityCost>) -> Vec<&CounterMatch> {
+    let Some(cost) = cost.as_ref() else {
+        return Vec::new();
+    };
+    let mut flattened = Vec::new();
+    append_mana_ability_cost_component_refs(cost, &mut flattened);
+    flattened
+        .into_iter()
+        .filter_map(|cost| match cost {
             AbilityCost::RemoveCounter {
                 count,
                 counter_type,
@@ -4620,9 +4656,72 @@ fn chosen_count_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&
                 ..
             } if is_chosen_remove_counter_cost_count(*count) => Some(counter_type),
             _ => None,
-        }),
-        _ => None,
+        })
+        .collect()
+}
+
+// CR 601.2b: the next chosen-count self-RemoveCounter leaf that has not yet
+// been answered — used both to decide whether to surface a `PayAmountChoice`
+// prompt and to size its `max`. `already_chosen.len()` is the count of leaves
+// already answered, in flattened order, so the next unanswered leaf is always
+// at that index.
+fn next_unchosen_remove_counter_leaf<'a>(
+    cost: &'a Option<AbilityCost>,
+    already_chosen: &[u32],
+) -> Option<&'a CounterMatch> {
+    chosen_count_self_remove_counter_leaves(cost)
+        .into_iter()
+        .nth(already_chosen.len())
+}
+
+// CR 601.2b: `append_mana_ability_cost_components` (used for payment) clones
+// each leaf; this borrowing twin walks the same recursion for read-only
+// lookups (the prompt gate and the literal-X classifier below) without
+// cloning every cost leaf on each check.
+fn append_mana_ability_cost_component_refs<'a>(
+    cost: &'a AbilityCost,
+    remaining: &mut Vec<&'a AbilityCost>,
+) {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            for cost in costs {
+                append_mana_ability_cost_component_refs(cost, remaining);
+            }
+        }
+        cost => remaining.push(cost),
     }
+}
+
+// CR 107.3i: whether the next unanswered chosen-count self-RemoveCounter leaf
+// (the one `pending.chosen_counter_counts.len()` indexes) is the literal-X
+// sentinel rather than the "any number of" sentinel — only a literal-X leaf's
+// announced count also binds `PendingManaAbility::chosen_x`, since CR 107.3i
+// requires every instance of X on the object to share that one value, and
+// "any number of" has no X in its Oracle text at all.
+pub(crate) fn next_chosen_counter_leaf_is_literal_x(
+    state: &GameState,
+    pending: &PendingManaAbility,
+) -> bool {
+    let Ok(ability_def) = mana_ability_definition(state, pending) else {
+        return false;
+    };
+    let Some(cost) = &ability_def.cost else {
+        return false;
+    };
+    let mut flattened = Vec::new();
+    append_mana_ability_cost_component_refs(cost, &mut flattened);
+    flattened
+        .into_iter()
+        .filter_map(|cost| match cost {
+            AbilityCost::RemoveCounter {
+                count,
+                target: None,
+                ..
+            } if is_chosen_remove_counter_cost_count(*count) => Some(*count),
+            _ => None,
+        })
+        .nth(pending.chosen_counter_counts.len())
+        == Some(REMOVE_COUNTER_COST_X)
 }
 
 fn removable_counter_count_for_mana_cost(
@@ -11031,7 +11130,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -11133,7 +11232,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -11344,7 +11443,7 @@ mod tests {
                 chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
-                chosen_counter_count: None,
+                chosen_counter_counts: Vec::new(),
                 chosen_x: None,
                 collected_evidence: Vec::new(),
                 chosen_exiled: Vec::new(),
@@ -11577,7 +11676,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -11683,7 +11782,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -12746,7 +12845,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -12983,9 +13082,9 @@ mod tests {
 
     // Regression for storage lands (Saltcrusted Steppe class): "Remove X storage
     // counters from ~: Add X mana in any combination of colors" must bind the
-    // announced counter-removal count to BOTH the cost (chosen_counter_count)
+    // announced counter-removal count to BOTH the cost (chosen_counter_counts)
     // AND the produced `Ref(Variable("X"))` quantity (chosen_x). Previously
-    // only chosen_counter_count was set, so the counters were removed but the
+    // only chosen_counter_counts was set, so the counters were removed but the
     // Variable("X") mana count resolved to 0 and no mana was produced.
     #[test]
     fn storage_land_variable_x_mana_ability_produces_chosen_amount() {
@@ -13089,6 +13188,236 @@ mod tests {
                 + state.players[0].mana_pool.count_color(ManaType::White),
             2,
             "Add X mana must produce X (2) mana units bound to the removed counter count"
+        );
+    }
+
+    // Regression: a chosen-count self-RemoveCounter mana-ability cost nested
+    // TWO levels deep inside `Composite` (the shape a static cost tax
+    // produces — see `casting_costs.rs`'s `AdditionalCost::Required` wrapping)
+    // must still reach the `PayAmountChoice` prompt. Before this fix, the
+    // prompt gate matched only one level of `Composite`, so a leaf this deep
+    // skipped straight to payment and failed with "Missing counter count for
+    // mana ability" instead of prompting.
+    #[test]
+    fn chosen_count_remove_counter_nested_two_composite_levels_deep_still_prompts() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8004),
+            player,
+            "Nested Storage Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                // Two nested `Composite` levels around the chosen-count leaf,
+                // mirroring how a cost-increase tax wraps an existing cost
+                // (`casting_costs.rs`'s `AbilityCost::Composite { costs }` arm
+                // for `AdditionalCost::Required`) rather than a hand-built
+                // one-level `Composite`.
+                .cost(AbilityCost::Composite {
+                    costs: vec![AbilityCost::Composite {
+                        costs: vec![AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        }],
+                    }],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+            },
+        )
+        .expect(
+            "a chosen-count RemoveCounter cost nested two Composite levels deep must still prompt",
+        );
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(*resource, PayableResource::Counters);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 3);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("chosen counter count should resume mana production from a nested composite cost");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "a nested chosen-count RemoveCounter leaf must still remove the chosen amount"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    // Regression: a composite cost with TWO INDEPENDENT chosen-count
+    // self-RemoveCounter leaves — a literal-X leaf (Saltcrusted Steppe class)
+    // alongside an unrelated literal "any number of" leaf (Pentad
+    // Prism/Black Mana Battery class) over a DIFFERENT counter type — must
+    // keep the two announced amounts distinct rather than collapsing them
+    // into one scalar. Before this fix, both leaves shared
+    // `chosen_counter_count`, so answering X = 1 and the other choice = 2 (or
+    // any two different values) would apply the SAME value to both leaves.
+    #[test]
+    fn composite_cost_with_two_independent_chosen_count_remove_counter_leaves() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8005),
+            player,
+            "Dual Counter Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 5);
+            obj.counters.insert(charge.clone(), 5);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        // Single color option: no `ChooseManaColor` prompt, so
+                        // the test isolates the counter-count collapse bug
+                        // rather than exercising color selection too.
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                            color_options: vec![ManaColor::Green],
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        // Flattened first: the literal-X leaf. Its announced
+                        // amount must bind `chosen_x` (and thus the produced
+                        // mana count).
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                        // Flattened second: an unrelated "any number of" leaf
+                        // over a DIFFERENT counter type. It has no `X` in its
+                        // Oracle text, so its announced amount must NOT bind
+                        // `chosen_x`.
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(charge.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+            },
+        )
+        .expect("the first chosen-count leaf should prompt for its own count");
+
+        // Answer the literal-X leaf with 1.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 1 },
+        )
+        .expect("the first leaf's answer should surface the second leaf's prompt");
+
+        // A second, independent prompt for the "any number of" leaf must
+        // follow — this is the crux of the collapse bug: a single scalar
+        // could not have represented two pending choices at once.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(*resource, PayableResource::Counters);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 5, "the second leaf's max must read the charge counters, not the already-answered storage counters");
+            }
+            other => panic!("expected a second, independent PayAmountChoice, got {other:?}"),
+        }
+
+        // Answer the "any number of" leaf with a DIFFERENT amount (3).
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 3 },
+        )
+        .expect("both independent counter choices should resume mana production");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            4,
+            "the literal-X leaf must remove exactly its own announced amount (1), not the other leaf's (3)"
+        );
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&charge)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "the any-number leaf must remove exactly its own announced amount (3), not the other leaf's (1)"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "Add X mana must bind X to the literal-X leaf's amount (1), not the unrelated any-number leaf's amount (3)"
         );
     }
 
@@ -13393,7 +13722,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -13958,7 +14287,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -14031,7 +14360,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -14159,7 +14488,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -14225,7 +14554,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
@@ -14383,7 +14712,7 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
-            chosen_counter_count: None,
+            chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),

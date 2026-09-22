@@ -3009,18 +3009,26 @@ pub(super) fn handle_resolution_choice(
                     // CR 107.3a + CR 107.3i: for a literal "Remove X counters"
                     // mana-ability cost (Saltcrusted Steppe class), CR 107.3i
                     // requires every instance of X on the object to share the
-                    // one announced value, so the announced amount must bind to
-                    // BOTH the counter-removal cost and the "Add X mana"
-                    // quantity ref, or the mana production resolves X to 0
-                    // despite the counters being removed successfully. Also
-                    // reached by the literal "any number of" counters sentinel
-                    // (CR 107.1c, e.g. Pentad Prism), which has no `X` in its
-                    // Oracle text — setting `chosen_x` there is inert, since
-                    // that class's effect reads the removed-counter count via
-                    // `QuantityRef::PreviousEffectAmount`, never `Variable("X")`.
+                    // one announced value, so the announced amount must ALSO
+                    // bind the "Add X mana" quantity ref, or the mana
+                    // production resolves X to 0 despite the counters being
+                    // removed successfully. Only the answered leaf that is
+                    // ITSELF the literal-X sentinel binds `chosen_x` —
+                    // `next_chosen_counter_leaf_is_literal_x` checks the
+                    // specific leaf this answer completes (by its position in
+                    // `chosen_counter_counts`), not just "some Counters prompt
+                    // was answered", so a composite cost combining a literal-X
+                    // leaf with an unrelated literal "any number of" leaf
+                    // (CR 107.1c, e.g. Pentad Prism, which has no `X` in its
+                    // Oracle text) can't leak the wrong leaf's amount into X.
+                    // Each leaf's amount is appended independently rather than
+                    // overwriting a single scalar, so a composite cost with
+                    // more than one chosen-count leaf keeps them distinct.
                     PayableResource::Counters => {
-                        pending.chosen_counter_count = Some(amount);
-                        pending.chosen_x = Some(amount);
+                        if mana_abilities::next_chosen_counter_leaf_is_literal_x(state, &pending) {
+                            pending.chosen_x = Some(amount);
+                        }
+                        pending.chosen_counter_counts.push(amount);
                     }
                     PayableResource::Speed => pending.chosen_x = Some(amount),
                     other => {

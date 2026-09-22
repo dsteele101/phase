@@ -7357,6 +7357,14 @@ pub struct ManaAbilityCostCursor {
     pub next_exiled: usize,
     #[serde(default)]
     pub next_sacrificed: usize,
+    /// Index into `PendingManaAbility::chosen_counter_counts` for the NEXT
+    /// chosen-count `RemoveCounter` leaf to consume, mirroring
+    /// `next_discard`/`next_tapper`/`next_sacrificed`: a composite cost may
+    /// carry more than one such leaf (a literal-X leaf alongside an unrelated
+    /// "any number of" leaf), each needing its own independently-announced
+    /// count rather than sharing one value.
+    #[serde(default)]
+    pub next_counter_choice: usize,
     /// The current selected-exile component, after the move that paused has
     /// been consumed. Its remaining objects must move before the cost cursor
     /// advances to the next component.
@@ -8209,10 +8217,20 @@ pub struct PendingManaAbility {
     /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_mana_payment: Option<Vec<ManaType>>,
-    /// CR 107.1c + CR 605.3a: Chosen count for "remove any number of counters"
-    /// in a mana-ability cost. The amount is chosen before mana production.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chosen_counter_count: Option<u32>,
+    /// CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any
+    /// number of" counters): chosen counts for a mana-ability cost's
+    /// self-RemoveCounter components that require an announced count. One
+    /// entry per such component, appended in the SAME order those components
+    /// are encountered when the cost is flattened
+    /// (`append_mana_ability_cost_components`) — a composite cost with
+    /// multiple independent chosen-count `RemoveCounter` leaves (e.g. a
+    /// literal-X leaf alongside an unrelated "any number of" leaf) gets one
+    /// independent entry per leaf rather than collapsing them into a single
+    /// value. Consumed sequentially during payment via
+    /// `ManaAbilityCostCursor::next_counter_choice`. The amount(s) are chosen
+    /// before mana production.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_counter_counts: Vec<u32>,
     /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Two
     /// writers, both binding the same CR 107.3a announcement:
     ///
@@ -33011,7 +33029,7 @@ mod tests {
                         chosen_tappers,
                         chosen_discards: Vec::new(),
                         chosen_mana_payment: None,
-                        chosen_counter_count: None,
+                        chosen_counter_counts: Vec::new(),
                         chosen_x: None,
                         collected_evidence: Vec::new(),
                         chosen_exiled: Vec::new(),
@@ -36796,7 +36814,7 @@ mod tests {
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
-                    chosen_counter_count: None,
+                    chosen_counter_counts: Vec::new(),
                     chosen_x: None,
                     collected_evidence: Vec::new(),
                     chosen_exiled: Vec::new(),
