@@ -13205,6 +13205,21 @@ fn rewrite_parent_target_to_self_ref(def: &mut AbilityDefinition) {
 fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition) {
     rewrite_reveal_top_player_to_post_replacement_target(def);
     rewrite_replacement_event_recipient_to_post_replacement_target(def);
+    rewrite_draw_replacement_card_to_last_revealed(def);
+}
+
+fn rewrite_draw_replacement_card_to_last_revealed(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::ParentTarget) {
+            *f = TargetFilter::LastRevealed;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_draw_replacement_card_to_last_revealed(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_draw_replacement_card_to_last_revealed(else_branch);
+    }
 }
 
 /// CR 614.6 + CR 701.20a: "they reveal it" in a draw replacement reveals the top

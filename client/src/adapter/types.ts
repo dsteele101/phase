@@ -7,6 +7,14 @@ import type {
   ViewerInteraction,
 } from "./generated/interaction";
 
+export type {
+  InteractionActionId,
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+  ViewerInteraction,
+};
+
 // ── Identifiers ──────────────────────────────────────────────────────────
 
 export type ObjectId = number;

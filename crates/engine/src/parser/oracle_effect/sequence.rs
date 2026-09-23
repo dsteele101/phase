@@ -584,18 +584,14 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
 /// CR 701.20a + CR 608.2c: Detect both rest-pile zone and rest ordering for RevealUntil.
 fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRestOrder) {
     let rest_zone = parse_reveal_until_rest_zone(lower);
-    let rest_order = if nom_primitives::scan_contains(lower, "in a random order") {
-        DigRestOrder::Random
-    } else if nom_primitives::scan_contains(lower, "in any order") {
+    let rest_order = if nom_primitives::scan_contains(lower, "in any order") {
         DigRestOrder::PlayerChoice
-    } else if nom_primitives::scan_contains(lower, "shuffle ")
+    } else if nom_primitives::scan_contains(lower, "in a random order")
+        || nom_primitives::scan_contains(lower, "shuffle ")
         || nom_primitives::scan_contains(lower, "shuffles ")
+        || rest_zone == Some(Zone::Library)
     {
         DigRestOrder::Random
-    } else if rest_zone == Some(Zone::Library) {
-        // CR 401.4: without an explicit randomization instruction, the owner
-        // chooses the order of cards placed together at a library position.
-        DigRestOrder::PlayerChoice
     } else {
         DigRestOrder::Preserve
     };
@@ -9264,14 +9260,15 @@ mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
 
-    // CR 401.4: unspecified library placement preserves the owner's choice;
-    // explicit randomization and non-library destinations retain their modes.
+    // CR 701.20a: unspecified library placement defaults to random order;
+    // explicit "in any order" gives player choice; explicit randomization and
+    // non-library destinations retain their modes.
     #[test]
     fn reveal_until_rest_order_distinguishes_default_from_randomization() {
         for (text, expected) in [
             (
                 "put the rest on the bottom of your library",
-                DigRestOrder::PlayerChoice,
+                DigRestOrder::Random,
             ),
             (
                 "put the rest on the bottom of your library in any order",

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject, ViewerInteraction, WaitingFor } from "../../../adapter/types.ts";
@@ -142,7 +142,9 @@ describe("RevealUntilBottomOrderModal", () => {
     render(<CardChoiceModal />);
 
     fireEvent.click(screen.getAllByRole("button", { name: /Move right/i })[0]);
-    setWaitingFor(waitingFor, objects, selectInteraction("session.1.2"));
+    act(() => {
+      setWaitingFor(waitingFor, objects, selectInteraction("session.1.2"));
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /Done|Confirm/i }));
     expect(dispatchMock).toHaveBeenLastCalledWith({

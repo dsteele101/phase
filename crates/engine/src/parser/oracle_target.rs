@@ -1448,7 +1448,6 @@ pub fn parse_target_with_syntax<'a>(
 
     // CR 603.7: Anaphoric tracked-set pronouns
     static TRACKED_SET_PHRASES: &[&str] = &[
-        "the chosen cards",
         "the rest",
         "the other",
         "those land cards",
@@ -13609,14 +13608,9 @@ mod tests {
     }
 
     #[test]
-    fn the_chosen_cards_produce_tracked_set() {
+    fn the_chosen_cards_inherits_parent_target() {
         let (filter, rest) = parse_target("the chosen cards");
-        assert_eq!(
-            filter,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0)
-            }
-        );
+        assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
     }
 
