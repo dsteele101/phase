@@ -2918,17 +2918,7 @@ pub(super) fn apply_post_replacement_effect(
     // "breaks any object-scoped reader". Glacierwood Siege's "As this
     // enchantment enters, choose Temur or Sultai" is exactly that shape, and it
     // reaches this function as a self-scoped replacement continuation.
-    //
-    // CR 109.5 + CR 121.1 + CR 614.6: a replaced event that acts on a PLAYER
-    // rather than an object — a draw — carries that player as the drain's event
-    // target. There "that player" is the drawing player (Uba Mask: "that player
-    // exiles that card instead"), not the controller of whatever object the
-    // continuation is keyed to (the replacement's own source, for a draw).
-    let affected_player = match state.post_replacement_event_target() {
-        Some(TargetRef::Player(player)) => *player,
-        _ => affected_controller,
-    };
-    let distinct_scoped_player = (affected_player != controller).then_some(affected_player);
+    let distinct_scoped_player = (affected_controller != controller).then_some(affected_controller);
 
     // CR 614.1c: Walk past modifier-only effects (Tap/Untap/PutCounter/ChangeZone)
     // in the sub_ability chain to find the real work. Composable replacements like
@@ -5088,6 +5078,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
@@ -7418,6 +7409,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
@@ -7625,6 +7617,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
@@ -7748,6 +7741,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
@@ -8206,6 +8200,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             discard_frame: None,
+            performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,

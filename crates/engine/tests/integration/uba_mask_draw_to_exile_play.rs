@@ -50,7 +50,10 @@ fn can_play_land(runner: &GameRunner, id: ObjectId) -> bool {
 
 /// Stage `card` as exiled with `source` this turn by `exiler`, whoever owns it —
 /// the link and per-turn record the exile resolver writes, plus the recorded
-/// exiling player (CR 406.6 + CR 607.2b).
+/// exiling player (CR 406.6 + CR 607.2b). Uba Mask itself only ever exiles a
+/// card from its drawer's own library, so owner and exiling player always
+/// match there; staging is how the permission predicate is tested with the two
+/// apart. The production writer is covered by this file's unstaged tests.
 fn stage_exiled_with_source(
     runner: &mut GameRunner,
     card: ObjectId,
@@ -200,6 +203,70 @@ fn opponent_draw_is_castable_only_by_that_opponent() {
     assert!(
         !spell_objects_available_to_cast(runner.state(), P0).contains(&spell),
         "Uba Mask's controller may not cast a card another player exiled"
+    );
+}
+
+/// CR 121.1 + CR 614.6 + CR 608.2c + CR 406.6: end to end on the opponent's
+/// own turn, with no staged state. P0 controls Uba Mask; on P1's turn, P1's
+/// draw-step draw and a later spell-driven draw are both replaced, P1 is
+/// recorded as the exiling player, and P1 then plays the land and casts the
+/// spell from exile through the real land-play and casting pipelines. P0 may
+/// use neither.
+#[test]
+fn opponent_plays_and_casts_own_exiled_draws_on_their_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Uba Mask", UBA_MASK);
+    scenario.with_library_top(P1, &["Filler A", "Filler B"]);
+    let spell = scenario
+        .add_spell_to_library_top(P1, "Opponent Instant", true)
+        .id();
+    let land = scenario.add_card_to_library_top(P1, "Masked Plains");
+    let peek = scenario
+        .add_spell_to_hand_from_oracle(P1, "Peek", true, DRAW_A_CARD)
+        .id();
+    let mut runner = scenario.build();
+    make_land(&mut runner, land);
+
+    // CR 504.1: P1's draw step draw is replaced — P1 exiles the land instead.
+    runner.advance_to_end_step();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1, "reach-guard: P1's turn");
+    assert_eq!(zone(&runner, land), Zone::Exile);
+    assert!(!in_hand(&runner, P1, land));
+    assert_eq!(
+        runner.state().objects[&land].exiled_by,
+        Some(P1),
+        "CR 608.2c: \"that player exiles\" — the drawing player exiled it"
+    );
+
+    // A spell-driven draw is replaced the same way.
+    runner.cast(peek).target_player(P1).resolve();
+    assert_eq!(zone(&runner, spell), Zone::Exile);
+    assert_eq!(runner.state().objects[&spell].exiled_by, Some(P1));
+    assert!(
+        !spell_objects_available_to_cast(runner.state(), P0).contains(&spell),
+        "Uba Mask's controller did not exile it, so may not cast it"
+    );
+
+    // CR 305.1: P1 plays the exiled land through the land-play pipeline.
+    assert!(can_play_land(&runner, land));
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect("P1 may play the land P1 exiled with Uba Mask");
+    assert_eq!(zone(&runner, land), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&land].controller, P1);
+
+    // CR 601.2: P1 casts the exiled spell through the casting pipeline.
+    runner.cast(spell).resolve();
+    assert_eq!(
+        zone(&runner, spell),
+        Zone::Graveyard,
+        "the spell was cast from exile and resolved"
     );
 }
 

@@ -5699,6 +5699,9 @@ pub struct PendingBatchZoneMoveRequest {
     pub chain_referent: ChainReferentIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_to: Option<AttachTarget>,
+    /// CR 608.2c + CR 406.6: the player performing this parked move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performed_by: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

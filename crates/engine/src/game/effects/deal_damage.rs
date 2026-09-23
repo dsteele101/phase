@@ -4820,6 +4820,7 @@ mod tests {
                             },
                             position: crate::types::ability::LibraryPosition::Top,
                             face_down: false,
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                         },
                     ))
                     .description("Crumbling Sanctuary prevention shield".to_string()),
