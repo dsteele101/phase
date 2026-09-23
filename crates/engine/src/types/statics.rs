@@ -506,15 +506,11 @@ pub enum ExileCastGrantee {
     SourceController,
     /// Each player, restricted to the pool cards that player exiled.
     ///
-    /// RUNTIME: the engine records no exiling player on an exile link, so
-    /// "cards they exiled" is evaluated as "cards they own" (CR 108.3). That is
-    /// exact for the exile instruction that feeds this shape today: a draw
-    /// replacement ("that player exiles that card instead", Uba Mask) exiles
-    /// the card the player would have drawn, which is always the top card of
-    /// their own library (CR 121.1). A source that makes a player exile cards
-    /// they don't own (Shared Fate: "the top card of one of their opponents'
-    /// libraries") needs exiler tracking before it can use this variant, so
-    /// the parser does not lower that wording here.
+    /// RUNTIME: the pool stays the source-linked set (CR 406.6 + CR 607.2b);
+    /// each player's share is the pool cards whose recorded exiling player
+    /// (`GameObject::exiled_by`) is that player. Ownership plays no part — a
+    /// player who exiled an opponent's card may use it, and its owner may not.
+    /// A pool card with no recorded exiling player is usable by nobody.
     EachPlayerOwnExiles,
 }
 

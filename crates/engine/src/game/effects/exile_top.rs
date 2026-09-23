@@ -119,6 +119,14 @@ pub fn resolve(
                 obj.face_down = true;
             }
         }
+        // CR 608.2c + CR 406.6: the acting player performs this exile — the
+        // bound "that player" subject when one exists, else the controller —
+        // which is who "cards they exiled with ~" later refers to.
+        crate::game::exile_links::record_exiling_player(
+            state,
+            object_id,
+            ability.scoped_player.unwrap_or(ability.controller),
+        );
     }
 
     events.push(GameEvent::EffectResolved {

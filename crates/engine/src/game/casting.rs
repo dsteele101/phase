@@ -4771,10 +4771,10 @@ struct ExilePermissionSource<'a> {
     /// remove-counters). Borrowed from the static definition so the source struct
     /// stays `Copy`.
     extra_cost: &'a Option<crate::types::statics::CastExtraCost>,
-    /// CR 406.6 + CR 607.1: The player whose own exiles are the only eligible
-    /// pool cards — `Some` for an "each player may … cards they exiled with ~"
-    /// grant (Uba Mask), `None` when the grantee is the source's controller and
-    /// the whole pool is eligible.
+    /// CR 406.6 + CR 607.2b: The player whose exiles are the only eligible pool
+    /// cards (matched against `GameObject::exiled_by`) — `Some` for an "each
+    /// player may … cards they exiled with ~" grant (Uba Mask), `None` when the
+    /// grantee is the source's controller and the whole pool is eligible.
     own_exiles_of: Option<PlayerId>,
 }
 
@@ -4797,11 +4797,16 @@ fn exile_permission_pool(state: &GameState, source: &ExilePermissionSource<'_>) 
                 .collect()
         }
     };
-    // CR 406.6 + CR 108.3: An "each player … cards they exiled" grant admits only
-    // the grantee's own exiles. See `ExileCastGrantee::EachPlayerOwnExiles` for
-    // why the exiling player is read as the card's owner.
+    // CR 406.6 + CR 607.2b: An "each player … cards they exiled with ~" grant
+    // admits only the source-linked cards this player exiled — the recorded
+    // exiling player, never the card's owner.
     if let Some(player) = source.own_exiles_of {
-        pool.retain(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player));
+        pool.retain(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.exiled_by == Some(player))
+        });
     }
     pool
 }

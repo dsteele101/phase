@@ -5,10 +5,11 @@
 //! Covers the two building blocks the card composes:
 //!   * CR 121.1 + CR 614.6: a draw replacement whose head is "exiles that card"
 //!     exiles the top card of the *drawing* player's library.
-//!   * CR 406.6 + CR 607.1: an "each player may … cards they exiled with ~ this
-//!     turn" exile-play grant (`ExileCastGrantee::EachPlayerOwnExiles`, per-turn
-//!     pool) lets each player — and only that player — play their own exiles,
-//!     only during the turn they were exiled.
+//!   * CR 406.6 + CR 607.2b: an "each player may … cards they exiled with ~
+//!     this turn" exile-play grant (`ExileCastGrantee::EachPlayerOwnExiles`,
+//!     per-turn pool) lets each player use only the source-linked cards that
+//!     player exiled (`GameObject::exiled_by`) — whoever owns them — and only
+//!     during the turn they were exiled.
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::spell_objects_available_to_cast;
@@ -17,6 +18,7 @@ use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{Effect, LibraryPosition, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -44,6 +46,29 @@ fn can_play_land(runner: &GameRunner, id: ObjectId) -> bool {
     legal_actions(runner.state())
         .iter()
         .any(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == id))
+}
+
+/// Stage `card` as exiled with `source` this turn by `exiler`, whoever owns it —
+/// the link and per-turn record the exile resolver writes, plus the recorded
+/// exiling player (CR 406.6 + CR 607.2b).
+fn stage_exiled_with_source(
+    runner: &mut GameRunner,
+    card: ObjectId,
+    source: ObjectId,
+    exiler: PlayerId,
+) {
+    let state = runner.state_mut();
+    state.exile_links.push(ExileLink {
+        exiled_id: card,
+        source_id: source,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    state
+        .cards_exiled_with_source_this_turn
+        .entry(source)
+        .or_default()
+        .push(card);
+    state.objects.get_mut(&card).unwrap().exiled_by = Some(exiler);
 }
 
 /// Make a staged card a land card (no rules text needed).
@@ -143,8 +168,9 @@ fn controller_draw_is_exiled_and_playable_as_land_this_turn() {
     assert_eq!(zone(&runner, land), Zone::Battlefield);
 }
 
-/// CR 406.6 + CR 607.1: "Each player may … cards *they* exiled" — an opponent's
-/// exiled draw is castable by that opponent, never by Uba Mask's controller.
+/// CR 406.6 + CR 607.2b: "Each player may … cards *they* exiled" — an
+/// opponent's exiled draw was exiled by that opponent ("that player exiles"),
+/// so it is castable by them, never by Uba Mask's controller.
 #[test]
 fn opponent_draw_is_castable_only_by_that_opponent() {
     let mut scenario = GameScenario::new();
@@ -162,6 +188,11 @@ fn opponent_draw_is_castable_only_by_that_opponent() {
 
     assert_eq!(zone(&runner, spell), Zone::Exile);
     assert!(!in_hand(&runner, P1, spell));
+    assert_eq!(
+        runner.state().objects[&spell].exiled_by,
+        Some(P1),
+        "CR 608.2c: \"that player exiles\" — the drawing player performed the exile"
+    );
     assert!(
         spell_objects_available_to_cast(runner.state(), P1).contains(&spell),
         "the player who exiled the card may cast it"
@@ -200,4 +231,99 @@ fn exiled_card_is_not_playable_on_a_later_turn() {
             "a card exiled on a previous turn must not be castable"
         );
     }
+}
+
+/// CR 406.6 + CR 607.2b: the grant follows the exiling player, not ownership.
+/// P1 exiled a P0-owned card and P0 exiled a P1-owned card, both with Uba Mask:
+/// P1 may cast the P0-owned card through the cast pipeline, and neither owner
+/// may cast their own card that the other player exiled.
+#[test]
+fn exiling_player_not_owner_may_cast_through_the_cast_pipeline() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let uba = scenario
+        .add_artifact_from_oracle(P0, "Uba Mask", UBA_MASK)
+        .id();
+    let p0_owned = scenario.add_spell_to_exile(P0, "P0 Instant", true).id();
+    let p1_owned = scenario.add_spell_to_exile(P1, "P1 Instant", true).id();
+    let mut runner = scenario.build();
+    stage_exiled_with_source(&mut runner, p0_owned, uba, P1);
+    stage_exiled_with_source(&mut runner, p1_owned, uba, P0);
+
+    let p1_castable = spell_objects_available_to_cast(runner.state(), P1);
+    let p0_castable = spell_objects_available_to_cast(runner.state(), P0);
+    assert!(
+        p1_castable.contains(&p0_owned),
+        "P1 exiled it, so P1 may cast it"
+    );
+    assert!(
+        !p1_castable.contains(&p1_owned),
+        "P1 owns it but P0 exiled it, so P1 may not cast it"
+    );
+    assert!(
+        p0_castable.contains(&p1_owned),
+        "P0 exiled it, so P0 may cast it"
+    );
+    assert!(
+        !p0_castable.contains(&p0_owned),
+        "P0 owns it but P1 exiled it, so P0 may not cast it"
+    );
+
+    // CR 117.3c: hand P1 priority and cast the P0-owned card through the full
+    // casting pipeline (CR 601.2).
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.cast(p0_owned).resolve();
+
+    assert_eq!(
+        zone(&runner, p0_owned),
+        Zone::Graveyard,
+        "the cast spell resolved and went to its owner's graveyard"
+    );
+    assert_eq!(
+        zone(&runner, p1_owned),
+        Zone::Exile,
+        "the other card was never cast"
+    );
+}
+
+/// CR 305.1 + CR 406.6 + CR 607.2b: land plays follow the exiling player too.
+/// On P0's turn, P0 may play the P1-owned land P0 exiled with Uba Mask, but not
+/// the P0-owned land P1 exiled.
+#[test]
+fn exiling_player_not_owner_may_play_the_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let uba = scenario
+        .add_artifact_from_oracle(P0, "Uba Mask", UBA_MASK)
+        .id();
+    let p0_owned = scenario.add_land_to_exile(P0, "P0 Land").id();
+    let p1_owned = scenario.add_land_to_exile(P1, "P1 Land").id();
+    let mut runner = scenario.build();
+    stage_exiled_with_source(&mut runner, p0_owned, uba, P1);
+    stage_exiled_with_source(&mut runner, p1_owned, uba, P0);
+
+    assert!(
+        !can_play_land(&runner, p0_owned),
+        "P0 owns it but P1 exiled it, so P0 may not play it"
+    );
+    assert!(
+        can_play_land(&runner, p1_owned),
+        "P0 exiled it, so P0 may play it"
+    );
+
+    let card_id = runner.state().objects[&p1_owned].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: p1_owned,
+            card_id,
+        })
+        .expect("playing the land P0 exiled must succeed");
+    assert_eq!(zone(&runner, p1_owned), Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&p1_owned].controller,
+        P0,
+        "CR 305.1: the player who plays a land controls it"
+    );
+    assert_eq!(zone(&runner, p0_owned), Zone::Exile);
 }
