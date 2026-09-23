@@ -341,6 +341,10 @@ fn sacrifice_leaf_cost(
     penalties: &PolicyPenalties,
 ) -> f64 {
     if matches!(target, TargetFilter::SelfRef) {
+        // A source that is leaving anyway is given up for nothing extra.
+        if source_is_doomed(state, ai_player, source_id) {
+            return 0.0;
+        }
         return sacrifice_cost(state, source_id, penalties);
     }
     let filter_ctx = FilterContext::from_source(state, source_id);
@@ -572,6 +576,21 @@ fn effect_benefit_value(
             resolve_quantity(state, amount, ai_player, source_id).max(0) as f64
                 * penalties.self_cost_pay_life_per_point,
         ),
+        // CR 120.3e + CR 704.5g: a small fixed ping whose only real payoff is a
+        // creature kill (the classifier found it non-trivial below the face
+        // ceiling and not lethal to a player) is worth the best opposing creature
+        // it kills, priced like any permanent given up. Larger or lethal-to-player
+        // damage stays unpriced: its payoff is not a single creature.
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value },
+            target,
+            ..
+        } if *value <= FACE_DAMAGE_TRIVIAL_CEILING
+            && !(filter_admits_player(target)
+                && damage_lethal_to_opponent(state, ai_player, *value)) =>
+        {
+            best_creature_kill_value(state, ai_player, source_id, target, *value, penalties)
+        }
         // CR 707.2 + CR 202.3: a token copy of a creature card with the chosen
         // mana value. Priced X-AGNOSTICALLY at one card-equivalent: at the
         // activation decision the player has not announced X yet
@@ -1062,6 +1081,39 @@ fn damage_kills_creature(
     })
 }
 
+/// The value of the most valuable opposing creature `value` fixed damage kills
+/// among those `target` admits, or `None` when it kills none (so the chain is
+/// not priced off a kill that is not there).
+fn best_creature_kill_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    target: &TargetFilter,
+    value: i32,
+    penalties: &PolicyPenalties,
+) -> Option<f64> {
+    let opponents = players::opponents(state, ai_player);
+    let filter_ctx = FilterContext::from_source(state, source_id);
+    let damage = Effect::DealDamage {
+        amount: QuantityExpr::Fixed { value },
+        target: TargetFilter::Any,
+        damage_source: None,
+        excess: None,
+    };
+    state
+        .battlefield
+        .iter()
+        .filter(|&&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                opponents.contains(&obj.controller)
+                    && obj.card_types.core_types.contains(&CoreType::Creature)
+            }) && matches_target_filter(state, id, target, &filter_ctx)
+                && lethal_to_creature(state, id, &[&damage]) == Some(true)
+        })
+        .map(|&id| sacrifice_cost(state, id, penalties))
+        .max_by(f64::total_cmp)
+}
+
 fn removal_is_trivial(
     state: &GameState,
     ai_player: PlayerId,
@@ -1105,6 +1157,136 @@ fn put_counter_fizzles(
         .cost
         .as_ref()
         .is_some_and(|cost| sacrifice_must_remove_source(state, ai_player, source_id, cost))
+}
+
+/// True when the source is about to leave the battlefield regardless of what
+/// the AI does with it, so sacrificing it for value surrenders nothing:
+///
+/// - CR 509.1h + CR 510.1c: blockers are declared and the combat damage still
+///   to come kills it (a blocked Mogg Fanatic, a chump blocker).
+/// - CR 115.1 + CR 117.1b: an opponent's spell or ability on the stack targets
+///   it. That is almost always removal, and sacrificing in response is the
+///   classic answer to it.
+pub(crate) fn source_is_doomed(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    use engine::types::ability::TargetRef;
+    if crate::combat_ai::creature_dies_in_current_combat(state, source_id) {
+        return true;
+    }
+    state.stack.iter().any(|entry| {
+        entry.controller != ai_player
+            && entry.ability().is_some_and(|ability| {
+                ability
+                    .targets
+                    .iter()
+                    .any(|target| matches!(target, TargetRef::Object(id) if *id == source_id))
+            })
+    })
+}
+
+/// Share of a self-sacrificing source's value that an activation must clear
+/// on top of breaking even. A permanent whose ability sacrifices itself keeps
+/// that ability available for as long as it stays on the battlefield, at
+/// instant speed unless restricted, while it goes on attacking and blocking.
+/// Cashing it in for an exactly even trade gives that option up for nothing.
+/// Holding it keeps the trade available and adds the body's combat value
+/// until the moment it is doomed, when the premium drops to zero (see
+/// [`source_is_doomed`]).
+const SELF_SACRIFICE_OPTION_SHARE: f64 = 0.5;
+
+/// The margin a self-sacrificing activation's payoff must clear beyond its
+/// cost: [`SELF_SACRIFICE_OPTION_SHARE`] of the source's value when paying
+/// `cost` necessarily sacrifices a source that is not already doomed, else 0.
+pub(crate) fn self_sacrifice_option_premium(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    if !sacrifice_must_remove_source(state, ai_player, source_id, cost)
+        || source_is_doomed(state, ai_player, source_id)
+    {
+        return 0.0;
+    }
+    SELF_SACRIFICE_OPTION_SHARE * sacrifice_cost(state, source_id, penalties)
+}
+
+/// CR 117.1b + CR 701.21a: what a creature can still cash in when it is about
+/// to die — the best confidently priced payoff among its activated abilities
+/// whose only non-mana cost is sacrificing itself, with the mana affordable
+/// now. A blocker that dies in combat can activate such an ability before
+/// damage (the doomed source pays nothing extra, see [`source_is_doomed`]), so
+/// losing it costs its value minus this. Unpriced or trivial payoffs count as 0,
+/// so this never credits a payoff the self-cost policy would not.
+pub(crate) fn self_sacrifice_salvage_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    let candidates: Vec<AbilityDefinition> =
+        engine::game::casting::activated_ability_definitions(state, source_id)
+            .into_iter()
+            .map(|(_, ability)| ability)
+            .filter(|ability| ability.cost.as_ref().is_some_and(cost_sacrifices_only_self))
+            .collect();
+    if candidates.is_empty() {
+        return 0.0;
+    }
+    let open_mana = crate::zone_eval::available_mana(state, ai_player);
+    candidates
+        .iter()
+        .filter(|ability| {
+            ability
+                .cost
+                .as_ref()
+                .is_some_and(|cost| salvage_mana_payable(cost, open_mana))
+        })
+        .filter_map(|ability| {
+            match appraise_benefit(state, ai_player, source_id, ability, penalties) {
+                BenefitAppraisal::Priced { value } => Some(value.max(0.0)),
+                BenefitAppraisal::Trivial { .. } | BenefitAppraisal::Unpriced => None,
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+fn is_self_sacrifice(cost: &AbilityCost) -> bool {
+    matches!(cost, AbilityCost::Sacrifice(sacrifice) if matches!(sacrifice.target, TargetFilter::SelfRef))
+}
+
+/// A cost that sacrifices the source itself plus, at most, mana. Any other
+/// component (tapping a blocker, paying life, discarding) is not something a
+/// salvage estimate should assume is free.
+fn cost_sacrifices_only_self(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            costs.iter().any(is_self_sacrifice)
+                && costs
+                    .iter()
+                    .all(|c| is_self_sacrifice(c) || matches!(c, AbilityCost::Mana { .. }))
+        }
+        other => is_self_sacrifice(other),
+    }
+}
+
+/// The mana part of a [`cost_sacrifices_only_self`] cost fits in `open_mana`.
+fn salvage_mana_payable(cost: &AbilityCost, open_mana: u32) -> bool {
+    let mana: u32 = match cost {
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .map(|c| match c {
+                AbilityCost::Mana { cost } => cost.mana_value(),
+                _ => 0,
+            })
+            .sum(),
+        _ => 0,
+    };
+    mana <= open_mana
 }
 
 /// True when paying `cost` necessarily sacrifices the ability's source — either

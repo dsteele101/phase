@@ -1,0 +1,431 @@
+//! Regression tests for ability- and life-aware combat decisions: block-time
+//! triggers (flanking, bushido), value gang blocks, life priced by the clock,
+//! connect-payoff denial, and self-sacrifice timing. Keyword triggers are
+//! installed through the engine's own card synthesis, so these tests exercise
+//! exactly the trigger shape a real card carries.
+
+use engine::database::synthesis::synthesize_all;
+use engine::game::zones::create_object;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, DamageKindFilter, Effect, QuantityExpr, TargetFilter,
+    TriggerDefinition,
+};
+use engine::types::card::CardFace;
+use engine::types::card_type::CoreType;
+use engine::types::game_state::GameState;
+use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::Keyword;
+use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
+
+use crate::combat_ai::choose_blockers;
+use crate::combat_triggers::{block_trigger_shifts, connect_trigger_value, PtShift};
+
+const AI: PlayerId = PlayerId(1);
+const OPP: PlayerId = PlayerId(0);
+
+fn setup(ai_life: i32) -> GameState {
+    let mut state = GameState::new_two_player(42);
+    state.turn_number = 4;
+    state.active_player = OPP;
+    state.players[AI.0 as usize].life = ai_life;
+    state
+}
+
+fn creature(state: &mut GameState, owner: PlayerId, name: &str, p: i32, t: i32) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(state.next_object_id),
+        owner,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.power = Some(p);
+    obj.toughness = Some(t);
+    obj.entered_battlefield_turn = Some(1);
+    id
+}
+
+/// Give `id` a keyword together with the triggers the card database
+/// synthesizes for it (flanking, bushido and rampage are triggered abilities).
+fn grant_keyword(state: &mut GameState, id: ObjectId, keyword: Keyword) {
+    let mut face = CardFace {
+        keywords: vec![keyword.clone()],
+        ..CardFace::default()
+    };
+    synthesize_all(&mut face);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.keywords.push(keyword);
+    for trigger in face.triggers {
+        obj.push_printed_trigger(trigger);
+    }
+}
+
+/// "Whenever this creature deals combat damage to a player, draw a card."
+fn grant_draw_on_connect(state: &mut GameState, id: ObjectId) {
+    let draw = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone).execute(draw);
+    trigger.valid_source = Some(TargetFilter::SelfRef);
+    trigger.valid_target = Some(TargetFilter::Player);
+    trigger.damage_kind = DamageKindFilter::CombatOnly;
+    state
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .push_printed_trigger(trigger);
+}
+
+fn blocks_on(assignments: &[(ObjectId, ObjectId)], attacker: ObjectId) -> Vec<ObjectId> {
+    assignments
+        .iter()
+        .filter(|(_, a)| *a == attacker)
+        .map(|(b, _)| *b)
+        .collect()
+}
+
+// --- Block-time trigger projection -----------------------------------------
+
+#[test]
+fn flanking_shrinks_each_blocker_without_flanking() {
+    let mut state = setup(20);
+    let flanker = creature(&mut state, OPP, "Flanker", 2, 2);
+    grant_keyword(&mut state, flanker, Keyword::Flanking);
+    let a = creature(&mut state, AI, "Bear A", 2, 2);
+    let b = creature(&mut state, AI, "Bear B", 2, 2);
+
+    let shifts = block_trigger_shifts(&state, flanker, &[a, b]);
+    let shrink = PtShift {
+        power: -1,
+        toughness: -1,
+    };
+    assert_eq!(shifts.blockers, vec![shrink, shrink]);
+    assert_eq!(shifts.attacker, PtShift::default());
+
+    // CR 702.25a: a blocker that itself has flanking is not affected.
+    grant_keyword(&mut state, b, Keyword::Flanking);
+    let shifts = block_trigger_shifts(&state, flanker, &[a, b]);
+    assert_eq!(shifts.blockers, vec![shrink, PtShift::default()]);
+}
+
+#[test]
+fn bushido_pumps_both_on_blocking_and_on_becoming_blocked() {
+    let mut state = setup(20);
+    let samurai = creature(&mut state, OPP, "Samurai", 2, 2);
+    grant_keyword(&mut state, samurai, Keyword::Bushido(1));
+    let bear = creature(&mut state, AI, "Bear", 2, 2);
+    let pump = PtShift {
+        power: 1,
+        toughness: 1,
+    };
+    assert_eq!(
+        block_trigger_shifts(&state, samurai, &[bear]).attacker,
+        pump
+    );
+    assert_eq!(
+        block_trigger_shifts(&state, bear, &[samurai]).blockers,
+        vec![pump]
+    );
+}
+
+#[test]
+fn rampage_counts_blockers_beyond_the_first() {
+    let mut state = setup(20);
+    let rampager = creature(&mut state, OPP, "Rampager", 3, 3);
+    grant_keyword(&mut state, rampager, Keyword::Rampage(2));
+    let ids: Vec<ObjectId> = (0..3)
+        .map(|i| creature(&mut state, AI, &format!("Bear {i}"), 2, 2))
+        .collect();
+    assert_eq!(
+        block_trigger_shifts(&state, rampager, &ids[..1]).attacker,
+        PtShift::default()
+    );
+    assert_eq!(
+        block_trigger_shifts(&state, rampager, &ids).attacker,
+        PtShift {
+            power: 4,
+            toughness: 4
+        }
+    );
+}
+
+// --- Blocking decisions ----------------------------------------------------
+
+#[test]
+fn does_not_block_a_flanker_with_an_equal_body_that_only_dies() {
+    let mut state = setup(20);
+    let flanker = creature(&mut state, OPP, "Flanker", 2, 2);
+    grant_keyword(&mut state, flanker, Keyword::Flanking);
+    creature(&mut state, AI, "Bear", 2, 2);
+
+    let assignments = choose_blockers(&state, AI, &[flanker]);
+    assert!(
+        assignments.is_empty(),
+        "flanking makes the 2/2 blocker a 1/1 that dies without killing: {assignments:?}"
+    );
+}
+
+#[test]
+fn still_trades_with_a_vanilla_attacker_of_the_same_size() {
+    let mut state = setup(20);
+    let attacker = creature(&mut state, OPP, "Bear", 2, 2);
+    let bear = creature(&mut state, AI, "Bear", 2, 2);
+    assert_eq!(
+        blocks_on(&choose_blockers(&state, AI, &[attacker]), attacker),
+        vec![bear]
+    );
+}
+
+#[test]
+fn does_not_double_block_a_flanker_that_kills_both_shrunken_blockers() {
+    let mut state = setup(20);
+    let flanker = creature(&mut state, OPP, "Flanker", 2, 2);
+    grant_keyword(&mut state, flanker, Keyword::Flanking);
+    creature(&mut state, AI, "Bear A", 2, 2);
+    creature(&mut state, AI, "Bear B", 2, 2);
+
+    let assignments = choose_blockers(&state, AI, &[flanker]);
+    assert!(
+        assignments.is_empty(),
+        "two 1/1s-after-flanking both die to the 2/2: {assignments:?}"
+    );
+}
+
+#[test]
+fn double_blocks_a_bigger_attacker_that_can_only_kill_one_blocker() {
+    let mut state = setup(20);
+    let ogre = creature(&mut state, OPP, "Ogre", 3, 3);
+    let a = creature(&mut state, AI, "Bear A", 2, 2);
+    let b = creature(&mut state, AI, "Bear B", 2, 2);
+
+    let mut gang = blocks_on(&choose_blockers(&state, AI, &[ogre]), ogre);
+    gang.sort();
+    assert_eq!(
+        gang,
+        vec![a, b],
+        "a 3/3 kills one 2/2 at most, so trading one bear for it is a win"
+    );
+}
+
+#[test]
+fn bushido_turns_a_losing_block_into_a_trade() {
+    let mut state = setup(20);
+    let ogre = creature(&mut state, OPP, "Ogre", 3, 3);
+    let samurai = creature(&mut state, AI, "Samurai", 2, 2);
+    // Without bushido, a 2/2 in front of a 3/3 just dies.
+    assert!(choose_blockers(&state, AI, &[ogre]).is_empty());
+
+    grant_keyword(&mut state, samurai, Keyword::Bushido(1));
+    assert_eq!(
+        blocks_on(&choose_blockers(&state, AI, &[ogre]), ogre),
+        vec![samurai],
+        "bushido makes the blocker a 3/3 that trades"
+    );
+}
+
+#[test]
+fn does_not_chump_away_a_creature_to_save_a_little_life_while_racing() {
+    // At 9 life against a lone 3/3, and out-powered, the old Race objective
+    // chump-blocked anything with power >= 2. Three damage at 9 is not worth a
+    // creature.
+    let mut state = setup(9);
+    let ogre = creature(&mut state, OPP, "Ogre", 3, 3);
+    creature(&mut state, AI, "Bear", 2, 2);
+    assert!(choose_blockers(&state, AI, &[ogre]).is_empty());
+}
+
+#[test]
+fn chumps_a_card_drawing_attacker_but_not_an_equal_vanilla_one() {
+    let mut state = setup(20);
+    let vanilla = creature(&mut state, OPP, "Bear", 2, 2);
+    creature(&mut state, AI, "Wall", 0, 1);
+    assert!(
+        choose_blockers(&state, AI, &[vanilla]).is_empty(),
+        "2 damage at 20 life is not worth even a 0/1"
+    );
+
+    let mut state = setup(20);
+    let thief = creature(&mut state, OPP, "Thief", 2, 2);
+    grant_draw_on_connect(&mut state, thief);
+    let wall = creature(&mut state, AI, "Wall", 0, 1);
+    assert!(connect_trigger_value(state.objects.get(&thief).unwrap()) > 0.0);
+    assert_eq!(
+        blocks_on(&choose_blockers(&state, AI, &[thief]), thief),
+        vec![wall],
+        "denying a card is worth a 0/1"
+    );
+}
+
+#[test]
+fn life_near_the_end_of_the_clock_justifies_a_block_it_would_skip_at_twenty() {
+    // Against a 3/3 with the AI already out-powered, a 1/1 chump is declined at
+    // a healthy total but taken when the 3 damage eats the last turns of life.
+    let mut state = setup(20);
+    let ogre = creature(&mut state, OPP, "Ogre", 3, 3);
+    creature(&mut state, AI, "Token", 1, 1);
+    assert!(choose_blockers(&state, AI, &[ogre]).is_empty());
+
+    let mut state = setup(8);
+    let ogre = creature(&mut state, OPP, "Ogre", 3, 3);
+    creature(&mut state, OPP, "Second Ogre", 3, 3);
+    let token = creature(&mut state, AI, "Token", 1, 1);
+    assert_eq!(
+        blocks_on(&choose_blockers(&state, AI, &[ogre]), ogre),
+        vec![token]
+    );
+}
+
+// --- Self-sacrificing creatures --------------------------------------------
+
+/// "Sacrifice this creature: it deals `amount` damage to any target." — the
+/// generic self-sacrifice ping shape (Mogg Fanatic is one of many).
+fn grant_sacrifice_ping(state: &mut GameState, id: ObjectId, amount: i32) {
+    use engine::types::ability::{AbilityCost, SacrificeCost};
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: amount },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+    );
+    ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )));
+    std::sync::Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(ability);
+}
+
+#[test]
+fn a_self_sacrificing_creature_is_a_cheap_chump_blocker() {
+    // A 1/1 whose sacrifice can still kill an opposing 1/1 loses nothing by
+    // blocking: once doomed it cashes the ability in before damage. The same
+    // 1/1 without the ability is not worth spending to save 2 life at 20.
+    let mut state = setup(20);
+    let bear = creature(&mut state, OPP, "Bear", 2, 2);
+    creature(&mut state, OPP, "Elf", 1, 1);
+    let pinger = creature(&mut state, AI, "Pinger", 1, 1);
+    assert!(choose_blockers(&state, AI, &[bear]).is_empty());
+
+    grant_sacrifice_ping(&mut state, pinger, 1);
+    assert_eq!(
+        blocks_on(&choose_blockers(&state, AI, &[bear]), bear),
+        vec![pinger]
+    );
+}
+
+#[test]
+fn a_blocked_creature_that_dies_in_combat_is_doomed_and_sacrifices_for_free() {
+    use crate::config::PolicyPenalties;
+    use crate::policies::self_cost::{self_sacrifice_option_premium, source_is_doomed};
+    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use engine::types::ability::{AbilityCost, SacrificeCost};
+
+    let mut state = setup(20);
+    let bear = creature(&mut state, OPP, "Bear", 2, 2);
+    let pinger = creature(&mut state, AI, "Pinger", 1, 1);
+    grant_sacrifice_ping(&mut state, pinger, 1);
+    let cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+    let penalties = PolicyPenalties::default();
+
+    // Outside combat the ability is an option worth holding.
+    assert!(!source_is_doomed(&state, AI, pinger));
+    assert!(self_sacrifice_option_premium(&state, AI, pinger, &cost, &penalties) > 0.0);
+
+    // CR 509.1h + CR 510.1c: blocking the 2/2, the 1/1 dies to combat damage.
+    state.phase = engine::types::phase::Phase::DeclareBlockers;
+    let mut combat = CombatState::default();
+    let mut info = AttackerInfo::new(bear, AttackTarget::Player(AI), AI);
+    info.blocked = true;
+    combat.attackers.push(info);
+    combat.blocker_assignments.insert(bear, vec![pinger]);
+    combat.blocker_to_attacker.insert(pinger, vec![bear]);
+    state.combat = Some(combat);
+
+    assert!(source_is_doomed(&state, AI, pinger));
+    assert_eq!(
+        self_sacrifice_option_premium(&state, AI, pinger, &cost, &penalties),
+        0.0
+    );
+    // The attacker survives the pinger's 1 damage, so it is not doomed.
+    assert!(!source_is_doomed(&state, OPP, bear));
+}
+
+#[test]
+fn a_blocks_trigger_aimed_at_its_triggering_object_pumps_the_blocker() {
+    // CR 509.1h: a blocker declaration's triggering object is the blocker, so
+    // "whenever this blocks, the triggering creature gets +2/+2" pumps the
+    // blocker, not the creature it blocks.
+    use engine::types::ability::PtValue;
+    let mut state = setup(20);
+    let attacker = creature(&mut state, OPP, "Bear", 2, 2);
+    let guard = creature(&mut state, AI, "Guard", 1, 1);
+    let pump = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(2),
+            target: TargetFilter::TriggeringSource,
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::Blocks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(pump);
+    state
+        .objects
+        .get_mut(&guard)
+        .unwrap()
+        .push_printed_trigger(trigger);
+
+    let shifts = block_trigger_shifts(&state, attacker, &[guard]);
+    assert_eq!(
+        shifts.blockers,
+        vec![PtShift {
+            power: 2,
+            toughness: 2
+        }]
+    );
+    assert_eq!(shifts.attacker, PtShift::default());
+}
+
+#[test]
+fn damage_already_dealt_is_not_counted_again_when_judging_doom() {
+    use crate::combat_ai::creature_dies_in_current_combat;
+    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+    // A 2/2 blocked by a 3/3 dies in the damage still to come.
+    let mut state = setup(20);
+    state.phase = engine::types::phase::Phase::CombatDamage;
+    let bear = creature(&mut state, OPP, "Bear", 2, 2);
+    let ogre = creature(&mut state, AI, "Ogre", 3, 3);
+    let mut combat = CombatState::default();
+    let mut info = AttackerInfo::new(bear, AttackTarget::Player(AI), AI);
+    info.blocked = true;
+    combat.attackers.push(info);
+    combat.blocker_assignments.insert(bear, vec![ogre]);
+    combat.blocker_to_attacker.insert(ogre, vec![bear]);
+    state.combat = Some(combat);
+    assert!(creature_dies_in_current_combat(&state, bear));
+    assert!(!creature_dies_in_current_combat(&state, ogre));
+
+    // After regular damage the surviving 3/3 carries 2 marked damage; nothing
+    // more is coming, so it must not be judged doomed by re-dealing the 2.
+    state.objects.get_mut(&ogre).unwrap().damage_marked = 2;
+    state.combat.as_mut().unwrap().regular_damage_done = true;
+    assert!(!creature_dies_in_current_combat(&state, ogre));
+
+    // After a first-strike step with no first strikers, only the regular step
+    // remains: a 3/3 with 2 marked from elsewhere still dies to the 2/2.
+    state.combat.as_mut().unwrap().regular_damage_done = false;
+    state.combat.as_mut().unwrap().first_strike_done = true;
+    assert!(creature_dies_in_current_combat(&state, ogre));
+}
