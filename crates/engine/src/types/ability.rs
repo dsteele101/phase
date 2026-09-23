@@ -17662,7 +17662,7 @@ pub enum Effect {
         /// subject (Uba Mask: "that player exiles that card"). Expressed
         /// relative to `player`, so every parser rewrite of the library owner
         /// carries the subject along. Recorded on each exiled card as the
-        /// player who exiled it (CR 406.6). Omitted from JSON when it is the
+        /// player who exiled it. Omitted from JSON when it is the
         /// controller, so existing card-data is unchanged.
         #[serde(
             default,
