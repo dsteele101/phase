@@ -41,6 +41,7 @@
 //! (`self_cost_value.rs`) fetches the activated ability and turns these
 //! predicates into a `PolicyVerdict`.
 
+use engine::game::casting::{find_one_of_cost, one_of_branch_payable_in};
 use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
 use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
@@ -191,9 +192,56 @@ fn self_counter_removal_cost(cost: &AbilityCost) -> Option<(u32, &CounterType)> 
     }
 }
 
+/// CR 118.3 + CR 601.2h + CR 602.2b: `cost` with each choice between costs
+/// settled on the cheapest branch (by [`real_self_cost`]) that the player can
+/// actually pay. Payability is the engine's activation authority, judged inside
+/// the whole cost and including mana, so a `{2}` branch without the mana to
+/// pay it is not an option. A choice with no payable branch stays unresolved.
+///
+/// Callers that price an activation and then ask what paying it gives up (the
+/// option premium, materiality) read this one resolved cost, so every question
+/// is answered about the branch the AI would actually pay.
+pub(crate) fn resolve_payable_cost(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    penalties: &PolicyPenalties,
+) -> AbilityCost {
+    let mut resolved = cost.clone();
+    while let Some(branches) = find_one_of_cost(&resolved) {
+        let cheapest = branches
+            .iter()
+            .filter(|branch| {
+                one_of_branch_payable_in(
+                    state,
+                    ai_player,
+                    source_id,
+                    &resolved,
+                    branch,
+                    ability_index,
+                )
+            })
+            .filter_map(|branch| resolved.resolve_first_one_of(branch))
+            .map(|candidate| {
+                let price = real_self_cost(state, ai_player, source_id, &candidate, penalties);
+                (price, candidate)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match cheapest {
+            Some((_, candidate)) => resolved = candidate,
+            None => break,
+        }
+    }
+    resolved
+}
+
 /// Price the self-inflicted portion of `cost` in card-equivalent units.
 /// `Composite` sums its sub-costs (you pay them all); `OneOf` takes the minimum
 /// (the payer chooses the cheapest). Out-of-scope sub-costs (mana, tap) price 0.
+/// This `OneOf` reading ignores payability; settle choices first with
+/// [`resolve_payable_cost`] when pricing a real activation.
 pub(crate) fn real_self_cost(
     state: &GameState,
     ai_player: PlayerId,
@@ -1167,7 +1215,7 @@ fn put_counter_fizzles(
 /// - CR 509.1h + CR 510.1c: blockers are declared and the combat damage still
 ///   to come kills it (a blocked Mogg Fanatic, a chump blocker).
 /// - CR 115.1 + CR 117.1b: an opponent's spell or ability on the stack
-///   targets it with an effect that removes it from the battlefield or is
+///   targets it with an unconditional effect that removes it from the battlefield or is
 ///   provably lethal to it. Sacrificing in response is the classic answer to
 ///   removal; a harmless or beneficial targeted effect dooms nothing.
 pub(crate) fn source_is_doomed(
@@ -1183,13 +1231,16 @@ pub(crate) fn source_is_doomed(
         entry.controller != ai_player
             && entry.ability().is_some_and(|ability| {
                 // Only the links of the chain that target the source act on it.
+                // CR 608.2c: a link with a condition is skipped at resolution
+                // when the condition is false, and whether it holds is decided
+                // then, not now — so only unconditional links count as doom.
                 let mut aimed: Vec<&Effect> = Vec::new();
                 let mut link = Some(ability);
                 while let Some(current) = link {
-                    if current
-                        .targets
-                        .iter()
-                        .any(|target| matches!(target, TargetRef::Object(id) if *id == source_id))
+                    if current.condition.is_none()
+                        && current.targets.iter().any(
+                            |target| matches!(target, TargetRef::Object(id) if *id == source_id),
+                        )
                     {
                         aimed.push(&current.effect);
                     }
@@ -1308,12 +1359,29 @@ fn cost_sacrifices_only_self(cost: &AbilityCost) -> bool {
 /// does; a choice between costs only when every branch the
 /// player can pay does, since a payable branch that spares the source is a way
 /// to activate without losing it.
+///
+/// CR 118.3 + CR 601.2h: which branches are payable is the engine's activation
+/// authority, judged inside the whole cost and including mana — a
+/// `{2}` branch with no mana available leaves only the sacrifice.
 fn sacrifice_must_remove_source(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
+    if let Some(branches) = find_one_of_cost(cost) {
+        let mut payable = branches
+            .iter()
+            .filter(|branch| {
+                one_of_branch_payable_in(state, ai_player, source_id, cost, branch, None)
+            })
+            .filter_map(|branch| cost.resolve_first_one_of(branch))
+            .peekable();
+        return payable.peek().is_some()
+            && payable.all(|resolved| {
+                sacrifice_must_remove_source(state, ai_player, source_id, &resolved)
+            });
+    }
     match cost {
         AbilityCost::Sacrifice(sacrifice) => {
             if matches!(sacrifice.target, TargetFilter::SelfRef) {
@@ -1340,14 +1408,7 @@ fn sacrifice_must_remove_source(
         AbilityCost::Composite { costs } => costs
             .iter()
             .any(|c| sacrifice_must_remove_source(state, ai_player, source_id, c)),
-        AbilityCost::OneOf { costs } => {
-            let mut payable = costs
-                .iter()
-                .filter(|c| c.is_payable(state, ai_player, source_id))
-                .peekable();
-            payable.peek().is_some()
-                && payable.all(|c| sacrifice_must_remove_source(state, ai_player, source_id, c))
-        }
+        // A `OneOf` never reaches here: every choice was settled above.
         _ => false,
     }
 }
