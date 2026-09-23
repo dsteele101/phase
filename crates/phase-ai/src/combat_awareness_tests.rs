@@ -605,6 +605,34 @@ fn a_choice_of_costs_sacrifices_the_source_only_when_every_payable_branch_does()
     );
     // CR 118.3: 30 life cannot be paid at 20, so the sacrifice is forced.
     assert!(self_sacrifice_option_premium(&state, AI, pinger, &choice(30), &penalties) > 0.0);
+
+    // CR 118.3: likewise a mana branch with no mana to pay it.
+    let mana_or_sacrifice = AbilityCost::OneOf {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: engine::types::mana::ManaCost::generic(2),
+            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+        ],
+    };
+    assert!(
+        self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, &penalties) > 0.0
+    );
+    for _ in 0..2 {
+        let _ = state.add_mana_to_pool(
+            AI,
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                pinger,
+                false,
+                vec![],
+            ),
+        );
+    }
+    assert_eq!(
+        self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, &penalties),
+        0.0
+    );
 }
 
 #[test]

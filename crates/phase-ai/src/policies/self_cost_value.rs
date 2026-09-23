@@ -73,7 +73,7 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
-    appraise_benefit, cost_is_material, real_self_cost, self_cost_in_scope,
+    appraise_benefit, cost_is_material, real_self_cost, resolve_payable_cost, self_cost_in_scope,
     self_counter_cost_preview, self_sacrifice_option_premium, synergy_justifies_self_cost,
     BenefitAppraisal, SelfCounterCostPreview,
 };
@@ -109,7 +109,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         let GameAction::ActivateAbility {
             source_id,
-            ability_index: _,
+            ability_index,
         } = &ctx.candidate.action
         else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
@@ -150,6 +150,16 @@ impl TacticalPolicy for SelfCostValuePolicy {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
+        // CR 118.3 + CR 601.2h: price, materiality and the option premium all
+        // read the branch of each cost choice the AI can actually pay.
+        let cost = &resolve_payable_cost(
+            ctx.state,
+            ctx.ai_player,
+            *source_id,
+            cost,
+            Some(*ability_index),
+            ctx.penalties(),
+        );
         let cost_value =
             real_self_cost(ctx.state, ctx.ai_player, *source_id, cost, ctx.penalties());
 
@@ -835,6 +845,17 @@ mod tests {
         id
     }
 
+    /// Put `amount` colorless mana, produced by `source`, in the AI's pool.
+    fn fund_generic_mana(state: &mut GameState, source: ObjectId, amount: usize) {
+        use engine::types::mana::{ManaType, ManaUnit};
+        for _ in 0..amount {
+            let _ = state.add_mana_to_pool(
+                AI,
+                ManaUnit::new(ManaType::Colorless, source, false, vec![]),
+            );
+        }
+    }
+
     fn next_id() -> u64 {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1000);
@@ -1092,6 +1113,60 @@ mod tests {
         creature(&mut state, OPP, "Elf", 1, 1);
         let source = self_sacrificing_pinger(&mut state);
         stack_removal_targeting(&mut state, source);
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_benefit_covers_cost",
+        );
+    }
+
+    #[test]
+    fn conditional_removal_does_not_doom_the_source() {
+        // CR 608.2c: a removal link whose condition is false is skipped at
+        // resolution, so it does not make the even kill free.
+        use engine::types::ability::AbilityCondition;
+        use engine::types::game_state::StackEntryKind;
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, OPP, "Elf", 1, 1);
+        let source = self_sacrificing_pinger(&mut state);
+        stack_removal_targeting(&mut state, source);
+        let entry = state.stack.back_mut().unwrap();
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &mut entry.kind
+        else {
+            unreachable!("stack_removal_targeting pushes a spell");
+        };
+        ability.condition = Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn);
+        assert_reject(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_hold_sacrifice_option",
+        );
+    }
+
+    #[test]
+    fn a_cost_choice_prices_only_the_branches_the_player_can_pay() {
+        // "{2} or sacrifice this": CR 118.3, with no mana the only payment
+        // sacrifices the source, so the even kill holds the option exactly as
+        // a plain self-sacrifice does. With the mana, the free branch keeps
+        // the source and the kill is taken.
+        use engine::types::mana::ManaCost;
+        let mut state = GameState::new_two_player(42);
+        creature(&mut state, OPP, "Elf", 1, 1);
+        let source = self_sacrificing_pinger(&mut state);
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)[0].cost =
+            Some(AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(2),
+                    },
+                ],
+            });
+        let verdict = verdict_for(&state, source, plain_features());
+        assert_reject(&verdict, "self_cost_hold_sacrifice_option");
+
+        fund_generic_mana(&mut state, source, 2);
         assert_neutral(
             &verdict_for(&state, source, plain_features()),
             "self_cost_benefit_covers_cost",
@@ -1621,6 +1696,8 @@ mod tests {
             &[CoreType::Artifact],
             activated(gain_life(1), cost),
         );
+        // CR 118.3: the mana branch is an option only with the mana to pay it.
+        fund_generic_mana(&mut state, source, 2);
         assert_not_reject(&verdict_for(&state, source, plain_features()));
     }
 
@@ -3233,6 +3310,8 @@ mod tests {
             &[CoreType::Artifact],
             activated(draw(1), cost),
         );
+        // CR 118.3: the mana branch is an option only with the mana to pay it.
+        fund_generic_mana(&mut state, source, 2);
         let verdict = verdict_for(&state, source, plain_features());
         assert_neutral(&verdict, "self_cost_benefit_covers_cost");
         // Facts pinned so this row is an EXACT test of the free branch, and so
