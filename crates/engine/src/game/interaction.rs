@@ -308,6 +308,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -318,6 +319,11 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
+        // CR 601.2f: the candidate generator emits exactly one action per
+        // distinct locked total cost the engine proved reachable, so the
+        // schema it projects IS complete for this prompt — two orders that
+        // lock the same cost are indistinguishable to the game.
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CastOffer { .. }
         // CR 702.60a: Ripple's "you **may** reveal the top N" is a binary
         // reveal/decline offer answered with `GameAction::RippleChoice` — the
@@ -411,6 +417,13 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             Some(InteractionSlotKind::Single),
         ),
         WaitingFor::OrderTriggers { .. } => (
+            InteractionWaitingForCode::Sequence,
+            None,
+            Some(InteractionSlotKind::Single),
+        ),
+        // CR 601.2f: a permutation submission, same response shape as
+        // `OrderTriggers`.
+        WaitingFor::OrderCostReductions { .. } => (
             InteractionWaitingForCode::Sequence,
             None,
             Some(InteractionSlotKind::Single),
@@ -551,6 +564,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::DiscardChoice {
             unless_filter: Some(_),
             ..
@@ -4730,6 +4744,7 @@ fn selection_projection(
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -4744,6 +4759,11 @@ fn selection_projection(
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
+        // CR 601.2f: the candidate generator emits exactly one action per
+        // distinct locked total cost the engine proved reachable, so the
+        // schema it projects IS complete for this prompt — two orders that
+        // lock the same cost are indistinguishable to the game.
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CastOffer { .. }
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::ModalFaceChoice { .. }
@@ -5798,6 +5818,19 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::TriggerIndex, index);
             }
         }
+        // CR 601.2f: indices into the prompt's snapshotted reduction list.
+        // CR 601.2b: the announced nonhybrid equivalents ride the same action.
+        GameAction::OrderCostReductions {
+            order,
+            hybrid_announcement,
+        } => {
+            for index in order {
+                push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index);
+            }
+            for shard in hybrid_announcement {
+                push_value_surface(surfaces, InteractionRoleCode::Option, shard.symbol());
+            }
+        }
         GameAction::Equip { target_id, .. } => {
             push_object_surface(surfaces, state, *target_id, InteractionRoleCode::Target)
         }
@@ -6461,6 +6494,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseReplacement { .. } => InteractionActionCode::ChooseReplacement,
         GameAction::ChooseEntryController { .. } => InteractionActionCode::ChooseEntryController,
         GameAction::OrderTriggers { .. } => InteractionActionCode::OrderTriggers,
+        GameAction::OrderCostReductions { .. } => InteractionActionCode::OrderCostReductions,
         GameAction::CancelCast => InteractionActionCode::CancelCast,
         GameAction::Equip { .. } => InteractionActionCode::Equip,
         GameAction::CrewVehicle { .. } => InteractionActionCode::CrewVehicle,

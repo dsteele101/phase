@@ -104,6 +104,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::OrderTriggers { .. }
+        | WaitingFor::OrderCostReductions { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
@@ -133,6 +134,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
+        | WaitingFor::EmpowerJaceChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
