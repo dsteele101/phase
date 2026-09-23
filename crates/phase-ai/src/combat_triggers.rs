@@ -304,15 +304,19 @@ fn counts_blockers_of_source(filter: &TargetFilter) -> bool {
 /// math prices bodies at `1.5 * power + toughness` (a 2/2 is 5.0), and a card
 /// is worth at least a small creature, so a card is priced just above a 1/1.
 const CONNECT_CARD_VALUE: f64 = 3.0;
-/// Price of a connect payoff this reader recognises but does not price
-/// individually (a token, a counter, a discard, a drain).
-const CONNECT_GENERIC_VALUE: f64 = 1.5;
 
 /// CR 510.1 + CR 120.3 + CR 509.1h: the value, in combat-eval units, of the
 /// payoff `obj` collects when it connects in combat, from "deals combat damage
 /// to a player" triggers and "attacks and isn't blocked" triggers. A block
 /// denies it, so it counts toward what blocking this attacker is worth and
 /// toward what an unblocked swing is worth to its controller.
+///
+/// Only established positive payoffs are priced. At block time the damage
+/// event does not exist yet, so an intervening-if condition (CR 603.4), a
+/// damage-amount threshold, a trigger constraint or an "unless [a player]
+/// pays" rider (CR 118.12a) cannot be confirmed — such a trigger is worth 0,
+/// as is any chain containing an effect this reader does not price (a harmful
+/// rider, a loot's discard, an opponent's draw).
 pub(crate) fn connect_trigger_value(obj: &GameObject) -> f64 {
     if obj.trigger_definitions.is_empty() {
         return 0.0;
@@ -320,10 +324,46 @@ pub(crate) fn connect_trigger_value(obj: &GameObject) -> f64 {
     obj.trigger_definitions
         .iter_unchecked()
         .map(|entry| &entry.definition)
-        .filter(|trigger| is_connect_trigger(trigger))
+        .filter(|trigger| is_connect_trigger(trigger) && fires_unconditionally(trigger))
         .filter_map(|trigger| trigger.execute.as_deref())
-        .map(connect_payoff_value)
+        .filter_map(connect_payoff_value)
         .sum()
+}
+
+/// No trigger-level gate that could stop the payoff once the source connects.
+fn fires_unconditionally(trigger: &TriggerDefinition) -> bool {
+    trigger.condition.is_none()
+        && trigger.constraint.is_none()
+        && trigger.unless_pay.is_none()
+        && trigger.damage_amount.is_none()
+}
+
+/// The value of a connect trigger's effect chain, or `None` when any link is
+/// conditional or not a recognised positive outcome for the controller.
+fn connect_payoff_value(execute: &AbilityDefinition) -> Option<f64> {
+    let mut total = 0.0;
+    let mut link: Option<&AbilityDefinition> = Some(execute);
+    while let Some(ability) = link {
+        if ability.condition.is_some()
+            || ability.unless_pay.is_some()
+            || ability.repeat_for.is_some()
+            || ability.modal.is_some()
+        {
+            return None;
+        }
+        total += match &*ability.effect {
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::Controller,
+            } if *value > 0 => f64::from(*value) * CONNECT_CARD_VALUE,
+            // A P/T pump on an unblocked attacker is already paid for by the
+            // damage it adds, which the caller counts through power.
+            Effect::Pump { .. } => 0.0,
+            _ => return None,
+        };
+        link = ability.sub_ability.as_deref();
+    }
+    Some(total)
 }
 
 fn is_connect_trigger(trigger: &TriggerDefinition) -> bool {
@@ -348,23 +388,4 @@ fn is_connect_trigger(trigger: &TriggerDefinition) -> bool {
             .is_none_or(|filter| matches!(filter, TargetFilter::SelfRef)),
         _ => false,
     }
-}
-
-fn connect_payoff_value(execute: &AbilityDefinition) -> f64 {
-    let mut total = 0.0;
-    let mut link: Option<&AbilityDefinition> = Some(execute);
-    while let Some(ability) = link {
-        total += match &*ability.effect {
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value },
-                target: TargetFilter::Controller,
-            } => f64::from((*value).max(0)) * CONNECT_CARD_VALUE,
-            // A P/T pump on an unblocked attacker is already paid for by the
-            // damage it adds, which the caller counts through power.
-            Effect::Pump { .. } => 0.0,
-            _ => CONNECT_GENERIC_VALUE,
-        };
-        link = ability.sub_ability.as_deref();
-    }
-    total
 }

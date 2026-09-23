@@ -429,3 +429,219 @@ fn damage_already_dealt_is_not_counted_again_when_judging_doom() {
     state.combat.as_mut().unwrap().first_strike_done = true;
     assert!(creature_dies_in_current_combat(&state, ogre));
 }
+
+// --- Review regressions ----------------------------------------------------
+
+#[test]
+fn a_block_that_already_saves_the_player_is_not_credited_to_the_next_one() {
+    // At 8 life a 7/7 and a 1/2 attack for exactly lethal. Chumping the 7/7
+    // saves the game; after that the 1/2 only threatens 1 of the remaining 8
+    // life, so the second 1/1 is not thrown in front of it (it would die
+    // without killing). Pricing every block against the original lethal total
+    // credited that survival twice.
+    let mut state = setup(8);
+    let giant = creature(&mut state, OPP, "Giant", 7, 7);
+    let elf = creature(&mut state, OPP, "Elf", 1, 2);
+    creature(&mut state, AI, "Token A", 1, 1);
+    creature(&mut state, AI, "Token B", 1, 1);
+
+    let assignments = choose_blockers(&state, AI, &[giant, elf]);
+    assert_eq!(blocks_on(&assignments, giant).len(), 1, "{assignments:?}");
+    assert!(blocks_on(&assignments, elf).is_empty(), "{assignments:?}");
+}
+
+/// A connect trigger with `execute` as its effect chain.
+fn connect_trigger(execute: AbilityDefinition) -> TriggerDefinition {
+    let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone).execute(execute);
+    trigger.valid_source = Some(TargetFilter::SelfRef);
+    trigger.valid_target = Some(TargetFilter::Player);
+    trigger.damage_kind = DamageKindFilter::CombatOnly;
+    trigger
+}
+
+fn draw_one() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+}
+
+#[test]
+fn only_established_positive_connect_payoffs_are_priced() {
+    use engine::types::ability::TriggerCondition;
+    let mut state = setup(20);
+    let thief = creature(&mut state, OPP, "Thief", 2, 2);
+    let value_with = |state: &mut GameState, trigger: TriggerDefinition| {
+        let obj = state.objects.get_mut(&thief).unwrap();
+        obj.trigger_definitions = Default::default();
+        obj.push_printed_trigger(trigger);
+        connect_trigger_value(state.objects.get(&thief).unwrap())
+    };
+
+    assert!(value_with(&mut state, connect_trigger(draw_one())) > 0.0);
+    // CR 603.4: an intervening-if the block-time state cannot confirm.
+    assert_eq!(
+        value_with(
+            &mut state,
+            connect_trigger(draw_one()).condition(TriggerCondition::LostLife)
+        ),
+        0.0
+    );
+    // A harmful payoff for its controller.
+    let lose_life = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: None,
+        },
+    );
+    assert_eq!(value_with(&mut state, connect_trigger(lose_life)), 0.0);
+    // A chain with an unpriced rider is not priced off its draw.
+    let loot = draw_one().sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+            filter: None,
+            selection: Default::default(),
+            unless_filter: None,
+        },
+    ));
+    assert_eq!(value_with(&mut state, connect_trigger(loot)), 0.0);
+
+    // End to end: a conditional draw does not buy a chump.
+    let obj = state.objects.get_mut(&thief).unwrap();
+    obj.trigger_definitions = Default::default();
+    obj.push_printed_trigger(connect_trigger(draw_one()).condition(TriggerCondition::LostLife));
+    creature(&mut state, AI, "Wall", 0, 1);
+    assert!(choose_blockers(&state, AI, &[thief]).is_empty());
+}
+
+fn push_opponent_spell(state: &mut GameState, effect: Effect, target: ObjectId) {
+    use engine::types::ability::{ResolvedAbility, TargetRef};
+    use engine::types::game_state::{StackEntry, StackEntryKind};
+    state.stack.push_back(StackEntry {
+        id: ObjectId(900),
+        source_id: ObjectId(901),
+        controller: OPP,
+        kind: StackEntryKind::Spell {
+            ability: Some(Box::new(ResolvedAbility::new(
+                effect,
+                vec![TargetRef::Object(target)],
+                ObjectId(901),
+                OPP,
+            ))),
+            card_id: CardId(901),
+            casting_variant: Default::default(),
+            actual_mana_spent: 0,
+        },
+    });
+}
+
+#[test]
+fn only_a_threatening_targeted_effect_dooms_the_source() {
+    use crate::policies::self_cost::source_is_doomed;
+    use engine::types::ability::PtValue;
+
+    let mut state = setup(20);
+    let pinger = creature(&mut state, AI, "Pinger", 1, 1);
+    push_opponent_spell(
+        &mut state,
+        Effect::Pump {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            target: TargetFilter::Any,
+        },
+        pinger,
+    );
+    assert!(
+        !source_is_doomed(&state, AI, pinger),
+        "a buff dooms nothing"
+    );
+
+    let destroy = Effect::Destroy {
+        target: TargetFilter::Any,
+        cant_regenerate: false,
+    };
+    state.stack.clear();
+    push_opponent_spell(&mut state, destroy.clone(), pinger);
+    assert!(source_is_doomed(&state, AI, pinger));
+
+    // CR 702.12b: destroy does not remove an indestructible creature.
+    state
+        .objects
+        .get_mut(&pinger)
+        .unwrap()
+        .keywords
+        .push(Keyword::Indestructible);
+    assert!(!source_is_doomed(&state, AI, pinger));
+}
+
+#[test]
+fn a_choice_of_costs_sacrifices_the_source_only_when_every_payable_branch_does() {
+    use crate::config::PolicyPenalties;
+    use crate::policies::self_cost::self_sacrifice_option_premium;
+    use engine::types::ability::{AbilityCost, SacrificeCost};
+
+    let state = setup(20);
+    let mut state = state;
+    let pinger = creature(&mut state, AI, "Pinger", 1, 1);
+    let penalties = PolicyPenalties::default();
+    let choice = |life: i32| AbilityCost::OneOf {
+        costs: vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: life },
+            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+        ],
+    };
+    // Paying 2 life keeps the source, so no option is surrendered.
+    assert_eq!(
+        self_sacrifice_option_premium(&state, AI, pinger, &choice(2), &penalties),
+        0.0
+    );
+    // CR 118.3: 30 life cannot be paid at 20, so the sacrifice is forced.
+    assert!(self_sacrifice_option_premium(&state, AI, pinger, &choice(30), &penalties) > 0.0);
+}
+
+#[test]
+fn salvage_counts_only_legal_targets_and_activations_in_the_combat_window() {
+    use crate::config::PolicyPenalties;
+    use crate::policies::self_cost::self_sacrifice_salvage_value;
+    use engine::types::ability::ActivationRestriction;
+
+    let penalties = PolicyPenalties::default();
+    let mut state = setup(20);
+    state.phase = engine::types::phase::Phase::DeclareBlockers;
+    let elf = creature(&mut state, OPP, "Elf", 1, 1);
+    let pinger = creature(&mut state, AI, "Pinger", 1, 1);
+    grant_sacrifice_ping(&mut state, pinger, 1);
+    assert!(self_sacrifice_salvage_value(&state, AI, pinger, &penalties) > 0.0);
+
+    // CR 702.11b: the only killable creature has hexproof, so the ping cannot
+    // target it.
+    state
+        .objects
+        .get_mut(&elf)
+        .unwrap()
+        .keywords
+        .push(Keyword::Hexproof);
+    assert_eq!(
+        self_sacrifice_salvage_value(&state, AI, pinger, &penalties),
+        0.0
+    );
+    state.objects.get_mut(&elf).unwrap().keywords.clear();
+
+    // CR 602.5: a sorcery-speed sacrifice cannot be activated in the
+    // opponent's combat.
+    let abilities = &mut state.objects.get_mut(&pinger).unwrap().abilities;
+    std::sync::Arc::make_mut(abilities)[0].activation_restrictions =
+        vec![ActivationRestriction::AsSorcery];
+    assert_eq!(
+        self_sacrifice_salvage_value(&state, AI, pinger, &penalties),
+        0.0
+    );
+}
