@@ -384,7 +384,8 @@ fn the_ring_goes_south_battlefield_tapped_and_random_bottom_rest() {
 #[test]
 fn compound_exile_grants_casting_permission_over_full_tracked_set() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, CastingPermission, Effect, LibraryPosition, TargetFilter,
+        AbilityDefinition, AbilityKind, CastingPermission, Effect, LibraryInstructionActor,
+        LibraryPosition, TargetFilter,
     };
 
     let mut scenario = GameScenario::new();
@@ -400,6 +401,7 @@ fn compound_exile_grants_casting_permission_over_full_tracked_set() {
             count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: LibraryInstructionActor::Controller,
         },
     );
     ability.sub_ability = Some(Box::new(AbilityDefinition::new(

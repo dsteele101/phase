@@ -19,7 +19,8 @@ pub(crate) use lower::{
     capitalize, lower_effect_chain_ir, parse_controls_permanent_object,
     parse_counter_suffix_body_combinator, parse_countless_counter_element,
     parse_with_counters_suffix, parse_with_counters_suffix_spanned,
-    player_lookback_relative_clause_owns_suffix, strip_trailing_duration, strip_trailing_where_x,
+    player_lookback_relative_clause_owns_suffix, publishes_chain_created_referent,
+    strip_trailing_duration, strip_trailing_where_x,
 };
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
@@ -46,16 +47,16 @@ use lower::{
     extract_remove_counter_multi_target, extract_switch_pt_multi_target,
     instruction_spine_is_continuation, is_token_creating_effect,
     parse_contextual_bare_card_aggregate, parse_damage_player_scope,
-    parse_for_each_opponent_target_fanout_clause, publishes_chain_created_referent,
-    rebind_clause_recipients_with, rebind_decline_body_recipient,
-    rebind_subject_only_body_recipient, scan_until_next_same_source_exile_invalidation,
-    split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
-    strip_each_scope_who_cant_subject, strip_each_scope_who_didnt_verb_filter_this_way_subject,
-    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
-    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
-    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
-    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
-    strip_redundant_flip_win_quantifier, strip_repeat_count_suffix, strip_return_destination_ext,
+    parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
+    rebind_decline_body_recipient, rebind_subject_only_body_recipient,
+    scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
+    strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
+    strip_each_scope_who_didnt_verb_filter_this_way_subject, strip_each_scope_who_does_subject,
+    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
+    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
+    strip_leading_return_destination_ext, strip_leading_sequence_connector,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
+    strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
     trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
     try_parse_distribute_counters, try_parse_distribute_damage,
@@ -108,11 +109,11 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
-    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint, Chooser,
-    CombatDamageScope, Comparator, ConjureCard, ConjureSource, ContinuousModification,
-    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
-    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    AttachCardinality, AttachSelection, BounceSelection, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, CastMechanism, CastPermissionConstraint, CastingPermission, ChoiceType,
+    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
+    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
@@ -133,7 +134,7 @@ use crate::types::ability::{
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject, DoubleTarget};
+use crate::types::ability::{AttackSubject, CombatHistoryScope, DoubleTarget};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -15062,6 +15063,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
     });
     clause.sub_ability = Some(Box::new(put_counter));
     Some(EffectChainIr::single_clause(
@@ -15473,6 +15475,10 @@ fn build_aura_attach_clause(
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
             target: TargetFilter::ParentTarget,
+            // The reanimated permanent is the host; the attachment is the source.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         },
     )
     .sub_ability(delayed);
@@ -19716,6 +19722,10 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             // self-reference so a `"that creature"` copy-token anaphor in the
             // continuation chunk still remaps to the enchanted host.
             host_self_reference: ctx.host_self_reference.clone(),
+            // CR 109.1 + CR 205.2: a continuation chunk is still the enclosing
+            // card's text, so its printed core types travel with it (CR 701.41a
+            // `support N` reads them).
+            source_core_types: ctx.source_core_types.clone(),
             ..Default::default()
         }
     } else {
@@ -22803,11 +22813,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
 /// `replace_target_with_parent`, but assigns `TargetFilter::SelfRef`.
 ///
 /// Only the effect arms reachable for the "name ~ then refer back" class are
-/// populated: zone changes (the issue card), single-object tap/untap, and
-/// `Transform` for the DFC family. Arms with
-/// `ParentTargetController`/`LastCreated` guards (`Sacrifice`, `Attach`) are
-/// intentionally omitted — those guards are meaningless for a `SelfRef` rebind,
-/// and no card in this class reaches them.
+/// populated: zone changes (the issue card), single-object tap/untap,
+/// `Transform` for the DFC family, and `Attach`'s ATTACHMENT operand for the
+/// FIN "transform ~, then attach it to <host>" class. `Attach` is the one arm
+/// whose rebind is limited to `ParentTarget` (see the arm comment); the
+/// `TriggeringSource` encoding names the trigger event's object and must not
+/// be re-pointed. Arms with `ParentTargetController`/`LastCreated` guards
+/// (`Sacrifice`) remain intentionally omitted — those guards are meaningless
+/// for a `SelfRef` rebind, and no card in this class reaches them.
 fn replace_target_with_self(effect: &mut Effect) {
     match effect {
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
@@ -22829,6 +22842,24 @@ fn replace_target_with_self(effect: &mut Effect) {
         // same source-binding fixup applies.
         Effect::FlipPermanent { target, .. } => {
             *target = TargetFilter::SelfRef;
+        }
+        // CR 608.2c + CR 701.3a (FIN Sidequest class — Sidequest: Play Blitzball):
+        // in "transform ~, then attach it to <host>", the bare-pronoun ATTACHMENT
+        // operand names the source the previous clause just transformed. Rewrite
+        // ONLY `attachment`; the fully-named host (`target`) keeps its own
+        // binding.
+        //
+        // `ParentTarget` is the only admitted encoding. The bare-pronoun
+        // attachment route (`imperative::parse_attachment_anaphor`) parses
+        // through a default `ParseContext` and therefore yields `ParentTarget`
+        // (the declared-slot and source-animation branches are the only
+        // alternatives, and neither applies here). The corpus's single
+        // `TriggeringSource` attachment operand (Ajani's Chosen, "you may attach
+        // it to the token") legitimately names the trigger event's object — a
+        // DIFFERENT antecedent — so admitting that encoding here would re-point
+        // a valid binding.
+        Effect::Attach { attachment, .. } if matches!(attachment, TargetFilter::ParentTarget) => {
+            *attachment = TargetFilter::SelfRef;
         }
         Effect::GenericEffect {
             target,
@@ -24329,6 +24360,8 @@ fn lower_subject_predicate_ast(
                     count,
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down,
+                    // CR 608.2c: the subject exiles from their own library.
+                    actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 });
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
@@ -33385,6 +33418,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -38894,6 +38928,12 @@ pub(crate) fn parse_effect_chain_ir(
             // self-reference so a `"that creature"` copy-token anaphor in any
             // chunk of an Aura/bestow card remaps to the enchanted host.
             host_self_reference: ctx.host_self_reference.clone(),
+            // CR 109.1 + CR 205.2: every chunk of a chain is still the enclosing
+            // card's text, so the card's printed core types travel with it.
+            // CR 701.41a `support N` reads them to pick the "other"/"any" branch
+            // of its expansion; this context is minted field-by-field rather than
+            // cloned, so anything card-scoped not listed here is silently lost.
+            source_core_types: ctx.source_core_types.clone(),
             // CR 608.2c + CR 608.2k + CR 406.6: the plural-anaphor antecedent
             // introduced by the trigger's intervening-if ("if there are cards
             // exiled with ~") is a property of the whole trigger body, not of
@@ -39264,6 +39304,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .where_x_expression(where_x_expression.clone())
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
+                .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                 .push();
             continue;
@@ -39957,7 +39998,31 @@ pub(crate) fn parse_effect_chain_ir(
                 }
             )
         });
-        if (typed_trigger_subject || exile_then_return_transformed)
+        // CR 608.2c (FIN Sidequest class): "transform ~, then attach it to <host>".
+        // The previous clause named the source via `~` (a `SelfRef` Transform), so this
+        // clause's bare-pronoun attachment operand names that same source. Admitted as
+        // a third structural class beside the typed-subject and exile-then-return
+        // branches; the shared `has_anaphoric_reference` + prior-SelfRef-clause
+        // conjuncts below are the same authorities those two branches use.
+        let attach_anaphor_after_self_ref_transform =
+            matches!(
+                &clause.effect,
+                Effect::Attach {
+                    attachment: TargetFilter::ParentTarget,
+                    ..
+                }
+            ) && builder.clauses().last().is_some_and(|prev| {
+                matches!(
+                    &prev.parsed.effect,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            });
+        if (typed_trigger_subject
+            || exile_then_return_transformed
+            || attach_anaphor_after_self_ref_transform)
             && has_anaphoric_reference(&text_lower)
             && builder
                 .clauses()
@@ -40524,6 +40589,7 @@ pub(crate) fn parse_effect_chain_ir(
                     .where_x_expression(where_x_expression)
                     .target_selection_mode(chunk_ctx.target_selection_mode)
                     .target_chooser(chunk_ctx.target_chooser.clone())
+                    .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
                     .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                     .push();
             }
@@ -40619,6 +40685,7 @@ pub(crate) fn parse_effect_chain_ir(
             .unless_pay(unless_pay)
             .target_selection_mode(chunk_ctx.target_selection_mode)
             .target_chooser(chunk_ctx.target_chooser.clone())
+            .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
             .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
             .push();
 
