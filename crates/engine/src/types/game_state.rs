@@ -16123,9 +16123,8 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
-                // CR 702.60a: the Ripple bottom-order response is a free
-                // permutation of the offered pile — the candidate enumerator
-                // only lists {identity}, so `apply()` is the real validator.
+                // CR 702.60a + CR 401.4: the bottom-order response is a
+                // permutation of the offered pile, verified by `apply()`.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
         )

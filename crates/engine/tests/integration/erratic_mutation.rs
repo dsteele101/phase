@@ -509,6 +509,16 @@ fn reveal_until_unspecified_bottom_order_is_owner_choice() {
         }
         other => panic!("expected owner ordering choice, got {other:?}"),
     }
+    // CR 401.4: AI candidate generation must offer alternate permutations,
+    // including [second, first] ([B, A]).
+    let ai_candidates = engine::ai_support::candidate_actions(committed.state());
+    let has_b_a = ai_candidates.iter().any(
+        |c| matches!(&c.action, GameAction::SelectCards { cards } if cards == &[second, first]),
+    );
+    assert!(
+        has_b_a,
+        "CR 401.4: AI candidates must include the alternate permutation [second, first]"
+    );
     assert_eq!(committed.state().objects[&hit].zone, Zone::Hand);
     committed
         .act(GameAction::SelectCards {
