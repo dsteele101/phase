@@ -471,10 +471,10 @@ fn compound_exile_grants_casting_permission_over_full_tracked_set() {
     );
 }
 
-/// CR 701.20a: Unspecified library placement defaults to random order without
-/// an interactive ordering pause.
+/// CR 401.4: synthetic grammar fixture, not a printed card. Omitting an order
+/// instruction must still let the owner order two cards placed on the bottom.
 #[test]
-fn reveal_until_unspecified_bottom_order_defaults_to_random_without_pause() {
+fn reveal_until_unspecified_bottom_order_is_owner_choice() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
@@ -500,11 +500,19 @@ fn reveal_until_unspecified_bottom_order_defaults_to_random_without_pause() {
     let mut committed = runner.cast(spell).commit();
     committed.act(GameAction::PassPriority).unwrap();
     committed.act(GameAction::PassPriority).unwrap();
+    match &committed.state().waiting_for {
+        WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            assert_eq!(cards, &[first, second]);
+        }
+        other => panic!("expected owner ordering choice, got {other:?}"),
+    }
     assert_eq!(committed.state().objects[&hit].zone, Zone::Hand);
-    assert_eq!(
-        committed.state().waiting_for,
-        WaitingFor::Priority { player: P0 }
-    );
+    committed
+        .act(GameAction::SelectCards {
+            cards: vec![second, first],
+        })
+        .unwrap();
     let library = &committed
         .state()
         .players
@@ -512,8 +520,8 @@ fn reveal_until_unspecified_bottom_order_defaults_to_random_without_pause() {
         .find(|p| p.id == P0)
         .unwrap()
         .library;
-    assert_eq!(library.front().copied(), Some(deep));
-    assert_eq!(library.len(), 3);
-    assert!(library.contains(&first));
-    assert!(library.contains(&second));
+    assert_eq!(
+        library.iter().copied().collect::<Vec<_>>(),
+        vec![deep, second, first]
+    );
 }
