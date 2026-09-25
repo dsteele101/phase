@@ -1080,6 +1080,7 @@ pub fn debug_card_entry_source(db: &CardDatabase, face: &CardFace) -> DebugCardE
     DebugCardEntrySource {
         face: face.clone(),
         back_face: super::printed_cards::back_face_for_card_face(db, face),
+        outside_game_faces: super::printed_cards::outside_game_faces_for(face, db),
     }
 }
 
@@ -1289,6 +1290,9 @@ fn materialize_debug_card(
     creation_kind: DebugCardCreationKind,
     initial_zone: Zone,
 ) -> ObjectId {
+    // CR 701.42a: a card entering mid-game can reach the same outside-the-game
+    // faces (its meld pair's combined back) as one that started in the game.
+    super::printed_cards::extend_card_face_registry(state, &source.outside_game_faces);
     // CR 400.7: The object receives an identity only at the point its own
     // entry starts; unattempted batch members are not game objects yet.
     let card_id = CardId(state.next_object_id);
@@ -1497,6 +1501,7 @@ mod tests {
                         ..Default::default()
                     },
                     back_face: None,
+                    outside_game_faces: Default::default(),
                 },
                 owner: PlayerId(9),
                 zone: Zone::Hand,
@@ -1524,6 +1529,7 @@ mod tests {
                         ..Default::default()
                     },
                     back_face: None,
+                    outside_game_faces: Default::default(),
                 },
                 owner: PlayerId(0),
                 zone: Zone::Hand,
@@ -1574,6 +1580,7 @@ mod tests {
                 ..Default::default()
             },
             back_face: None,
+            outside_game_faces: Default::default(),
         };
 
         let result = create_debug_cards(
@@ -1621,6 +1628,7 @@ mod tests {
                     ..Default::default()
                 },
                 back_face: None,
+                outside_game_faces: Default::default(),
             },
             owner: PlayerId(0),
             attach_to: None,
@@ -1678,6 +1686,7 @@ mod tests {
                         ..Default::default()
                     },
                     back_face: None,
+                    outside_game_faces: Default::default(),
                 },
                 owner: PlayerId(0),
                 zone: Zone::Battlefield,

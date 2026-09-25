@@ -106,6 +106,45 @@ afterEach(() => {
 });
 
 describe("visual-pack animation consumers", () => {
+  it("forges the pre-meld pair and reveals the melded permanent's combined face", () => {
+    const gisela = visibleObject({
+      id: 50,
+      name: "Gisela, the Broken Blade",
+      printed_ref: { oracle_id: "gisela-oracle", face_name: "Gisela, the Broken Blade" },
+    });
+    const bruna = visibleObject({
+      id: 51,
+      name: "Bruna, the Fading Light",
+      printed_ref: { oracle_id: "bruna-oracle", face_name: "Bruna, the Fading Light" },
+    });
+    const melded = visibleObject({
+      ...gisela,
+      name: "Brisela, Voice of Nightmares",
+      merge_kind: "Meld",
+      merged_components: [gisela.id, bruna.id],
+      printed_ref: { oracle_id: "brisela-oracle", face_name: "Brisela, Voice of Nightmares" },
+    });
+    currentSnapshot.set(gisela.id, rect(10, 20));
+    currentSnapshot.set(bruna.id, rect(110, 20));
+    seedOverlay(
+      state([gisela, bruna]),
+      state([melded]),
+      step(
+        { type: "Melded", data: { object_id: gisela.id, partner_id: bruna.id, controller: 0 } },
+        3200,
+      ),
+    );
+
+    render(<AnimationOverlay containerRef={containerRef} />);
+
+    expect(screen.getByTestId("meld-forge-animation")).toBeInTheDocument();
+    expect([...useAnimationStore.getState().veiledObjectIds].sort()).toEqual([gisela.id, bruna.id]);
+    const requested = vi.mocked(useCardImage).mock.calls.map(([, options]) => options?.oracleId);
+    expect(requested).toEqual(
+      expect.arrayContaining(["gisela-oracle", "bruna-oracle", "brisela-oracle"]),
+    );
+  });
+
   it("keeps a cast snapshot latched while advancing its exact normal source", () => {
     const object = visibleObject({
       id: 30,
