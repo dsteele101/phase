@@ -11136,7 +11136,9 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         // timing parser used by the "Any player may activate ... but only"
         // composition path. The condition-only form stays on its specialized
         // branch below so the once-per-turn rider is stripped before condition
-        // parsing.
+        // parsing. Here and below, the unmodernized "Activate this ability
+        // only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku and
+        // Riku) is the same restriction as "Activate only …".
         if let Some((before, restriction)) = tp
             .rsplit_around("activate this ability only ")
             .or_else(|| tp.rsplit_around("activate only "))

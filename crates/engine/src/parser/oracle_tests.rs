@@ -31307,112 +31307,153 @@ fn divergent_transformations_retains_unparsed_quantity_marker_without_shuffle() 
     );
 }
 
-/// CR 701.24a + CR 608.2c: Wand of Wonder binds both the ExileFromTopUntil and the following
-/// rest-shuffle to `ScopedPlayer` under `PlayerFilter::Opponent`.
+/// CR 701.24c + CR 608.2c: a subject-elided "then shuffles the rest into their
+/// library" names a rest pile only its antecedent defines. After an
+/// exile-until (Wand of Wonder: the exiled misses) or a hand choice
+/// (Worldpurge: the unchosen hand cards) that pile is NOT in the library, so a
+/// bare `Shuffle` would silently drop the move. Both keep the explicit
+/// `shuffle` gap until the rest-pile move is represented.
 #[test]
-fn wand_of_wonder_parses_shuffle_scoped_to_opponent() {
-    let wow = parse(
-        "{4}, {T}: Roll a d20. Each opponent exiles cards from the top of their library until they exile an instant or sorcery card, then shuffles the rest into their library. You may cast up to X instant and/or sorcery spells from among cards exiled this way without paying their mana costs.\n1—9 | X is one.\n10—19 | X is two.\n20 | X is three.",
-        "Wand of Wonder",
-        &[],
-        &["Artifact"],
-        &[],
-    );
-    let defs = reveal_chain_defs(&wow.abilities[0]);
-    let exile_def = defs
-        .iter()
-        .find(|d| matches!(&*d.effect, Effect::ExileFromTopUntil { .. }))
-        .expect("must contain ExileFromTopUntil");
-    assert_eq!(
-        exile_def.player_scope,
-        Some(crate::types::ability::PlayerFilter::Opponent)
-    );
-    match &*exile_def.effect {
-        Effect::ExileFromTopUntil { player, .. } => {
-            assert_eq!(
-                *player,
-                TargetFilter::ScopedPlayer,
-                "ExileFromTopUntil must bind to ScopedPlayer"
-            );
-        }
-        _ => unreachable!(),
+fn third_person_rest_shuffle_without_library_rest_pile_stays_an_explicit_gap() {
+    for (name, oracle, types) in [
+        (
+            "Wand of Wonder",
+            "{4}, {T}: Roll a d20. Each opponent exiles cards from the top of their library until they exile an instant or sorcery card, then shuffles the rest into their library. You may cast up to X instant and/or sorcery spells from among cards exiled this way without paying their mana costs.\n1—9 | X is one.\n10—19 | X is two.\n20 | X is three.",
+            "Artifact",
+        ),
+        (
+            "Worldpurge",
+            "Return all permanents to their owners' hands. Each player chooses up to seven cards in their hand, then shuffles the rest into their library. Each player loses all unspent mana.",
+            "Sorcery",
+        ),
+    ] {
+        let parsed = parse(oracle, name, &[], &[types], &[]);
+        let defs = reveal_chain_defs(&parsed.abilities[0]);
+        assert!(
+            defs.iter().any(|d| matches!(
+                &*d.effect,
+                Effect::Unimplemented { name, description: Some(text) }
+                    if name == "shuffle" && text.contains("shuffles the rest")
+            )),
+            "{name} must keep the explicit `shuffle` gap, got {defs:?}"
+        );
+        assert!(
+            !defs
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::Shuffle { .. })),
+            "{name} must not claim a bare library Shuffle, got {defs:?}"
+        );
     }
-    let shuffle_def = defs
-        .iter()
-        .find(|d| matches!(&*d.effect, Effect::Shuffle { .. }))
-        .expect("must contain Shuffle");
-    assert_eq!(
-        *shuffle_def.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ScopedPlayer
-        },
-        "Shuffle must bind to ScopedPlayer"
-    );
 }
 
-/// CR 701.24a + CR 608.2c: Worldpurge binds the rest-shuffle to `ScopedPlayer` under `PlayerFilter::All`.
-#[test]
-fn worldpurge_parses_shuffle_scoped_to_all_players() {
-    let wp = parse(
-        "Return all permanents to their owners' hands. Each player chooses up to seven cards in their hand, then shuffles the rest into their library. Each player loses all unspent mana.",
-        "Worldpurge",
-        &[],
-        &["Sorcery"],
-        &[],
-    );
-    let defs = reveal_chain_defs(&wp.abilities[0]);
-    let shuffle_def = defs
-        .iter()
-        .find(|d| matches!(&*d.effect, Effect::Shuffle { .. }))
-        .expect("must contain Shuffle");
-    assert_eq!(
-        *shuffle_def.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ScopedPlayer
-        },
-        "Worldpurge Shuffle must bind to ScopedPlayer"
-    );
-}
+/// Printed Oracle text of M'Odo, the Gnarled Oracle (MTGJSON AtomicCards / Scryfall).
+const M_ODO_ORACLE: &str = "Eminence — {X}, Discard a card: Target player reveals cards from the top of their library until they reveal a creature card with converted mana cost X or less. Put that card onto the battlefield under your control, then that player shuffles the rest into their library. Activate this ability only if M'Odo, the Gnarled Oracle is on the battlefield or in the command zone.";
 
-/// CR 113.6b + CR 602.5b: M'Odo, the Gnarled Oracle parses "Activate this ability only if M'Odo, the Gnarled Oracle is on the battlefield or in the command zone."
-/// into `ActivationRestriction::RequiresCondition` with `ParsedCondition::Or` over `SourceInZone { Battlefield }` and `SourceInZone { Command }`.
+/// CR 113.6b + CR 701.20a + CR 202.3 + CR 701.24c: M'Odo's printed Eminence
+/// ability parses clause by clause — `{X}` plus a discard cost; the TARGET
+/// player's reveal-until whose hit is a creature card with mana value X or less
+/// ("converted mana cost" is its unmodernized name), entering under the
+/// activator's control; that player's rest-shuffle; and the zone restriction
+/// "on the battlefield or in the command zone". No clause is left as a gap.
 #[test]
-fn m_odo_the_gnarled_oracle_parses_activation_restriction_battlefield_or_command_zone() {
-    let oracle = "{X}{B}, Exile a creature card with mana value X from your graveyard: Target opponent loses X life and you gain X life. Activate this ability only if M'Odo, the Gnarled Oracle is on the battlefield or in the command zone.";
+fn m_odo_the_gnarled_oracle_parses_its_printed_eminence_ability() {
     let parsed = parse(
-        oracle,
+        M_ODO_ORACLE,
         "M'Odo, the Gnarled Oracle",
         &[],
         &["Creature"],
         &["Zombie", "Elf", "Wizard"],
     );
-    assert_eq!(parsed.abilities.len(), 1);
+    assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
     let ability = &parsed.abilities[0];
-    let restrictions = &ability.activation_restrictions;
-    let req_cond = restrictions
-        .iter()
-        .find(|r| matches!(r, ActivationRestriction::RequiresCondition { .. }))
-        .expect("must have RequiresCondition activation restriction");
-    let ActivationRestriction::RequiresCondition {
-        condition: Some(ParsedCondition::Or { conditions }),
-    } = req_cond
-    else {
-        panic!("expected RequiresCondition with Or condition, got {req_cond:?}");
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Cost: {X}, Discard a card.
+    let Some(AbilityCost::Composite { costs }) = &ability.cost else {
+        panic!(
+            "expected a composite {{X}} + discard cost, got {:?}",
+            ability.cost
+        );
     };
     assert!(
-        conditions.contains(&ParsedCondition::SourceInZone {
-            zone: Zone::Battlefield,
-        }),
-        "must require SourceInZone(Battlefield)"
+        costs.iter().any(|c| matches!(
+            c,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { shards, generic: 0 },
+            } if shards == &vec![ManaCostShard::X]
+        )),
+        "cost must include {{X}}, got {costs:?}"
     );
     assert!(
-        conditions.contains(&ParsedCondition::SourceInZone {
-            zone: Zone::Command,
-        }),
-        "must require SourceInZone(Command)"
+        costs.iter().any(|c| matches!(
+            c,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                ..
+            }
+        )),
+        "cost must include discarding one card, got {costs:?}"
     );
+
+    // Effect: target player reveals until a creature card with MV <= X; the hit
+    // enters under the activator's control; the rest return to that library.
+    let Effect::RevealUntil {
+        player,
+        filter,
+        kept_destination,
+        rest_destination,
+        enters_under,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", ability.effect);
+    };
+    assert_eq!(*player, TargetFilter::Player);
+    assert_eq!(*kept_destination, Zone::Battlefield);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*enters_under, Some(ControllerRef::You));
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a typed creature filter, got {filter:?}");
+    };
+    assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
     assert!(
-        !matches!(&*ability.effect, Effect::Unimplemented { .. }),
-        "M'Odo ability must not be unimplemented"
+        typed.properties.contains(&FilterProp::Cmc {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                },
+            },
+        }),
+        "the converted-mana-cost bound must survive as Cmc <= X, got {typed:?}"
+    );
+
+    // "then that player shuffles the rest into their library" — the revealing
+    // (targeted) player's library, not the activator's.
+    let sub = ability.sub_ability.as_deref().expect("rest-shuffle clause");
+    assert_eq!(
+        *sub.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    );
+    assert!(sub.sub_ability.is_none(), "no trailing gap: {sub:?}");
+
+    // Restriction: "on the battlefield or in the command zone".
+    assert_eq!(
+        ability.activation_restrictions,
+        vec![ActivationRestriction::RequiresCondition {
+            condition: Some(ParsedCondition::Or {
+                conditions: vec![
+                    ParsedCondition::SourceInZone {
+                        zone: Zone::Battlefield
+                    },
+                    ParsedCondition::SourceInZone {
+                        zone: Zone::Command
+                    },
+                ],
+            }),
+        }]
     );
 }

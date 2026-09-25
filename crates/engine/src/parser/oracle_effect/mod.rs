@@ -13522,26 +13522,20 @@ fn try_parse_exile_from_top_until(
     //
     // Mirrors the analogous sub-combinator pattern in
     // `parse_reveal_until_prefix` (oracle_effect/mod.rs:2433).
-    let (is_third_person, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = alt((tag("exile "), tag("exiles "))).parse(i)?;
         let (i, _) = tag("cards from the top of ").parse(i)?;
-        let (i, is_third_person) = alt((
-            value(false, tag("your ")),
-            value(true, tag("their ")),
-            value(true, tag("his ")),
-            value(true, tag("her ")),
-            value(false, tag("its ")),
+        let (i, _) = alt((
+            tag("your "),
+            tag("their "),
+            tag("his "),
+            tag("her "),
+            tag("its "),
         ))
         .parse(i)?;
-        let (i, _) = tag("library until ").parse(i)?;
-        Ok((i, is_third_person))
+        value::<_, _, OracleError<'_>, _>((), tag("library until ")).parse(i)
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-
-    let mut player = player;
-    if player == TargetFilter::Controller && is_third_person {
-        player = TargetFilter::ScopedPlayer;
-    }
 
     let until = parse_until_condition(rest_lower)?;
     Some(parsed_clause(Effect::ExileFromTopUntil { player, until }))
@@ -13874,6 +13868,10 @@ fn reveal_filter_separator(input: &str) -> nom::IResult<&str, &str, OracleError<
 fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
     let mut disjuncts = Vec::new();
     let mut remaining = filter_text;
+    // CR 701.20a: only an "or" connective makes the list disjunctive. A comma
+    // list without one ("a nonlegendary, nonland card" — Plargg, Dean of Chaos)
+    // stacks adjectives on one card and must stay a single conjunctive filter.
+    let mut has_or_connective = false;
     loop {
         // Scan to the next separator (or end of input) via the nom combinator.
         let mut split_at = None;
@@ -13890,7 +13888,8 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
                     return None; // malformed: empty disjunct
                 }
                 disjuncts.push(frag);
-                let (after_sep, _) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                let (after_sep, separator) = reveal_filter_separator(&remaining[idx..]).ok()?;
+                has_or_connective |= separator.trim_start_matches(',').trim() == "or";
                 remaining = after_sep;
             }
             None => {
@@ -13901,7 +13900,7 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
             }
         }
     }
-    (disjuncts.len() >= 2).then_some(disjuncts)
+    (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
@@ -14012,14 +14011,60 @@ fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
     // ("a creature or land card"); a comma+or list of distinct filters must be
     // split per-disjunct and assembled into an Or.
     if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
-        let filters: Vec<TargetFilter> = disjuncts
+        let mut filters: Vec<TargetFilter> = disjuncts
             .iter()
             .map(|frag| build_reveal_until_disjunct_filter(frag.trim()))
             .collect();
+        distribute_shared_card_qualifier(&disjuncts, &mut filters);
         return TargetFilter::Or { filters };
     }
     let (parsed, _) = parse_target(filter_text);
     parsed
+}
+
+/// CR 701.20a + CR 202.3: In "an instant, sorcery, or enchantment card with
+/// converted mana cost less than N" (Underdark Beholder) the type words share
+/// ONE head noun, so the qualifier after "card" constrains every disjunct, not
+/// just the last. Applies only when the earlier disjuncts are bare type words
+/// (no "card" noun of their own) and the last one carries a post-noun
+/// qualifier; a list of distinct card phrases ("doctor card, a card with
+/// doctor's companion, or a vehicle card" — An Unearthly Child) is untouched.
+fn distribute_shared_card_qualifier(disjuncts: &[&str], filters: &mut [TargetFilter]) {
+    fn has_card_noun(fragment: &str) -> bool {
+        take_until::<_, _, OracleError<'_>>(" card")
+            .parse(fragment)
+            .is_ok()
+    }
+    fn has_post_noun_qualifier(fragment: &str) -> bool {
+        (take_until(" card"), tag::<_, _, OracleError<'_>>(" card "))
+            .parse(fragment)
+            .is_ok_and(|(qualifier, _)| !qualifier.trim().is_empty())
+    }
+    let (Some((last_text, earlier_texts)), Some((last_filter, earlier_filters))) =
+        (disjuncts.split_last(), filters.split_last_mut())
+    else {
+        return;
+    };
+    if earlier_texts.iter().any(|text| has_card_noun(text))
+        || !has_post_noun_qualifier(last_text.trim())
+    {
+        return;
+    }
+    let TargetFilter::Typed(TypedFilter {
+        properties: shared, ..
+    }) = last_filter
+    else {
+        return;
+    };
+    for filter in earlier_filters {
+        if let TargetFilter::Typed(typed) = filter {
+            for property in shared.iter() {
+                if !typed.properties.contains(property) {
+                    typed.properties.push(property.clone());
+                }
+            }
+        }
+    }
 }
 
 /// CR 701.20a: Parse `"reveal[s] cards from the top of <possessive> library until …"`
@@ -40363,35 +40408,38 @@ pub(crate) fn parse_effect_chain_ir(
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
         // CR 701.24c + CR 608.2c: "then shuffle(s) the rest into their library"
-        // directly after a `RevealUntil`, `ExileFromTopUntil`, or player-scoped clause
-        // shuffles the library the rest pile went into — the affected player's
-        // (Transmogrify, Blessed Reincarnation, Wand of Wonder, Worldpurge).
-        // The subject-elided clause parses with the caster default (Controller),
-        // so bind it to ScopedPlayer when inside a player scope, or to the preceding
-        // effect's player; an explicit subject ("that player shuffles …") already
-        // produced a non-default target.
-        if let (Some(prev), Effect::Shuffle { target }) =
-            (effective_prev_effect.as_ref(), &mut clause.effect)
+        // directly after a `RevealUntil` whose rest pile went into the library
+        // shuffles that library — the revealing player's (Transmogrify, Blessed
+        // Reincarnation: the exiled creature's controller). The subject-elided
+        // clause parses with the caster default, so bind it to the reveal's
+        // player; an explicit subject ("that player shuffles …") already
+        // produced a non-default target. After any other antecedent the
+        // subject-elided "rest" is not a library pile (Wand of Wonder's exiled
+        // misses, Worldpurge's unchosen hand cards): a bare shuffle would drop
+        // the move, so keep the clause an explicit gap.
+        if let Effect::Shuffle {
+            target: TargetFilter::Controller,
+        } = clause.effect
         {
-            if (*target == TargetFilter::Controller || *target == TargetFilter::ScopedPlayer)
-                && imperative::is_shuffle_rest_clause(&normalized_text.to_lowercase())
-            {
-                let is_scoped = builder
-                    .clauses()
-                    .last()
-                    .is_some_and(|c| c.player_scope.is_some())
-                    || player_scope.is_some();
-                if is_scoped {
-                    *target = TargetFilter::ScopedPlayer;
-                } else {
-                    match prev {
-                        Effect::RevealUntil { player, .. }
-                        | Effect::ExileFromTopUntil { player, .. } => {
-                            *target = player.clone();
-                        }
-                        _ => {}
-                    }
+            let rest_library_player = match effective_prev_effect.as_ref() {
+                Some(Effect::RevealUntil {
+                    player,
+                    rest_destination: Zone::Library,
+                    ..
+                }) => Some(player.clone()),
+                _ => None,
+            };
+            match (
+                imperative::shuffle_rest_clause(&normalized_text.to_lowercase()),
+                rest_library_player,
+            ) {
+                (Some(_), Some(player)) => {
+                    clause.effect = Effect::Shuffle { target: player };
                 }
+                (Some(imperative::ShuffleRestClause::ThirdPerson), None) => {
+                    clause.effect = Effect::unimplemented("shuffle", normalized_text);
+                }
+                (Some(imperative::ShuffleRestClause::Imperative) | None, _) => {}
             }
         }
         let followup_continuation = effective_prev_effect

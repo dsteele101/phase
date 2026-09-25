@@ -8842,20 +8842,38 @@ fn parse_hand_to_library_position(rest: &str) -> Option<LibraryPosition> {
     Some(position)
 }
 
-/// CR 701.24c: "[then] shuffle(s) the rest [of the revealed cards] into
-/// <possessive> library" — the rest pile of an earlier reveal/dig is shuffled
-/// into a library, which shuffles that whole library. Accepts the imperative
-/// ("shuffle the rest", Aspiring Champion) and the subject-elided third-person
-/// form ("…, then shuffles the rest into their library", Transmogrify).
-pub(super) fn is_shuffle_rest_clause(lower: &str) -> bool {
-    let input = lower.trim_start();
-    let result: Result<(&str, _), nom::Err<OracleError<'_>>> = (
-        opt(alt((tag("then, "), tag("then "), tag("and ")))),
-        alt((tag("shuffles "), tag("shuffle "))),
+/// CR 701.24c: grammatical form of a "[then] shuffle(s) the rest [of the
+/// revealed cards] into <possessive> library" clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShuffleRestClause {
+    /// "shuffle the rest …" — the imperative, addressed to the ability's
+    /// controller (Aspiring Champion).
+    Imperative,
+    /// "…, then shuffles the rest into their library" — the subject-elided
+    /// third-person continuation of the preceding clause's subject
+    /// (Transmogrify). What "the rest" names depends on that clause, so only
+    /// the effect-chain assembly, which sees the antecedent, may resolve it.
+    ThirdPerson,
+}
+
+/// CR 701.24c: Recognizes a clause that begins with a rest-shuffle and reports
+/// its grammatical form.
+pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
+    let (_, (_, form, _)) = (
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("then, "),
+            tag("then "),
+            tag("and "),
+        ))),
+        alt((
+            value(ShuffleRestClause::ThirdPerson, tag("shuffles ")),
+            value(ShuffleRestClause::Imperative, tag("shuffle ")),
+        )),
         tag("the rest"),
     )
-        .parse(input);
-    result.is_ok()
+        .parse(lower.trim_start())
+        .ok()?;
+    Some(form)
 }
 
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
@@ -8868,8 +8886,13 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         });
     }
     // "shuffle the rest into your library" — the "rest" are already in the library
-    // from a preceding dig/reveal effect; this is just a shuffle.
-    if is_shuffle_rest_clause(lower) {
+    // from a preceding dig/reveal effect; this is just a shuffle. The
+    // third-person form parses the same way here; `parse_effect_chain_ir`
+    // binds it to a `RevealUntil` antecedent or keeps it an explicit gap.
+    if shuffle_rest_clause(lower) == Some(ShuffleRestClause::ThirdPerson)
+        || nom_primitives::scan_contains(lower, "shuffle the rest")
+        || nom_primitives::scan_contains(lower, "shuffle them")
+    {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
         });

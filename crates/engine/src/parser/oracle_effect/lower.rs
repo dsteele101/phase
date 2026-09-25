@@ -2972,21 +2972,14 @@ pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
                 ..
             }
         );
-        let parent_moves_objects = parent_moves_to_battlefield
-            || matches!(
-                *def.effect,
-                Effect::Seek { .. }
-                    | Effect::Dig { .. }
-                    | Effect::ChangeZone { .. }
-                    | Effect::SearchLibrary { .. }
-            );
         let attach_anaphor_names_moved_card = parent_moves_to_battlefield
             && rebind_attach_attachment_to_forwarded_source_if_anaphor_names_moved_card(
                 &mut sub.effect,
             );
-        if (parent_moves_to_battlefield
-            && (sub_is_attach_with_zone_changed_cond || attach_anaphor_names_moved_card))
-            || (parent_moves_objects && sub_targets_moved_card(sub))
+        if parent_moves_to_battlefield
+            && (sub_is_attach_with_zone_changed_cond
+                || attach_anaphor_names_moved_card
+                || sub_targets_moved_card(sub))
         {
             def.forward_result = true;
         }

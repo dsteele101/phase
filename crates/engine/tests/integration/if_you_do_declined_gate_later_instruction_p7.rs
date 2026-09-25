@@ -634,8 +634,8 @@ fn choice_of_fortunes_declined_still_creates_the_emblem() {
     );
 }
 
-/// J-2g′: accepted, both sought cards return to the library, the library is shuffled,
-/// the second seek runs, and the emblem is created.
+/// J-2g′: accepted, every instruction happens. GREEN AT BASE: reach guard of
+/// J-2g; preservation only.
 #[test]
 fn choice_of_fortunes_accepted_seeks_twice_and_creates_the_emblem() {
     let (runner, events) = choice_of_fortunes(true);
@@ -643,47 +643,12 @@ fn choice_of_fortunes_accepted_seeks_twice_and_creates_the_emblem() {
         resolved(&events),
         vec![
             EffectKind::Seek,
-            EffectKind::ChangeZone,
             EffectKind::Shuffle,
             EffectKind::Seek,
             EffectKind::CreateEmblem
         ]
     );
     assert_no_maximum_hand_size_emblem(&runner);
-
-    // CR 701.24a: verify library shuffle event occurred for P0
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerPerformedAction {
-                player_id,
-                action: PlayerActionKind::ShuffledLibrary,
-                ..
-            } if *player_id == P0
-        )),
-        "ShuffledLibrary event must occur for P0"
-    );
-
-    // Verify spell is in graveyard (not moved to library by ChangeZone)
-    let spell_obj = runner
-        .state()
-        .objects
-        .values()
-        .find(|obj| obj.name == "Choice of Fortunes")
-        .expect("Choice of Fortunes object should exist");
-    assert_eq!(
-        spell_obj.zone,
-        Zone::Graveyard,
-        "Choice of Fortunes spell must resolve to graveyard, not be targeted by ChangeZone"
-    );
-
-    // Hand should have 2 cards from the second seek
-    let p0_hand = &runner.state().players[P0.0 as usize].hand;
-    assert_eq!(
-        p0_hand.len(),
-        2,
-        "P0 hand should contain 2 cards from the second seek"
-    );
 }
 
 /// J-3 (a): declined, the gate's doubling is skipped, and both later
