@@ -13522,20 +13522,26 @@ fn try_parse_exile_from_top_until(
     //
     // Mirrors the analogous sub-combinator pattern in
     // `parse_reveal_until_prefix` (oracle_effect/mod.rs:2433).
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
+    let (is_third_person, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = alt((tag("exile "), tag("exiles "))).parse(i)?;
         let (i, _) = tag("cards from the top of ").parse(i)?;
-        let (i, _) = alt((
-            tag("your "),
-            tag("their "),
-            tag("his "),
-            tag("her "),
-            tag("its "),
+        let (i, is_third_person) = alt((
+            value(false, tag("your ")),
+            value(true, tag("their ")),
+            value(true, tag("his ")),
+            value(true, tag("her ")),
+            value(false, tag("its ")),
         ))
         .parse(i)?;
-        value::<_, _, OracleError<'_>, _>((), tag("library until ")).parse(i)
+        let (i, _) = tag("library until ").parse(i)?;
+        Ok((i, is_third_person))
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+
+    let mut player = player;
+    if player == TargetFilter::Controller && is_third_person {
+        player = TargetFilter::ScopedPlayer;
+    }
 
     let until = parse_until_condition(rest_lower)?;
     Some(parsed_clause(Effect::ExileFromTopUntil { player, until }))
@@ -40357,18 +40363,35 @@ pub(crate) fn parse_effect_chain_ir(
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
         // CR 701.24c + CR 608.2c: "then shuffle(s) the rest into their library"
-        // directly after a `RevealUntil` shuffles the library the rest pile went
-        // into — the revealing player's (Transmogrify, Blessed Reincarnation: the
-        // exiled creature's controller). The subject-elided clause parses with the
-        // caster default, so bind it to the reveal's player; an explicit subject
-        // ("that player shuffles …") already produced a non-default target.
-        if let (Some(Effect::RevealUntil { player, .. }), Effect::Shuffle { target }) =
+        // directly after a `RevealUntil`, `ExileFromTopUntil`, or player-scoped clause
+        // shuffles the library the rest pile went into — the affected player's
+        // (Transmogrify, Blessed Reincarnation, Wand of Wonder, Worldpurge).
+        // The subject-elided clause parses with the caster default (Controller),
+        // so bind it to ScopedPlayer when inside a player scope, or to the preceding
+        // effect's player; an explicit subject ("that player shuffles …") already
+        // produced a non-default target.
+        if let (Some(prev), Effect::Shuffle { target }) =
             (effective_prev_effect.as_ref(), &mut clause.effect)
         {
-            if *target == TargetFilter::Controller
+            if (*target == TargetFilter::Controller || *target == TargetFilter::ScopedPlayer)
                 && imperative::is_shuffle_rest_clause(&normalized_text.to_lowercase())
             {
-                *target = player.clone();
+                let is_scoped = builder
+                    .clauses()
+                    .last()
+                    .is_some_and(|c| c.player_scope.is_some())
+                    || player_scope.is_some();
+                if is_scoped {
+                    *target = TargetFilter::ScopedPlayer;
+                } else {
+                    match prev {
+                        Effect::RevealUntil { player, .. }
+                        | Effect::ExileFromTopUntil { player, .. } => {
+                            *target = player.clone();
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
         let followup_continuation = effective_prev_effect

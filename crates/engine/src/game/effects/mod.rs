@@ -5952,8 +5952,26 @@ fn is_player_scope_local_continuation(
                     ..
                 }
             )
+            // CR 608.2c + CR 701.24a: "then shuffles the rest into their library"
+            // following ExileFromTopUntil, Choose, or RevealUntil is local to each
+            // iterated player (Wand of Wonder, Worldpurge, Transmogrify). Detaching
+            // the shuffle as an unscoped tail would run the shuffle once for the
+            // caster instead of each player shuffling their own library.
+            | (Effect::ExileFromTopUntil { .. }, Effect::Shuffle { .. })
+            | (Effect::Choose { .. }, Effect::Shuffle { .. })
+            | (Effect::RevealUntil { .. }, Effect::Shuffle { .. })
     );
     if generic_local_continuation {
+        return true;
+    }
+    // A child whose recipient is explicitly iteration-bound (e.g. ScopedPlayer shuffle)
+    // must stay inside the iteration; detaching it would leave ScopedPlayer unbound.
+    if matches!(
+        child,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ) {
         return true;
     }
 
@@ -6125,7 +6143,8 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
         Effect::Token { owner, .. } => owner,
         Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
-        | Effect::Mill { target, .. } => target,
+        | Effect::Mill { target, .. }
+        | Effect::Shuffle { target, .. } => target,
         // CR 119.3 + CR 115.10: a directed LoseLife whose recipient is the
         // scoped opponent or the printed controller is iteration-bound exactly
         // like Draw/Discard/Mill — keep its continuation inside the scope.

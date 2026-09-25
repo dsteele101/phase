@@ -31277,3 +31277,99 @@ fn draw_replacement_player_slots_keep_player_referent() {
         }
     }
 }
+
+/// CR 701.24c + CR 608.2c: Divergent Transformations contains an unmodelled per-creature
+/// resolution loop ("For each of those creatures, its controller reveals... then shuffles the rest...").
+/// The trailing shuffle must NOT be greedily absorbed as an unscoped controller shuffle;
+/// it must preserve the `unparsed_quantity` marker until the full class is implemented.
+#[test]
+fn divergent_transformations_retains_unparsed_quantity_marker_without_shuffle() {
+    let dt = parse(
+        "Undaunted (This spell costs {1} less to cast for each opponent.)\nExile two target creatures. For each of those creatures, its controller reveals cards from the top of their library until they reveal a creature card, puts that card onto the battlefield, then shuffles the rest into their library.",
+        "Divergent Transformations",
+        &[crate::types::keywords::Keyword::Undaunted],
+        &["Instant"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&dt.abilities[0]);
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::Unimplemented { name, .. } if name == "unparsed_quantity"
+        )),
+        "Divergent Transformations must retain the unparsed_quantity marker, got {defs:?}"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Shuffle { .. })),
+        "Divergent Transformations must not emit an unmodelled Shuffle, got {defs:?}"
+    );
+}
+
+/// CR 701.24a + CR 608.2c: Wand of Wonder binds both the ExileFromTopUntil and the following
+/// rest-shuffle to `ScopedPlayer` under `PlayerFilter::Opponent`.
+#[test]
+fn wand_of_wonder_parses_shuffle_scoped_to_opponent() {
+    let wow = parse(
+        "{4}, {T}: Roll a d20. Each opponent exiles cards from the top of their library until they exile an instant or sorcery card, then shuffles the rest into their library. You may cast up to X instant and/or sorcery spells from among cards exiled this way without paying their mana costs.\n1—9 | X is one.\n10—19 | X is two.\n20 | X is three.",
+        "Wand of Wonder",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&wow.abilities[0]);
+    let exile_def = defs
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::ExileFromTopUntil { .. }))
+        .expect("must contain ExileFromTopUntil");
+    assert_eq!(
+        exile_def.player_scope,
+        Some(crate::types::ability::PlayerFilter::Opponent)
+    );
+    match &*exile_def.effect {
+        Effect::ExileFromTopUntil { player, .. } => {
+            assert_eq!(
+                *player,
+                TargetFilter::ScopedPlayer,
+                "ExileFromTopUntil must bind to ScopedPlayer"
+            );
+        }
+        _ => unreachable!(),
+    }
+    let shuffle_def = defs
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::Shuffle { .. }))
+        .expect("must contain Shuffle");
+    assert_eq!(
+        *shuffle_def.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        },
+        "Shuffle must bind to ScopedPlayer"
+    );
+}
+
+/// CR 701.24a + CR 608.2c: Worldpurge binds the rest-shuffle to `ScopedPlayer` under `PlayerFilter::All`.
+#[test]
+fn worldpurge_parses_shuffle_scoped_to_all_players() {
+    let wp = parse(
+        "Return all permanents to their owners' hands. Each player chooses up to seven cards in their hand, then shuffles the rest into their library. Each player loses all unspent mana.",
+        "Worldpurge",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&wp.abilities[0]);
+    let shuffle_def = defs
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::Shuffle { .. }))
+        .expect("must contain Shuffle");
+    assert_eq!(
+        *shuffle_def.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        },
+        "Worldpurge Shuffle must bind to ScopedPlayer"
+    );
+}

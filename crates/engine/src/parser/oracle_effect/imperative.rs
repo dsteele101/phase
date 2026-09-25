@@ -8848,14 +8848,14 @@ fn parse_hand_to_library_position(rest: &str) -> Option<LibraryPosition> {
 /// ("shuffle the rest", Aspiring Champion) and the subject-elided third-person
 /// form ("…, then shuffles the rest into their library", Transmogrify).
 pub(super) fn is_shuffle_rest_clause(lower: &str) -> bool {
-    nom_primitives::scan_at_word_boundaries(lower, |input| {
-        pair(
-            alt((tag::<_, _, OracleError<'_>>("shuffles "), tag("shuffle "))),
-            tag("the rest"),
-        )
-        .parse(input)
-    })
-    .is_some()
+    let input = lower.trim_start();
+    let result: Result<(&str, _), nom::Err<OracleError<'_>>> = (
+        opt(alt((tag("then, "), tag("then "), tag("and ")))),
+        alt((tag("shuffles "), tag("shuffle "))),
+        tag("the rest"),
+    )
+        .parse(input);
+    result.is_ok()
 }
 
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
@@ -8869,7 +8869,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     }
     // "shuffle the rest into your library" — the "rest" are already in the library
     // from a preceding dig/reveal effect; this is just a shuffle.
-    if is_shuffle_rest_clause(lower) || nom_primitives::scan_contains(lower, "shuffle them") {
+    if is_shuffle_rest_clause(lower) {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
         });
