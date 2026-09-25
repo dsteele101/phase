@@ -88,6 +88,7 @@ describe("DamageAssignmentModal", () => {
     expect(dispatchAction).toHaveBeenCalledWith({
       type: "AssignCombatDamage",
       data: {
+        mode: "Normal",
         assignments: [
           [20, 2],
           [21, 2],
@@ -95,6 +96,74 @@ describe("DamageAssignmentModal", () => {
         trample_damage: 0,
         controller_damage: 0,
       },
+    });
+  });
+
+  it("hides the as-though-unblocked option unless the engine offers it", () => {
+    render(
+      <DamageAssignmentModal
+        data={{
+          player: 0,
+          attacker_id: 10,
+          total_damage: 4,
+          blockers: [{ blocker_id: 20, lethal_minimum: 3 }],
+          trample: null,
+          defending_player: 1,
+          attack_target: { type: "Player", data: 1 },
+        }}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /as though unblocked/ })).toBeNull();
+  });
+
+  it("submits an as-though-unblocked assignment when the engine offers that mode", () => {
+    render(
+      <DamageAssignmentModal
+        data={{
+          player: 0,
+          attacker_id: 10,
+          total_damage: 4,
+          blockers: [{ blocker_id: 20, lethal_minimum: 3 }],
+          assignment_modes: ["Normal", "AsThoughUnblocked"],
+          trample: null,
+          defending_player: 1,
+          attack_target: { type: "Player", data: 1 },
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Assign 4 as though unblocked" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "AssignCombatDamage",
+      data: { mode: "AsThoughUnblocked", assignments: [], trample_damage: 0, controller_damage: 0 },
+    });
+  });
+
+  it("lets a blocked attacker whose blockers left combat assign no damage normally", () => {
+    render(
+      <DamageAssignmentModal
+        data={{
+          player: 0,
+          attacker_id: 10,
+          total_damage: 4,
+          blockers: [],
+          assignment_modes: ["Normal", "AsThoughUnblocked"],
+          trample: null,
+          defending_player: 1,
+          attack_target: { type: "Player", data: 1 },
+        }}
+      />,
+    );
+
+    const assignButton = screen.getByRole("button", { name: "Assign Damage" });
+    expect(assignButton).toBeEnabled();
+    fireEvent.click(assignButton);
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "AssignCombatDamage",
+      data: { mode: "Normal", assignments: [], trample_damage: 0, controller_damage: 0 },
     });
   });
 });

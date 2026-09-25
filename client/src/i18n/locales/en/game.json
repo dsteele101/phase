@@ -813,7 +813,9 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
-    "pwControllerTrample": "PW Controller (Trample Over PW)"
+    "pwControllerTrample": "PW Controller (Trample Over PW)",
+    "asThoughUnblockedPrompt": "{{name}} may assign its combat damage as though it weren't blocked.",
+    "asThoughUnblockedButton": "Assign {{amount}} as though unblocked"
   },
   "stack": {
     "title": "Stack",

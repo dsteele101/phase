@@ -780,7 +780,9 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealtad: {{loyalty}})",
     "defendingPlayerTrample": "Jugador defensor (Arrollar)",
-    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)"
+    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)",
+    "asThoughUnblockedPrompt": "{{name}} puede asignar su daño de combate como si no hubiera sido bloqueado.",
+    "asThoughUnblockedButton": "Asignar {{amount}} como si no estuviera bloqueado"
   },
   "stack": {
     "title": "Pila",

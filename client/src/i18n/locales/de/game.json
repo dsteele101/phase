@@ -780,7 +780,9 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
-    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)"
+    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "asThoughUnblockedPrompt": "{{name}} darf seinen Kampfschaden so zuweisen, als wäre es nicht geblockt worden.",
+    "asThoughUnblockedButton": "{{amount}} wie ungeblockt zuweisen"
   },
   "stack": {
     "title": "Stapel",

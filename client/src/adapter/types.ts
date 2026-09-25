@@ -667,6 +667,11 @@ export interface BlockRequirementInfo {
 // CR 702.19: Which trample variant applies to combat damage assignment.
 export type TrampleKind = "Standard" | "OverPlaneswalkers";
 
+/** CR 510.1c: how an attacker's combat damage is assigned. `AsThoughUnblocked`
+ *  is offered by the engine only for "assign its combat damage as though it
+ *  weren't blocked" creatures (e.g. Thorn Elemental). */
+export type CombatDamageAssignmentMode = "Normal" | "AsThoughUnblocked";
+
 // ── Commander Damage ────────────────────────────────────────────────────
 
 export interface CommanderDamageEntry {
@@ -2529,7 +2534,7 @@ export type WaitingFor =
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
   | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
-  | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
+  | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; assignment_modes?: CombatDamageAssignmentMode[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   // CR 510.1d + CR 702.22k: a blocking creature blocking a banded attacker —
   // the active player divides that blocker's combat damage among the attackers
   // it's blocking (free division, no lethal ordering).
@@ -3088,7 +3093,7 @@ export type GameAction =
   | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
   // CR 603.3b: mirror engine GameAction::SetTriggerOrderTemplate (PR-7 phase-2 boundary sync).
   | { type: "SetTriggerOrderTemplate"; data: { op: TriggerOrderTemplateOp } }
-  | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
+  | { type: "AssignCombatDamage"; data: { mode?: CombatDamageAssignmentMode; assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }

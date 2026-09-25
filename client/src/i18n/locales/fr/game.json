@@ -780,7 +780,9 @@
     "lethalBadge": "Létal",
     "planeswalkerLoyalty": "Planeswalker (loyauté : {{loyalty}})",
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
-    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)"
+    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)",
+    "asThoughUnblockedPrompt": "{{name}} peut attribuer ses blessures de combat comme s'il n'était pas bloqué.",
+    "asThoughUnblockedButton": "Attribuer {{amount}} comme s'il n'était pas bloqué"
   },
   "stack": {
     "title": "Pile",

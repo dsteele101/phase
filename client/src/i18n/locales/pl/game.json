@@ -780,7 +780,9 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
-    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
+    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "asThoughUnblockedPrompt": "{{name}} może przydzielić swoje obrażenia bojowe tak, jakby nie został zablokowany.",
+    "asThoughUnblockedButton": "Przydziel {{amount}} jak niezablokowany"
   },
   "stack": {
     "title": "Stos",

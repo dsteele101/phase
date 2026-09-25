@@ -86,7 +86,10 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const isOverPw = data.trample === "OverPlaneswalkers" && data.pw_controller != null;
   const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
   const total = blockerTotal + trampleDamage + controllerDamage;
-  const remaining = data.total_damage - total;
+  // CR 510.1c: a blocked creature with no creatures currently blocking it
+  // (and no trample) assigns no combat damage under the normal mode.
+  const expectedTotal = data.blockers.length === 0 && data.trample == null ? 0 : data.total_damage;
+  const remaining = expectedTotal - total;
   // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
   // excess to the defending player/planeswalker, not an unconditional constraint.
   // When trampleDamage and controllerDamage are both 0 the player is freely
@@ -97,7 +100,11 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   // CR 702.19c: Must assign at least PW loyalty before controller spillover.
   const loyaltyMet = !isOverPw || controllerDamage === 0 ||
     trampleDamage >= (data.pw_loyalty ?? 0);
-  const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
+  const isValid = total === expectedTotal && trampleLethalMet && loyaltyMet;
+  // CR 510.1c: the engine offers `AsThoughUnblocked` only when this attacker
+  // may assign its combat damage as though it weren't blocked.
+  const canAssignAsThoughUnblocked =
+    data.assignment_modes?.includes("AsThoughUnblocked") ?? false;
 
   const setAmount = useCallback((index: number, value: number) => {
     setAmounts((prev) => {
@@ -117,9 +124,25 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
     ]);
     dispatch({
       type: "AssignCombatDamage",
-      data: { assignments, trample_damage: trampleDamage, controller_damage: controllerDamage },
+      data: {
+        mode: "Normal",
+        assignments,
+        trample_damage: trampleDamage,
+        controller_damage: controllerDamage,
+      },
     });
   }, [dispatch, data.blockers, amounts, trampleDamage, controllerDamage, isValid]);
+
+  // The engine routes all damage to the attack target; no split is submitted.
+  const handleAssignAsThoughUnblocked = useCallback(() => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
+    setSubmitted(true);
+    dispatch({
+      type: "AssignCombatDamage",
+      data: { mode: "AsThoughUnblocked", assignments: [], trample_damage: 0, controller_damage: 0 },
+    });
+  }, [dispatch]);
 
   if (submitted) return null;
 
@@ -129,6 +152,19 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
       subtitle={t("combat.assignDamageSubtitle", { name: getName(data.attacker_id), remaining })}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label={t("combat.assignDamageButton")} />}
     >
+      {canAssignAsThoughUnblocked && (
+        <div className="mb-4 flex flex-col items-center gap-2 rounded-lg bg-emerald-900/30 p-3 ring-1 ring-emerald-600/40">
+          <span className="text-center text-sm text-emerald-100">
+            {t("combat.asThoughUnblockedPrompt", { name: getName(data.attacker_id) })}
+          </span>
+          <button
+            className={gameButtonClass({ tone: "emerald", size: "sm" })}
+            onClick={handleAssignAsThoughUnblocked}
+          >
+            {t("combat.asThoughUnblockedButton", { amount: data.total_damage })}
+          </button>
+        </div>
+      )}
       <div className="mb-4 space-y-3">
         {data.blockers.map((blocker, i) => {
           const isLethal = amounts[i] >= blocker.lethal_minimum;

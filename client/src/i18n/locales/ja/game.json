@@ -818,7 +818,9 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
-    "pwControllerTrample": "PWコントローラー（PW越しのトランプル）"
+    "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
+    "asThoughUnblockedPrompt": "{{name}}は、ブロックされていないかのように戦闘ダメージを割り振ることができます。",
+    "asThoughUnblockedButton": "ブロックされていないかのように{{amount}}点を割り振る"
   },
   "stack": {
     "title": "スタック",
