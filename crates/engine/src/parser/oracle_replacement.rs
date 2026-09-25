@@ -7690,10 +7690,35 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     if super::oracle::has_unimplemented(&payload) {
         return None;
     }
+    // Honest-gap guard: CR 115.1c + CR 602.2b — the creating ability announces
+    // exactly the substitute HEAD's single target slot (see
+    // `triggers::extract_target_filter_from_effect`). A multi-target head or a
+    // targeted later clause would be announced without its slots and resolve
+    // with no target, so leave such a payload an honest gap.
+    if !draw_replacement_payload_targets_fit_head_slot(&payload) {
+        return None;
+    }
 
     Some(Effect::CreateDrawReplacement {
         replacement_effect: Box::new(payload),
     })
+}
+
+/// CR 115.1c: whether every target a draw-replacement substitute names can be
+/// announced through the single slot its head surfaces — no multi-target head,
+/// and no targeted sub/else clause.
+fn draw_replacement_payload_targets_fit_head_slot(payload: &AbilityDefinition) -> bool {
+    fn chain_has_target(def: &AbilityDefinition) -> bool {
+        crate::game::triggers::extract_target_filter_from_effect(&def.effect).is_some()
+            || def.sub_ability.as_deref().is_some_and(chain_has_target)
+            || def.else_ability.as_deref().is_some_and(chain_has_target)
+    }
+    payload.multi_target.is_none()
+        && !payload.sub_ability.as_deref().is_some_and(chain_has_target)
+        && !payload
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_has_target)
 }
 
 fn parse_entering_copy_subject(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -26857,6 +26882,20 @@ mod snapshot_tests {
             matches!(waste_effect, Effect::Discard { .. }),
             "Words of Waste payload must be a discard, got {waste_effect:?}"
         );
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_rejects_targets_outside_head_slot() {
+        // Reach-guard: the same shape with an untargeted rider parses.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target and you gain 2 life instead",
+        )
+        .is_some());
+        // A targeted later clause has no announced slot — stays an honest gap.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, you gain 2 life and ~ deals 2 damage to any target instead",
+        )
+        .is_none());
     }
 
     #[test]

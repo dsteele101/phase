@@ -14,6 +14,7 @@
 
 use engine::game::casting::activated_ability_definitions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -211,6 +212,80 @@ fn words_of_war_still_replaces_draw_when_target_left() {
         p1_life,
         "the damage is not redirected anywhere else"
     );
+}
+
+/// CR 608.2b: if Words of War's only target is illegal as the ability tries to
+/// resolve, the ability doesn't resolve — no shield is installed and the next
+/// draw is a normal draw.
+#[test]
+fn words_of_war_fizzles_when_target_illegal_on_resolution() {
+    let Setup {
+        mut scenario,
+        words,
+        drawer,
+        library_top,
+    } = setup("Words of War", WORDS_OF_WAR, 1);
+    let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // Drive the activation by hand so the ability stays on the stack.
+    let index = first_ability_index(&runner, words);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: words,
+            ability_index: index,
+        })
+        .expect("activation accepted");
+    for _ in 0..8 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt while activating: {other:?}"),
+        };
+        runner.act(action).expect("activation step accepted");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach-guard: Words of War's ability is on the stack"
+    );
+    engine::game::zones::move_to_zone(runner.state_mut(), bear, Zone::Hand, &mut Vec::new());
+    resolve_stack(&mut runner);
+
+    draw_one(&mut runner, drawer);
+
+    assert!(
+        in_hand(&runner, library_top),
+        "no shield was installed, so the draw happens normally"
+    );
+}
+
+/// CR 113.7a: the shield exists independently of Words of War once the ability
+/// resolved — the damage is still dealt if the enchantment has left the
+/// battlefield before the draw.
+#[test]
+fn words_of_war_damages_after_source_left() {
+    let Setup {
+        scenario,
+        words,
+        drawer,
+        library_top,
+    } = setup("Words of War", WORDS_OF_WAR, 1);
+    let mut runner = scenario.build();
+    let p1_life = runner.state().players[1].life;
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).target_player(P1).resolve();
+    resolve_stack(&mut runner);
+    engine::game::zones::move_to_zone(runner.state_mut(), words, Zone::Graveyard, &mut Vec::new());
+
+    draw_one(&mut runner, drawer);
+
+    assert!(!in_hand(&runner, library_top), "the draw is replaced");
+    assert_eq!(runner.state().players[1].life, p1_life - 2);
 }
 
 /// CR 614.6: the damage shield is one-shot — the second draw is normal.
@@ -437,7 +512,11 @@ fn multiple_words_let_the_player_choose_which_applies_per_draw() {
         "one remaining shield needs no choice, got {:?}",
         runner.state().waiting_for
     );
-    assert_eq!(applied(&runner), 2, "the other Words is used on the next draw");
+    assert_eq!(
+        applied(&runner),
+        2,
+        "the other Words is used on the next draw"
+    );
     assert!(
         !in_hand(&runner, library_top),
         "both draws were replaced, one by each Words"
