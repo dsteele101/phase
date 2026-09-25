@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -212,6 +212,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const reduceMotion = useReducedMotion();
 
   const getObjectRect = useCallback(
     (objectId: number): DOMRect | null =>
@@ -715,8 +716,12 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             },
           ]);
 
-          if (vfxQuality !== "minimal") {
-            const at = (fraction: number) => fraction * owningStepMs;
+          // The hammer blows always ring. Particles and screen shake move the
+          // board, so they honor reduced motion as well as the VFX quality —
+          // as the forge itself does by cross-fading instead.
+          const animatesVfx = vfxQuality !== "minimal" && !reduceMotion;
+          const at = (fraction: number) => fraction * owningStepMs;
+          if (animatesVfx) {
             scheduleStepTimeout(
               () => particleRef.current?.forgeHeat(
                 center.x,
@@ -725,20 +730,23 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               ),
               at(MELD_FORGE_PHASES.gathered),
             );
-            MELD_FORGE_PHASES.strikes.forEach((strikeAt, blow) => {
-              const isFinalBlow = blow === MELD_FORGE_PHASES.strikes.length - 1;
-              scheduleStepTimeout(() => {
-                particleRef.current?.forgeStrike(
-                  center.x,
-                  center.y,
-                  (blow + 1) / MELD_FORGE_PHASES.strikes.length,
-                );
-                audioManager.playSfx("DamageDealt", isFinalBlow ? 1 : 0.7);
-                if (vfxQuality === "full" && containerRef.current) {
-                  applyScreenShake(containerRef.current, isFinalBlow ? "medium" : "light", speedMultiplier);
-                }
-              }, at(strikeAt));
-            });
+          }
+          MELD_FORGE_PHASES.strikes.forEach((strikeAt, blow) => {
+            const isFinalBlow = blow === MELD_FORGE_PHASES.strikes.length - 1;
+            scheduleStepTimeout(() => {
+              audioManager.playSfx("DamageDealt", isFinalBlow ? 1 : 0.7);
+              if (!animatesVfx) return;
+              particleRef.current?.forgeStrike(
+                center.x,
+                center.y,
+                (blow + 1) / MELD_FORGE_PHASES.strikes.length,
+              );
+              if (vfxQuality === "full" && containerRef.current) {
+                applyScreenShake(containerRef.current, isFinalBlow ? "medium" : "light", speedMultiplier);
+              }
+            }, at(strikeAt));
+          });
+          if (animatesVfx) {
             scheduleStepTimeout(
               () => particleRef.current?.summonBurst(center.x, center.y, FORGE_YELLOW),
               at(MELD_FORGE_PHASES.flipped),
@@ -801,6 +809,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
       getPlayerHudPosition,
       vfxQuality,
       speedMultiplier,
+      reduceMotion,
       containerRef,
       scheduleStepTimeout,
       addPendingDeath,
