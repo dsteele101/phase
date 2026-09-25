@@ -13216,12 +13216,21 @@ fn rewrite_draw_replacement_execute_referents(def: &mut AbilityDefinition, text:
     rewrite_draw_replacement_card_to_last_revealed(def);
 }
 
+/// CR 614.6 + CR 608.2c: in a draw-replacement chain, "put that card / put it
+/// into …" moves the card the replacement revealed or looked at (Zur's Weirding,
+/// Enduring Renewal, Underrealm Lich), so a card-movement `ParentTarget` binds
+/// to the reveal ledger. Only card-movement slots are rebound: a player-slot
+/// `ParentTarget` ("they draw a card", "they mill a card" — Chains of
+/// Mephistopheles) names the replaced draw's player and must stay a player
+/// referent.
 fn rewrite_draw_replacement_card_to_last_revealed(def: &mut AbilityDefinition) {
-    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
-        if matches!(f, TargetFilter::ParentTarget) {
-            *f = TargetFilter::LastRevealed;
+    if let Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } =
+        &mut *def.effect
+    {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::LastRevealed;
         }
-    });
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_draw_replacement_card_to_last_revealed(sub);
     }

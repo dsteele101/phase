@@ -1,6 +1,7 @@
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -577,20 +578,44 @@ fn reveal_until_then_shuffle_randomizes_unrevealed_library_cards() {
 
     let mut runner = scenario.build();
     let mut committed = runner.cast(spell).commit();
-    committed.act(GameAction::PassPriority).unwrap();
-    committed.act(GameAction::PassPriority).unwrap();
+    // Collect every event emitted while the spell resolves, so the shuffle
+    // assertion observes the production action pipeline rather than zones.
+    let mut events: Vec<GameEvent> = Vec::new();
+    events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+    events.extend(committed.act(GameAction::PassPriority).unwrap().events);
 
     // If bottom order was prompted, answer it
     if let WaitingFor::RevealUntilBottomOrder { .. } = &committed.state().waiting_for {
-        committed
-            .act(GameAction::SelectCards {
-                cards: vec![land1, land2],
-            })
-            .unwrap();
+        events.extend(
+            committed
+                .act(GameAction::SelectCards {
+                    cards: vec![land1, land2],
+                })
+                .unwrap()
+                .events,
+        );
     }
 
     // Hit card must be in hand
     assert_eq!(committed.state().objects[&hit].zone, Zone::Hand);
+
+    // CR 701.24a: "Then shuffle your library" performs a library shuffle for
+    // the caster. Placing only the revealed pile would leave this event absent.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P0,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "the caster's library must be shuffled exactly once, got {events:?}"
+    );
 
     // CR 701.24a: The remaining library must contain Land1, Land2, Deep1, Deep2, Deep3 (all 5 cards)
     let p0_lib = &committed
@@ -720,4 +745,85 @@ fn clone_shell_dies_trigger_leaves_non_creature_in_exile() {
     let obj = &runner.state().objects[&exiled_spell];
     assert_eq!(obj.zone, Zone::Exile);
     assert!(!obj.face_down);
+}
+
+/// Printed Oracle text of Transmogrify (MTGJSON AtomicCards).
+const TRANSMOGRIFY_ORACLE: &str = "Exile target creature. That creature's controller reveals cards from the top of their library until they reveal a creature card. That player puts that card onto the battlefield, then shuffles the rest into their library.";
+
+/// CR 701.20a + CR 701.24c: Transmogrify's subject-elided "then shuffles the
+/// rest into their library" shuffles the REVEALING player's library — the
+/// exiled creature's controller — not the caster's.
+#[test]
+fn transmogrify_shuffles_the_revealing_players_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario.add_creature(P1, "Victim", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Transmogrify", false, TRANSMOGRIFY_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    // P1 library, top first: Land, Hit (creature), Deep.
+    let deep = scenario.add_card_to_library_top(P1, "Deep Card");
+    let hit = scenario
+        .add_spell_to_library_top(P1, "Hit Creature", false)
+        .as_creature()
+        .id();
+    let land = scenario
+        .add_spell_to_library_top(P1, "Revealed Land", false)
+        .as_land()
+        .id();
+    scenario.add_card_to_library_top(P0, "Caster Card");
+
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(spell).target_object(victim).commit();
+    let mut events: Vec<GameEvent> = Vec::new();
+    events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+    events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+
+    let state = committed.state();
+    assert_eq!(state.objects[&victim].zone, Zone::Exile);
+    assert_eq!(state.objects[&hit].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&hit].controller, P1,
+        "the revealed creature enters under the revealing player's control"
+    );
+    for id in [land, deep] {
+        assert_eq!(state.objects[&id].zone, Zone::Library);
+    }
+
+    let shuffles_for = |player| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } if *player_id == player
+                )
+            })
+            .count()
+    };
+    assert_eq!(
+        shuffles_for(P1),
+        1,
+        "the exiled creature's controller shuffles their library, got {events:?}"
+    );
+    assert_eq!(
+        shuffles_for(P0),
+        0,
+        "the caster's library is not shuffled, got {events:?}"
+    );
 }

@@ -8842,6 +8842,22 @@ fn parse_hand_to_library_position(rest: &str) -> Option<LibraryPosition> {
     Some(position)
 }
 
+/// CR 701.24c: "[then] shuffle(s) the rest [of the revealed cards] into
+/// <possessive> library" — the rest pile of an earlier reveal/dig is shuffled
+/// into a library, which shuffles that whole library. Accepts the imperative
+/// ("shuffle the rest", Aspiring Champion) and the subject-elided third-person
+/// form ("…, then shuffles the rest into their library", Transmogrify).
+pub(super) fn is_shuffle_rest_clause(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        pair(
+            alt((tag::<_, _, OracleError<'_>>("shuffles "), tag("shuffle "))),
+            tag("the rest"),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
     if matches!(
         lower,
@@ -8853,9 +8869,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     }
     // "shuffle the rest into your library" — the "rest" are already in the library
     // from a preceding dig/reveal effect; this is just a shuffle.
-    if nom_primitives::scan_contains(lower, "shuffle the rest")
-        || nom_primitives::scan_contains(lower, "shuffle them")
-    {
+    if is_shuffle_rest_clause(lower) || nom_primitives::scan_contains(lower, "shuffle them") {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
         });

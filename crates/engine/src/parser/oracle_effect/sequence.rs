@@ -8120,11 +8120,7 @@ pub(super) fn parse_followup_continuation_ast(
         // CR 701.20a: "put the rest" / "the rest on the bottom" / "put the revealed cards"
         // after RevealUntil — overrides rest_destination. The "the rest" without "put"
         // occurs when split_clause_sequence splits "put X and the rest" on "and".
-        // Also recognizes:
-        //   • "shuffles ... revealed this way into <possessive> library" (Polymorph,
-        //     Transmogrify) — the engine's existing rest=Library destination already
-        //     random-orders, satisfying the shuffle semantics.
-        //   • Third-person "puts" verb form (Polymorph chain).
+        // Also recognizes the third-person "puts" verb form (Polymorph chain).
         // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
         // into [zone]" after RevealUntil — the entire revealed pile (matching card +
         // everything revealed before it) goes to the same zone. Checked before the PutRest
@@ -8155,13 +8151,14 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "all other cards revealed this way")
                 || nom_primitives::scan_contains(&lower, "other cards revealed this way") =>
         {
-            // Delegate to the shared rest-zone matcher so the kept-card and
-            // standalone-rest arms recognize the same destination phrases.
-            let destination = parse_reveal_until_rest_zone(&lower).unwrap_or(Zone::Library);
+            // Delegate to the shared rest-zone/order matcher so the kept-card and
+            // standalone-rest arms recognize the same destination and ordering
+            // phrases ("in a random order" / "in any order", CR 401.4).
+            let (destination, rest_order) = parse_reveal_until_rest_zone_and_order(&lower);
             Some(ContinuationAst::PutRest {
-                destination,
+                destination: destination.unwrap_or(Zone::Library),
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order,
             })
         }
         // "create a ... token and suspect it" → chain suspect on last created token

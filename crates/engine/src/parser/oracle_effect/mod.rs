@@ -40356,6 +40356,21 @@ pub(crate) fn parse_effect_chain_ir(
             .collect();
         let effective_prev_effect =
             absorbed_choice_prev.or_else(|| non_absorbed.first().map(|c| effective_effect_of(c)));
+        // CR 701.24c + CR 608.2c: "then shuffle(s) the rest into their library"
+        // directly after a `RevealUntil` shuffles the library the rest pile went
+        // into — the revealing player's (Transmogrify, Blessed Reincarnation: the
+        // exiled creature's controller). The subject-elided clause parses with the
+        // caster default, so bind it to the reveal's player; an explicit subject
+        // ("that player shuffles …") already produced a non-default target.
+        if let (Some(Effect::RevealUntil { player, .. }), Effect::Shuffle { target }) =
+            (effective_prev_effect.as_ref(), &mut clause.effect)
+        {
+            if *target == TargetFilter::Controller
+                && imperative::is_shuffle_rest_clause(&normalized_text.to_lowercase())
+            {
+                *target = player.clone();
+            }
+        }
         let followup_continuation = effective_prev_effect
             .as_ref()
             .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff, ctx))
@@ -40394,25 +40409,32 @@ pub(crate) fn parse_effect_chain_ir(
                 // or `DealDamage` on Explosive Revelation).
                 // Scan `non_absorbed` (nearest-first) for a preceding `RevealUntil` antecedent.
                 // The parser is the detector: only bind if `parse_followup_continuation_ast`
-                // against the candidate `RevealUntil` produces a recognized `RevealUntil` continuation.
-                non_absorbed.iter().find_map(|c| {
-                    let deeper = effective_effect_of(c);
-                    match deeper {
+                // against the candidate `RevealUntil` produces a recognized pile-disposition
+                // continuation. The scan stops at an unparsed clause: an unrecognized
+                // instruction may itself select or re-bind the referent ("Choose one of the
+                // revealed creature cards", Dance, Pathetic Marionette), so a later "all
+                // other cards revealed this way" can no longer be read as the reveal's rest
+                // pile. `RevealUntilKept` is never bound across clauses: its "put it" /
+                // "put that card" anaphor names the nearest referent, and its application
+                // patches only the immediately preceding definition.
+                non_absorbed
+                    .iter()
+                    .map(|c| effective_effect_of(c))
+                    .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
+                    .find_map(|deeper| match deeper {
                         Effect::RevealUntil { .. } => {
                             match parse_followup_continuation_ast(normalized_text, &deeper, ctx) {
                                 Some(
                                     continuation @ (ContinuationAst::RevealUntilAllToZone {
                                         ..
                                     }
-                                    | ContinuationAst::PutRest { .. }
-                                    | ContinuationAst::RevealUntilKept { .. }),
+                                    | ContinuationAst::PutRest { .. }),
                                 ) => Some(continuation),
                                 _ => None,
                             }
                         }
                         _ => None,
-                    }
-                })
+                    })
             })
             .or_else(|| {
                 // CR 707.10c: a "you may choose new targets for the copy/copies"
