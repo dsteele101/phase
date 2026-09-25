@@ -22672,6 +22672,17 @@ enum ActivationStructuralEligibility {
 }
 
 /// CR 113.6 + CR 113.6b + CR 602.2: Classifies the immutable source-zone and activator
+fn condition_allows_zone(cond: &crate::types::ability::ParsedCondition, zone: Zone) -> bool {
+    match cond {
+        crate::types::ability::ParsedCondition::SourceInZone { zone: z } => *z == zone,
+        crate::types::ability::ParsedCondition::Or { conditions } => {
+            conditions.iter().any(|c| condition_allows_zone(c, zone))
+        }
+        _ => false,
+    }
+}
+
+/// CR 113.6 + CR 113.6b + CR 602.2: Structural (per-card / per-zone)
 /// prerequisites shared by activation legality and pre-cast payoff discovery.
 /// This deliberately runs before mutable restrictions, targets, and costs: a
 /// currently false restriction may be the payoff of the spell being assessed.
@@ -22701,9 +22712,20 @@ fn activation_structural_eligibility(
         return ActivationStructuralEligibility::NinjutsuFamily;
     }
     // CR 113.6 + CR 113.6b: activated abilities default to functioning only
-    // on the battlefield unless their definition names another activation zone.
+    // on the battlefield unless their definition names another activation zone
+    // or an activation restriction explicitly permits that zone.
+    let zone_permitted_by_restriction = ability_def.activation_restrictions.iter().any(|r| {
+        if let crate::types::ability::ActivationRestriction::RequiresCondition {
+            condition: Some(cond),
+        } = r
+        {
+            condition_allows_zone(cond, obj.zone)
+        } else {
+            false
+        }
+    });
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
-    if obj.zone != required_zone {
+    if obj.zone != required_zone && !zone_permitted_by_restriction {
         return ActivationStructuralEligibility::WrongZone(required_zone);
     }
     ActivationStructuralEligibility::Eligible

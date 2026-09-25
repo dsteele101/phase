@@ -31373,3 +31373,46 @@ fn worldpurge_parses_shuffle_scoped_to_all_players() {
         "Worldpurge Shuffle must bind to ScopedPlayer"
     );
 }
+
+/// CR 113.6b + CR 602.5b: M'Odo, the Gnarled Oracle parses "Activate this ability only if M'Odo, the Gnarled Oracle is on the battlefield or in the command zone."
+/// into `ActivationRestriction::RequiresCondition` with `ParsedCondition::Or` over `SourceInZone { Battlefield }` and `SourceInZone { Command }`.
+#[test]
+fn m_odo_the_gnarled_oracle_parses_activation_restriction_battlefield_or_command_zone() {
+    let oracle = "{X}{B}, Exile a creature card with mana value X from your graveyard: Target opponent loses X life and you gain X life. Activate this ability only if M'Odo, the Gnarled Oracle is on the battlefield or in the command zone.";
+    let parsed = parse(
+        oracle,
+        "M'Odo, the Gnarled Oracle",
+        &[],
+        &["Creature"],
+        &["Zombie", "Elf", "Wizard"],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let ability = &parsed.abilities[0];
+    let restrictions = &ability.activation_restrictions;
+    let req_cond = restrictions
+        .iter()
+        .find(|r| matches!(r, ActivationRestriction::RequiresCondition { .. }))
+        .expect("must have RequiresCondition activation restriction");
+    let ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::Or { conditions }),
+    } = req_cond
+    else {
+        panic!("expected RequiresCondition with Or condition, got {req_cond:?}");
+    };
+    assert!(
+        conditions.contains(&ParsedCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        }),
+        "must require SourceInZone(Battlefield)"
+    );
+    assert!(
+        conditions.contains(&ParsedCondition::SourceInZone {
+            zone: Zone::Command,
+        }),
+        "must require SourceInZone(Command)"
+    );
+    assert!(
+        !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "M'Odo ability must not be unimplemented"
+    );
+}

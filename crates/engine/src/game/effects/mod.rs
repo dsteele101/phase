@@ -3899,7 +3899,25 @@ pub(crate) fn optional_decline_branch(
     if !selected {
         // CR 608.2c: a declined "you may" fails the "if you do" gate `sub`,
         // and the gate skips only the instructions it governs.
-        return declined_gate_reduced_to_surviving_instructions(sub).map(Cow::Owned);
+        // Walk past any unconditional resolution sub-steps of the declined parent action
+        // (such as a Shuffle attached to an optional ChangeZoneToLibrary).
+        let mut gate = sub;
+        while gate.condition.is_none() && gate.else_ability.is_none() {
+            if let Some(next) = gate.sub_ability.as_deref() {
+                if next
+                    .condition
+                    .as_ref()
+                    .is_some_and(AbilityCondition::is_optional_effect_performed)
+                {
+                    gate = next;
+                    break;
+                }
+                gate = next;
+            } else {
+                break;
+            }
+        }
+        return declined_gate_reduced_to_surviving_instructions(gate).map(Cow::Owned);
     }
     if sub
         .condition

@@ -890,8 +890,13 @@ fn wand_of_wonder_shuffles_each_opponents_library() {
     events.extend(runner.act(GameAction::PassPriority).unwrap().events);
 
     // If prompted for the optional cast, decline
-    if matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
-        runner.act(GameAction::DecideOptionalEffect { accept: false }).unwrap();
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ) {
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
     }
 
     let state = runner.state();
