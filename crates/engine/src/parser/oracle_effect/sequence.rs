@@ -8153,9 +8153,7 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "put the revealed cards")
                 || nom_primitives::scan_contains(&lower, "put them back")
                 || nom_primitives::scan_contains(&lower, "all other cards revealed this way")
-                || nom_primitives::scan_contains(&lower, "other cards revealed this way")
-                || (nom_primitives::scan_contains(&lower, "shuffle")
-                    && nom_primitives::scan_contains(&lower, "library")) =>
+                || nom_primitives::scan_contains(&lower, "other cards revealed this way") =>
         {
             // Delegate to the shared rest-zone matcher so the kept-card and
             // standalone-rest arms recognize the same destination phrases.

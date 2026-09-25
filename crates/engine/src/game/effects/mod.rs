@@ -3573,12 +3573,6 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             .target_filter()
             .is_some_and(TargetFilter::references_exiled_by_source)
             && !effect_refs_parent_target(&sub.effect))
-        && !sub.effect.target_filter().is_some_and(|f| {
-            matches!(
-                f,
-                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-            )
-        })
 }
 
 /// CR 115.10 + CR 608.2d: a nontargeted zone choice announced while the effect
@@ -5619,13 +5613,20 @@ fn inject_last_revealed_targets(
         // CR 701.20e + CR 608.2c: In an immediate look-then-act chain, an exact
         // `ParentTarget` names the object produced by the parent look even though
         // looking does not move it or create an ordinary target. Bind that one
-        // sentinel through the existing look ledger. Composed filters remain
-        // intact so their concrete restrictions are still evaluated.
-        let filter = if matches!(filter, TargetFilter::ParentTarget) {
-            &TargetFilter::LastRevealed
-        } else {
-            filter
-        };
+        // sentinel through the existing look/reveal ledger across all zones
+        // (library look-then-cast for Planetarium, exile reveal-then-move for
+        // Clone Shell). Composed filters remain intact so their concrete
+        // restrictions are still evaluated.
+        if matches!(filter, TargetFilter::ParentTarget) {
+            return crate::game::filter::last_revealed_ids_matching(
+                state,
+                &TargetFilter::LastRevealed,
+                &ctx,
+            )
+            .into_iter()
+            .map(TargetRef::Object)
+            .collect();
+        }
         return crate::game::filter::last_revealed_library_ids_matching(state, filter, &ctx)
             .into_iter()
             .map(TargetRef::Object)
@@ -7935,23 +7936,19 @@ fn filter_prop_references_tracked_quantity(prop: &crate::types::ability::FilterP
 }
 
 fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
-    let matches_filter = |f: &TargetFilter| {
-        matches!(
-            f,
-            TargetFilter::TrackedSet { .. }
-                | TargetFilter::TrackedSetFiltered { .. }
-                | TargetFilter::ExiledBySource
-        )
-    };
-    if effect.target_filter().is_some_and(matches_filter) {
-        return true;
-    }
-    match effect {
-        Effect::GrantCastingPermission { target, .. } | Effect::CastCopyOfCard { target, .. } => {
-            matches_filter(target)
+    matches!(
+        effect,
+        Effect::GrantCastingPermission {
+            target: TargetFilter::TrackedSet { .. },
+            ..
+        } | Effect::CastCopyOfCard {
+            target: TargetFilter::TrackedSet { .. },
+            ..
+        } | Effect::PutAtLibraryPosition {
+            target: TargetFilter::ExiledBySource,
+            ..
         }
-        _ => false,
-    }
+    )
 }
 
 /// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`

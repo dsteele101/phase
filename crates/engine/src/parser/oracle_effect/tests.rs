@@ -41474,6 +41474,34 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
     );
 }
 
+/// CR 701.24a: A trailing shuffle instruction after RevealUntil must be emitted
+/// as a distinct Effect::Shuffle, not swallowed into PutRest (The Crimson Avenger,
+/// Underdark Beholder).
+#[test]
+fn reveal_until_followed_by_shuffle_emits_distinct_shuffle() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a nonland card. \
+         Cast that card without paying its mana cost. Then shuffle your library.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil { .. } = &*def.effect else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    let cast = def
+        .sub_ability
+        .as_ref()
+        .expect("RevealUntil must chain into Cast");
+    let shuffle = cast
+        .sub_ability
+        .as_ref()
+        .expect("Cast must chain into Shuffle");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "expected trailing Effect::Shuffle, got {:?}",
+        shuffle.effect
+    );
+}
+
 /// CR 701.20a: All cards revealed on the bottom in a random order.
 #[test]
 fn reveal_until_all_cards_revealed_this_way_random_order() {

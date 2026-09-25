@@ -537,3 +537,187 @@ fn reveal_until_unspecified_bottom_order_is_owner_choice() {
         vec![deep, second, first]
     );
 }
+
+/// CR 701.24a: When a spell reveals until a condition and then instructs to shuffle the
+/// library (e.g. The Crimson Avenger, Underdark Beholder), the whole library including
+/// unrevealed cards must be shuffled, rather than only placing the revealed pile.
+#[test]
+fn reveal_until_then_shuffle_randomizes_unrevealed_library_cards() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let oracle = "Reveal cards from the top of your library until you reveal a nonland card. Put that card into your hand. Then shuffle your library.";
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Reveal and Shuffle", true, oracle)
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    // Setup library: bottom to top
+    // Cards: Deep3, Deep2, Deep1, Hit (nonland), Land2, Land1
+    let deep3 = scenario.add_card_to_library_top(P0, "Deep 3");
+    let deep2 = scenario.add_card_to_library_top(P0, "Deep 2");
+    let deep1 = scenario.add_card_to_library_top(P0, "Deep 1");
+    let hit = scenario.add_spell_to_library_top(P0, "Hit", false).id();
+    let land2 = scenario
+        .add_spell_to_library_top(P0, "Land 2", false)
+        .as_land()
+        .id();
+    let land1 = scenario
+        .add_spell_to_library_top(P0, "Land 1", false)
+        .as_land()
+        .id();
+
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(spell).commit();
+    committed.act(GameAction::PassPriority).unwrap();
+    committed.act(GameAction::PassPriority).unwrap();
+
+    // If bottom order was prompted, answer it
+    if let WaitingFor::RevealUntilBottomOrder { .. } = &committed.state().waiting_for {
+        committed
+            .act(GameAction::SelectCards {
+                cards: vec![land1, land2],
+            })
+            .unwrap();
+    }
+
+    // Hit card must be in hand
+    assert_eq!(committed.state().objects[&hit].zone, Zone::Hand);
+
+    // CR 701.24a: The remaining library must contain Land1, Land2, Deep1, Deep2, Deep3 (all 5 cards)
+    let p0_lib = &committed
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library;
+    assert_eq!(p0_lib.len(), 5);
+    for id in [land1, land2, deep1, deep2, deep3] {
+        assert!(
+            p0_lib.contains(&id),
+            "library must contain remaining card {id:?}"
+        );
+        assert_eq!(committed.state().objects[&id].zone, Zone::Library);
+    }
+}
+
+/// CR 406.3 + CR 608.2c: When Clone Shell dies, it turns the exiled card face up,
+/// and if it's a creature card, puts it onto the battlefield under your control.
+/// The follow-up ChangeZone resolves ParentTarget from Zone::Exile.
+#[test]
+fn clone_shell_dies_trigger_puts_exiled_creature_onto_battlefield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let dies_oracle = "When Clone Shell dies, turn the exiled card face up. If it's a creature card, put it onto the battlefield under your control.";
+    let shell = scenario
+        .add_creature_from_oracle(P0, "Clone Shell", 2, 2, dies_oracle)
+        .id();
+
+    let exiled_creature = scenario
+        .add_creature_to_exile(P0, "Colossal Dreadmaw", 6, 6)
+        .id();
+
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&exiled_creature)
+        .unwrap()
+        .face_down = true;
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            source_id: shell,
+            exiled_id: exiled_creature,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+    runner.cast(murder).target_object(shell).resolve();
+
+    // Clone Shell died and was put into the graveyard.
+    assert_eq!(runner.state().objects[&shell].zone, Zone::Graveyard);
+
+    // The exiled creature was turned face up and put onto the battlefield under P0's control.
+    let obj = &runner.state().objects[&exiled_creature];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(obj.controller, P0);
+    assert!(!obj.face_down);
+}
+
+/// CR 406.3 + CR 608.2c: When Clone Shell dies, if the exiled card is not a creature card,
+/// it is turned face up in exile but is NOT put onto the battlefield.
+#[test]
+fn clone_shell_dies_trigger_leaves_non_creature_in_exile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let dies_oracle = "When Clone Shell dies, turn the exiled card face up. If it's a creature card, put it onto the battlefield under your control.";
+    let shell = scenario
+        .add_creature_from_oracle(P0, "Clone Shell", 2, 2, dies_oracle)
+        .id();
+
+    let exiled_spell = scenario.add_spell_to_exile(P0, "Lightning Bolt", true).id();
+
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&exiled_spell)
+        .unwrap()
+        .face_down = true;
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            source_id: shell,
+            exiled_id: exiled_spell,
+            kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+
+    runner.cast(murder).target_object(shell).resolve();
+
+    // Clone Shell died and was put into the graveyard.
+    assert_eq!(runner.state().objects[&shell].zone, Zone::Graveyard);
+
+    // The non-creature card was turned face up in exile, but stayed in exile.
+    let obj = &runner.state().objects[&exiled_spell];
+    assert_eq!(obj.zone, Zone::Exile);
+    assert!(!obj.face_down);
+}
