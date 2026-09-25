@@ -13,7 +13,7 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
-/** CR 712.4c / CR 730.2: the keyword that built a merged permanent. */
+/** CR 701.42a / CR 730.2: the keyword that built a merged permanent. */
 export type MergeKind = "Mutate" | "Meld" | "Augment";
 
 // Engine masking sentinel emitted at the client boundary for hidden card faces.
@@ -1602,7 +1602,7 @@ export interface GameObject {
    */
   is_copy?: boolean;
   /**
-   * CR 712.4c / CR 730.2: which keyword built this merged permanent (mirrors the
+   * CR 701.42a / CR 730.2: which keyword built this merged permanent (mirrors the
    * engine's `merge_kind`). Present only on a merged permanent. `"Meld"` marks a
    * melded permanent — one object represented by the two cards of a meld pair
    * (CR 701.42a), displayed as its oversized combined card.
