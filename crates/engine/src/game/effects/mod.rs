@@ -7678,6 +7678,16 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    // CR 608.2c: an each-source damage node whose SOURCE population is the
+    // chain's tracked set ("Each Wolf tapped this way deals damage …") consumes
+    // that set. `Effect::target_filter()` surfaces only the recipient, so the
+    // source filter must be inspected here or the producer never publishes and
+    // the sources resolve to nothing.
+    if let Effect::EachSourceDealsDamage { sources, .. } = effect {
+        if filter_references_tracked_set(sources) {
+            return true;
+        }
+    }
     // `GrantCastingPermission` has a `target` field that is not exposed by
     // `Effect::target_filter()` (it selects objects to grant permission to,
     // not spell/ability targets). Inspect directly so "the rest" / "those
@@ -7959,8 +7969,10 @@ fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bo
 ///   - BounceAll → `Bounced` if its destination is Hand, `Returned` if
 ///     Battlefield (default Hand → `Bounced`, CR 400.7 / CR 611.2c).
 ///   - ExileTop / ExileFromTopUntil → `Exiled` (CR 701.13a).
+///   - SetTapState with `TapStateChange::Tap` → `Tapped` (CR 701.26a); only
+///     the permanents that actually became tapped emit `PermanentTapped`.
 ///   - RevealUntil's kept card / counter whose CR 614.1a exile rider did not
-///     apply (see `this_way_cause_for_resolved`) / reveal / tap-untap producers do not
+///     apply (see `this_way_cause_for_resolved`) / reveal / untap producers do not
 ///     name a "<verb>ed this way" set; they carry no cause and are consumed only
 ///     by `caused_by: None` (selection-set) downstream references.
 fn affected_objects_with_causes(
@@ -7974,7 +7986,7 @@ fn affected_objects_with_causes(
     // individual member's event — so every member of this publish shares one
     // cause, except under `Effect::Counter`, whose CR 614.1a rider applies to a
     // member by its printed condition (see `this_way_cause_for_resolved`).
-    // `None` for producers that do not name a "this way" verb (reveals, taps,
+    // `None` for producers that do not name a "this way" verb (reveals, untaps,
     // counters whose exile rider did not apply, the RevealUntil kept card, and
     // zone changes to a destination no consumer references), which are read only
     // by `caused_by: None`.
@@ -8067,7 +8079,20 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
         // "those creatures" is a bare frozen population, so its members carry no
         // cause and are matched only by the punisher's `caused_by: None`.
         Effect::GenericEffect { .. } => None,
-        // Reveals, taps, counter producers (the exile-rider case is lifted out
+        // CR 701.26a + CR 608.2c: a tap instruction names a "tapped this way"
+        // population. For a mass tap (`EffectScope::All`, which declares no
+        // targets) the members are exactly the `PermanentTapped` emitters that
+        // `affected_objects_from_events` publishes, so a pre-tapped or
+        // restriction-held permanent is never stamped. A single-target tap that
+        // emits no event falls back to its declared target, which would be
+        // stamped; no `Some(Tapped)` consumer of a single-target tap exists. An
+        // untap (CR 701.26b) names no consumed population and stays unstamped
+        // below.
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => Some(ThisWayCause::Tapped),
+        // Reveals, untaps, counter producers (the exile-rider case is lifted out
         // by `this_way_cause_for_resolved`), the RevealUntil kept card, and any
         // other producer do not name a "<verb>ed this way" set — leave them
         // unstamped (matched only by `caused_by: None`).
@@ -40856,6 +40881,89 @@ mod tests {
             &AbilityCondition::ConditionInstead {
                 inner: Box::new(leaf),
             }
+        ));
+    }
+
+    /// CR 701.26a + CR 608.2c: a tap instruction stamps `Tapped`; untap stays unstamped.
+    #[test]
+    fn set_tap_state_tap_stamps_tapped_cause() {
+        let wolves = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Wolf".to_string())
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Untapped]),
+        );
+        for scope in [EffectScope::All, EffectScope::Single] {
+            assert_eq!(
+                this_way_cause_for_effect(&Effect::SetTapState {
+                    target: wolves.clone(),
+                    scope,
+                    state: TapStateChange::Tap,
+                }),
+                Some(ThisWayCause::Tapped),
+            );
+        }
+        assert_eq!(
+            this_way_cause_for_effect(&Effect::SetTapState {
+                target: wolves,
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+            }),
+            None,
+            "CR 701.26b: an untap names no consumed population"
+        );
+    }
+
+    /// CR 608.2c: an each-source node whose sources are the chain tracked set
+    /// makes the preceding tap publish it; a plain typed source class does not.
+    #[test]
+    fn each_source_tracked_sources_require_tap_publication() {
+        let tap_all = || {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .subtype("Wolf".to_string())
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Untapped]),
+                    ),
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let each_source = |sources: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::EachSourceDealsDamage {
+                    sources,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::BatchSource,
+                        },
+                    },
+                    recipient: EachDamageRecipient::Shared(TargetFilter::Typed(
+                        TypedFilter::creature(),
+                    )),
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let wolf = TargetFilter::Typed(TypedFilter::default().subtype("Wolf".to_string()));
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(wolf.clone()),
+            caused_by: Some(ThisWayCause::Tapped),
+        };
+        assert!(next_sub_needs_tracked_set(
+            &tap_all().sub_ability(each_source(tracked))
+        ));
+        assert!(!next_sub_needs_tracked_set(
+            &tap_all().sub_ability(each_source(wolf))
         ));
     }
 }

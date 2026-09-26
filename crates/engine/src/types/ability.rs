@@ -7417,6 +7417,14 @@ pub enum ThisWayCause {
     /// CR 701.9a: the member was discarded this way (cause survives a
     /// replacement that redirects the discard to another zone — CR 614.6).
     Discarded,
+    /// CR 701.26a: the member was tapped this way — only an actual
+    /// untapped→tapped change counts. A permanent that was already tapped, or
+    /// that a "can't become tapped" restriction kept upright, is not tapped by
+    /// the instruction and so never becomes a member of a mass tap's set (it
+    /// emits no `PermanentTapped`, and a mass tap declares no targets to fall
+    /// back to). Master of the Wild Hunt: "Each Wolf tapped this way
+    /// deals damage equal to its power to target creature."
+    Tapped,
     /// CR 608.2c + CR 400.7: the member was returned (put onto the battlefield)
     /// this way by a one-shot put-onto-battlefield instruction.
     Returned,
@@ -7698,6 +7706,9 @@ pub enum TargetFilter {
     /// (`Some(Exiled)`) and "sacrificed this way" (`Some(Sacrificed)`)
     /// references disjointly — and a sacrifice that a replacement redirects to
     /// Exile (CR 614.6) still counts as `Sacrificed` (issue #2932).
+    /// A mass tap stamps its newly tapped members `Tapped` (CR 701.26a), so
+    /// "each Wolf tapped this way" (`Some(Tapped)`) reads exactly the
+    /// permanents the instruction tapped.
     TrackedSetFiltered {
         id: super::identifiers::TrackedSetId,
         filter: Box<TargetFilter>,

@@ -7683,4 +7683,97 @@ mod tests {
         // already consumed it via the qualified path.
         let _ = CounterType::Plus1Plus1;
     }
+
+    /// CR 701.26a + CR 608.2c + CR 120.1: SetTapState{Tap, All} publishes only
+    /// the permanents it actually tapped, stamped `Tapped`; an each-source node
+    /// reading that set deals each newly tapped Wolf's OWN power. Board: untapped
+    /// Wolves 1/2/4, pre-tapped Wolf 3, 5/5 target → exactly 7 (not 10 with the
+    /// pre-tapped Wolf, not 3k for any uniform per-source power).
+    #[test]
+    fn each_wolf_tapped_this_way_deals_own_power_only_newly_tapped() {
+        use crate::types::ability::{
+            EachDamageRecipient, EffectScope, TapStateChange, ThisWayCause,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        let mut state = GameState::new_two_player(7);
+        let mk =
+            |state: &mut GameState, id: u64, owner: PlayerId, name: &str, p: i32, wolf: bool| {
+                let o = create_object(
+                    state,
+                    CardId(id),
+                    owner,
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&o).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                if wolf {
+                    obj.card_types.subtypes = vec!["Wolf".to_string()];
+                }
+                obj.base_card_types = obj.card_types.clone();
+                obj.power = Some(p);
+                obj.base_power = Some(p);
+                obj.toughness = Some(p);
+                obj.base_toughness = Some(p);
+                o
+            };
+        let w1 = mk(&mut state, 50, PlayerId(0), "Wolf One", 1, true);
+        let w2 = mk(&mut state, 51, PlayerId(0), "Wolf Two", 2, true);
+        let w4 = mk(&mut state, 52, PlayerId(0), "Wolf Four", 4, true);
+        let w3 = mk(&mut state, 53, PlayerId(0), "Wolf Three", 3, true);
+        state.objects.get_mut(&w3).unwrap().tapped = true;
+        let target = mk(&mut state, 54, PlayerId(1), "Target", 5, false);
+
+        let tap_all = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype("Wolf".to_string())
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Untapped]),
+                ),
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let each_wolf = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Wolf".to_string()),
+                    )),
+                    caused_by: Some(ThisWayCause::Tapped),
+                },
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::BatchSource,
+                    },
+                },
+                recipient: EachDamageRecipient::Shared(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ),
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = tap_all.sub_ability(each_wolf);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for w in [w1, w2, w4] {
+            assert!(state.objects[&w].tapped, "untapped Wolf becomes tapped");
+        }
+        assert_eq!(
+            state.objects[&target].damage_marked, 7,
+            "only the three newly tapped Wolves deal their own power (1+2+4)"
+        );
+        for w in [w1, w2, w3, w4] {
+            assert_eq!(state.objects[&w].damage_marked, 0);
+        }
+    }
 }
