@@ -1204,6 +1204,7 @@ mod sentinel_sliver_vigilance_grant;
 mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
 mod shorten_efficacy;
+mod shuffle_them_into_libraries;
 mod shuri_wakandan_inventor_copy_recipient;
 mod sift_through_sands;
 mod sigarda_tajuru_tamiyo_forced_action_protection;

@@ -31457,3 +31457,93 @@ fn m_odo_the_gnarled_oracle_parses_its_printed_eminence_ability() {
         }]
     );
 }
+
+/// CR 608.2c + CR 701.24c: Choice of Fortunes — "Seek two cards. You may shuffle
+/// them into your library. If you do, seek two cards." The optional instruction
+/// moves the WHOLE sought set (the chain tracked set Seek publishes) into the
+/// library with one terminal shuffle; "If you do" gates the second seek.
+#[test]
+fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
+    let parsed = parse(
+        "Seek two cards. You may shuffle them into your library. If you do, seek two cards.\nYou have no maximum hand size for the rest of the game.",
+        "Choice of Fortunes",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let head = &parsed.abilities[0];
+    assert!(matches!(
+        &*head.effect,
+        Effect::Seek {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
+    let optional = head.sub_ability.as_deref().expect("optional move");
+    assert!(optional.optional);
+    assert_eq!(
+        *optional.effect,
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            },
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        }
+    );
+    let shuffle = optional.sub_ability.as_deref().expect("terminal shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    );
+    assert_eq!(shuffle.sub_link, SubAbilityLink::ContinuationStep);
+    let gated = shuffle.sub_ability.as_deref().expect("if-you-do seek");
+    assert!(matches!(&*gated.effect, Effect::Seek { .. }));
+    assert!(gated
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed));
+}
+
+/// CR 400.3 + CR 701.24c: an owner subject ("the owners of those cards" / "those
+/// permanents' owners") before "shuffle them into their libraries" moves the
+/// declared objects into their owners' libraries — not a bare shuffle.
+#[test]
+fn owner_subject_shuffle_them_into_their_libraries_moves_the_objects() {
+    let parsed = parse(
+        "Choose up to three target cards in graveyards. The owners of those cards shuffle them into their libraries. You gain 2 life.",
+        "Turn the Earth",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let defs = reveal_chain_defs(&parsed.abilities[0]);
+    assert!(
+        defs.iter().any(|d| matches!(
+            &*d.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                owner_library: true,
+                ..
+            }
+        )),
+        "expected an owner-library move, got {defs:?}"
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Unimplemented { .. })),
+        "{defs:?}"
+    );
+}

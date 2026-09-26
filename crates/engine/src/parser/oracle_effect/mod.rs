@@ -31285,6 +31285,9 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         // publisher so a following "those cards" move receives the tracked-set
         // sentinel that activates that runtime publication.
         || matches!(effect, Effect::SearchLibrary { .. })
+        // Seek publishes its sought cards the same way ("Seek two cards. You may
+        // shuffle them into your library." — Choice of Fortunes).
+        || matches!(effect, Effect::Seek { .. })
         || matches!(
             effect,
             Effect::PutCounter { .. }
@@ -31800,6 +31803,52 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         || copy_token_recall
         || play_from_exile_grant
         || free_cast_that_card_grant
+        || plural_library_shuffle_recall(lower)
+}
+
+/// CR 701.24c + CR 608.2c: the PLURAL library-recall anaphor — "[you may]
+/// shuffle them into <possessive> library" names every object the previous
+/// instruction put elsewhere (Choice of Fortunes: the two sought cards now in
+/// hand). Start-anchored like the other recalls so a same-sentence "create …
+/// and shuffle them into …" (Gunk Slug) is not a cross-clause anaphor.
+pub(crate) fn plural_library_shuffle_recall(lower: &str) -> bool {
+    (
+        opt(tag::<_, _, OracleError<'_>>("you may ")),
+        tag("shuffle them into "),
+    )
+        .parse(lower)
+        .is_ok()
+        && scan_contains_phrase(lower, "library")
+}
+
+/// CR 701.24c + CR 608.2c: "shuffle them into your library" after a tracked-set
+/// publisher moves EVERY member of that set, so the pronoun's singular
+/// `ChangeZone` (whose `TrackedSet` form means "choose one from among" —
+/// Expressive Iteration) becomes a mass `ChangeZoneAll` over the chain set.
+/// CR 701.24a: `TerminalShuffle` leaves the one shuffle to the chained terminal
+/// `Shuffle`, after every member has moved.
+fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
+    if let Effect::ChangeZone {
+        origin,
+        destination: Zone::Library,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = effect
+    {
+        *effect = Effect::ChangeZoneAll {
+            origin: *origin,
+            destination: Zone::Library,
+            target: tracked_set_filter(),
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+        };
+    }
 }
 
 /// CR 608.2c: the SINGULAR battlefield-recall anaphor — "return it " at a

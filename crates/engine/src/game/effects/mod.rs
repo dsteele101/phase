@@ -3889,7 +3889,20 @@ pub(crate) fn optional_decline_branch(
     if let Some(branch) = ability.else_ability.as_deref() {
         return Some(Cow::Borrowed(branch));
     }
-    let sub = ability.sub_ability.as_deref()?;
+    let mut sub = ability.sub_ability.as_deref()?;
+    // CR 608.2c: an unconditional `ContinuationStep` is a resolution step of the
+    // declined instruction itself (Choice of Fortunes' "shuffle them into your
+    // library" = move, then shuffle), so it is skipped with that instruction and
+    // the decline is decided at the next printed node — an "if you do" gate or
+    // the next instruction. A `SequentialSibling`, a conditioned node, or a node
+    // with its own decline branch stops the walk.
+    while sub.sub_link == SubAbilityLink::ContinuationStep
+        && sub.condition.is_none()
+        && sub.else_ability.is_none()
+        && !should_resolve_subability_on_optional_decline(sub)
+    {
+        sub = sub.sub_ability.as_deref()?;
+    }
     let selected = should_resolve_subability_on_optional_decline(sub)
         || (sub.sub_link == SubAbilityLink::SequentialSibling
             && !sub_ability_is_reflexive(sub)
@@ -8480,6 +8493,10 @@ fn affected_objects_from_events(
                 // to that zone makes a downstream "from among the milled cards"
                 // sub-ability resolve against exactly the milled cards.
                 Effect::Mill { destination, .. } => Some(*destination),
+                // Seek: the sought cards land in the Seek's destination, so a
+                // downstream "them" names exactly those cards (Choice of
+                // Fortunes' "shuffle them into your library").
+                Effect::Seek { destination, .. } => Some(*destination),
                 // CR 701.20a + CR 608.2f: The kept card lands in `kept_destination`; scope the
                 // tracked set to that zone so downstream TrackedSet consumers (e.g. IC's
                 // ChangeZoneAll{Exile→Battlefield}) see only the kept card, not the rest pile.

@@ -8889,9 +8889,11 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     // from a preceding dig/reveal effect; this is just a shuffle. The
     // third-person form parses the same way here; `parse_effect_chain_ir`
     // binds it to a `RevealUntil` antecedent or keeps it an explicit gap.
+    // "shuffle them into <library>" is NOT a bare shuffle: "them" names objects
+    // that are elsewhere (Choice of Fortunes' sought cards in hand), so it falls
+    // through to the zone-move arm below (CR 701.24c).
     if shuffle_rest_clause(lower) == Some(ShuffleRestClause::ThirdPerson)
         || nom_primitives::scan_contains(lower, "shuffle the rest")
-        || nom_primitives::scan_contains(lower, "shuffle them")
     {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
@@ -8926,6 +8928,34 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             target: TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
             },
+        });
+    }
+    // CR 400.3 + CR 701.24c: "the owners of those cards shuffle them into their
+    // libraries" (Turn the Earth) / "those permanents' owners shuffle them into
+    // their libraries" (Guff Rewrites History) — each declared object goes to
+    // its owner's library, then each such owner shuffles. The owner subject
+    // names who acts; the objects are the parent's declared targets.
+    let owner_subject = alt((
+        preceded(
+            tag::<_, _, OracleError<'_>>("the owners of those "),
+            alt((tag("cards"), tag("permanents"))),
+        ),
+        terminated(
+            preceded(tag("those "), alt((tag("cards"), tag("permanents")))),
+            tag("' owners"),
+        ),
+    ));
+    if all_consuming((
+        owner_subject,
+        tag(" shuffle them into their libraries"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+            target: TargetFilter::ParentTarget,
+            owner_library: true,
         });
     }
     if tag::<_, _, OracleError<'_>>("shuffle")
