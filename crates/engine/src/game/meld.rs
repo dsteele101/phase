@@ -387,14 +387,17 @@ pub(crate) fn commit_meld_battlefield(state: &mut GameState, context: &MeldSelec
         None,
     );
     // CR 701.42a / CR 730.2: absorb the partner into the single melded permanent
-    // — it is no longer an independent object; remove it from the exile list and
-    // mark it absorbed (zone == Battlefield, in no zone list), mirroring
-    // merge_object_onto, so the CR 712.21 leave-split routes it to the graveyard
-    // exactly once. This runs BEFORE the survivor's pipeline entry below: an
-    // entry-replacement consult (CR 614.1c) can park a `NeedsChoice` pause, and
-    // absorbing first guarantees the partner is never stranded in exile across
-    // that pause.
-    crate::game::zones::absorb_component(state, context.partner_id, Some(Zone::Exile));
+    // — it is no longer an independent object; remove it from the zone list the
+    // exile instruction left it in and mark it absorbed (zone == Battlefield, in
+    // no zone list), mirroring merge_object_onto, so the CR 712.21 leave-split
+    // routes it to the graveyard exactly once. CR 400.7j + CR 701.42b: a
+    // replacement may have left that card in another public zone instead of
+    // exile, so read its current zone rather than assuming Exile.
+    let partner_zone = state
+        .objects
+        .get(&context.partner_id)
+        .map(|partner| partner.zone);
+    crate::game::zones::absorb_component(state, context.partner_id, partner_zone);
     if let Some(survivor) = state.objects.get_mut(&context.source_id) {
         survivor.merged_components = vec![context.source_id, context.partner_id];
         survivor.merge_kind = Some(MergeKind::Meld);

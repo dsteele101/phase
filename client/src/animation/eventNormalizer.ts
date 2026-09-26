@@ -122,17 +122,34 @@ const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
  * CR 701.42a: a meld exiles both cards of the pair and returns them as one
  * melded permanent. The `Melded` forge animation presents that whole sequence,
  * so the pair's preceding exile and entry moves are not animated separately.
+ *
+ * CR 400.7j: a replacement can send either exile attempt to another public
+ * zone (or keep the card on the battlefield) and the meld still happens, so a
+ * component's meld moves are identified by their place in the sequence rather
+ * than by destination: walking back from `Melded`, the survivor's latest move
+ * onto the battlefield is its entry, and each card's latest move off the
+ * battlefield is its exile attempt. Earlier moves of either card stay animated.
  */
 function meldPresentedZoneChanges(events: GameEvent[]): Set<number> {
   const presented = new Set<number>();
   events.forEach((event, meldIndex) => {
     if (event.type !== "Melded") return;
-    const pair = new Set([event.data.object_id, event.data.partner_id]);
-    for (let index = 0; index < meldIndex; index++) {
-      const candidate = events[index];
-      if (candidate.type !== "ZoneChanged" || !pair.has(candidate.data.object_id)) continue;
-      const { from, to } = candidate.data;
-      if (to === "Exile" || (from === "Exile" && to === "Battlefield")) presented.add(index);
+    const { object_id: survivor, partner_id: partner } = event.data;
+    for (const component of [survivor, partner]) {
+      let awaitingEntry = component === survivor;
+      for (let index = meldIndex - 1; index >= 0; index--) {
+        const candidate = events[index];
+        if (candidate.type !== "ZoneChanged" || candidate.data.object_id !== component) continue;
+        const { from, to } = candidate.data;
+        if (awaitingEntry && to === "Battlefield") {
+          presented.add(index);
+          awaitingEntry = false;
+          if (from !== "Battlefield") continue;
+        } else if (from === "Battlefield" && to !== "Battlefield") {
+          presented.add(index);
+        }
+        break;
+      }
     }
   });
   return presented;

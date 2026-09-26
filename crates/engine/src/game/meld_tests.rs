@@ -648,6 +648,17 @@ fn assert_redirected_exile_pair_melds(redirects: &[(&str, Zone)]) {
         state.objects[&source].merged_components,
         vec![source, partner]
     );
+    // CR 701.42a: the absorbed partner is part of the melded permanent, so it
+    // must not linger in whichever zone list the redirected exile left it in.
+    assert_eq!(state.objects[&partner].zone, Zone::Battlefield);
+    assert!(!state.battlefield.contains(&partner));
+    assert!(!state.exile.contains(&partner));
+    assert!(!state.command_zone.contains(&partner));
+    assert!(state.players.iter().all(|player| {
+        !player.graveyard.contains(&partner)
+            && !player.hand.contains(&partner)
+            && !player.library.contains(&partner)
+    }));
     for (name, destination) in redirects {
         if *destination == Zone::Battlefield {
             assert!(!events.iter().any(|event| matches!(

@@ -133,6 +133,34 @@ describe("normalizeEvents", () => {
       expect(animated).toContainEqual(unrelated);
       expect(animated.filter((event) => event.type === "ZoneChanged")).toHaveLength(1);
     });
+
+    it("presents redirected exile attempts through the forge animation alone", () => {
+      const steps = normalizeEvents([
+        { type: "ZoneChanged", data: { object_id: 10, from: "Battlefield", to: "Graveyard" } },
+        { type: "ZoneChanged", data: { object_id: 11, from: "Battlefield", to: "Command" } },
+        { type: "ZoneChanged", data: { object_id: 10, from: "Graveyard", to: "Battlefield" } },
+        melded,
+      ]);
+      expect(steps).toHaveLength(1);
+      expect(steps[0].effects.map((effect) => effect.event.type)).toEqual(["Melded"]);
+    });
+
+    it("still animates a component's moves that precede the meld sequence", () => {
+      const earlierExile: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 11, from: "Hand", to: "Exile" },
+      };
+      const earlierReturn: GameEvent = {
+        type: "ZoneChanged",
+        data: { object_id: 11, from: "Exile", to: "Battlefield" },
+      };
+      const steps = normalizeEvents([earlierExile, earlierReturn, ...meldSequence]);
+      const animated = steps.flatMap((step) => step.effects.map((effect) => effect.event));
+      expect(animated.filter((event) => event.type === "ZoneChanged")).toEqual([
+        earlierExile,
+        earlierReturn,
+      ]);
+    });
   });
 
   it("SpellCast always starts a new step", () => {
