@@ -13,8 +13,8 @@
 //!
 //! The deck is 60 lands, so a player's land count equals their own turn count
 //! and X is bounded by it. The default line is "spend the whole turn on the
-//! sink", capped at 8 — beyond 8 the creature pool thins out and the extra mana
-//! buys little:
+//! sink", with the rung capped at 8 — mana past 8 is spent only when the pool
+//! scoring below says the larger X is worth it:
 //!
 //! | own turn | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9+ |
 //! |---|---|---|---|---|---|---|---|---|---|
@@ -85,9 +85,9 @@ use super::mulligan::TurnOrder;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
 
-/// Largest X the schedule ever asks for. Past this the marginal creature is not
-/// worth the extra land drop's worth of mana, and the pool at very high mana
-/// values is thin.
+/// Highest rung of the schedule. Past this the table stops climbing: a larger X
+/// is taken only when the pool scoring (see the module docs) finds the pool
+/// there better than the pool at the rung.
 pub const MAX_SCHEDULED_X: u32 = 8;
 
 /// First own-turn on which the player on the play activates. CR 103.8a: they
@@ -672,15 +672,22 @@ mod tests {
         assert_eq!(turn_order(&momir_state(P1, 1), P0), TurnOrder::OnDraw);
     }
 
-    /// The cap is what stops the AI dumping a whole late-game mana base into a
-    /// single creature; it must hold no matter how far the game runs.
+    /// The rung — the floor the pool scoring starts from, and the whole answer
+    /// when there is no pool data — never climbs past the cap, however far the
+    /// game runs and however much mana is payable.
     #[test]
-    fn schedule_never_exceeds_the_cap() {
+    fn schedule_rung_never_exceeds_the_cap() {
         for own_turn in 1..=40u32 {
             let state = momir_state(P0, own_turn * 2 - 1);
-            // Affordability held below the Emrakul threshold so this asserts
-            // the ordinary cap, not the 15-mana hunt.
-            if let Some(x) = scheduled_x(&state, P0, &XBudget::all_free(MAX_SCHEDULED_X), None) {
+            // Affordability well above the cap but below the Emrakul threshold,
+            // so this asserts the ordinary cap, not the 15-mana hunt.
+            let affordable = EMRAKUL_MANA_VALUE - 1;
+            assert_eq!(
+                scheduled_x(&state, P0, &XBudget::all_free(affordable), None),
+                schedule_rung(&state, P0, affordable),
+                "without pool data the rung is the answer"
+            );
+            if let Some(x) = schedule_rung(&state, P0, affordable) {
                 assert!(
                     x <= MAX_SCHEDULED_X,
                     "own turn {own_turn} scheduled X={x} above cap {MAX_SCHEDULED_X}"
