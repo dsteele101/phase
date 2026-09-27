@@ -314,6 +314,7 @@ For interactive replacements, you need to:
 | **AssignCombatDamage** | `AssignCombatDamage { player, assignments }` | Complex — damage assignment order |
 | **EquipTarget** | `EquipTarget { player, equipment_id, legal_targets }` | Simple — target for equip |
 | **CopyRetarget** | `CopyRetarget { player, copy_id, ... }` | Medium — retarget copied spell |
+| **DistributeAmong (resolution-time)** | `DistributeAmong { player, total, targets, unit, scope: ResolutionCandidates { pending_effect } }` | Medium — CR 608.2d untargeted division chosen on resolution (gate: `ability_utils::resolution_time_division`); answered with `GameAction::DistributeAmong`, validated by `ability_utils::validate_distribution`, resumed via `deal_damage::resume_resolution_division` |
 
 ### Named & Modal Choices
 
