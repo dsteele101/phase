@@ -6287,6 +6287,7 @@ fn build_restriction_clause(
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::ParentTargetAttachedTo
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::SourceChosenPlayer

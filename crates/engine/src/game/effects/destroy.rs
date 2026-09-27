@@ -247,6 +247,9 @@ pub(super) fn destroyed_targets(state: &GameState, ability: &ResolvedAbility) ->
     // Gated on `ability.targets.is_empty()` so a genuinely targeted destroy still
     // affects exactly the chosen targets (CR 608.2b).
     match target_filter {
+        Some(filter @ TargetFilter::ParentTargetAttachedTo) => {
+            crate::game::targeting::resolved_targets(ability, filter, state)
+        }
         Some(filter)
             if ability.targets.is_empty()
                 && crate::game::targeting::is_pure_event_context_filter(filter) =>

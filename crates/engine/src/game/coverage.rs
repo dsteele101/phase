@@ -772,6 +772,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
+        TargetFilter::ParentTargetAttachedTo => {
+            "permanent or player that parent target was attached to".into()
+        }
         TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
@@ -954,6 +957,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
             FilterProp::AttachedToPlayer { player } => {
                 parts.push(format!("attached to {}", fmt_controller(player)))
+            }
+            FilterProp::AttachedToHost { filter } => {
+                parts.push(format!("attached to {}", fmt_target(filter)))
             }
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {

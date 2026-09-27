@@ -4312,6 +4312,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::Historic
         | FilterProp::NotHistoric
         | FilterProp::Other { .. } => false,
+        FilterProp::AttachedToHost { filter } => target_filter_reads_life_total(filter),
     }
 }
 
@@ -4390,6 +4391,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -20309,6 +20311,7 @@ mod tests {
             Zone::Battlefield,
             Zone::Graveyard,
             Vec::new(),
+            None,
         );
         assert!(
             state.objects[&exiled].casting_permissions.is_empty(),
@@ -23192,6 +23195,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
 

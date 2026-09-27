@@ -865,6 +865,11 @@ pub fn resolved_targets(
             })
             .unwrap_or_default();
     }
+    if matches!(target_filter, TargetFilter::ParentTargetAttachedTo) {
+        return crate::game::ability_utils::parent_target_attached_to(ability, state)
+            .into_iter()
+            .collect();
+    }
     // CR 608.2k: "the exiled/sacrificed/discarded <noun>" — an untargeted
     // reference to the object referred to by this ability's cost. Resolved
     // from the recursively-stamped `cost_paid_object`. Mirrors the local
@@ -1247,6 +1252,7 @@ pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool
             | TargetFilter::AttachedTo
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
+            | TargetFilter::ParentTargetAttachedTo
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
@@ -1383,6 +1389,12 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         // reason.
         TargetFilter::ParentTargetSlot { index } => {
             resolve_live_parent_slot_from_root(state, ability, *index)
+                .and_then(|target| target_ref_object(&target))
+                .into_iter()
+                .collect()
+        }
+        TargetFilter::ParentTargetAttachedTo => {
+            crate::game::ability_utils::parent_target_attached_to(ability, state)
                 .and_then(|target| target_ref_object(&target))
                 .into_iter()
                 .collect()
@@ -1640,6 +1652,33 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        TargetFilter::ParentTargetAttachedTo => {
+            if let Some(event) = event {
+                if let Some(source_obj_id) = extract_source_from_event(event) {
+                    let attached_to = state
+                        .objects
+                        .get(&source_obj_id)
+                        .and_then(|o| o.attached_to)
+                        .or_else(|| {
+                            state
+                                .lki_cache
+                                .get(&source_obj_id)
+                                .and_then(|lki| lki.attached_to)
+                        });
+                    if let Some(host) = attached_to {
+                        return match host {
+                            crate::game::game_object::AttachTarget::Object(id) => {
+                                Some(TargetRef::Object(id))
+                            }
+                            crate::game::game_object::AttachTarget::Player(player) => {
+                                Some(TargetRef::Player(player))
+                            }
+                        };
+                    }
+                }
+            }
+            None
+        }
         // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
         // but returns the *owner* of the resolved object. When no trigger event
         // supplies a source object (Enslave's phase trigger), fall back to the
@@ -1889,6 +1928,12 @@ pub fn resolve_effect_player_ref(
                     }
                 })
             })
+        }
+        TargetFilter::ParentTargetAttachedTo => {
+            match crate::game::ability_utils::parent_target_attached_to(ability, state) {
+                Some(TargetRef::Player(player)) => Some(player),
+                _ => None,
+            }
         }
         // CR 120.1 + CR 109.4: The damage RECIPIENT's controller. Deliberately
         // does NOT consult `parent_target_controller` first, unlike the arm

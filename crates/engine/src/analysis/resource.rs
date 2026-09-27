@@ -5771,6 +5771,7 @@ fn node_reads_mutable_resolution_local_state(node: &crate::types::ability::Targe
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
@@ -5925,6 +5926,7 @@ fn node_has_non_arrival_invariant_property(node: &crate::types::ability::TargetF
         | TargetFilter::ChosenCard
         | TargetFilter::HasChosenName
         | TargetFilter::ExiledBySource
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::ExiledCardByIndex { .. } => false,
     }
 }
@@ -6069,6 +6071,7 @@ fn prop_is_arrival_invariant(prop: &crate::types::ability::FilterProp) -> bool {
         | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::Other { .. } => false,
     }
 }

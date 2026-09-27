@@ -2781,6 +2781,7 @@ impl GameObject {
             // snapshots that use this method never ask an attachment predicate, so an
             // empty set here is the same fail-closed answer they got before.
             attachments: Vec::new(),
+            attached_to: self.attached_to,
         }
     }
 

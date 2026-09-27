@@ -113,6 +113,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::GrantingObject
         // CR 608.2c: source-relative object ref carries no pitch-bound X.
         | TargetFilter::OriginalSource
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -295,6 +296,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::GrantingObject
         // CR 608.2c: source-relative object ref — nothing to relax.
         | TargetFilter::OriginalSource
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => filter.clone(),
     }
 }

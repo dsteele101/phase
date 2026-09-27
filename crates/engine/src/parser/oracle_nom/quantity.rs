@@ -2911,6 +2911,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -3047,6 +3048,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => true,
     }
 }

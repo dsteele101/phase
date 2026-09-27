@@ -392,6 +392,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });

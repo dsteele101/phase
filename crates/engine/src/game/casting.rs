@@ -2934,6 +2934,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }

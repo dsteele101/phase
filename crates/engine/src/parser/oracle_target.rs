@@ -5124,6 +5124,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::IsCommander
         | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -9522,6 +9523,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => None,
     }
 }

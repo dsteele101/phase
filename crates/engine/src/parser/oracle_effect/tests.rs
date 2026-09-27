@@ -62151,6 +62151,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -62174,6 +62175,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         FilterProp::AnyOf { props } => props.iter().any(prop_has_chosen_color),
         FilterProp::Not { prop } => prop_has_chosen_color(prop),
         // Nested `TargetFilter`.
+        FilterProp::AttachedToHost { filter } => filter_has_chosen_color(filter),
         FilterProp::CanEnchant { target } => filter_has_chosen_color(target),
         FilterProp::DifferentNameFrom { filter } => filter_has_chosen_color(filter),
         FilterProp::DistinctFrom { reference } => filter_has_chosen_color(reference),
@@ -74081,4 +74083,65 @@ fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
         "{plargg:?}"
     );
     assert!(plargg.properties.contains(&three_or_less), "{plargg:?}");
+}
+
+#[test]
+fn test_unforge_attached_condition_and_damage_parsing() {
+    use super::conditions::try_nom_condition_as_ability_condition;
+
+    let text = "Destroy target Equipment. If that Equipment was attached to a creature, Unforge deals 2 damage to that creature.";
+    let chain = parse_effect_chain(text, AbilityKind::Spell);
+
+    // Root effect is Destroy target Equipment.
+    assert!(
+        matches!(&*chain.effect, Effect::Destroy { target, .. } if matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Subtype("Equipment".to_string())))),
+        "expected Destroy target Equipment, got {:?}",
+        chain.effect
+    );
+
+    // Sub-ability is gated on target having been attached to a creature.
+    let sub = chain
+        .sub_ability
+        .as_ref()
+        .expect("expected sub-ability for conditional clause");
+    match &sub.condition {
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki: true,
+            ..
+        }) => {
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected typed filter, got {filter:?}");
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(p, FilterProp::AttachedToHost { filter: host } if matches!(**host, TargetFilter::Typed(ref htf) if htf.type_filters.contains(&TypeFilter::Creature)))),
+                "expected AttachedToHost(creature) property, got {tf:?}"
+            );
+        }
+        other => panic!("expected TargetMatchesFilter with use_lki: true, got {other:?}"),
+    }
+
+    // Effect of sub-ability is DealDamage to ParentTargetAttachedTo.
+    match &*sub.effect {
+        Effect::DealDamage { target, amount, .. } => {
+            assert_eq!(*target, TargetFilter::ParentTargetAttachedTo);
+            assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
+        }
+        other => panic!("expected DealDamage to ParentTargetAttachedTo, got {other:?}"),
+    }
+
+    // Direct condition test
+    let mut ctx = ParseContext::default();
+    let cond = try_nom_condition_as_ability_condition(
+        "that Equipment was attached to a creature",
+        &mut ctx,
+    );
+    assert!(matches!(
+        cond,
+        Some(AbilityCondition::TargetMatchesFilter { use_lki: true, .. })
+    ));
+    assert_eq!(
+        ctx.demonstrative_object_ref,
+        Some(TargetFilter::ParentTargetAttachedTo)
+    );
 }

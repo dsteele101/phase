@@ -157,6 +157,12 @@ fn resolve_effect_recipients(
             .map(|id| vec![TargetRef::Object(id)])
             .unwrap_or_default();
     }
+    // CR 608.2c + CR 608.2h + CR 301.5: The host permanent/player an ability's parent target
+    // was attached to. Resolved before `ability.targets` because chained nodes inherit the
+    // parent targets (e.g. the destroyed Equipment), while this effect damages the host creature.
+    if matches!(target_filter, TargetFilter::ParentTargetAttachedTo) {
+        return crate::game::targeting::resolved_targets(ability, target_filter, state);
+    }
     if let Some(target) = player_context_target(state, ability, target_filter) {
         return vec![target];
     }

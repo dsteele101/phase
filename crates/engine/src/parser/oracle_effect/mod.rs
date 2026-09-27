@@ -7397,17 +7397,24 @@ fn parse_event_context_ref_with_ctx<'a>(
     ctx: &ParseContext,
 ) -> Option<(TargetFilter, &'a str)> {
     let (target, rest) = parse_event_context_ref(text)?;
-    let target = match (&target, ctx.relative_player_scope.as_ref()) {
-        (TargetFilter::TriggeringPlayer, Some(ControllerRef::ScopedPlayer)) => {
-            TargetFilter::ScopedPlayer
-        }
-        (TargetFilter::TriggeringPlayer, Some(ControllerRef::SourceChosenPlayer)) => {
-            TargetFilter::SourceChosenPlayer
-        }
-        (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
-            TargetFilter::ParentTargetController
-        }
-        _ => target,
+    // CR 608.2c + CR 608.2k: When a demonstrative object binding has been established
+    // in the parse context (e.g. `ParentTargetAttachedTo` from "if that Equipment was
+    // attached to a creature"), generic demonstrative phrases like "that creature"
+    // bind to the demonstrative referent rather than falling back to `TriggeringSource`.
+    let target = match (&target, ctx.demonstrative_object_ref.as_ref()) {
+        (TargetFilter::TriggeringSource, Some(demonstrative)) => demonstrative.clone(),
+        _ => match (&target, ctx.relative_player_scope.as_ref()) {
+            (TargetFilter::TriggeringPlayer, Some(ControllerRef::ScopedPlayer)) => {
+                TargetFilter::ScopedPlayer
+            }
+            (TargetFilter::TriggeringPlayer, Some(ControllerRef::SourceChosenPlayer)) => {
+                TargetFilter::SourceChosenPlayer
+            }
+            (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
+                TargetFilter::ParentTargetController
+            }
+            _ => target,
+        },
     };
     Some((target, rest))
 }
@@ -9738,6 +9745,9 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
                         *controller = to.clone();
                     }
                 }
+                if let FilterProp::AttachedToHost { filter: inner } = prop {
+                    rebind_controller_scope(inner, from.clone(), to.clone());
+                }
             }
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -9786,6 +9796,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -22749,7 +22760,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
-            if !matches!(target, TargetFilter::ParentTargetController) =>
+            if !matches!(target, TargetFilter::ParentTargetController | TargetFilter::ParentTargetAttachedTo) =>
         {
             *target = TargetFilter::ParentTarget;
         }
@@ -22779,7 +22790,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::PutCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::MultiplyCounter { target, .. }
-            if !matches!(target, TargetFilter::LastCreated) =>
+            if !matches!(target, TargetFilter::LastCreated | TargetFilter::ParentTargetAttachedTo) =>
         {
             *target = TargetFilter::ParentTarget;
         }
@@ -22795,7 +22806,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
             .iter()
             .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)) => {}
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
-            if !matches!(target, TargetFilter::SelfRef)
+            if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTargetAttachedTo)
                 && !target_filter_has_explicit_object_constraints(target) =>
         {
             *target = TargetFilter::ParentTarget;
@@ -39711,9 +39722,14 @@ pub(crate) fn parse_effect_chain_ir(
             // The `binds_source_counter_pronoun` rung is deliberately absent:
             // that gate exists for the bare "it" pronoun's source-counter class
             // (#8549), which is not a demonstrative grammar.
-            demonstrative_object_ref: prior_typed_referent
-                .then_some(TargetFilter::ParentTarget)
-                .or_else(|| ctx.demonstrative_object_ref.clone()),
+            demonstrative_object_ref: match ctx.demonstrative_object_ref.clone() {
+                Some(TargetFilter::ParentTargetAttachedTo) => {
+                    Some(TargetFilter::ParentTargetAttachedTo)
+                }
+                other => prior_typed_referent
+                    .then_some(TargetFilter::ParentTarget)
+                    .or(other),
+            },
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
             // body, not of an individual chunk, so all chunks inside a trigger

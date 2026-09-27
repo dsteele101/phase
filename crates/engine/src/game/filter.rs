@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::game::combat;
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{AttachTarget, GameObject};
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
     resolve_quantity_with_targets,
@@ -217,6 +217,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
         // at grant-clone and never reaches this object predicate.
         | TargetFilter::GrantingObject
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -246,6 +247,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // (`reference = None`) is candidate-local, validated at resolution time,
         // not whole-board membership.
         FilterProp::SharesQuality { reference, .. } => reference.is_some(),
+        FilterProp::AttachedToHost { filter } => affected_filter_uses_object_population(filter),
         // Embedded-threshold props: population dependent iff the threshold
         // expression reads object count.
         FilterProp::Counters { count, .. } => {
@@ -478,6 +480,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -682,6 +685,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         FilterProp::TargetsOnly { filter } | FilterProp::Targets { filter } => {
             target_filter_characteristic_reads_at(filter, depth)
         }
+        FilterProp::AttachedToHost { filter } => target_filter_characteristic_reads_at(filter, depth),
         // CR 603.4: the shared quality names exactly which characteristic is
         // compared; the reference set contributes its own filter's kinds.
         FilterProp::SharesQuality {
@@ -879,6 +883,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         // CR 201.5a: append-only; GrantingObject is concretized to SpecificObject
         // at grant-clone and never reaches this object predicate.
         | TargetFilter::GrantingObject
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -984,6 +989,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
         | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
@@ -1766,6 +1772,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -1789,6 +1796,7 @@ pub(crate) fn filter_prop_contains(
         FilterProp::SharesQuality { reference, .. } => reference.as_deref().is_some_and(recurse),
         // CR 115.9b/9c: the stack entry's target-side filters.
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => recurse(filter),
+        FilterProp::AttachedToHost { filter } => recurse(filter),
         // CR 608.2c: prop-level combinators.
         FilterProp::Not { prop } => filter_prop_contains(prop, leaf),
         FilterProp::AnyOf { props } => props.iter().any(|p| filter_prop_contains(p, leaf)),
@@ -2017,6 +2025,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -2040,6 +2049,7 @@ fn filter_prop_contains_filter_prop(
             FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
                 filter_contains_filter_prop(filter, predicate)
             }
+            FilterProp::AttachedToHost { filter } => filter_contains_filter_prop(filter, predicate),
             FilterProp::Not { prop } => filter_prop_contains_filter_prop(prop, predicate),
             FilterProp::AnyOf { props } => props
                 .iter()
@@ -2475,6 +2485,7 @@ fn rewrite_filter_props(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::AllPlayers => {}
     }
 }
@@ -2499,6 +2510,7 @@ fn rewrite_filter_prop(
         FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
             rewrite_filter_props(filter, rewrite, complete)
         }
+        FilterProp::AttachedToHost { filter } => rewrite_filter_props(filter, rewrite, complete),
         FilterProp::Not { prop } => rewrite_filter_prop(prop, rewrite, complete),
         FilterProp::AnyOf { props } => props
             .iter_mut()
@@ -3987,7 +3999,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
             .is_some_and(|object| object.is_token),
         combat_status: Default::default(),
         co_departed: Vec::new(),
-        attached_to: None,
+        attached_to: lki.attached_to,
         entered_incarnation,
         turn_zone_change_index: 0,
         recorded_turn_number: 0,
@@ -4916,6 +4928,10 @@ fn filter_inner_for_object(
                     Some(TargetRef::Object(id)) if id == object_id
                 )
         }),
+        TargetFilter::ParentTargetAttachedTo => ability.is_some_and(|ability| {
+            crate::game::ability_utils::parent_target_attached_to(ability, state)
+                == Some(TargetRef::Object(object_id))
+        }),
         // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
         // resolve at resolution time, not via object matching. ParentTargetOwner
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
@@ -5298,6 +5314,7 @@ fn zone_change_filter_inner(
         | TargetFilter::StackSpell
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::Owner => false,
     }
 }
@@ -5635,6 +5652,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::Owner => false,
     }
 }
@@ -5959,6 +5977,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::Named { .. }
         // CR 201.5a: append-only (concretized before runtime).
         | TargetFilter::GrantingObject
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::Owner => false,
     }
 }
@@ -6274,6 +6293,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
         | FilterProp::AttachedToPlayer { .. }
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::Another
@@ -6382,6 +6402,20 @@ struct SourceContext<'a> {
     /// (e.g., target validation, spell-record matching, single-shot quantity
     /// resolution).
     recipient_id: Option<ObjectId>,
+}
+
+impl<'a> SourceContext<'a> {
+    fn to_filter_context(&self) -> FilterContext<'a> {
+        FilterContext {
+            source_id: self.id,
+            source_controller: self.controller,
+            ability: self.ability,
+            trigger_source: self.trigger_source,
+            recipient_id: self.recipient_id,
+            scoped_iteration_player: None,
+            triggering_object: self.triggering_object,
+        }
+    }
 }
 
 /// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
@@ -6564,6 +6598,7 @@ fn source_context_from_filter<'a>(
                     tapped: false,
                     is_suspected: false,
                     attachments: Vec::new(),
+                    attached_to: None,
                 });
             (
                 lki,
@@ -6750,6 +6785,11 @@ fn referenced_targets_for_filter(
         // shared chain-root authority.
         TargetFilter::ParentTargetSlot { index } => {
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+                .into_iter()
+                .collect()
+        }
+        TargetFilter::ParentTargetAttachedTo => {
+            crate::game::ability_utils::parent_target_attached_to(ability, state)
                 .into_iter()
                 .collect()
         }
@@ -7405,6 +7445,29 @@ fn matches_filter_prop(
             .is_some_and(|attached_player| {
                 source_controller_ref_player(state, source, player) == Some(attached_player)
             }),
+        // CR 301.5 + CR 303.4: Attachment-host predicate — matches when this
+        // object (Aura/Equipment/Fortification) is attached to a host that
+        // satisfies `host_filter`.
+        FilterProp::AttachedToHost {
+            filter: host_filter,
+        } => {
+            let Some(attached_target) = obj.attached_to else {
+                return false;
+            };
+            match attached_target {
+                AttachTarget::Object(host_id) => {
+                    let ctx = source.to_filter_context();
+                    matches_target_filter(state, host_id, host_filter, &ctx)
+                }
+                AttachTarget::Player(host_player) => player_matches_target_filter_in_state(
+                    state,
+                    host_filter,
+                    host_player,
+                    source.controller,
+                    Some(source.id),
+                ),
+            }
+        }
         // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
         // at least one attachment of the given kind whose controller satisfies
         // the optional `ControllerRef`. `exclude_source` preserves "another
@@ -8380,6 +8443,29 @@ fn zone_change_record_matches_property(
                     .contains(&record.object_id)
         }
 
+        // CR 301.5 + CR 303.4 + CR 608.2h: Attachment-host predicate against
+        // exit snapshot — reads LKI attachment so "if that Equipment was attached
+        // to a creature" (Unforge) evaluates against the host it equipped as it
+        // departed.
+        FilterProp::AttachedToHost { filter: host_filter } => {
+            let Some(attached_target) = record.attached_to else {
+                return false;
+            };
+            match attached_target {
+                AttachTarget::Object(host_id) => {
+                    let ctx = source.to_filter_context();
+                    matches_target_filter(state, host_id, host_filter, &ctx)
+                }
+                AttachTarget::Player(host_player) => player_matches_target_filter_in_state(
+                    state,
+                    host_filter,
+                    host_player,
+                    source.controller,
+                    Some(source.id),
+                ),
+            }
+        }
+
         FilterProp::SaddledSource
         | FilterProp::ConvokedSource
         | FilterProp::ProtectorMatches { .. }
@@ -8826,6 +8912,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         });
     SourceContext {
         id: context.source_id,
@@ -10746,6 +10833,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
 
@@ -16292,6 +16380,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -16340,6 +16429,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
         let entrant = ObjectId(700);
         let filter = TargetFilter::Typed(
@@ -16476,6 +16566,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
         let filter =
             TargetFilter::Typed(
@@ -16620,6 +16711,7 @@ mod tests {
             tapped,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
 
         // Left the battlefield TAPPED.
@@ -17583,6 +17675,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -17604,6 +17697,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
 
         let filter =
@@ -17753,6 +17847,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
 
@@ -17824,6 +17919,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
 
@@ -18520,6 +18616,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::EquippedBy
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
+            | FilterProp::AttachedToHost { .. }
             | FilterProp::Another
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject

@@ -945,6 +945,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementDamageSource

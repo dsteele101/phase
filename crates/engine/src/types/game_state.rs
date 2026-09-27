@@ -465,6 +465,10 @@ pub struct LKISnapshot {
     /// which is exactly the pre-change fail-closed behavior.
     #[serde(default)]
     pub attachments: Vec<AttachmentSnapshot>,
+    /// CR 608.2h + CR 400.7 + CR 301.5 + CR 303.4: The host this object was attached to
+    /// as it last existed on the battlefield. Captured before severance on battlefield exit.
+    #[serde(default)]
+    pub attached_to: Option<AttachTarget>,
 }
 
 /// Complete event-time authority for a triggered ability's source.
@@ -35182,6 +35186,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             }
         }
 

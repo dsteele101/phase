@@ -3339,6 +3339,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::OriginalSource => AttachHostAuthority::NoHost,
     };
 

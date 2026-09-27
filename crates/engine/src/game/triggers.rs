@@ -11944,6 +11944,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::ScopedPlayer
         // CR 608.2k: the cost-paid / effect-context referent lives on
         // `ResolvedAbility`, so this matches nothing at fire time. The
@@ -12148,6 +12149,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // diverges exactly when the nested filter does, and this recursion is
         // precise rather than merely conservative.
         FilterProp::CanEnchant { target } => filter_binding_diverges(target),
+        FilterProp::AttachedToHost { filter } => filter_binding_diverges(filter),
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => filter_binding_diverges(filter),
@@ -22273,6 +22275,7 @@ pub mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
 

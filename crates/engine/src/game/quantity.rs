@@ -10136,6 +10136,7 @@ mod tests {
             tapped: false,
             is_suspected: false,
             attachments: Vec::new(),
+            attached_to: None,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -19373,6 +19374,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
         state.current_trigger_event =
@@ -19437,6 +19439,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });
@@ -19587,6 +19590,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });
@@ -19668,6 +19672,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });
@@ -19748,6 +19753,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });
@@ -19814,6 +19820,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         };
@@ -19877,6 +19884,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });
@@ -19933,6 +19941,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         };
@@ -20012,6 +20021,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         };
@@ -20368,6 +20378,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -21190,6 +21201,7 @@ mod tests {
                     tapped: false,
                     is_suspected: false,
                     attachments: Vec::new(),
+                    attached_to: None,
                 },
             );
             state.exile_links.push(ExileLink {

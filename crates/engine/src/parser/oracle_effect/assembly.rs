@@ -1797,6 +1797,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            | TargetFilter::ParentTargetAttachedTo
             | TargetFilter::AllPlayers => None,
         },
         // CR 608.2c + CR 608.2d: during THIS resolution every event-context and
@@ -1912,6 +1913,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::EventTarget
             | TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::ParentTargetAttachedTo
             | TargetFilter::OriginalSource
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }

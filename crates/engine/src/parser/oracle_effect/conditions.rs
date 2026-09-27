@@ -6307,6 +6307,15 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    // CR 301.5 + CR 303.4 + CR 400.7 + CR 608.2c + CR 608.2h: target-anaphoric
+    // attachment gate ("that Equipment was attached to a creature" — Unforge).
+    // Binds `ctx.demonstrative_object_ref` to `ParentTargetAttachedTo` so the
+    // subsequent effect's "that creature" resolves to the equipped host permanent.
+    if let Some(condition) = parse_target_attached_to_condition_text(lower.as_str()) {
+        ctx.demonstrative_object_ref = Some(TargetFilter::ParentTargetAttachedTo);
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_you_controlled_parent_target_condition(lower.as_str()) {
         return Some(condition);
     }
@@ -7056,6 +7065,70 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
         },
         negated,
     ))
+}
+
+/// CR 301.5 + CR 303.4 + CR 400.7 + CR 608.2c + CR 608.2h: target-anaphoric attachment gate —
+/// "that Equipment was attached to a creature" / "it was attached to a creature"
+/// / "that Aura was attached to a creature". Evaluates whether the target
+/// (evaluated via LKI when past tense: `was`) was attached to a host matching the
+/// filter.
+fn parse_target_attached_to_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = alt((
+        map(
+            preceded(
+                tag::<_, _, OracleError<'_>>("that "),
+                parse_demonstrative_noun,
+            ),
+            |_| (),
+        ),
+        value((), tag("it")),
+    ))
+    .parse(input)?;
+    let (rest, (negated, use_lki)) = alt((
+        value((false, true), tag(" was attached to ")),
+        value((false, false), tag(" is attached to ")),
+        value(
+            (true, true),
+            alt((
+                tag(" wasn't attached to "),
+                tag(" wasn’t attached to "),
+                tag(" was not attached to "),
+            )),
+        ),
+        value(
+            (true, false),
+            alt((
+                tag(" isn't attached to "),
+                tag(" isn’t attached to "),
+                tag(" is not attached to "),
+            )),
+        ),
+    ))
+    .parse(rest)?;
+    let (host_filter, remainder) = crate::parser::oracle_target::parse_target(rest);
+    if matches!(host_filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let condition = AbilityCondition::TargetMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::AttachedToHost {
+                filter: Box::new(host_filter),
+            },
+        ])),
+        use_lki,
+        subject_slot: None,
+    };
+    Ok((remainder, maybe_negate(condition, negated)))
+}
+
+fn parse_target_attached_to_condition_text(lower: &str) -> Option<AbilityCondition> {
+    let trimmed = lower.trim().trim_end_matches('.');
+    let (remainder, condition) = parse_target_attached_to_condition(trimmed).ok()?;
+    if remainder.trim().is_empty() {
+        Some(condition)
+    } else {
+        None
+    }
 }
 
 /// CR 109.4 + CR 608.2c: "an opponent controls that creature / that permanent /

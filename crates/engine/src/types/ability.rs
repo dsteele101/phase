@@ -6550,6 +6550,11 @@ pub enum FilterProp {
     AttachedToPlayer {
         player: ControllerRef,
     },
+    /// CR 301.5 + CR 303.4: True when the matched object's `attached_to` host matches
+    /// the inner target filter.
+    AttachedToHost {
+        filter: Box<TargetFilter>,
+    },
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),
@@ -7814,6 +7819,9 @@ pub enum TargetFilter {
     /// Distinct from `Owner` (which always reads the source object's owner) and
     /// `ParentTargetController` (which returns the controller per CR 109.4).
     ParentTargetOwner,
+    /// CR 608.2c + CR 608.2h + CR 301.5 + CR 303.4: Resolves to the permanent (or player)
+    /// that the parent ability's target object was attached to.
+    ParentTargetAttachedTo,
     /// CR 607.2d + CR 608.2c: Resolves to the player chosen for the source by
     /// a linked persisted choice ("the chosen player"). This is not a target
     /// slot and is distinct from `ControllerRef::ChosenPlayer`, which is
@@ -21158,6 +21166,7 @@ impl TargetFilter {
                 | TargetFilter::AttachedTo
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::ParentTargetAttachedTo
         )
     }
 
@@ -21231,6 +21240,7 @@ impl TargetFilter {
                 // exactly the failure `AmassedArmy` above documents.
                 | TargetFilter::EventTargetController
                 | TargetFilter::ParentTargetOwner
+                | TargetFilter::ParentTargetAttachedTo
                 | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
                 // CR 615.5: the prevented event's damage source (reflection

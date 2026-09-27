@@ -170,6 +170,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     from: Zone,
     to: Zone,
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
+    attached_to: Option<crate::game::game_object::AttachTarget>,
 ) {
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. The information authority receives the
@@ -263,6 +264,8 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // last known information once its source has left the battlefield.
                 // Supplied by the caller: the sever already ran by the time we get here.
                 attachments,
+                // CR 608.2h + CR 301.5 + CR 303.4: The attached_to host BEFORE SBA unattached it.
+                attached_to,
             };
             state.lki_cache.insert(object_id, lki.clone());
             state
@@ -1468,6 +1471,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
         from,
         to,
         zone_change_record.attachments.clone(),
+        zone_change_record.attached_to,
     );
 
     // Command-zone routes select between the ordinary command container and
@@ -2339,6 +2343,7 @@ pub fn move_to_library_at_index(
         from,
         Zone::Library,
         zone_change_record.attachments.clone(),
+        zone_change_record.attached_to,
     );
 
     remove_from_zone(state, object_id, from, owner);
@@ -2621,12 +2626,19 @@ pub(crate) fn route_component(state: &mut GameState, component_id: ObjectId, to:
 
     // CR 608.2h: no sever has run on this path, so the live attachment list is
     // still intact when this component becomes a new object.
-    let attachments = state
+    let (attachments, attached_to) = state
         .objects
         .get(&component_id)
-        .map(|obj| capture_attachment_snapshot(state, obj))
+        .map(|obj| (capture_attachment_snapshot(state, obj), obj.attached_to))
         .unwrap_or_default();
-    apply_zone_exit_cleanup(state, component_id, Zone::Battlefield, to, attachments);
+    apply_zone_exit_cleanup(
+        state,
+        component_id,
+        Zone::Battlefield,
+        to,
+        attachments,
+        attached_to,
+    );
     // CR 730.2: the component is absorbed into the survivor and is not an
     // independent member of the battlefield list; defensively ensure it is not
     // left there (a no-op under the runtime invariant) before adding it to its

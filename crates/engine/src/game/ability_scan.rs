@@ -3355,6 +3355,11 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             sibling: false,
             projected: false,
         },
+        TargetFilter::ParentTargetAttachedTo => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TargetFilter::SourceChosenPlayer => Axes::NONE,
         TargetFilter::PlayerWhoChoseLabel { label: _ } => Axes::NONE,
         // CR 102.1: the nested player predicate can itself read projected state
@@ -4485,6 +4490,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         }
         FilterProp::TargetsOnly { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
         FilterProp::Targets { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
+        FilterProp::AttachedToHost { filter } => scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode),
 
         // --- Box<PlayerFilter>-bearing: recurse (OpponentLostLife/… is projected).
         FilterProp::ControllerMatches { player } => scan_player_filter(player, mode),

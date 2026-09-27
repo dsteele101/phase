@@ -1000,6 +1000,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // own fingerprint — POISON for memoization.
         | FilterProp::InTrackedSet { .. }
         | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::Other { .. } => false,
     }
 }

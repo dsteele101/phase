@@ -1471,6 +1471,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
@@ -2398,6 +2399,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
                 || tf.properties.iter().any(legacy_filter_prop)
         }
         TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -2462,6 +2464,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => legacy_target_filter(filter),
         FilterProp::DistinctFrom { reference } => legacy_target_filter(reference),
+        FilterProp::AttachedToHost { filter } => legacy_target_filter(filter),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(legacy_target_filter)
         }
@@ -2640,6 +2643,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::StackAbility { .. }
         // CR 201.5a (PR-6.75 c5, R3 axis): two normalized-identical granted bodies
         // whose granters DIFFER each read their OWN granter ⇒ per-member-divergent
@@ -2751,6 +2755,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => member_bound_target_filter(filter),
         FilterProp::DistinctFrom { reference } => member_bound_target_filter(reference),
+        FilterProp::AttachedToHost { filter } => member_bound_target_filter(filter),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(member_bound_target_filter)
         }
@@ -7059,6 +7064,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         // the write path `target_is_legacy_ref` excludes it too), so it must NOT
         // set `legacy_batch_prompt`; it is a live event read like the others here.
         TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetAttachedTo
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController

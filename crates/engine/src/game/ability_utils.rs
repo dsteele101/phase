@@ -859,6 +859,45 @@ pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Opti
         .map(|snapshot| snapshot.lki.owner)
 }
 
+/// CR 608.2c + CR 608.2h + CR 301.5 + CR 303.4: Resolve the permanent (or player)
+/// that an ability's first parent target object was attached to.
+///
+/// Used by `TargetFilter::ParentTargetAttachedTo` for "that creature" / "that player"
+/// anaphors referring to the host of a destroyed/unattached Aura or Equipment (e.g.
+/// Unforge: "Destroy target Equipment. If that Equipment was attached to a creature,
+/// Unforge deals 2 damage to that creature."). Falls back to last-known information
+/// (CR 608.2h) when the parent target has left the battlefield.
+pub fn parent_target_attached_to(
+    ability: &ResolvedAbility,
+    state: &GameState,
+) -> Option<TargetRef> {
+    if let Some(target) = ability.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => {
+            let obj_opt = state.objects.get(id);
+            let off_battlefield = obj_opt.is_none_or(|obj| obj.zone != Zone::Battlefield);
+            let attached_to = if off_battlefield {
+                state
+                    .lki_cache
+                    .get(id)
+                    .and_then(|lki| lki.attached_to)
+                    .or_else(|| obj_opt.and_then(|obj| obj.attached_to))
+            } else {
+                obj_opt.and_then(|obj| obj.attached_to)
+            };
+            attached_to.map(super::effects::attach::target_ref_from_attach_target)
+        }
+        TargetRef::Player(_) => None,
+    }) {
+        return Some(target);
+    }
+
+    ability
+        .effect_context_object
+        .as_ref()
+        .and_then(|snapshot| snapshot.lki.attached_to)
+        .map(super::effects::attach::target_ref_from_attach_target)
+}
+
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
     modal
         .constraints
@@ -4232,6 +4271,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::IsCommander
         | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -4379,6 +4419,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::IsCommander
         | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::AttachedToHost { .. }
         | FilterProp::Other { .. } => false,
     }
 }
@@ -19741,6 +19782,7 @@ mod tests {
                 tapped: false,
                 is_suspected: false,
                 attachments: Vec::new(),
+                attached_to: None,
             },
             incarnation: 0,
         });
