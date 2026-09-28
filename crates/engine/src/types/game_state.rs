@@ -16663,6 +16663,7 @@ impl WaitingFor {
             | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DieKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
