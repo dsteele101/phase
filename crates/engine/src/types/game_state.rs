@@ -24,7 +24,7 @@ use super::ability::{
     TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
     TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
-use super::actions::{DebugCardCreationKind, ResolveAllScope};
+use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
@@ -7414,6 +7414,20 @@ pub enum DeferredLifeCostResume {
 }
 
 impl DeferredLifeCostResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the suspended payment belongs
+    /// to casting a spell, activating an ability or performing a special
+    /// action, rather than to a resolution. Exhaustive so a new owner has to
+    /// be classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            DeferredLifeCostResume::Cast { .. } => true,
+            // A resolution-time "pay any amount of life" choice (CR 608.2).
+            DeferredLifeCostResume::PayAmount { .. } => false,
+            // A mana payment's Phyrexian life; its outer root names the owner.
+            DeferredLifeCostResume::ManaRoot { resume, .. } => resume.withholds_priority(),
+        }
+    }
+
     pub fn resume_at_resolution_depth(&self) -> usize {
         match self {
             DeferredLifeCostResume::Cast {
@@ -7774,6 +7788,43 @@ pub enum PendingCostMoveResume {
     /// a replacement pause, which is exactly the shape that guard says to box
     /// rather than widen the budget for.
     RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+impl PendingCostMoveResume {
+    /// CR 601.2h + CR 602.2b + CR 605.3b + CR 116.2h: Whether the paused cost
+    /// move belongs to casting a spell, activating an ability (a mana ability
+    /// included) or performing a special action, none of which gives a player
+    /// priority until it completes, rather than to a resolution or a
+    /// replacement's own optional cost. Exhaustive so a new owner has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            PendingCostMoveResume::Cast { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. } => true,
+            // CR 116.2h: foretelling is a special action; its {2} is paid before
+            // its exile move, which can then pause on a replacement.
+            PendingCostMoveResume::Foretell { .. } => true,
+            // Cast and activation payments keep their announcement; an
+            // optional payment made during a resolution does not.
+            PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::Casting { .. }
+                | CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Effect { .. } => false,
+            },
+            // Unless-costs and ward payments are made while an ability resolves
+            // (CR 118.12), and a replacement's optional cost belongs to that
+            // replacement (CR 614.1).
+            PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+        }
+    }
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: payload of
@@ -8277,6 +8328,33 @@ pub enum ManaAbilityResume {
     FinalizePendingManaPayment {
         player: PlayerId,
     },
+}
+
+impl ManaAbilityResume {
+    /// CR 601.2h + CR 602.2b + CR 116.2: Whether the outer payment root this
+    /// resumes is a cast, activation or special action (no priority until it
+    /// completes) rather than a resolution. Exhaustive so a new root has to be
+    /// classified.
+    pub fn withholds_priority(&self) -> bool {
+        match self {
+            // CR 601.2g-h: the outer spell or ability cost is still being paid.
+            ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 116.2g / 116.2b / 116.2c: companion to hand, turning a
+            // permanent face up, and paying to end an effect are special actions.
+            ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. } => true,
+            // CR 118.12 / CR 608.2: payments made while an ability resolves.
+            ManaAbilityResume::UnlessPayment { .. } | ManaAbilityResume::EffectPayCost { .. } => {
+                false
+            }
+            // No outer process: the mana ability itself returns to priority.
+            ManaAbilityResume::Priority => false,
+        }
+    }
 }
 
 /// CR 605.3b + CR 106.1a: A pre-resolved choice that short-circuits the normal
@@ -12615,6 +12693,89 @@ impl GameState {
         });
     }
 
+    /// A staged payment is a replay authority, not merely display data.  Keep
+    /// its player references inside the restored game's seat set before any
+    /// caller can finalize or replay it; otherwise a crafted raw snapshot can
+    /// smuggle an out-of-range actor/owner through serde and into the ordinary
+    /// action boundary.
+    fn validate_payment_transaction(&self) -> Result<(), String> {
+        let Some(transaction) = self.payment_transaction.as_deref() else {
+            return Ok(());
+        };
+        let valid = |player: PlayerId| (player.0 as usize) < self.players.len();
+        if !valid(transaction.owner) {
+            return Err(format!(
+                "owner {:?} is not a seat in the restored game",
+                transaction.owner
+            ));
+        }
+        for (label, waiting_for) in [
+            ("transaction base prompt", &transaction.base_waiting_for),
+            ("current prompt", &self.waiting_for),
+        ] {
+            if let Some(player) = waiting_for
+                .acting_players()
+                .into_iter()
+                .find(|player| !valid(*player))
+            {
+                return Err(format!(
+                    "{label} actor {:?} is not a seat in the restored game",
+                    player
+                ));
+            }
+        }
+
+        fn validate_ability(
+            ability: &ResolvedAbility,
+            valid: &impl Fn(PlayerId) -> bool,
+        ) -> Result<(), String> {
+            for (label, player) in [
+                ("controller", ability.controller),
+                (
+                    "original_controller",
+                    ability.original_controller.unwrap_or(ability.controller),
+                ),
+                (
+                    "scoped_player",
+                    ability.scoped_player.unwrap_or(ability.controller),
+                ),
+            ] {
+                if !valid(player) {
+                    return Err(format!("root {label} {:?} is not a seat", player));
+                }
+            }
+            if let Some(sub) = ability.sub_ability.as_deref() {
+                validate_ability(sub, valid)?;
+            }
+            if let Some(otherwise) = ability.else_ability.as_deref() {
+                validate_ability(otherwise, valid)?;
+            }
+            Ok(())
+        }
+
+        validate_ability(&transaction.root, &valid)?;
+        for (index, entry) in transaction.transcript.iter().enumerate() {
+            if crate::game::payment_transaction::is_outside_transaction(&entry.action) {
+                return Err(format!(
+                    "transcript[{index}] action is outside staged payment"
+                ));
+            }
+            if !valid(entry.authenticated_actor) {
+                return Err(format!(
+                    "transcript[{index}] authenticated actor {:?} is not a seat",
+                    entry.authenticated_actor
+                ));
+            }
+            if !valid(entry.semantic_owner) {
+                return Err(format!(
+                    "transcript[{index}] semantic owner {:?} is not a seat",
+                    entry.semantic_owner
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// CR 903.3 + CR 111.6 + CR 704.3 + CR 704.5d: a token cannot be the
     /// commander card named by a command-zone return choice. Older snapshots
     /// can retain such an impossible choice after a copied commander spell left
@@ -12720,6 +12881,8 @@ pub enum PersistedRestoreError {
     UnsupportedFormat(String),
     #[error("persisted state contains an unsupported stack object: {0}")]
     UnsupportedStackObject(&'static str),
+    #[error("persisted payment transaction is invalid: {0}")]
+    InvalidPaymentTransaction(String),
     #[error("persisted restore finalization policy mismatch: {0}")]
     FinalizationPolicyMismatch(&'static str),
     #[error("persisted state runtime rehydration failed: {0}")]
@@ -12914,6 +13077,9 @@ impl PersistedGameState {
         finalization: PersistedRestoreFinalization,
     ) -> Result<PreparedPersistedGameState, PersistedRestoreError> {
         let mut state = self.into_game_state_unchecked();
+        state
+            .validate_payment_transaction()
+            .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state
             .format_config
             .reject_unimplemented_range_of_influence()
@@ -16400,6 +16566,176 @@ impl WaitingFor {
         self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
     }
 
+    /// CR 605.3a + CR 605.3b: Whether this state continues a mana ability's
+    /// activation — one of its cost choices, or the choice of which mana it
+    /// adds. A mana ability doesn't use the stack and resolves immediately, so
+    /// no player receives priority until it has finished, whether it was
+    /// activated with priority or while paying a cost (CR 117.1d).
+    ///
+    /// A mana-color choice made while an *effect* resolves
+    /// (`ManaChoiceContext::ResolvingEffect`) is not a mana ability.
+    pub fn is_mana_ability_continuation(&self) -> bool {
+        match self {
+            WaitingFor::ChooseManaColor { context, .. } => match context {
+                ManaChoiceContext::ManaAbility(_) => true,
+                ManaChoiceContext::ResolvingEffect(_) => false,
+            },
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::ManaAbility { .. } => true,
+                CostResume::Spell { .. }
+                | CostResume::SpellCost { .. }
+                | CostResume::Resolution => false,
+            },
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::ManaAbility { .. } => true,
+                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
+                    false
+                }
+            },
+            WaitingFor::PayAmountChoice {
+                pending_mana_ability,
+                ..
+            } => pending_mana_ability.is_some(),
+            WaitingFor::PayManaAbilityMana { .. } => true,
+            // Every other prompt is not part of a mana ability's activation.
+            // Listed rather than `_` so a new prompt has to be classified.
+            WaitingFor::Priority { .. }
+            | WaitingFor::ResolveAllConsent { .. }
+            | WaitingFor::ResolveAllReady { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::MulliganDecision { .. }
+            | WaitingFor::OpeningHandBottomCards { .. }
+            | WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::AssistChoosePlayer { .. }
+            | WaitingFor::AssistPayment { .. }
+            | WaitingFor::ChooseXValue { .. }
+            | WaitingFor::TargetSelection { .. }
+            | WaitingFor::DeclareAttackers { .. }
+            | WaitingFor::DeclareBlockers { .. }
+            | WaitingFor::UntapChoice { .. }
+            | WaitingFor::ChooseUntapSubset { .. }
+            | WaitingFor::ExertChoice { .. }
+            | WaitingFor::EnlistChoice { .. }
+            | WaitingFor::GameOver { .. }
+            | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::OrderTriggers { .. }
+            | WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ExploreChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::EquipTarget { .. }
+            | WaitingFor::CrewVehicle { .. }
+            | WaitingFor::StationTarget { .. }
+            | WaitingFor::SaddleMount { .. }
+            | WaitingFor::ScryChoice { .. }
+            | WaitingFor::RippleRevealChoice { .. }
+            | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieKeepChoice { .. }
+            | WaitingFor::DigChoice { .. }
+            | WaitingFor::SurveilChoice { .. }
+            | WaitingFor::RevealChoice { .. }
+            | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
+            | WaitingFor::OutsideGameChoice { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::ConniveDiscard { .. }
+            | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
+            | WaitingFor::LearnChoice { .. }
+            | WaitingFor::ManifestDreadChoice { .. }
+            | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::BetweenGamesSideboard { .. }
+            | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OpponentGuess { .. }
+            | WaitingFor::SpellbookDraft { .. }
+            | WaitingFor::DamageSourceChoice { .. }
+            | WaitingFor::ModeChoice { .. }
+            | WaitingFor::DiscardToHandSize { .. }
+            | WaitingFor::OptionalCostChoice { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::SpliceOffer { .. }
+            | WaitingFor::DefilerPayment { .. }
+            | WaitingFor::OrderCostReductions { .. }
+            | WaitingFor::CastOffer { .. }
+            | WaitingFor::ModalFaceChoice { .. }
+            | WaitingFor::AlternativeCastChoice { .. }
+            | WaitingFor::MutateMergeChoice { .. }
+            | WaitingFor::CipherEncodeChoice { .. }
+            | WaitingFor::CastingVariantChoice { .. }
+            | WaitingFor::ChoosePermanentTypeSlot { .. }
+            | WaitingFor::MultiTargetSelection { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            | WaitingFor::PairChoice { .. }
+            | WaitingFor::TributeChoice { .. }
+            | WaitingFor::MiracleReveal { .. }
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::LoopShortcut { .. }
+            | WaitingFor::RespondToShortcut { .. }
+            | WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. }
+            | WaitingFor::UnlessPayment { .. }
+            | WaitingFor::UnlessPaymentChooseCost { .. }
+            | WaitingFor::WardDiscardChoice { .. }
+            | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBounceChoice { .. }
+            | WaitingFor::ChooseRingBearer { .. }
+            | WaitingFor::ChooseRoomDoor { .. }
+            | WaitingFor::ChooseDungeon { .. }
+            | WaitingFor::ChooseDungeonRoom { .. }
+            | WaitingFor::SpecializeColor { .. }
+            | WaitingFor::ActivationCostOneOfChoice { .. }
+            | WaitingFor::CostTypeChoice { .. }
+            | WaitingFor::BlightChoice { .. }
+            | WaitingFor::HarmonizeTapChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
+            | WaitingFor::TopOrBottomChoice { .. }
+            | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+            | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::CompanionReveal { .. }
+            | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CommanderZoneChoice { .. }
+            | WaitingFor::BattleProtectorChoice { .. }
+            | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::TimeTravelChoice { .. }
+            | WaitingFor::ChooseObjectsSelection { .. }
+            | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
+            | WaitingFor::KeepExactPermanentsChoice { .. }
+            | WaitingFor::CopyRetarget { .. }
+            | WaitingFor::AssignCombatDamage { .. }
+            | WaitingFor::AssignBlockerDamage { .. }
+            | WaitingFor::DistributeAmong { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
+            | WaitingFor::RemoveCountersChoice { .. }
+            | WaitingFor::RetargetChoice { .. }
+            | WaitingFor::CombatTaxPayment { .. }
+            | WaitingFor::PhyrexianPayment { .. } => false,
+        }
+    }
+
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.11 /
     /// CR 703.1 + CR 117.3a + CR 704.3: the windows the ENGINE forces open before the
     /// next grant of priority. Two sources feed the class — the windows that open
@@ -18492,6 +18828,101 @@ pub struct LoopDetectSample {
     pub live: GameState,
 }
 
+/// CR 601.2h + CR 608.2c: authoritative descriptor for a resolution-time
+/// composite payment that crossed an interactive choice. The canonical state
+/// remains the pre-payment base while this descriptor is live; viewers and
+/// legal-action consumers materialize the shadow by replaying `root` and the
+/// submitted `transcript` against that base. Keeping the descriptor as a
+/// replayable root rather than a nested `GameState` snapshot avoids a second
+/// rules authority and keeps persistence/restore deterministic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolutionPaymentTransaction {
+    /// Descriptor wire version. This is independent from the resolution-frame
+    /// wire version because the transaction is a top-level optional carrier.
+    #[serde(default = "resolution_payment_transaction_wire_version")]
+    pub wire_version: u32,
+    /// Player who owns the payment decision. The live `WaitingFor` remains the
+    /// action-authorization authority; this field is provenance for audits and
+    /// restore validation.
+    pub owner: PlayerId,
+    /// The complete resolution root, including its printed rider chain.
+    pub root: Box<ResolvedAbility>,
+    /// Actions already accepted while the payment shadow was paused. The
+    /// authenticated actor is persisted alongside each action so replay cannot
+    /// silently substitute a different controller/submitter. Events are
+    /// deliberately not stored here; replay regenerates them and commit
+    /// publishes them exactly once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<ResolutionPaymentTranscriptEntry>,
+    /// Authoritative pre-payment waiting state. The live state may expose the
+    /// shadow prompt while this descriptor is active, but resource/object state
+    /// remains at this base until commit.
+    pub base_waiting_for: WaitingFor,
+    /// CR 608.2c + CR 608.2h: resolution-time trigger context captured at the
+    /// transaction boundary. A replay must restore this context before it
+    /// re-evaluates payer and quantity expressions after a pause/serde roundtrip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_trigger_context: Option<ResolvingTriggerContext>,
+}
+
+/// One admitted action in a staged payment transaction. Both halves of the
+/// original interaction boundary are durable: the authenticated submitter is
+/// retained for audit, while the semantic owner freezes the decision slot that
+/// was admitted. Replay uses that frozen owner instead of re-authorizing the
+/// historical submitter against a later control topology.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResolutionPaymentTranscriptEntry {
+    pub authenticated_actor: PlayerId,
+    pub semantic_owner: PlayerId,
+    pub action: GameAction,
+}
+
+impl<'de> Deserialize<'de> for ResolutionPaymentTranscriptEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(default)]
+            authenticated_actor: Option<PlayerId>,
+            #[serde(default)]
+            actor: Option<PlayerId>,
+            #[serde(default)]
+            semantic_owner: Option<PlayerId>,
+            action: GameAction,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let authenticated_actor = wire
+            .authenticated_actor
+            .or(wire.actor)
+            .ok_or_else(|| serde::de::Error::custom("payment transcript actor is missing"))?;
+        let semantic_owner = match wire.semantic_owner {
+            Some(owner) => owner,
+            // Protocol-1 payloads used `actor` as the single decision-owner
+            // field. Preserve that shape explicitly; a payload that carries
+            // only the newer authenticated actor cannot safely invent the
+            // semantic owner and is rejected at the wire boundary.
+            None if wire.authenticated_actor.is_none() => authenticated_actor,
+            None => {
+                return Err(serde::de::Error::custom(
+                    "payment transcript semantic_owner is missing",
+                ));
+            }
+        };
+        Ok(Self {
+            authenticated_actor,
+            semantic_owner,
+            action: wire.action,
+        })
+    }
+}
+
+fn resolution_payment_transaction_wire_version() -> u32 {
+    1
+}
+
 /// CR 104.1: the result of a game that has ended. `winner: None` is a draw (CR 104.4).
 /// Written only by `elimination::end_game`; see [`GameState::game_end`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20177,6 +20608,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "ResolutionStack::is_empty")]
     pub resolution_stack: Box<ResolutionStack>,
 
+    /// CR 601.2h + CR 608.2c: staged resolution-time composite payment. The
+    /// descriptor is durable authority (base + replayable transaction), while
+    /// the two execution flags below are transient replay guards only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_transaction: Option<Box<ResolutionPaymentTransaction>>,
+    #[serde(skip)]
+    pub payment_transaction_replay: bool,
+    #[serde(skip)]
+    pub payment_transaction_just_handled: bool,
+
     /// Borrowed execution-local view of the active continuation's captured
     /// Aura host. The authoritative value remains inside
     /// `AbilityContinuationFrame`; this transient is installed only while its
@@ -21389,6 +21830,7 @@ impl GameStateDecode {
         if !value.is_object() {
             return Err("persisted game state must be a JSON object".to_string());
         }
+        crate::types::resolution::reject_wire_projection_marker(&value)?;
         match mode {
             // An UNVERSIONED raw payload carries no resolution-wire
             // discriminator. Raw persistence in general does: the engine's own
@@ -23006,6 +23448,46 @@ fn annotate_paused_exile_event(
 }
 
 impl GameState {
+    /// CR 704.3: Whether the game is inside a process that no player receives
+    /// priority during, so the state-based action check must wait until it
+    /// completes. There are four owners:
+    /// - **a cast or activation** (CR 601.2 + CR 602.2b; priority returns only
+    ///   at CR 601.2i): an inline cast carrier (`has_pending_cast`), or one
+    ///   parked in the external `pending_cast` carrier behind a prompt that
+    ///   doesn't carry it (Assist);
+    /// - **a cast, activation or special-action cost paused on a replacement**
+    ///   (CR 616.1; special actions per CR 116.2): a cost move awaiting its
+    ///   replacement, a life payment whose replacement is still running its
+    ///   interactive effect, or a cost discard. Those prompts
+    ///   (`ReplacementChoice`, `ChooseOneOfBranch`, ...) are shared with
+    ///   resolutions, so the owner is read from the typed resume instead;
+    /// - **a mana ability's activation** (CR 605.3b), with priority or while
+    ///   paying a cost;
+    /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
+    ///   after the mana ability that triggered it, without waiting for
+    ///   priority".
+    ///
+    /// Prompts owned by a resolution are deliberately not counted, so the
+    /// #962 safety net still ends a game stuck waiting on a player who has
+    /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
+    /// and `CancelCast` predicate.
+    pub fn withholds_priority(&self) -> bool {
+        self.pending_cast.is_some()
+            || self.waiting_for.has_pending_cast()
+            || self
+                .pending_cost_move_resume
+                .as_ref()
+                .is_some_and(PendingCostMoveResume::withholds_priority)
+            || self
+                .pending_deferred_life_cost_resume
+                .as_ref()
+                .is_some_and(DeferredLifeCostResume::withholds_priority)
+            // Both variants carry the cast being paid for.
+            || self.pending_discard_for_cost.is_some()
+            || self.waiting_for.is_mana_ability_continuation()
+            || self.pending_triggered_mana_resume.is_some()
+    }
+
     /// Returns the active continuation only when its typed frame is the stack
     /// top. A buried continuation is an invalid nesting dependency, not a
     /// fallback lookup opportunity.
@@ -26106,6 +26588,9 @@ impl GameState {
             public_revealed_cards: Box::default(),
             product_knowledge_state: Box::default(),
             resolution_stack: Box::default(),
+            payment_transaction: None,
+            payment_transaction_replay: false,
+            payment_transaction_just_handled: false,
             resolving_continuation_attach_host: None,
             resolving_player_scope_linked_exile: None,
             merged_card_component_route: None,
@@ -28427,6 +28912,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         public_revealed_cards: _,
         product_knowledge_state: _,
         resolution_stack: _,
+        payment_transaction: _,
+        payment_transaction_replay: _,
+        payment_transaction_just_handled: _,
         resolving_continuation_attach_host: _,
         resolving_player_scope_linked_exile: _,
         merged_card_component_route: _,
@@ -28773,6 +29261,7 @@ impl PartialEq for GameState {
             && self.public_revealed_cards == other.public_revealed_cards
             && self.product_knowledge_state == other.product_knowledge_state
             && self.resolution_stack.game_state_eq(&other.resolution_stack)
+            && self.payment_transaction == other.payment_transaction
             && self.pending_resolution_completion == other.pending_resolution_completion
             // CR 104.4b: volatile resolution-scoped flip result. A flip already
             // advances `state.rng`, so iterations differ regardless; comparing
@@ -33391,33 +33880,16 @@ mod tests {
         }
     }
 
-    /// V12. Pins the premise `declare_raw_resolution_wire` rests on for the
-    /// entire client-wire population: `client_state_wire_value` must keep
-    /// emitting `resolution_stack`.
-    ///
-    /// That function redacts by an explicit, MUTABLE removal list. Nothing in the
-    /// type system ties it to the inference rule, so if it ever begins stripping
-    /// `resolution_stack`, every client-wire payload silently stops being
-    /// classifiable and no compiler signal fires. This assertion is the signal.
-    ///
-    /// It pins a SECOND premise of the same kind, and for the same reason: the
-    /// client wire must keep declaring NO `resolution_state_version`. Both are
-    /// premises about whether `declare_raw_resolution_wire` is REACHED at all —
-    /// its first statement early-returns on a declared version, and its guard's
-    /// first conjunct is `resolution_stack` present. That is why the version
-    /// premise lives here rather than in
-    /// `client_wire_removes_every_unconditional_projection_field`, whose subject
-    /// is the removal LIST, i.e. whether the guard FIRES once reached. If the
-    /// deferred write-time stamping lands at `client_state_wire_value` on its
-    /// own, every client-wire payload takes that early return, the projection
-    /// guard goes dead for its entire population, and without the assertion
-    /// below no row reddens.
+    /// V12. Pins the client-wire provenance contract: the shared fail-closed
+    /// projection removes the private `resolution_stack` carrier and the
+    /// writer emits a positive `wire_projection` marker. Persistence must
+    /// reject that marker before a declared-version early return.
     #[test]
-    fn client_wire_still_carries_resolution_stack() {
+    fn client_wire_marks_projection_and_redacts_resolution_stack() {
         let state = parked_spell_resolution_fixture();
         let bare = serde_json::to_value(&state).expect("the bare GameState serializes");
-        // `viewer: None` performs no viewer filtering, so no projection sentinel
-        // is stamped — the same constructor a client debug export comes through.
+        // `viewer: None` uses the unseated shared fail-closed projection — the
+        // same constructor a client debug export comes through.
         let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
             &state, None,
         ))
@@ -33438,23 +33910,65 @@ mod tests {
             "the client redactor must have run — it removes next_delayed_trigger_token"
         );
 
-        assert!(
-            wire["state"].get("resolution_stack").is_some(),
-            "`client_state_wire_value` no longer preserves `resolution_stack`. \
-             `declare_raw_resolution_wire` (types/resolution.rs) keys on that field, \
-             and its inference rule silently stops applying to every client-wire \
-             payload if the redactor removes it. Fix the redactor or re-derive the \
-             rule — do not delete this assertion."
+        assert_eq!(
+            wire["state"].get("wire_projection"),
+            Some(&serde_json::Value::Bool(true)),
+            "the client wire must carry a positive projection provenance marker"
         );
-
         assert!(
             wire["state"].get("resolution_state_version").is_none(),
-            "`client_state_wire_value` now DECLARES a resolution wire version. \
-             `declare_raw_resolution_wire` (types/resolution.rs) early-returns on \
-             that key, so its client-wire projection guard is now dead for every \
-             payload this writer produces and no other row reddens. If this is the \
-             deferred write-time stamp landing, replace the absence fingerprint with \
-             a positive `wire_projection` check — do not delete this assertion."
+            "the client wire must not declare a persistence resolution version"
+        );
+        assert!(
+            wire["state"].get("resolution_stack").is_none(),
+            "the shared unseated projection must not expose private resolution frames"
+        );
+
+        for (label, persisted) in [
+            (
+                "bare GameState",
+                serde_json::to_value(&state).expect("bare state serializes"),
+            ),
+            (
+                "raw persistence writer",
+                serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+                    .expect("raw state serializes"),
+            ),
+            (
+                "trusted persistence writer",
+                serde_json::to_value(PersistedGameState::capture(state.clone()))
+                    .expect("trusted state serializes"),
+            ),
+        ] {
+            assert!(
+                persisted.get("wire_projection").is_none(),
+                "{label} must never emit the client-only projection marker"
+            );
+        }
+
+        let mut marked_versioned = wire["state"].clone();
+        marked_versioned
+            .as_object_mut()
+            .expect("the client state is a JSON object")
+            .insert(
+                "resolution_state_version".to_string(),
+                serde_json::Value::from(3_u64),
+            );
+        let raw_error = serde_json::from_value::<PersistedGameState>(marked_versioned.clone())
+            .expect_err("a marked versioned raw projection must be rejected before inference")
+            .to_string();
+        assert!(
+            raw_error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "raw marker rejection must precede version inference, got {raw_error}"
+        );
+        let trusted_error = serde_json::from_value::<PersistedGameState>(serde_json::json!({
+            "state": marked_versioned,
+        }))
+        .expect_err("a marked versioned trusted projection must be rejected")
+        .to_string();
+        assert!(
+            trusted_error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "trusted marker rejection must precede versioned restore, got {trusted_error}"
         );
     }
 
@@ -33495,10 +34009,9 @@ mod tests {
     }
 
     /// The redacted client-wire projection of the same state. `viewer: None`
-    /// performs no viewer filtering, so no `viewer_projection` sentinel is
-    /// stamped — this is the exact constructor a client debug export comes
-    /// through, and the population `reject_viewer_projection_as_authority`
-    /// cannot see.
+    /// uses the unseated shared fail-closed projection and carries the
+    /// JSON-only `wire_projection` provenance marker; the marker is what the
+    /// persistence gate sees before the typed state is materialized.
     fn client_wire_value(state: &GameState) -> serde_json::Value {
         serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
             state, None,
@@ -33517,11 +34030,14 @@ mod tests {
         value
     }
 
-    /// The same redacted payload with ONE fingerprint key restored, at the value
-    /// an absent key already decodes to: `next_delayed_trigger_token` carries a
-    /// plain `#[serde(default)]` (so absent means `0`), and
+    /// The same redacted payload with ONE legacy-fingerprint key restored, at
+    /// the value an absent key already decodes to: `next_delayed_trigger_token`
+    /// carries a plain `#[serde(default)]` (so absent means `0`), and
     /// `normalize_delayed_trigger_allocators` collapses both `0` and the absent
-    /// case to `1` for a payload with no install roots.
+    /// case to `1` for a payload with no install roots. The positive marker is
+    /// removed deliberately so this helper models an old, unmarked capture and
+    /// exercises the compatibility fingerprint rather than the new provenance
+    /// gate.
     ///
     /// So this payload is DECODE-IDENTICAL to the redacted one and differs only
     /// in whether the guard's conjunction holds. It measures what the same bytes
@@ -33529,12 +34045,32 @@ mod tests {
     /// is what makes the `!contains(…)` clauses below discriminated rather than
     /// vacuously true of any refusal.
     fn with_the_projection_guard_bypassed(mut wire: serde_json::Value) -> serde_json::Value {
+        let object = wire
+            .as_object_mut()
+            .expect("the client wire payload is a JSON object");
+        object.remove("wire_projection");
+        object.insert(
+            "next_delayed_trigger_token".to_string(),
+            serde_json::Value::from(0),
+        );
+        wire
+    }
+
+    /// The pre-marker client wire retained `resolution_stack`. Reinsert that
+    /// historical carrier when a test needs to exercise the legacy downstream
+    /// coherence refusal rather than the current positive provenance gate.
+    fn with_legacy_stack_and_projection_guard_bypassed(
+        state: &GameState,
+        wire: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut wire = with_the_projection_guard_bypassed(wire);
+        let stack = bare_value(state)
+            .get("resolution_stack")
+            .cloned()
+            .expect("the historical fixture carries resolution_stack");
         wire.as_object_mut()
             .expect("the client wire payload is a JSON object")
-            .insert(
-                "next_delayed_trigger_token".to_string(),
-                serde_json::Value::from(0),
-            );
+            .insert("resolution_stack".to_string(), stack);
         wire
     }
 
@@ -33591,10 +34127,9 @@ mod tests {
         state
     }
 
-    /// V14. Pins the OTHER half of the premise
-    /// `client_wire_still_carries_resolution_stack` pins: the four fields whose
-    /// absence `declare_raw_resolution_wire` reads as a client-wire redaction
-    /// fingerprint are removed by `client_state_wire_value` and by nothing else.
+    /// V14. Pins the legacy compatibility fingerprint: the four fields whose
+    /// absence `declare_raw_resolution_wire` reads as an unmarked client-wire
+    /// redaction are removed by `client_state_wire_value` and by nothing else.
     ///
     /// Mutation (i) — delete any one `root.remove(k)` for these four keys in
     /// `client_state_wire_value`. Reddens at the WIRE-ABSENT assertion for that
@@ -33677,13 +34212,14 @@ mod tests {
         }
     }
 
-    /// V15. The mechanism row: a payload that decodes cleanly on BOTH sides
-    /// today is newly refused on the redacted side, by name.
+    /// V15. The mechanism row: a client-wire payload is refused by its
+    /// positive provenance marker before any legacy wire inference, by name.
     ///
-    /// Mutation — delete the fingerprint guard in `declare_raw_resolution_wire`.
-    /// The wire payload is MEASURED `DECODE OK (Raw)` today, so with the guard
-    /// gone it decodes. Reddens at the `expect_err` on the wire payload; the
-    /// message `contains` below is never reached under that mutation.
+    /// Mutation — delete the positive-marker check in the persistence ingress.
+    /// The shared fail-closed projection has no resolution stack, so the legacy
+    /// fingerprint is not sufficient for this new wire; the expect-error then
+    /// reddens. The unmarked legacy fallback remains covered by the integration
+    /// capture tests.
     #[test]
     fn raw_ingress_refuses_a_redacted_client_wire_projection() {
         let state = parked_continuation_fixture(None);
@@ -33711,21 +34247,22 @@ mod tests {
         );
     }
 
-    /// V16. The discriminating row. UNREDACTED this state is REFUSED; redacted
-    /// it decoded silently, with the CR 603.2 ordinary vs CR 603.7 delayed
-    /// firing classification gone from the parked continuation. The guard
-    /// restores the refusal.
+    /// V16. The discriminating legacy-fallback row. UNREDACTED this state is
+    /// REFUSED; an unmarked redacted copy would decode silently, with the CR
+    /// 603.2 ordinary vs CR 603.7 delayed firing classification gone from the
+    /// parked continuation. The positive marker restores refusal for current
+    /// wires, while the helper below removes it to keep the fallback proven.
     ///
     /// The reach-guard is a REFUSAL, not an admission, and that is the point: the
     /// claim is not "a payload is refused", it is "the redaction converts a
     /// refusal into an acceptance". An admission guard would be FALSE for this
     /// fixture, so the row could not even be written that way.
     ///
-    /// Mutation A — delete the fingerprint guard. The wire payload is MEASURED
+    /// Mutation A — delete the legacy fingerprint guard. The helper's
+    /// deliberately unmarked payload is MEASURED
     /// `DECODE OK (Raw) continuation_firings=[None]` today, so it decodes.
-    /// Reddens at the `expect_err` on the wire payload. The reach-guard is
-    /// unaffected: the guard never fires on the bare payload, whose fingerprint
-    /// is fully present.
+    /// Reddens at the final `expect_err`; the current marked wire remains
+    /// protected by the positive marker independently.
     ///
     /// Mutation B (message only) — reword the guard's `Err` string. The
     /// `expect_err` still passes, so this reddens at the projection-message
@@ -33880,11 +34417,12 @@ mod tests {
 
         let wire = client_wire_value(&state);
 
-        // Measures the string the ingress produces with the guard bypassed, so
-        // the `!contains` clause below is a discriminated claim rather than a
+        // Measures the legacy downstream string with the positive marker
+        // removed and the historical stack carrier restored, so the
+        // `!contains` clause below is a discriminated claim rather than a
         // sentence that is true of any refusal whatsoever.
         let bypassed = serde_json::from_value::<PersistedGameState>(
-            with_the_projection_guard_bypassed(wire.clone()),
+            with_legacy_stack_and_projection_guard_bypassed(&state, wire.clone()),
         )
         .expect_err("the redaction strips every install root, so the payload is refused")
         .to_string();
@@ -38417,7 +38955,8 @@ mod tests {
         // A PayCost with a ManaAbility resume carries PendingManaAbility, not
         // PendingCast. A mana ability activated inside a spell cast still routes
         // the cast through the outer ManaPayment state, so excluding this
-        // variant here does not lose mid-cast tracking.
+        // variant here does not lose mid-cast tracking. (The CR 704.3 gate reads
+        // `GameState::withholds_priority`, which does count it.)
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
             kind: PayCostKind::TapCreatures {
@@ -38451,6 +38990,129 @@ mod tests {
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());
+    }
+
+    /// CR 605.3b + CR 704.3: a mana ability's own prompts are part of its
+    /// activation, so no state-based action check runs there, even though they
+    /// aren't cast states for display or `CancelCast`.
+    #[test]
+    fn mana_ability_continuations_count_as_activating() {
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: ObjectId(1),
+            ability_index: Some(0),
+            rules_execution_node: None,
+            ability_snapshot: None,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
+            chosen_tappers: None,
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!state.withholds_priority());
+
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Black, ManaType::Green],
+            },
+            context: ManaChoiceContext::ManaAbility(Box::new(pending.clone())),
+        };
+        assert!(!state.waiting_for.has_pending_cast());
+        assert!(state.waiting_for.is_mana_ability_continuation());
+        assert!(state.withholds_priority());
+
+        state.waiting_for = WaitingFor::PayManaAbilityMana {
+            player: PlayerId(0),
+            options: vec![vec![ManaType::Black]],
+            pending_mana_ability: Box::new(pending),
+        };
+        assert!(state.withholds_priority());
+
+        // CR 702.132a: Assist parks the cast in the external carrier while the
+        // caster picks a helper; the cast is still in progress.
+        state.waiting_for = WaitingFor::AssistChoosePlayer {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1)],
+            max_generic: 1,
+            convoke_mode: None,
+        };
+        assert!(!state.waiting_for.has_pending_cast());
+        assert!(!state.withholds_priority());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            ObjectId(2),
+            CardId(2),
+            ability,
+            ManaCost::zero(),
+        )));
+        assert!(state.withholds_priority());
+    }
+
+    /// CR 608.2 + CR 616.1: a replacement prompt left over from a resolution's
+    /// own life payment keeps the resolution's #962 safety net; the same prompt
+    /// during a cast's payment does not.
+    #[test]
+    fn cost_owner_decides_whether_priority_is_withheld() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 3,
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!state.withholds_priority());
+
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
+            player: PlayerId(0),
+            pending: None,
+            remaining_life_payments: Vec::new(),
+            resume_at_resolution_depth: 0,
+        });
+        assert!(state.withholds_priority());
+
+        // CR 601.2h + CR 616.1: a cost discard paused on a replacement carries
+        // its cast inside the resume, not in `pending_cast`.
+        state.pending_deferred_life_cost_resume = None;
+        assert!(!state.withholds_priority());
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume::Chosen {
+            player: PlayerId(0),
+            pending: PendingCast::new(ObjectId(2), CardId(2), ability, ManaCost::zero()),
+            chosen: vec![ObjectId(3)],
+            paused_at_index: 0,
+        }));
+        assert!(state.withholds_priority());
     }
 
     #[test]

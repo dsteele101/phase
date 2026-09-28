@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
+ *      display event. StateUpdate carries GameEvent[]; older peers would
+ *      accept the connection but omit ignored dice from the roll overlay.
+ *      P2P moves in lockstep; lobby messages are unchanged.
  * 84 — WaitingFor.ChooseDungeon options (DungeonPreview) gained required
  *      `card`, `rooms`, and `room_count`: the whole dungeon behind each
  *      choice, so the prompt previews each card instead of describing only
@@ -581,7 +585,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 84;
+export const PROTOCOL_VERSION = 85;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

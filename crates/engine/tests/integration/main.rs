@@ -1225,6 +1225,7 @@ mod self_destruct_target_power;
 mod self_exile_at_resolution_8721;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
+mod sephiroth_super_nova_transform_emblem_4359;
 mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
 mod shorten_efficacy;
@@ -1736,6 +1737,7 @@ mod xantid_swarm_defending_player_cant_cast;
 mod you_have_been_caught_stealing_any_damage;
 mod yurlok_of_scorch_thrash;
 mod zenos_yae_galvus_chosen_object;
+mod zero_life_mid_cast_payment;
 mod zhulodok_double_cascade;
 
 mod arm_the_cathars_conjunct_anaphor_p6;
