@@ -74168,6 +74168,23 @@ fn jace_reality_sculptor_exile_all_but_bottom_card_each_opponent() {
 }
 
 #[test]
+fn controller_worded_each_player_library_exile_keeps_controller_as_actor() {
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of each player's library.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    let Effect::ExileTop { player, actor, .. } = &*def.effect else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::Controller
+    );
+}
+
+#[test]
 fn nicol_bolas_exile_all_but_bottom_card_target_player() {
     // CR 401.1 + CR 701.13a: Nicol Bolas, the Arisen [-12] ability
     let def = parse_effect_chain(

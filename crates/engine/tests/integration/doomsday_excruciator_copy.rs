@@ -75,7 +75,7 @@ fn doomsday_excruciator_cast_exiles_all_but_bottom_six_cards_face_down() {
     for &obj_id in &state.exile {
         let obj = &state.objects[&obj_id];
         assert!(obj.face_down, "Exiled cards must be face down");
-        // CR 608.2c + CR 406.6: subject-worded "each player exiles" is performed by the library owner
+        // CR 608.2c: subject-worded "each player exiles" is performed by the library owner
         if obj.owner == P0 {
             assert_eq!(obj.exiled_by, Some(P0), "P0's cards must be exiled by P0");
             p0_exiled_count += 1;
@@ -170,7 +170,7 @@ fn superior_spider_man_copies_doomsday_excruciator_in_graveyard() {
     assert_eq!(spidey_obj.toughness, Some(4));
 }
 
-/// CR 608.2c + CR 406.6 + CR 109.5: Jace, Reality Sculptor ("Exile all but the bottom card
+/// CR 608.2c + CR 109.5: Jace, Reality Sculptor ("Exile all but the bottom card
 /// of each opponent's library") is a controller-worded instruction distributed across opponents.
 /// The controller (P0) performs the exile, so `exiled_by` on the opponent's exiled cards must
 /// record P0 (the original controller), NOT the rebound opponent (P1).
@@ -218,7 +218,55 @@ fn jace_reality_sculptor_distributive_exile_records_controller_as_actor() {
         assert_eq!(
             obj.exiled_by,
             Some(P0),
-            "CR 608.2c + CR 406.6: Jace's controller (P0) must be recorded as exiling player"
+            "CR 608.2c: Jace's controller (P0) must be recorded as exiling player"
         );
+    }
+}
+
+/// CR 608.2c + CR 109.5: a controller-worded instruction remains performed by
+/// the spell's controller even when it names each player's library.
+#[test]
+fn each_player_library_exile_keeps_spell_controller_as_actor() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for i in 0..4 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Card {i}"));
+        scenario.add_card_to_library_top(P1, &format!("P1 Card {i}"));
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Library Exile",
+            false,
+            "Exile all but the bottom card of each player's library.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).resolve();
+    let state = outcome.state();
+
+    assert_eq!(
+        state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .library
+            .len(),
+        1
+    );
+    assert_eq!(
+        state
+            .players
+            .iter()
+            .find(|p| p.id == P1)
+            .unwrap()
+            .library
+            .len(),
+        1
+    );
+    assert_eq!(state.exile.len(), 6);
+    for &obj_id in &state.exile {
+        assert_eq!(state.objects[&obj_id].exiled_by, Some(P0));
     }
 }

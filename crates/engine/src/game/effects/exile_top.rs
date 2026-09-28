@@ -44,7 +44,7 @@ pub fn resolve(
     // CR 608.2c: the player performing this exile — the controller unless the
     // instruction names its subject ("that player exiles that card"), who is
     // the player whose library it is. Rides each move request so the delivery
-    // that settles a card in exile records who exiled it (CR 406.6).
+    // that settles a card in exile records who followed the instruction (CR 608.2c).
     // Under a distributive fan-out (player_scope), `ability.controller` rebinds to the
     // iterating seat while `ability.original_controller` retains the printed controller (CR 109.5).
     let actor = match actor {
@@ -1050,7 +1050,7 @@ mod tests {
         state.objects[&top].exiled_by
     }
 
-    /// CR 608.2c + CR 406.6: a controller-worded exile ("exile the top card of
+    /// CR 608.2c: a controller-worded exile ("exile the top card of
     /// that player's library") is performed by the controller, even when a
     /// different affected player is scoped.
     #[test]
@@ -1061,7 +1061,7 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 406.6: a subject-worded exile ("that player exiles the top
+    /// CR 608.2c: a subject-worded exile ("that player exiles the top
     /// card of their library") is performed by the player whose library it is.
     #[test]
     fn exile_top_records_library_player_for_subject_worded_instruction() {
@@ -1071,7 +1071,7 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 406.6: during distributive fan-out across opponents, the iterating
+    /// CR 608.2c + CR 109.5: during distributive fan-out across opponents, the iterating
     /// seat rebinds `ability.controller` to each opponent in turn, but `original_controller`
     /// preserves the printed controller (CR 109.5). A controller-worded instruction must
     /// record the original controller as the exiling player, not the rebound opponent.

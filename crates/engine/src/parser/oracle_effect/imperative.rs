@@ -10091,7 +10091,7 @@ pub(super) fn try_parse_exile_all_but_edge<'a>(
         offset: -n,
     };
 
-    let actor = if is_third_person || matches!(player, TargetFilter::ScopedPlayer) {
+    let actor = if is_third_person {
         crate::types::ability::LibraryInstructionActor::LibraryPlayer
     } else {
         crate::types::ability::LibraryInstructionActor::Controller
