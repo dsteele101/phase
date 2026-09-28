@@ -553,6 +553,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::CaseSolved { .. }
             | GameEvent::ClassLevelGained { .. }
             | GameEvent::DieRolled { .. }
+            // CR 706.6: an ignored roll carries no public-state delta either —
+            // it is rendered from the structured event log, not derived state.
+            | GameEvent::DieRollIgnored { .. }
             | GameEvent::CoinFlipped { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
@@ -650,6 +653,7 @@ mod tests {
                 valid_block_targets: Default::default(),
                 block_requirements: Default::default(),
                 blocker_constraints: Default::default(),
+                must_be_blocked_targets: Default::default(),
             }),
             Some(Phase::DeclareBlockers),
         );

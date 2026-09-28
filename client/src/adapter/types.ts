@@ -7,6 +7,14 @@ import type {
   ViewerInteraction,
 } from "./generated/interaction";
 
+export type {
+  InteractionActionId,
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+  ViewerInteraction,
+};
+
 // ── Identifiers ──────────────────────────────────────────────────────────
 
 export type ObjectId = number;
@@ -49,11 +57,18 @@ export interface RoomPreview {
 
 // Mirrors `engine::game::dungeon::DungeonPreview`. `entry_room` is the topmost
 // room (CR 309.4a) — the room the venturing player enters immediately on
-// choosing this dungeon.
+// choosing this dungeon. `card` + `rooms` carry the whole dungeon behind the
+// choice so the prompt can preview each card.
 export interface DungeonPreview {
   dungeon: DungeonId;
   name: string;
   entry_room: RoomPreview;
+  /** The printed dungeon card's Scryfall identity. */
+  card: DungeonCardView;
+  /** Every room on the card in printed order, with edges and card geometry. */
+  rooms: DungeonRoomNodeView[];
+  /** Total rooms on the dungeon card, for "room 1 of 7". */
+  room_count: number;
 }
 
 // Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
@@ -72,7 +87,8 @@ export interface DungeonRoomView {
   rooms: DungeonRoomNodeView[];
 }
 
-// Mirrors `engine::game::derived_views::DungeonCardView`.
+// Mirrors `engine::game::dungeon::DungeonCardView` (re-exported by
+// `engine::game::derived_views`).
 //
 // Two ids, because the five dungeons are NOT indexed uniformly by the client's
 // Scryfall sidecars. Four are `layout: "normal"` and resolve from
@@ -88,9 +104,10 @@ export interface DungeonCardView {
   face_name: string;
 }
 
-// Mirrors `engine::game::derived_views::DungeonRoomNodeView`. `RoomPreview` is
-// flattened into this by serde, so `index`/`name`/`text` sit alongside the
-// edges and geometry rather than under a nested key.
+// Mirrors `engine::game::dungeon::DungeonRoomNodeView` (re-exported by
+// `engine::game::derived_views`). `RoomPreview` is flattened into this by
+// serde, so `index`/`name`/`text` sit alongside the edges and geometry
+// rather than under a nested key.
 export interface DungeonRoomNodeView extends RoomPreview {
   /** Rooms the venture marker may move to from here (CR 309.5a); empty for
    *  the bottommost room. */
@@ -471,7 +488,7 @@ export interface DraftLobbyMetadata {
   setCode: string;
   /**
    * Draft kind, as the serialized name of a `DraftKind`. Deliberately not
-   * enumerated here: `DRAFT_KINDS` in `adapter/draft-adapter.ts` is the single
+   * enumerated here: `DRAFT_KINDS` in `adapter/draftKinds.ts` is the single
    * authority, and a second enumeration in a doc comment goes stale silently
    * (this one already had, naming three of the then-five kinds).
    */
@@ -2100,6 +2117,10 @@ export interface ActivationCostSnapshot {
   base_cost: SerializedAbilityCost;
   raise_total?: number;
   reductions?: CostReductionEntry[];
+  // Which pending field holds the unpaid mana while the lock waits for targets.
+  mana_carrier?: "Whole" | "Split";
+  // Set only while a target-settlement election prompt is outstanding.
+  settlement_tail?: "SurfaceThenBoundary" | "Boundary";
   lock:
     | { type: "Open"; data: { point?: ActivationCostLockPoint } }
     | {
@@ -2108,7 +2129,7 @@ export interface ActivationCostSnapshot {
       };
 }
 
-export type ActivationCostLockPoint = "Announcement" | "XAnnounced";
+export type ActivationCostLockPoint = "Announcement" | "XAnnounced" | "TargetSettlement";
 
 /// CR 601.2b + CR 601.2f: the caster's announced nonhybrid equivalents and the
 /// order their reductions are applied in, as one recorded election.
@@ -2420,6 +2441,7 @@ export type WaitingFor =
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RippleRevealChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "RippleBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; final_cast?: ObjectId | null } }
+  | { type: "RevealUntilBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; clear_markers?: ObjectId[]; emit_reveal_until_resolved?: ObjectId | null; reveal_until_hit_snapshot?: unknown } }
   | { type: "ArrangePlanarDeckTopChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_on_top: number } }
   | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
@@ -2470,7 +2492,7 @@ export type WaitingFor =
   // `keyword.type` mirrors engine `AlternativeCastKeyword` (game_state.rs) 1:1.
   // Keep this union exhaustive with the engine enum so the modal's keyword
   // switch is type-checked against every variant the engine can emit.
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null; alternative_additional_cost_description: AlternativeAdditionalCostDescription | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Emerge" } | { type: "Dash" } | { type: "Blitz" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Impending" } | { type: "Prototype" } | { type: "Mutate" } | { type: "Spectacle" } | { type: "Prowl" } | { type: "FaceDown" } | { type: "Surge" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null; alternative_additional_cost_description: AlternativeAdditionalCostDescription | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -3318,6 +3340,11 @@ export type GameEvent =
   // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
   // numeric face value to animate.
   | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number | null } }
+  // CR 706.6: a die roll ignored by a replacement, shown so players see what
+  // the lowest roll was. Display mirror only — never a rules roll: triggers,
+  // results tables, aggregates, and AI must not read it. `result` is always
+  // the natural value (modifiers never touch ignored rolls).
+  | { type: "DieRollIgnored"; data: { player_id: PlayerId; sides: number; result: number } }
   // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
   // preserves the round boundaries (round 1 = every seat; each later round = the
   // previous round's tied-max group that rerolled); `winner` is the engine's
@@ -3770,6 +3797,8 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /** CR 400.7 + CR 607.2a: cards currently exiled with each battlefield permanent, keyed by ObjectId-as-string. */
+  linked_exile_ids?: Record<string, ObjectId[]>;
   /**
    * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
    * recipient ObjectId-as-string. A null value means the grant remains live
@@ -4011,21 +4040,22 @@ export type DayNight = "Day" | "Night";
 
 /**
  * Mirrors engine `ExileLinkKind` (`crates/engine/src/types/game_state.rs`).
- * Unit variants serialize as bare strings; the two struct variants serialize
- * as a single-key object under serde's default external tagging. Only
- * `HideawayLookable` is currently read on the client (the exile-visibility
- * gate in `viewmodel/gameStateView.ts`) — the rest are kept so `exile_links`
- * round-trips the full wire shape rather than widening it to `unknown`.
+ * Unit variants serialize as bare strings; the struct variants serialize as a
+ * single-key object under serde's default external tagging. The client reads
+ * no kind; the union mirrors the wire so `exile_links` round-trips.
  */
 export type ExileLinkKind =
   | "TrackedBySource"
   | "Cipher"
   | "Haunt"
-  | "HideawayLookable"
+  | { HideawayLookable: { grant: LookGrant; lookers: PlayerId[]; source_incarnation: number } }
   | "CraftMaterial"
   | { UntilSourceLeaves: { return_zone: Zone } }
   | { UntilOpponentBecomesMonarch: { return_zone: Zone; controller: PlayerId } }
   | { ParadigmSource: { player: PlayerId } };
+
+/** Mirrors engine `LookGrant`: whom a face-down exile look link's live rule admits. */
+export type LookGrant = "SourceController" | { Player: { player: PlayerId } };
 
 export interface GameState {
   turn_number: number;

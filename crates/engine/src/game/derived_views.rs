@@ -604,33 +604,11 @@ pub struct DungeonRoomView {
     pub rooms: Vec<DungeonRoomNodeView>,
 }
 
-/// The printed dungeon card, as the client looks it up on Scryfall.
-///
-/// Identity plumbing, not a rule — deliberately unannotated.
-///
-/// Both ids ride along because the five dungeons are not indexed uniformly by
-/// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
-/// only `scryfall-token-images.json` carries. See `dungeon::DungeonCardRef`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DungeonCardView {
-    pub oracle_id: String,
-    pub scryfall_id: String,
-    pub face_name: String,
-}
-
-/// CR 309.4: One room as the client draws it — its preview, its outgoing
-/// edges, and its position on the printed card face.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DungeonRoomNodeView {
-    #[serde(flatten)]
-    pub room: crate::game::dungeon::RoomPreview,
-    /// CR 309.5a: the rooms the venture marker may move to from here. Empty
-    /// for the bottommost room (CR 309.5).
-    pub next_rooms: Vec<u8>,
-    /// Where this room is drawn on the card. Permille of the image — see
-    /// `RoomMarkerPoint`, which documents why it is not a fraction.
-    pub marker: crate::game::dungeon::RoomMarkerPoint,
-}
+/// Re-exported from `dungeon`, the canonical home of the wire shapes: the
+/// venture-marker panel (`DungeonRoomView`) and the dungeon-choice preview
+/// (`dungeon::DungeonPreview`) describe the same cards and rooms, so the types
+/// live once, beside the static tables, rather than once per surface.
+pub use crate::game::dungeon::{DungeonCardView, DungeonRoomNodeView};
 
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
@@ -678,6 +656,9 @@ pub struct DerivedViews {
     /// next one belongs too.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+    /// CR 400.7 + CR 607.2a: the cards currently exiled with each battlefield permanent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub linked_exile_ids: BTreeMap<ObjectId, Vec<ObjectId>>,
 
     /// CR 509.1b + CR 611.2c: creatures with a live, temporary
     /// `CantBeBlocked` grant. The optional value is the granting source only
@@ -1177,15 +1158,9 @@ pub struct ClientGameState {
 /// cast — activated-ability mana payment keeps its full-cost display, and
 /// convoke/improvise/delve pay via board taps tracked by their own staged UI.
 ///
-/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
-/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
-/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
-/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
-/// This is deliberately consistent with the pin-eligibility gate
-/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
-/// reject such a pin — both layers agree on the stricter behavior, and the
-/// common cases (generic + plain colored costs) are exact. Threading the real
-/// permission bundle through both sites is the follow-up to lift this.
+/// Uses the current spell's typed mana-spend permission when matching pinned
+/// units to colored or colorless requirements. This projection subtracts only
+/// pinned mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
     use crate::types::game_state::WaitingFor;
     use crate::types::mana::{ManaPool, PaymentContext};
@@ -1227,43 +1202,14 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
         &selected,
         &cost,
         ctx.as_ref(),
-        false,
+        crate::game::casting::player_mana_spend_permission_for_payment(
+            state,
+            viewer,
+            Some(pending.object_id),
+            ctx.as_ref(),
+        ),
         None,
     ))
-}
-
-/// Project the printed dungeon card's Scryfall identity.
-fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardView {
-    let card = crate::game::dungeon::card_ref(dungeon);
-    DungeonCardView {
-        oracle_id: card.oracle_id.to_string(),
-        scryfall_id: card.scryfall_id.to_string(),
-        face_name: card.face_name.to_string(),
-    }
-}
-
-/// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
-/// outgoing edges, and where it is drawn on the card.
-///
-/// The client needs all of it at once: it places the marker on the current room
-/// and marks the rooms reachable from it (CR 309.5a), and neither is derivable
-/// from the current room alone.
-fn dungeon_room_nodes(dungeon: crate::game::dungeon::DungeonId) -> Vec<DungeonRoomNodeView> {
-    let markers = crate::game::dungeon::marker_points(dungeon);
-    (0..crate::game::dungeon::room_count(dungeon))
-        .filter_map(|index| {
-            // `dungeon_marker_points_cover_every_room` pins these lists to the
-            // same length, so a miss is unreachable. Skipping rather than
-            // indexing keeps a future table edit from panicking the whole state
-            // projection on a purely cosmetic field.
-            let marker = *markers.get(index as usize)?;
-            Some(DungeonRoomNodeView {
-                room: crate::game::dungeon::room_preview(dungeon, index),
-                next_rooms: crate::game::dungeon::next_rooms(dungeon, index).to_vec(),
-                marker,
-            })
-        })
-        .collect()
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1287,8 +1233,8 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                         .to_string(),
                     room: crate::game::dungeon::room_preview(dungeon, progress.current_room),
                     room_count: crate::game::dungeon::room_count(dungeon),
-                    card: dungeon_card_view(dungeon),
-                    rooms: dungeon_room_nodes(dungeon),
+                    card: crate::game::dungeon::card_view(dungeon),
+                    rooms: crate::game::dungeon::room_nodes(dungeon),
                 },
             ))
         })
@@ -1581,6 +1527,12 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .collect();
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        let linked: Vec<ObjectId> = crate::game::exile_links::live_links_for_source(state, obj_id)
+            .map(|link| link.exiled_id)
+            .collect();
+        if !linked.is_empty() {
+            views.linked_exile_ids.insert(obj_id, linked);
         }
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
