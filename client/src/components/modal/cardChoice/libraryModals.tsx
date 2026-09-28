@@ -846,7 +846,7 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
                     aria-label={t("cardChoice.dig.moveEarlier", { card: cardName })}
                     disabled={!canMove(index, index - 1)}
                     onClick={() => move(index, index - 1)}
-                    className="rounded bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                    className="flex h-11 min-w-11 items-center justify-center rounded bg-slate-700/80 px-2 text-sm font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
                   >
                     {"←"}
                   </button>
@@ -855,7 +855,7 @@ export function DigRestSplitModal({ data }: { data: DigRestSplitChoice["data"] }
                     aria-label={t("cardChoice.dig.moveLater", { card: cardName })}
                     disabled={!canMove(index, index + 1)}
                     onClick={() => move(index, index + 1)}
-                    className="rounded bg-slate-700/80 px-2 py-1 text-xs font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
+                    className="flex h-11 min-w-11 items-center justify-center rounded bg-slate-700/80 px-2 text-sm font-bold text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-30"
                   >
                     {"→"}
                   </button>

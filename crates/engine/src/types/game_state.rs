@@ -38134,7 +38134,7 @@ mod tests {
             outcomes: Vec::new(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 40);
+        assert_eq!(variants.len(), 41);
     }
 
     #[test]

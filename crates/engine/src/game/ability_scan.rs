@@ -863,8 +863,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             if let Some(kce) = keep_count_expr {
                 acc = acc.or(scan_quantity_expr(kce, mode));
             }
-            // CR 401.2 + CR 701.20e: a dynamic remainder-split size is the same
-            // class of projected-resource read as the dynamic keep count.
+            // A dynamic remainder-split size is the same class of
+            // projected-resource read as the dynamic keep count.
             if let Some(split) = rest_split_top_count {
                 acc = acc.or(scan_quantity_expr(split, mode));
             }
