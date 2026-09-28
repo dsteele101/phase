@@ -26,7 +26,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // target-gated activation costs (`ReduceAbilityCost { targets, frequency }`,
 // the per-turn activation journal and the target-settlement carrier fields);
 // v84 adds required dungeon choice card and room previews.
-// v85 adds the tagged ignored-die display event.
+// v85 adds the tagged ignored-die display event; v86 adds the tagged
+// GameEvent::Melded event.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -39,7 +40,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +12: the v83 target-gated activation costs.
 // +13: the v84 dungeon choice card and room previews.
 // +14: the v85 ignored-die display event.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 14;
+// +15: the v86 Melded event tag.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 15;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -75,7 +77,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +11: wire 65 moves with full-game v83 for target-gated activation costs.
 // +12: wire 66 moves with full-game v84 for dungeon choice previews.
 // +13: wire 67 moves with full-game v85 for ignored-die event batches.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 13;
+// +14: wire 68 moves with full-game v86 for the Melded event tag.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 14;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

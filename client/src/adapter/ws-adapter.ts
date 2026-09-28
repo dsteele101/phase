@@ -210,6 +210,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 86 — GameEvent gained the tagged Melded variant. Full-game event frames
+ *      can carry it, so the exact handshake refuses v85 peers. P2P moves in
+ *      lockstep (wire 68); lobby messages are unchanged.
  * 85 — GameEvent gained the tagged DieRollIgnored { player_id, sides, result }
  *      display event. StateUpdate carries GameEvent[]; older peers would
  *      accept the connection but omit ignored dice from the roll overlay.
@@ -585,7 +588,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 85;
+export const PROTOCOL_VERSION = 86;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
