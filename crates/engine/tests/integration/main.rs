@@ -278,6 +278,7 @@ mod divine_visitation_token_substitution;
 mod djinn_most_common_color_static;
 mod doom_s_time_platform_exile_with_time_counters;
 mod doomsday;
+mod doomsday_excruciator_copy;
 mod doran_attack_block_pump;
 mod double_strike_first_strike_trigger_removes_attacker;
 mod dragon_man_reformed_robot_graveyard_discard_cost;

@@ -19124,6 +19124,15 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
 
+    // Exile all but bottom/top N cards: "exile all but the bottom six cards of their library"
+    if let Some((rem, ast)) = imperative::try_parse_exile_all_but_edge(lower, ctx) {
+        let original_rem = &text[text.len() - rem.len()..];
+        return Some((
+            TargetedImperativeAst::ZoneCounterProxy(Box::new(ast)),
+            original_rem,
+        ));
+    }
+
     // Exile: infer origin zone from the primary target clause the target parser
     // consumed (see the `infer_origin_zone` call below) — NOT the bare remainder
     // (parse_zone_suffix inside parse_type_phrase_folding strips zone phrases off it) and
@@ -24381,6 +24390,23 @@ fn lower_subject_predicate_ast(
                     player: affected,
                     count,
                 });
+            }
+            // CR 701.13a + CR 401.1: "<player> exiles all but the bottom/top [N] card(s) of their library [face down]"
+            // (Doomsday Excruciator: "each player exiles all but the bottom six cards of their library face down")
+            if let Some((rem, mut ast)) = imperative::try_parse_exile_all_but_edge(&pred_lower, ctx)
+            {
+                if imperative::terminal_punctuation_only(rem) {
+                    if let ZoneCounterImperativeAst::ExileTop {
+                        ref mut actor,
+                        ref mut player,
+                        ..
+                    } = ast
+                    {
+                        *actor = crate::types::ability::LibraryInstructionActor::LibraryPlayer;
+                        *player = affected.clone();
+                    }
+                    return parsed_clause(imperative::lower_zone_counter_ast(ast));
+                }
             }
             // CR 701.13a: "<player> exiles the top [N] card(s) of their library"
             if alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles ")))

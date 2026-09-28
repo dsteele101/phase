@@ -74085,3 +74085,123 @@ fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
     );
     assert!(plargg.properties.contains(&three_or_less), "{plargg:?}");
 }
+#[test]
+fn doomsday_excruciator_each_player_exiles_all_but_bottom_six_cards() {
+    // CR 401.1 + CR 701.13a: Doomsday Excruciator ETB effect chain
+    let def = parse_effect_chain(
+        "Each player exiles all but the bottom six cards of their library face down.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        face_down,
+        actor,
+    } = &*def.effect
+    else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::ScopedPlayer);
+    assert_eq!(*position, LibraryPosition::Top);
+    assert!(*face_down);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::LibraryPlayer
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::ScopedPlayer,
+                },
+            }),
+            offset: -6,
+        }
+    );
+}
+
+#[test]
+fn jace_reality_sculptor_exile_all_but_bottom_card_each_opponent() {
+    // CR 401.1 + CR 701.13a: Jace, Reality Sculptor [0] ability
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of each opponent's library.",
+        AbilityKind::Activated,
+    );
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        face_down,
+        actor,
+    } = &*def.effect
+    else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(*position, LibraryPosition::Top);
+    assert!(!*face_down);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::Controller
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::ScopedPlayer,
+                },
+            }),
+            offset: -1,
+        }
+    );
+}
+
+#[test]
+fn nicol_bolas_exile_all_but_bottom_card_target_player() {
+    // CR 401.1 + CR 701.13a: Nicol Bolas, the Arisen [-12] ability
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of target player's library.",
+        AbilityKind::Activated,
+    );
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        face_down,
+        actor,
+    } = &*def.effect
+    else {
+        panic!("expected ExileTop effect, got {:?}", def.effect);
+    };
+    assert_eq!(*player, TargetFilter::Player);
+    assert_eq!(*position, LibraryPosition::Top);
+    assert!(!*face_down);
+    assert_eq!(
+        *actor,
+        crate::types::ability::LibraryInstructionActor::Controller
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::TargetZoneCardCount {
+                    zone: ZoneRef::Library,
+                    scope: ControllerRef::TargetPlayer,
+                    binding: CountBinding::Anaphoric,
+                },
+            }),
+            offset: -1,
+        }
+    );
+}
