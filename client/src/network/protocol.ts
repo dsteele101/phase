@@ -106,6 +106,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  69 — game_setup and state_update can carry WaitingFor.DigRestSplitChoice
+ *       and Effect.Dig.rest_split_top_count. First contact refuses a peer
+ *       that cannot represent the split. Bumped with full-game protocol 87.
  *  68 — game_setup and state_update can carry GameEvent::Melded. An older
  *       guest cannot present the meld sequence, so first contact refuses the
  *       skew. Bumped in lockstep with full-game protocol 86.
@@ -453,7 +456,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 68 as const;
+export const WIRE_PROTOCOL_VERSION = 69 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

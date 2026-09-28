@@ -3318,17 +3318,17 @@ mod tests {
         }
     }
 
-    /// `StateUpdate.events` can now carry the tagged `Melded` display event.
-    /// A v85 peer would silently omit the meld forge, so it must be refused
-    /// before receiving v86 event batches.
+    /// A game-state snapshot can now carry `WaitingFor::DigRestSplitChoice`
+    /// and `Effect::Dig.rest_split_top_count`. A v86 peer cannot represent the
+    /// new pause, so it must be refused before receiving a v87 snapshot.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_86_for_melded_event() {
-        assert_eq!(PROTOCOL_VERSION, 86);
+    fn protocol_version_is_87_for_dig_rest_split_choice() {
+        assert_eq!(PROTOCOL_VERSION, 87);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3339,7 +3339,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_86_for_melded_event` stays
+    /// `protocol_version_is_87_for_dig_rest_split_choice` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

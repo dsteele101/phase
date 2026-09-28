@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 87 — WaitingFor.DigRestSplitChoice and Effect.Dig.rest_split_top_count
+ *      extend serialized game state for Telling Time-class rest piles. The
+ *      exact handshake refuses v86 peers; P2P moves in lockstep (wire 69).
+ *      Lobby messages are unchanged.
  * 86 — GameEvent gained the tagged Melded variant. Full-game event frames
  *      can carry it, so the exact handshake refuses v85 peers. P2P moves in
  *      lockstep (wire 68); lobby messages are unchanged.
@@ -588,7 +592,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 86;
+export const PROTOCOL_VERSION = 87;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
