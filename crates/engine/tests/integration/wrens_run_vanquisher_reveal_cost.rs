@@ -38,8 +38,8 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     scenario.at_phase(Phase::PreCombatMain);
 
     // Provide 2 lands for {1}{G} base cost.
-    add_forest(&mut scenario);
-    add_wastes(&mut scenario);
+    let forest = add_forest(&mut scenario);
+    let wastes = add_wastes(&mut scenario);
 
     // An Elf card in hand to reveal.
     let elf = scenario
@@ -114,7 +114,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     }
 
     // 4. Select the Elf card to reveal.
-    runner
+    let reveal_outcome = runner
         .act(GameAction::SelectCards { cards: vec![elf] })
         .expect("selecting the Elf card to reveal must succeed");
 
@@ -134,6 +134,25 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
         "revealed Elf must remain in hand (CR 701.20b)"
     );
 
+    // CR 118.3 & CR 601.2h: Assert base cost {1}{G} was paid with both lands tapped.
+    assert!(
+        runner.state().objects[&forest].tapped,
+        "Forest must be tapped to pay {{1}}{{G}}"
+    );
+    assert!(
+        runner.state().objects[&wastes].tapped,
+        "Wastes must be tapped to pay {{1}}{{G}}"
+    );
+
+    // CR 701.20a: A CardsRevealed event must be emitted for the revealed Elf.
+    assert!(
+        reveal_outcome.events.iter().any(|e| matches!(
+            e,
+            engine::types::events::GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&elf)
+        )),
+        "a CardsRevealed event containing the revealed Elf card must be emitted"
+    );
+
     // 6. Resolve the spell onto the battlefield.
     runner.advance_until_stack_empty();
     assert_eq!(
@@ -149,11 +168,12 @@ fn wrens_run_vanquisher_cast_by_paying_three() {
     scenario.at_phase(Phase::PreCombatMain);
 
     // Provide 5 lands for {4}{G} total ({1}{G} base + {3} additional cost).
-    add_forest(&mut scenario);
-    add_wastes(&mut scenario);
-    add_wastes(&mut scenario);
-    add_wastes(&mut scenario);
-    add_wastes(&mut scenario);
+    let f = add_forest(&mut scenario);
+    let w1 = add_wastes(&mut scenario);
+    let w2 = add_wastes(&mut scenario);
+    let w3 = add_wastes(&mut scenario);
+    let w4 = add_wastes(&mut scenario);
+    let lands = [f, w1, w2, w3, w4];
 
     let elf = scenario
         .add_creature_to_hand(P0, "Llanowar Elves", 1, 1)
@@ -207,6 +227,14 @@ fn wrens_run_vanquisher_cast_by_paying_three() {
         "Elf remains in hand"
     );
 
+    // CR 118.3 & CR 601.2h: Verify all 5 lands were tapped to pay {4}{G} ({1}{G} base + {3} additional).
+    for land in lands {
+        assert!(
+            runner.state().objects[&land].tapped,
+            "all 5 lands must be tapped to pay {{4}}{{G}} (land {land:?})"
+        );
+    }
+
     runner.advance_until_stack_empty();
     assert_eq!(
         runner.state().objects[&spell].zone,
@@ -221,11 +249,12 @@ fn wrens_run_vanquisher_auto_falls_through_when_no_elf_in_hand() {
     scenario.at_phase(Phase::PreCombatMain);
 
     // Provide 5 lands for {4}{G}.
-    add_forest(&mut scenario);
-    add_wastes(&mut scenario);
-    add_wastes(&mut scenario);
-    add_wastes(&mut scenario);
-    add_wastes(&mut scenario);
+    let f = add_forest(&mut scenario);
+    let w1 = add_wastes(&mut scenario);
+    let w2 = add_wastes(&mut scenario);
+    let w3 = add_wastes(&mut scenario);
+    let w4 = add_wastes(&mut scenario);
+    let lands = [f, w1, w2, w3, w4];
 
     // Hand has no Elf cards.
     scenario
@@ -269,4 +298,12 @@ fn wrens_run_vanquisher_auto_falls_through_when_no_elf_in_hand() {
         Zone::Stack,
         "spell must be on the stack"
     );
+
+    // CR 118.3 & CR 601.2h: Verify all 5 lands were tapped to pay fallback {4}{G}.
+    for land in lands {
+        assert!(
+            runner.state().objects[&land].tapped,
+            "all 5 lands must be tapped to pay fallback {{4}}{{G}} (land {land:?})"
+        );
+    }
 }

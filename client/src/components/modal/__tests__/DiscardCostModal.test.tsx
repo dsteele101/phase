@@ -679,4 +679,59 @@ describe("Discard cost modal", () => {
       data: { cards: [10] },
     });
   });
+
+  it("resets Reveal selection across consecutive prompts with different eligible choices", () => {
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+        20: makeObject(20, "Elvish Mystic", "Hand"),
+      },
+    );
+
+    const { rerender } = render(<CardChoiceModal />);
+
+    // Select card 10 in the first prompt
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    // Rerender with a subsequent Reveal prompt offering only card 20
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [20],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+        20: makeObject(20, "Elvish Mystic", "Hand"),
+      },
+    );
+
+    rerender(<CardChoiceModal />);
+
+    // The selection must have reset: button is disabled at (0/1)
+    const confirmButton = screen.getByRole("button", { name: "Reveal (0/1)" });
+    expect(confirmButton).toBeDisabled();
+
+    // Selecting card 20 now confirms with [20], not the stale [10]
+    fireEvent.click(screen.getByRole("button", { name: /Elvish Mystic/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal (1/1)" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [20] },
+    });
+  });
 });

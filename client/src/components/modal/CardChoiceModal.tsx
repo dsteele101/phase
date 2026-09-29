@@ -2408,7 +2408,7 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
         />
       );
     case "Reveal":
-      return <RevealForCostModal data={data} />;
+      return <RevealForCostModal key={choicesKey} data={data} />;
     case "Sacrifice":
       return isManaAbility ? (
         <SacrificeForManaAbilityModal data={data} />
