@@ -74223,6 +74223,21 @@ fn nicol_bolas_exile_all_but_bottom_card_target_player() {
     );
 }
 
+#[test]
+fn exile_all_but_edge_with_unbound_player_does_not_exile_permanents() {
+    // "That player" has no binding in this standalone clause. Its library
+    // cannot be counted through the current scoped player or the controller.
+    let def = parse_effect_chain(
+        "Exile all but the bottom card of that player's library.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { .. }),
+        "unbound library owner must remain unsupported: {:?}",
+        def.effect
+    );
+}
+
 /// CR 608.2d + CR 613.4c — SelfRef subject (Brightling, Endling, Greater
 /// Morphling, Shorecrasher Elemental, Multiform Wonder all print this clause).
 ///

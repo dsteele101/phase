@@ -10078,12 +10078,16 @@ pub(super) fn try_parse_exile_all_but_edge<'a>(
             filter: None,
             scope: CountScope::Controller,
         },
-        _ => QuantityRef::ZoneCardCount {
+        TargetFilter::ScopedPlayer | TargetFilter::Opponent => QuantityRef::ZoneCardCount {
             zone: ZoneRef::Library,
             card_types: vec![],
             filter: None,
             scope: CountScope::ScopedPlayer,
         },
+        // These anaphoric players can differ from the current scoped player.
+        // CountScope has no corresponding owner, so decline the parse rather
+        // than count one library and exile cards from another.
+        _ => return None,
     };
 
     let count = QuantityExpr::Offset {

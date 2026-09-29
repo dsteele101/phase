@@ -18628,6 +18628,23 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         return clause;
     }
 
+    // A recognized all-but-library head with an unsupported anaphoric owner
+    // must not fall into the broad "exile all" battlefield parser.
+    let lower = text.to_lowercase();
+    if tag::<_, _, OracleError<'_>>("exile all but the ")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        let gap = match imperative::try_parse_exile_all_but_edge(&lower, ctx) {
+            Some((tail, _)) if imperative::terminal_punctuation_only(tail) => None,
+            Some(_) => Some("exile_all_but_edge_suffix"),
+            None => Some("exile_all_but_edge_owner"),
+        };
+        if let Some(gap) = gap {
+            return parsed_clause(Effect::unimplemented(gap, text));
+        }
+    }
+
     // CR 608.2c: Compound damage actions: "~ deals 3 damage to any target and you gain 3 life"
     if let Some(clause) = try_split_damage_compound(text, ctx) {
         return clause;
@@ -19144,6 +19161,12 @@ fn try_parse_verb_and_target<'a>(
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ast)),
             original_rem,
         ));
+    }
+    if tag::<_, _, OracleError<'_>>("exile all but the ")
+        .parse(lower)
+        .is_ok()
+    {
+        return None;
     }
 
     // Exile: infer origin zone from the primary target clause the target parser
@@ -24406,8 +24429,15 @@ fn lower_subject_predicate_ast(
             }
             // CR 701.13a + CR 401.2: "<player> exiles all but the bottom/top [N] card(s) of their library [face down]"
             // (Doomsday Excruciator: "each player exiles all but the bottom six cards of their library face down")
-            if let Some((rem, mut ast)) = imperative::try_parse_exile_all_but_edge(&pred_lower, ctx)
+            if tag::<_, _, OracleError<'_>>("exile all but the ")
+                .parse(pred_lower.as_str())
+                .is_ok()
             {
+                let Some((rem, mut ast)) =
+                    imperative::try_parse_exile_all_but_edge(&pred_lower, ctx)
+                else {
+                    return parsed_clause(Effect::unimplemented("exile_all_but_edge_owner", text));
+                };
                 if !imperative::terminal_punctuation_only(rem) {
                     return parsed_clause(Effect::unimplemented("exile_all_but_edge_suffix", text));
                 }
