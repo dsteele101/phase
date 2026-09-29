@@ -782,7 +782,9 @@ impl AbilityCost {
                         let ctx = FilterContext::from_source(state, source);
                         p.hand
                             .iter()
-                            .filter(|&&id| matches_target_filter(state, id, f, &ctx))
+                            .filter(|&&id| {
+                                id != source && matches_target_filter(state, id, f, &ctx)
+                            })
                             .count()
                             >= *count as usize
                     }

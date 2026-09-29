@@ -2372,6 +2372,20 @@ function BeholdModal({
   );
 }
 
+function RevealForCostModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      minCount={data.count}
+      title={t("cardChoice.reveal.titleReveal")}
+      subtitle={t("cardChoice.reveal.subtitleChoose")}
+      confirmLabel={t("cardChoice.badges.reveal")}
+    />
+  );
+}
+
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
 // state — branch on `kind.type` to the matching cost-selection modal. The
 // `key` forces a fresh selection set when the eligible-object list changes.
@@ -2393,6 +2407,8 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
           canCancel={!isManaAbility}
         />
       );
+    case "Reveal":
+      return <RevealForCostModal data={data} />;
     case "Sacrifice":
       return isManaAbility ? (
         <SacrificeForManaAbilityModal data={data} />
