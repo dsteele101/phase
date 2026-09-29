@@ -27518,7 +27518,8 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
     // X is the amount of mana spent to cast ~` suffix substitutes the
     // bare `X` variable with the typed mana-spent quantity ref — without
     // this binding the trigger would have no chosen X and the count
-    // would default to 0 at resolution time. (#326)
+    // would default to 0 at resolution time. The subject-worded "each
+    // player exiles" makes each library's player the actor. (#326)
     let def = parse_effect_chain(
             "Each player exiles the top X cards of their library, where X is the amount of mana spent to cast ~.",
             AbilityKind::Spell,
@@ -27535,7 +27536,7 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
             },
         position: LibraryPosition::Top,
         face_down: false,
-        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     } = &*def.effect
     else {
         panic!(
