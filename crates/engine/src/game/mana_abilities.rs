@@ -2252,19 +2252,25 @@ pub(super) fn advance_mana_ability_activation(
     // `chosen_counter_counts` rather than collapsing them into one value.
     // CR 118.3 + CR 601.2h: the `max` offered for each subsequent leaf
     // already excludes whatever an EARLIER, type-overlapping leaf reserved
-    // (`next_unchosen_remove_counter_leaf_max`), so two leaves that can draw
+    // (`next_unchosen_remove_counter_leaf_bounds`), so two leaves that can draw
     // from the same counters (same type, or an `Any` leaf) can never together
     // announce more than the object actually has.
-    if let Some((_counter_type, max)) = next_unchosen_remove_counter_leaf_max(
+    if let Some((min, max)) = next_unchosen_remove_counter_leaf_bounds(
         state,
         pending.source_id,
         &ability_def.cost,
         &pending.chosen_counter_counts,
+        pending.chosen_x,
     ) {
+        if min > max {
+            return Err(EngineError::ActionNotAllowed(
+                "Not enough counters to pay the announced X for every cost clause".to_string(),
+            ));
+        }
         return Ok(WaitingFor::PayAmountChoice {
             player: pending.player,
             resource: PayableResource::Counters,
-            min: 0,
+            min,
             max,
             accumulated: 0,
             source_id: pending.source_id,
@@ -4143,7 +4149,7 @@ where
                     // the resources to pay it in full. The prompt gate already
                     // reserves overlapping earlier leaves' announced amounts
                     // when sizing this leaf's `max`
-                    // (`next_unchosen_remove_counter_leaf_max`), so this is a
+                    // (`next_unchosen_remove_counter_leaf_bounds`), so this is a
                     // defense-in-depth re-check against the object's CURRENT
                     // counters at the moment of payment — `remove_counters_for_mana_cost`
                     // would otherwise silently pay LESS than announced via its
@@ -4710,7 +4716,9 @@ pub fn handle_pay_mana_ability_mana(
 // payment. Named neutrally (not "any_number") because the sentinel set spans
 // two distinct rules with two distinct Oracle phrasings: literal "Remove X
 // counters" (CR 107.3a) and literal "any number of" counters (CR 107.1c).
-fn chosen_count_self_remove_counter_leaves(cost: &Option<AbilityCost>) -> Vec<&CounterMatch> {
+fn chosen_count_self_remove_counter_leaves(
+    cost: &Option<AbilityCost>,
+) -> Vec<(u32, &CounterMatch)> {
     let Some(cost) = cost.as_ref() else {
         return Vec::new();
     };
@@ -4724,7 +4732,7 @@ fn chosen_count_self_remove_counter_leaves(cost: &Option<AbilityCost>) -> Vec<&C
                 counter_type,
                 target: None,
                 ..
-            } if is_chosen_remove_counter_cost_count(*count) => Some(counter_type),
+            } if is_chosen_remove_counter_cost_count(*count) => Some((*count, counter_type)),
             _ => None,
         })
         .collect()
@@ -4756,15 +4764,14 @@ fn counter_match_overlaps(a: &CounterMatch, b: &CounterMatch) -> bool {
 // semantics, not to rescue an over-announced chosen count) instead of
 // refusing the impossible aggregate.
 fn reserved_overlapping_counter_count(
-    leaves: &[&CounterMatch],
+    leaves: &[(u32, &CounterMatch)],
     chosen: &[u32],
-    leaf_index: usize,
+    counter_type: &CounterMatch,
 ) -> u32 {
-    let target = leaves[leaf_index];
-    leaves[..leaf_index]
+    leaves
         .iter()
         .zip(chosen.iter())
-        .filter(|(other, _)| counter_match_overlaps(other, target))
+        .filter(|(other, _)| counter_match_overlaps(other.1, counter_type))
         .map(|(_, amount)| *amount)
         .sum()
 }
@@ -4775,18 +4782,48 @@ fn reserved_overlapping_counter_count(
 // overlapping leaves already reserved. `pending.chosen_counter_counts.len()`
 // is the count of leaves already answered, in flattened order, so the next
 // unanswered leaf is always at that index.
-fn next_unchosen_remove_counter_leaf_max(
+fn next_unchosen_remove_counter_leaf_bounds(
     state: &GameState,
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
     already_chosen: &[u32],
-) -> Option<(CounterMatch, u32)> {
+    chosen_x: Option<u32>,
+) -> Option<(u32, u32)> {
     let leaves = chosen_count_self_remove_counter_leaves(cost);
     let leaf_index = already_chosen.len();
-    let counter_type = *leaves.get(leaf_index)?;
+    let &(count, counter_type) = leaves.get(leaf_index)?;
     let available = removable_counter_count_for_mana_cost(state, source_id, counter_type);
-    let reserved = reserved_overlapping_counter_count(&leaves, already_chosen, leaf_index);
-    Some((counter_type.clone(), available.saturating_sub(reserved)))
+    let reserved = reserved_overlapping_counter_count(&leaves, already_chosen, counter_type);
+    let mut max = available.saturating_sub(reserved);
+
+    // CR 107.3a + CR 107.3i + CR 118.3: every literal-X leaf uses the same
+    // announced X. Reserve enough counters for all still-unanswered X leaves
+    // sharing each pool before offering a count for this leaf.
+    let remaining_x = |matcher: &CounterMatch| {
+        leaves[leaf_index..]
+            .iter()
+            .filter(|(leaf_count, leaf_matcher)| {
+                *leaf_count == REMOVE_COUNTER_COST_X
+                    && counter_match_overlaps(leaf_matcher, matcher)
+            })
+            .count() as u32
+    };
+    if count == REMOVE_COUNTER_COST_X {
+        for &(leaf_count, matcher) in &leaves[leaf_index..] {
+            if leaf_count != REMOVE_COUNTER_COST_X {
+                continue;
+            }
+            let available = removable_counter_count_for_mana_cost(state, source_id, matcher);
+            let reserved = reserved_overlapping_counter_count(&leaves, already_chosen, matcher);
+            max = max.min(available.saturating_sub(reserved) / remaining_x(matcher));
+        }
+        if let Some(x) = chosen_x {
+            return Some((x, max.min(x)));
+        }
+    } else if let Some(x) = chosen_x {
+        max = max.saturating_sub(remaining_x(counter_type).saturating_mul(x));
+    }
+    Some((0, max))
 }
 
 // CR 601.2b: `append_mana_ability_cost_components` (used for payment) clones
@@ -4820,21 +4857,9 @@ pub(crate) fn next_chosen_counter_leaf_is_literal_x(
     let Ok(ability_def) = mana_ability_definition(state, pending) else {
         return false;
     };
-    let Some(cost) = &ability_def.cost else {
-        return false;
-    };
-    let mut flattened = Vec::new();
-    append_mana_ability_cost_component_refs(cost, &mut flattened);
-    flattened
+    chosen_count_self_remove_counter_leaves(&ability_def.cost)
         .into_iter()
-        .filter_map(|cost| match cost {
-            AbilityCost::RemoveCounter {
-                count,
-                target: None,
-                ..
-            } if is_chosen_remove_counter_cost_count(*count) => Some(*count),
-            _ => None,
-        })
+        .map(|(count, _)| count)
         .nth(pending.chosen_counter_counts.len())
         == Some(REMOVE_COUNTER_COST_X)
 }
@@ -13402,16 +13427,14 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 
-    // Regression: a composite cost with TWO INDEPENDENT chosen-count
-    // self-RemoveCounter leaves — a literal-X leaf (Saltcrusted Steppe class)
-    // alongside an unrelated literal "any number of" leaf (Pentad
-    // Prism/Black Mana Battery class) over a DIFFERENT counter type — must
-    // keep the two announced amounts distinct rather than collapsing them
-    // into one scalar. Before this fix, both leaves shared
-    // `chosen_counter_count`, so answering X = 1 and the other choice = 2 (or
-    // any two different values) would apply the SAME value to both leaves.
+    // Regression: a composite cost with a shared literal X and an unrelated
+    // "any number of" count (Pentad Prism/Black Mana Battery class) must
+    // keep the independent choice separate while applying the same X to both
+    // literal-X leaves. One scalar counter count would collapse the choices;
+    // separately stored counts without a shared X would accept two values
+    // for the same variable.
     #[test]
-    fn composite_cost_with_two_independent_chosen_count_remove_counter_leaves() {
+    fn composite_counter_costs_keep_independent_counts_and_one_announced_x() {
         let mut state = GameState::new_two_player(42);
         let player = PlayerId(0);
         let land = create_object(
@@ -13470,6 +13493,12 @@ mod tests {
                             target: None,
                             selection: crate::types::ability::CounterCostSelection::SingleObject,
                         },
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_X,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
                     ],
                 }),
             );
@@ -13484,10 +13513,21 @@ mod tests {
         )
         .expect("the first chosen-count leaf should prompt for its own count");
 
-        // Answer the literal-X leaf with 1.
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(
+                    (*min, *max),
+                    (0, 2),
+                    "five storage counters can pay X twice only when X is at most two"
+                );
+            }
+            other => panic!("expected first PayAmountChoice, got {other:?}"),
+        }
+
+        // Announce X = 2 for both literal-X leaves.
         crate::game::engine::apply_as_current(
             &mut state,
-            crate::types::actions::GameAction::SubmitPayAmount { amount: 1 },
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
         )
         .expect("the first leaf's answer should surface the second leaf's prompt");
 
@@ -13505,12 +13545,36 @@ mod tests {
             other => panic!("expected a second, independent PayAmountChoice, got {other:?}"),
         }
 
-        // Answer the "any number of" leaf with a DIFFERENT amount (3).
+        // Answer the independent "any number of" leaf with a different amount.
         crate::game::engine::apply_as_current(
             &mut state,
             crate::types::actions::GameAction::SubmitPayAmount { amount: 3 },
         )
-        .expect("both independent counter choices should resume mana production");
+        .expect("the independent choice should reach the second literal-X prompt");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { min, max, .. } => {
+                assert_eq!(
+                    (*min, *max),
+                    (2, 2),
+                    "the second literal-X leaf must use the announced X"
+                );
+            }
+            other => panic!("expected shared-X PayAmountChoice, got {other:?}"),
+        }
+        assert!(
+            crate::game::engine::apply_as_current(
+                &mut state,
+                crate::types::actions::GameAction::SubmitPayAmount { amount: 1 },
+            )
+            .is_err(),
+            "a second literal-X leaf cannot announce a different value"
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 2 },
+        )
+        .expect("the shared X should pay both leaves and produce mana");
 
         assert_eq!(
             state.objects[&land]
@@ -13518,8 +13582,8 @@ mod tests {
                 .get(&storage)
                 .copied()
                 .unwrap_or(0),
-            4,
-            "the literal-X leaf must remove exactly its own announced amount (1), not the other leaf's (3)"
+            1,
+            "both literal-X leaves must remove the same announced amount (2)"
         );
         assert_eq!(
             state.objects[&land]
@@ -13528,12 +13592,12 @@ mod tests {
                 .copied()
                 .unwrap_or(0),
             2,
-            "the any-number leaf must remove exactly its own announced amount (3), not the other leaf's (1)"
+            "the any-number leaf must remove exactly its own announced amount (3)"
         );
         assert_eq!(
             state.players[0].mana_pool.count_color(ManaType::Green),
-            1,
-            "Add X mana must bind X to the literal-X leaf's amount (1), not the unrelated any-number leaf's amount (3)"
+            2,
+            "Add X mana must use the shared literal-X amount (2), not the unrelated any-number amount (3)"
         );
     }
 
@@ -13774,7 +13838,7 @@ mod tests {
     // Regression (defense in depth): even if a `PendingManaAbility` somehow
     // reaches payment with `chosen_counter_counts` announcing MORE than the
     // object's actual counters across overlapping leaves — bypassing the
-    // prompt-time reservation in `next_unchosen_remove_counter_leaf_max`
+    // prompt-time reservation in `next_unchosen_remove_counter_leaf_bounds`
     // entirely, as a stale or malformed resume might — payment must refuse
     // the impossible aggregate rather than silently paying less than
     // announced via `remove_counters_for_mana_cost`'s `available.min` clamp.
