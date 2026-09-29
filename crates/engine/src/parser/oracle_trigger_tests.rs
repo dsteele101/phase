@@ -34725,3 +34725,65 @@ fn split_graveyard_origin_owner_axes() {
         );
     }
 }
+
+/// CR 120.3a + CR 109.4 + CR 603.2: Emissary of Despair and Emissary of Hope
+/// combat-damage triggers establish TriggeringPlayer as the relative player
+/// scope for "that player" / "they" references in their effect bodies.
+#[test]
+fn emissary_of_despair_and_hope_trigger_definitions() {
+    let despair = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, that player loses 1 life for each artifact they control.",
+        "Emissary of Despair",
+    );
+    assert_eq!(despair.mode, TriggerMode::DamageDone);
+    let despair_exec = despair.execute.as_deref().expect("despair body");
+    let Effect::LoseLife { amount, target } = &*despair_exec.effect else {
+        panic!("expected LoseLife, got {:?}", despair_exec.effect);
+    };
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::TriggeringPlayer),
+        "damaged player must be the directed life loss target"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    properties: Vec::new(),
+                })
+            }
+        },
+        "artifact count must be scoped to TriggeringPlayer"
+    );
+
+    let hope = parse_trigger_line(
+        "Whenever this creature deals combat damage to a player, you gain 1 life for each artifact that player controls.",
+        "Emissary of Hope",
+    );
+    assert_eq!(hope.mode, TriggerMode::DamageDone);
+    let hope_exec = hope.execute.as_deref().expect("hope body");
+    let Effect::GainLife { amount, player } = &*hope_exec.effect else {
+        panic!("expected GainLife, got {:?}", hope_exec.effect);
+    };
+    assert_eq!(
+        player,
+        &TargetFilter::Controller,
+        "ability controller gains the life"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::TriggeringPlayer),
+                    properties: Vec::new(),
+                })
+            }
+        },
+        "artifact count must be scoped to TriggeringPlayer"
+    );
+}

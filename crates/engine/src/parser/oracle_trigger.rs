@@ -15444,6 +15444,14 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // `tag("deals ")`, mirroring the article path's own trailing-space consume.
     if let Ok((rest, filter)) = alt((
         value(
+            TargetFilter::SelfRef,
+            alt((
+                tag::<_, _, OracleError<'_>>("~ "),
+                tag("this creature "),
+                tag("this permanent "),
+            )),
+        ),
+        value(
             TargetFilter::AttachedTo,
             tag::<_, _, OracleError<'_>>("enchanted creature "),
         ),
