@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
+use engine::types::ability::{DelayedTriggerCondition, Effect};
 
 fn tap_land_action(runner: &GameRunner, object_id: ObjectId) -> GameAction {
     engine::game::mana_sources::activatable_mana_actions_for_player(
@@ -233,8 +234,6 @@ fn becomes_blocked_by_creature_fires_for_each_blocker() {
 /// `trigger_blocks_or_becomes_blocked_venom_parses_delayed_destroy`.)
 #[test]
 fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
-    use engine::types::ability::{DelayedTriggerCondition, Effect};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker = scenario
@@ -320,8 +319,6 @@ fn venom_destroys_the_creature_that_blocked_it_at_end_of_combat() {
 /// the attacking creature it blocked, and Tangle Asp must survive.
 #[test]
 fn tangle_asp_destroys_creature_it_blocks_at_end_of_combat() {
-    use engine::types::ability::{DelayedTriggerCondition, Effect};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker = scenario.add_creature(P0, "Attacking Bear", 1, 5).id();
@@ -393,8 +390,6 @@ fn tangle_asp_destroys_creature_it_blocks_at_end_of_combat() {
 /// the blocking creature, and Tangle Asp must survive.
 #[test]
 fn tangle_asp_destroys_creature_that_blocks_it_at_end_of_combat() {
-    use engine::types::ability::{DelayedTriggerCondition, Effect};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let asp = scenario
