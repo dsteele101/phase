@@ -10009,7 +10009,7 @@ fn parse_exile_that_many_from_library_edge(
     Ok((input, (position, player)))
 }
 
-/// CR 401.1 + CR 701.13a: "exile all but the bottom/top N cards of <player>'s library [face down]"
+/// CR 401.2 + CR 701.13a: "exile all but the bottom/top N cards of <player>'s library [face down]"
 /// (Doomsday Excruciator, Jace Reality Sculptor, Nicol Bolas the Arisen).
 /// Exiles (library.len() - N) cards from the opposite edge (e.g. from the top down when leaving
 /// N cards at the bottom).

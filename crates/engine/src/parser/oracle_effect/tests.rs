@@ -74087,7 +74087,7 @@ fn reveal_until_shared_card_qualifier_constrains_every_disjunct() {
 }
 #[test]
 fn doomsday_excruciator_each_player_exiles_all_but_bottom_six_cards() {
-    // CR 401.1 + CR 701.13a: Doomsday Excruciator ETB effect chain
+    // CR 401.2 + CR 701.13a + CR 406.3: Exile from a library face down.
     let def = parse_effect_chain(
         "Each player exiles all but the bottom six cards of their library face down.",
         AbilityKind::Spell,
@@ -74128,7 +74128,7 @@ fn doomsday_excruciator_each_player_exiles_all_but_bottom_six_cards() {
 
 #[test]
 fn jace_reality_sculptor_exile_all_but_bottom_card_each_opponent() {
-    // CR 401.1 + CR 701.13a: Jace, Reality Sculptor [0] ability
+    // CR 401.2 + CR 701.13a: Exile from each opponent's ordered library.
     let def = parse_effect_chain(
         "Exile all but the bottom card of each opponent's library.",
         AbilityKind::Activated,
@@ -74186,7 +74186,7 @@ fn controller_worded_each_player_library_exile_keeps_controller_as_actor() {
 
 #[test]
 fn nicol_bolas_exile_all_but_bottom_card_target_player() {
-    // CR 401.1 + CR 701.13a: Nicol Bolas, the Arisen [-12] ability
+    // CR 401.2 + CR 701.13a: Exile from the target player's ordered library.
     let def = parse_effect_chain(
         "Exile all but the bottom card of target player's library.",
         AbilityKind::Activated,

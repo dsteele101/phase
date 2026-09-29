@@ -67,6 +67,22 @@ fn doomsday_excruciator_cast_exiles_all_but_bottom_six_cards_face_down() {
         6,
         "P1 should have exactly 6 cards remaining in library"
     );
+    for (player, prefix) in [(P0, "P0"), (P1, "P1")] {
+        let remaining: Vec<_> = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .unwrap()
+            .library
+            .iter()
+            .map(|id| state.objects[id].name.clone())
+            .collect();
+        let bottom_six: Vec<_> = (0..6).rev().map(|i| format!("{prefix} Card {i}")).collect();
+        assert_eq!(
+            remaining, bottom_six,
+            "bottom six cards must remain in order"
+        );
+    }
 
     // Check exiled cards: 14 from P0 + 9 from P1 = 23 cards in exile
     assert_eq!(state.exile.len(), 23, "23 total cards should be in exile");
@@ -209,6 +225,8 @@ fn jace_reality_sculptor_distributive_exile_records_controller_as_actor() {
         1,
         "P1 should have 1 card remaining in library"
     );
+    let remaining_id = state.players.iter().find(|p| p.id == P1).unwrap().library[0];
+    assert_eq!(state.objects[&remaining_id].name, "P1 Card 0");
 
     // 9 cards exiled from P1's library
     assert_eq!(state.exile.len(), 9);
