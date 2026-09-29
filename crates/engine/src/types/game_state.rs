@@ -8572,14 +8572,14 @@ pub struct PendingManaAbility {
     ///
     /// A retype like this is normally version-backed rather than left silent
     /// — see the `chosen_tappers_pre_option_wire_shape_is_rejected` doc block
-    /// above for the precedent this follows: `PROTOCOL_VERSION` moved to 78
+    /// above for the precedent this follows: `PROTOCOL_VERSION` moved to 91
     /// (#9207) for the same reason. This field intentionally carries NO
     /// `#[serde(default)]` and NO `skip_serializing_if`, unlike the scalar
     /// `chosen_counter_count: Option<u32>` field it replaces: a `Vec` field
     /// (unlike `Option`) already fails deserialization on a missing key
     /// without any extra machinery, so simply never omitting it on write (an
     /// empty `Vec` serializes as `[]`, not skipped) is enough to make an old
-    /// pre-78 payload — which carries the old field name and can therefore
+    /// pre-91 payload — which carries the old field name and can therefore
     /// never populate this one — a loud parse failure instead of a silently
     /// empty (and therefore wrongly reopened) choice stage. Pinned by
     /// `chosen_counter_counts_missing_field_wire_shape_is_rejected` in this
@@ -35311,7 +35311,7 @@ mod tests {
     /// number of" leaf) carries an independently-announced amount per leaf
     /// instead of collapsing them into one scalar. The field intentionally
     /// carries NO `#[serde(default)]` and no `skip_serializing_if`, backed by
-    /// `lobby_broker::PROTOCOL_VERSION` 78 / `WIRE_PROTOCOL_VERSION` 60 — the
+    /// `lobby_broker::PROTOCOL_VERSION` 91 / `WIRE_PROTOCOL_VERSION` 73 — the
     /// same convention entry 23 (`PayableResource::ManaGeneric`) established
     /// and `chosen_tappers_pre_option_wire_shape_is_rejected` above pins for
     /// the sibling `chosen_tappers` retype.
@@ -35322,7 +35322,7 @@ mod tests {
     /// `#[serde(default)]`), a bare `Vec` field already fails deserialization
     /// on a missing key with no extra machinery — so simply never skipping it
     /// on write is enough. This test proves that through the actual
-    /// production restore path (`PersistedGameState`): a pre-78 payload,
+    /// production restore path (`PersistedGameState`): a pre-91 payload,
     /// which can only carry the OLD scalar field under the old name and
     /// therefore never populates this one, must be a loud parse failure
     /// rather than silently defaulting to an empty choice list and reopening
@@ -35399,11 +35399,11 @@ mod tests {
                 .get("chosen_counter_counts"),
             Some(&serde_json::Value::Array(Vec::new())),
             "`chosen_counter_counts` must be serialized unconditionally, empty included: \
-             an omitted key here would be indistinguishable from the pre-77 wire shape \
+             an omitted key here would be indistinguishable from the pre-retype wire shape \
              this break exists to reject"
         );
 
-        // The pre-77 wire shape: no `chosen_counter_counts` key at all (the
+        // The pre-retype wire shape: no `chosen_counter_counts` key at all (the
         // old scalar lived under the different name `chosen_counter_count`).
         let mut legacy_omitted = two_leaves_answered;
         legacy_omitted["waiting_for"]["data"]["pending_mana_ability"]
@@ -35411,7 +35411,9 @@ mod tests {
             .expect("the pending mana ability payload is a JSON object")
             .remove("chosen_counter_counts");
         let omitted_error = serde_json::from_value::<PersistedGameState>(legacy_omitted)
-            .expect_err("pre-77 omitted-`chosen_counter_counts` payload must fail to deserialize");
+            .expect_err(
+                "pre-retype omitted-`chosen_counter_counts` payload must fail to deserialize",
+            );
         assert!(
             omitted_error.to_string().contains("chosen_counter_counts"),
             "expected a missing-`chosen_counter_counts` deserialize error, got: {omitted_error}"
