@@ -48,6 +48,17 @@ const cancellablePrompts: Array<[string, WaitingFor]> = [
     }),
   ],
   [
+    "PayCost Reveal",
+    buildPayCostWaitingFor({
+      player: 0,
+      kind: { type: "Reveal" },
+      choices: [10],
+      count: 1,
+      min_count: 1,
+      resume: { type: "Spell", Spell: buildPendingCast() },
+    }),
+  ],
+  [
     "CollectEvidenceChoice",
     {
       type: "CollectEvidenceChoice",
@@ -632,6 +643,40 @@ describe("Discard cost modal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [11, 10] },
+    });
+  });
+
+  it("renders reveal cost modal and dispatches selected card on confirm", () => {
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10, 11],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast() },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+        11: makeObject(11, "Elvish Mystic", "Hand"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Reveal from Hand")).toBeInTheDocument();
+    expect(screen.getByText("Choose a card")).toBeInTheDocument();
+
+    const confirmButton = screen.getByRole("button", { name: /^Reveal/i });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal (1/1)" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
     });
   });
 });
