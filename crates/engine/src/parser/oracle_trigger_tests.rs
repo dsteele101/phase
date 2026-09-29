@@ -34672,3 +34672,30 @@ fn split_graveyard_origin_owner_axes() {
         );
     }
 }
+
+#[test]
+fn trigger_lorthos_attacks_tap_all_permanents_your_opponent_controls() {
+    let def = parse_trigger_line(
+        "Whenever Lorthos attacks, tap all permanents your opponent controls.",
+        "Lorthos, Tentacled Terror",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    let Some(execute) = def.execute else {
+        panic!("expected execute ability");
+    };
+    let Effect::SetTapState {
+        target,
+        scope,
+        state,
+    } = *execute.effect
+    else {
+        panic!("expected SetTapState effect, got {:?}", execute.effect);
+    };
+    assert_eq!(scope, EffectScope::All);
+    assert_eq!(state, TapStateChange::Tap);
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected Typed target, got {:?}", target);
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+}

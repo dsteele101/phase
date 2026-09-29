@@ -4854,6 +4854,7 @@ fn parse_control_scope_prefix(input: &str) -> OracleResult<'_, ControllerRef> {
     alt((
         value(ControllerRef::You, tag("you control ")),
         value(ControllerRef::Opponent, tag("your opponents control ")),
+        value(ControllerRef::Opponent, tag("your opponent controls ")),
         // CR 508.5 + CR 508.5a: the combat-context leaf of the same
         // control-subject axis. The defending player is determined per
         // attacking creature and resolved at read time by the shared
@@ -5553,7 +5554,11 @@ fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> 
 /// creature". Chevill, Bane of Monsters (permanents); Erebos's Titan,
 /// Kezzerdrix (creatures).
 fn parse_your_opponents_control_no(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("your opponents control no ").parse(input)?;
+    let (rest, _) = alt((
+        tag("your opponents control no "),
+        tag("your opponent controls no "),
+    ))
+    .parse(input)?;
     let (filter, remainder) = parse_type_phrase_folding(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(

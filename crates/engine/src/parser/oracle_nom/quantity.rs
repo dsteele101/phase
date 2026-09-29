@@ -649,6 +649,8 @@ fn parse_quantity_controller_suffix(input: &str) -> OracleResult<'_, ControllerR
         // CR 109.4: "your opponents control" — aggregate across each opponent's
         // permanents (Angry Mob, Chameleon Spirit, Entropic Specter class).
         value(ControllerRef::Opponent, tag(" your opponents control")),
+        value(ControllerRef::Opponent, tag(" your opponent controls")),
+        value(ControllerRef::Opponent, tag(" an opponent controls")),
     ))
     .parse(input)
 }

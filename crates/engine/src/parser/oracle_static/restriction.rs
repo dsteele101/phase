@@ -852,6 +852,10 @@ pub(crate) fn strip_controller_possessive_scope(tp: &str) -> Option<(Prohibition
     if let Some(rest) = nom_tag_lower(tp, &lower, "your opponents control ") {
         return Some((ProhibitionScope::Opponents, rest));
     }
+    // "your opponent controls " (singular possessive form).
+    if let Some(rest) = nom_tag_lower(tp, &lower, "your opponent controls ") {
+        return Some((ProhibitionScope::Opponents, rest));
+    }
     // "an opponent controls " (singular form).
     if let Some(rest) = nom_tag_lower(tp, &lower, "an opponent controls ") {
         return Some((ProhibitionScope::Opponents, rest));

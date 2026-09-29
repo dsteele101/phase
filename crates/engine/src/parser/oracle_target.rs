@@ -2429,6 +2429,7 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" you own")),
         value((), tag(" an opponent controls")),
         value((), tag(" your opponents control")),
+        value((), tag(" your opponent controls")),
         // Relative-pronoun clause leads (CR 201.2 descriptive clauses).
         value((), tag(" that ")),
         value((), tag(" with ")),
@@ -5856,6 +5857,10 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         value(
             ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("your opponents controlled"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>("your opponent controlled"),
         ),
         // CR 102.1 + CR 608.2i: past-tense "the active player controlled"
         // look-back. Longest-match-first preserved (no prefix collision with
@@ -22103,5 +22108,16 @@ mod tests {
             ChosenColorQualifierScope::Unbound,
             "a freshly defaulted context leaves the gate closed"
         );
+    }
+
+    #[test]
+    fn parse_type_phrase_permanents_your_opponent_controls() {
+        let (filter, rest) = parse_type_phrase_folding("permanents your opponent controls");
+        assert!(rest.trim().is_empty(), "rest: {rest}");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {:?}", filter);
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
     }
 }

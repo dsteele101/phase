@@ -4542,6 +4542,14 @@ fn parse_shared_controller_compound_subject_filter(subject: &TextPair<'_>) -> Op
         .or_else(|| {
             parse_subject_suffix(subject, " your opponents control")
                 .map(|descriptor| (descriptor, " your opponents control"))
+        })
+        .or_else(|| {
+            parse_subject_suffix(subject, " your opponent controls")
+                .map(|descriptor| (descriptor, " your opponent controls"))
+        })
+        .or_else(|| {
+            parse_subject_suffix(subject, " an opponent controls")
+                .map(|descriptor| (descriptor, " an opponent controls"))
         })?;
 
     // A leading distribution word ("Other <list>", "Each other <list>", "Each
@@ -4726,6 +4734,8 @@ fn parse_bare_compound_subtype_subject_filter(subject: &TextPair<'_>) -> Option<
     // Controller-scoped compounds belong to the sibling handler above.
     if parse_subject_suffix(subject, " you control").is_some()
         || parse_subject_suffix(subject, " your opponents control").is_some()
+        || parse_subject_suffix(subject, " your opponent controls").is_some()
+        || parse_subject_suffix(subject, " an opponent controls").is_some()
     {
         return None;
     }
@@ -5285,9 +5295,11 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
     // CR 700.9 + CR 700.4: "modified creature(s)" and "other modified
     // creature(s) [you control]" — includes "Another" variant for triggers
     // that exclude the source (Ondu Knotmaster, Golden-Tail Trainer).
-    let controller_suffix_patterns: [(&str, Option<ControllerRef>); 3] = [
+    let controller_suffix_patterns: [(&str, Option<ControllerRef>); 5] = [
         (" you control", Some(ControllerRef::You)),
         (" your opponents control", Some(ControllerRef::Opponent)),
+        (" your opponent controls", Some(ControllerRef::Opponent)),
+        (" an opponent controls", Some(ControllerRef::Opponent)),
         ("", None),
     ];
     for (suffix, controller) in controller_suffix_patterns {
@@ -5432,7 +5444,11 @@ pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(Ta
         value((Some(ControllerRef::You), None), tag(" you control")),
         value(
             (Some(ControllerRef::Opponent), None),
-            tag(" your opponents control"),
+            alt((
+                tag(" your opponents control"),
+                tag(" your opponent controls"),
+                tag(" an opponent controls"),
+            )),
         ),
         value(
             (
@@ -5533,6 +5549,8 @@ fn parse_static_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef
     alt((
         value(ControllerRef::You, tag("you control")),
         value(ControllerRef::Opponent, tag("your opponents control")),
+        value(ControllerRef::Opponent, tag("your opponent controls")),
+        value(ControllerRef::Opponent, tag("an opponent controls")),
         value(ControllerRef::Opponent, tag("you don't control")),
         // CR 303.4b + CR 702.5a: "enchanted player controls" — the controller
         // scope is the player the source Aura is attached to.
