@@ -734,4 +734,67 @@ describe("Discard cost modal", () => {
       data: { cards: [20] },
     });
   });
+
+  it("resets Reveal selection across consecutive prompts with the same eligible choices", () => {
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10],
+        count: 1,
+        min_count: 1,
+        resume: {
+          type: "Spell",
+          Spell: buildPendingCast({
+            pinned_pool_units: [1],
+          }),
+        },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+      },
+    );
+
+    const { rerender } = render(<CardChoiceModal />);
+
+    // Select card 10 in the first prompt
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    // Rerender with a second sequential Reveal prompt offering the same [10] choices list
+    setWaitingFor(
+      buildPayCostWaitingFor({
+        player: 0,
+        kind: { type: "Reveal" },
+        choices: [10],
+        count: 1,
+        min_count: 1,
+        resume: {
+          type: "Spell",
+          Spell: buildPendingCast({
+            pinned_pool_units: [1, 2],
+          }),
+        },
+      }),
+      {
+        10: makeObject(10, "Llanowar Elves", "Hand"),
+      },
+    );
+
+    rerender(<CardChoiceModal />);
+
+    // The second prompt must start unselected at (0/1) with confirm disabled even though choices is [10]
+    const confirmButton = screen.getByRole("button", { name: "Reveal (0/1)" });
+    expect(confirmButton).toBeDisabled();
+
+    // Selecting card 10 enables confirm for the second prompt
+    fireEvent.click(screen.getByRole("button", { name: /Llanowar Elves/i }));
+    expect(screen.getByRole("button", { name: "Reveal (1/1)" })).not.toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal (1/1)" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
 });
