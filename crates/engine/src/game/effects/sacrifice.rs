@@ -316,6 +316,25 @@ pub fn resolve(
         Some(ControllerRef::ParentTargetController)
     ) {
         Vec::new()
+    } else if ability.targets.is_empty()
+        && (crate::game::targeting::is_pure_event_context_filter(filter)
+            || matches!(
+                filter,
+                TargetFilter::ParentTarget | TargetFilter::AttachedTo
+            ))
+    {
+        // CR 603.2 + CR 608.2k: An untargeted object anaphor on a triggered ability
+        // (e.g. Slow Motion's "that player sacrifices that creature") names an object
+        // carried by event context or attached host, not a target the controller chose,
+        // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
+        // without falling back to `source_id` for unresolved ParentTarget.
+        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect()
     } else {
         // CR 400.7 + CR 603.7c: `effect_object_targets` indexes ParentTargetSlot
         // by DECLARED position, so a pin-filtered slice would renumber every
@@ -589,7 +608,8 @@ pub fn resolve(
         //
         // CR 701.21a: "To sacrifice a permanent, its controller moves it..." — for an
         // explicit anaphoric target (ParentTarget/ParentTargetSlot, e.g. Animate
-        // Dead's "that creature's controller sacrifices it"), the acting player is
+        // Dead's "that creature's controller sacrifices it", or pure event context
+        // filters like Slow Motion's "that player sacrifices that creature"), the acting player is
         // the object's OWN current controller, unconditionally, even if control
         // changed since the ability (e.g. a delayed leaves-battlefield trigger) was
         // created. The equality check below remains a valid defense-in-depth guard
@@ -599,6 +619,7 @@ pub fn resolve(
                 filter,
                 TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
             )
+            && !crate::game::targeting::is_pure_event_context_filter(filter)
         {
             continue;
         }
