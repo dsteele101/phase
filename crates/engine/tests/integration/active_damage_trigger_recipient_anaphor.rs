@@ -26,8 +26,9 @@
 
 use super::rules::{GameScenario, Phase, P0, P1};
 use engine::game::combat::AttackTarget;
-use engine::types::ability::{Effect, TargetFilter};
+use engine::types::ability::{Effect, ReplacementDefinition, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const TOXIN_SLIVER: &str = "Whenever a Sliver deals combat damage to a creature, destroy that creature. It can't be regenerated.";
@@ -385,7 +386,7 @@ fn mephitic_ooze_trigger_parses_cant_regenerate() {
     }
 }
 
-/// CR 120.1 + CR 510.4 + CR 701.19c: Mephitic Ooze deals combat damage to a creature
+/// CR 120.1 + CR 701.8a + CR 701.19c: Mephitic Ooze deals combat damage to a creature
 /// and destroys it via trigger at runtime, preventing regeneration.
 #[test]
 fn mephitic_ooze_destroys_creature_dealt_combat_damage() {
@@ -393,6 +394,15 @@ fn mephitic_ooze_destroys_creature_dealt_combat_damage() {
     scenario.at_phase(Phase::PreCombatMain);
 
     const MEPHITIC_OOZE: &str = "Mephitic Ooze gets +1/+0 for each artifact you control.\nWhenever Mephitic Ooze deals combat damage to a creature, destroy that creature. The creature can’t be regenerated.";
+
+    assert_eq!(
+        trigger_body_effect(MEPHITIC_OOZE, "Mephitic Ooze"),
+        Effect::Destroy {
+            target: TargetFilter::EventTarget,
+            cant_regenerate: true,
+        },
+        "the full Oracle text must carry the regeneration prohibition"
+    );
 
     let ooze = {
         let mut b = scenario.add_creature(P0, "Mephitic Ooze", 0, 5);
@@ -402,7 +412,14 @@ fn mephitic_ooze_destroys_creature_dealt_combat_damage() {
     // Add an artifact so Mephitic Ooze has 1/5 and deals combat damage.
     scenario.add_artifact_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.");
 
-    let blocker = scenario.add_creature(P1, "Colossal Dreadmaw", 6, 6).id();
+    let blocker = scenario
+        .add_creature(P1, "Colossal Dreadmaw", 6, 6)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .regeneration_shield(),
+        )
+        .id();
 
     let mut runner = scenario.build();
     runner.advance_to_combat();
