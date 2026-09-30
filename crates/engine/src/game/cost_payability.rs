@@ -724,17 +724,38 @@ impl AbilityCost {
                     >= *count as usize
             }
             // CR 701.3d: An explicit unattach cost is payable only while the
-            // source is an attached battlefield permanent controlled by player.
-            AbilityCost::Unattach => state.objects.get(&source).is_some_and(|obj| {
-                obj.zone == Zone::Battlefield
-                    && obj.controller == player
-                    && obj
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|subtype| subtype == "Equipment")
-                    && obj.attached_to.is_some()
-            }),
+            // source is an attached battlefield permanent controlled by player,
+            // or when `target` specifies an attached permanent (or attached to source).
+            AbilityCost::Unattach { target } => match target {
+                None => state.objects.get(&source).is_some_and(|obj| {
+                    obj.zone == Zone::Battlefield
+                        && obj.controller == player
+                        && obj
+                            .card_types
+                            .subtypes
+                            .iter()
+                            .any(|subtype| subtype == "Equipment")
+                        && obj.attached_to.is_some()
+                }),
+                Some(filter) => state.objects.get(&source).is_some_and(|obj| {
+                    if obj.zone == Zone::Battlefield
+                        && obj.controller == player
+                        && obj.attached_to.is_some()
+                        && super::filter::matches_target_filter(
+                            state,
+                            source,
+                            filter,
+                            &super::filter::FilterContext::from_source(state, source),
+                        )
+                    {
+                        return true;
+                    }
+                    !super::casting::find_eligible_unattach_for_cost_targets(
+                        state, player, source, filter, 0,
+                    )
+                    .is_empty()
+                }),
+            },
             // CR 701.3d + CR 601.2b: An unattach-from cost is payable iff the
             // source controls >= `count` battlefield attachments matching `filter`
             // currently attached to it. The generic eligibility count uses `n = 0`
