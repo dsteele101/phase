@@ -1,4 +1,5 @@
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -101,8 +102,27 @@ fn vex_declining_optional_draw_draws_no_card() {
 
     let shock_id = put_instant_on_stack(&mut runner, P1);
 
-    // Default resolve() policy declines optional prompts
-    runner.cast(vex_id).target_objects(&[shock_id]).resolve();
+    // CR 608.2d: observe this resolution's choice before explicitly declining it.
+    let mut commit = runner.cast(vex_id).target_objects(&[shock_id]).commit();
+    commit.act(GameAction::PassPriority).unwrap();
+    commit.act(GameAction::PassPriority).unwrap();
+    assert!(
+        matches!(commit.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == P1),
+        "the countered spell's controller must receive the draw choice before declining"
+    );
+    assert_eq!(
+        commit.state().objects[&shock_id].zone,
+        Zone::Graveyard,
+        "the target spell was countered before the optional draw"
+    );
+    commit
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    assert!(
+        matches!(commit.state().waiting_for, WaitingFor::Priority { .. }),
+        "declining must finish the optional draw and return priority"
+    );
+    drop(commit);
 
     let p1_hand_after = runner.state().players[1].hand.len();
 
