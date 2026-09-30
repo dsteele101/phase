@@ -29137,8 +29137,8 @@ fn damage_to_player_trigger_uses_triggering_player() {
     }
 }
 
-/// CR 120.3a + CR 603.2c: Damage-to-opponent triggers introduce the damaged opponent,
-/// which uses TriggeringPlayer (the event player), not DefendingPlayer or TargetPlayer.
+/// Damage-to-opponent triggers introduce the damaged opponent, which uses
+/// TriggeringPlayer (the event player), not DefendingPlayer or TargetPlayer.
 #[test]
 fn damage_to_opponent_trigger_uses_triggering_player() {
     let def = parse_trigger_line(
