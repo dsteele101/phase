@@ -34288,6 +34288,17 @@ pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefi
 
     fn rewrite_ref(qty: &mut QuantityRef) {
         match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::GraveyardSize { player }
+            | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if *player == PlayerScope::Target =>
+            {
+                *player = PlayerScope::ScopedPlayer;
+            }
             // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
             // An explicit "target player's/opponent's …" count declares its
             // own announcement and must survive for the slot machinery —
