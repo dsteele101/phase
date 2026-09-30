@@ -7160,6 +7160,7 @@ pub(super) fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'
         (
             alt((
                 tag::<_, _, OracleError<'_>>("can't"),
+                tag::<_, _, OracleError<'_>>("can\u{2019}t"),
                 tag::<_, _, OracleError<'_>>("cannot"),
             )),
             tag(" be regenerated"),
@@ -8064,7 +8065,10 @@ fn is_restriction_predicate_verb(token: &str) -> bool {
     // copula-negation here lets `find_predicate_start` split subject from
     // predicate so the continuous-clause path produces a `RemoveType`
     // modification (via `parse_continuous_modifications`).
-    matches!(token, "can't" | "cannot" | "isn't" | "aren't")
+    matches!(
+        token,
+        "can't" | "can\u{2019}t" | "cannot" | "isn't" | "isn\u{2019}t" | "aren't" | "aren\u{2019}t"
+    )
 }
 
 fn token_starts_predicate(token: &str) -> bool {
