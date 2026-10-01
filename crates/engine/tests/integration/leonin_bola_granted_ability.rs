@@ -1,6 +1,7 @@
 use engine::ai_support::legal_actions;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{AbilityCost, TargetFilter};
 use engine::types::actions::GameAction;
 
 const LEONIN_BOLA: &str =
@@ -202,8 +203,8 @@ fn leonin_bola_granted_ability_distinct_controllers() {
 
 #[test]
 fn leonin_bola_granted_ability_distinct_granters() {
-    // P0 controls two Leonin Bolas attached to two different creatures.
-    // Activating ability on Creature 1 unattaches only Bola 1, leaving Bola 2 attached.
+    // Two Bolas grant abilities to the same host. Activate the second granter
+    // so attachment-to-host eligibility alone cannot select the right Equipment.
     let mut scenario = GameScenario::new();
 
     let target = scenario.add_creature(P1, "Bear", 2, 2);
@@ -211,8 +212,6 @@ fn leonin_bola_granted_ability_distinct_granters() {
 
     let host1 = scenario.add_creature(P0, "Creature 1", 1, 1);
     let host1_id = host1.id();
-    let host2 = scenario.add_creature(P0, "Creature 2", 1, 1);
-    let host2_id = host2.id();
 
     let mut bola1 = scenario.add_artifact_from_oracle(P0, "Leonin Bola", LEONIN_BOLA);
     bola1.with_subtypes(vec!["Equipment"]);
@@ -224,7 +223,7 @@ fn leonin_bola_granted_ability_distinct_granters() {
 
     let mut runner = scenario.build();
 
-    // Attach Bola 1 to Host 1, Bola 2 to Host 2
+    // Attach both Bolas to Host 1
     {
         let b1 = runner.state_mut().objects.get_mut(&bola1_id).unwrap();
         b1.attached_to = Some(AttachTarget::Object(host1_id));
@@ -237,11 +236,11 @@ fn leonin_bola_granted_ability_distinct_granters() {
             .push(bola1_id);
 
         let b2 = runner.state_mut().objects.get_mut(&bola2_id).unwrap();
-        b2.attached_to = Some(AttachTarget::Object(host2_id));
+        b2.attached_to = Some(AttachTarget::Object(host1_id));
         runner
             .state_mut()
             .objects
-            .get_mut(&host2_id)
+            .get_mut(&host1_id)
             .unwrap()
             .attachments
             .push(bola2_id);
@@ -250,26 +249,37 @@ fn leonin_bola_granted_ability_distinct_granters() {
     engine::game::layers::mark_layers_full(runner.state_mut());
     engine::game::layers::flush_layers(runner.state_mut());
 
-    // Activate on Host 1
+    let abilities = &runner.state().objects[&host1_id].abilities;
+    assert_eq!(abilities.len(), 2, "both Bolas must grant an ability");
+    let ability_index = abilities
+        .iter()
+        .position(|ability| match ability.cost.as_ref() {
+            Some(AbilityCost::Composite { costs }) => costs.iter().any(|cost| {
+                matches!(
+                    cost,
+                    AbilityCost::Unattach {
+                        target: Some(TargetFilter::SpecificObject { id })
+                    } if *id == bola2_id
+                )
+            }),
+            _ => false,
+        })
+        .expect("Bola 2's granted cost must bind Bola 2");
+    assert!(!runner.state().objects[&target_id].tapped);
+
     runner
-        .activate(host1_id, 0)
+        .activate(host1_id, ability_index)
         .target_object(target_id)
         .resolve();
 
-    // Bola 1 should be unattached, Bola 2 should remain attached to Host 2
     assert!(
-        runner
-            .state()
-            .objects
-            .get(&bola1_id)
-            .unwrap()
-            .attached_to
-            .is_none(),
-        "Bola 1 should be unattached"
+        runner.state().objects[&bola2_id].attached_to.is_none(),
+        "Bola 2 should be unattached"
     );
     assert_eq!(
-        runner.state().objects.get(&bola2_id).unwrap().attached_to,
-        Some(AttachTarget::Object(host2_id)),
-        "Bola 2 should still be attached to Host 2"
+        runner.state().objects[&bola1_id].attached_to,
+        Some(AttachTarget::Object(host1_id)),
+        "Bola 1 should remain attached to the same host"
     );
+    assert!(runner.state().objects[&target_id].tapped);
 }
