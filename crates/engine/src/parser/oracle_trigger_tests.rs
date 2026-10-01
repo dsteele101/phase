@@ -36268,6 +36268,37 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
 }
 
 #[test]
+fn rohgahh_plural_control_transfer_preserves_parent_operand() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your upkeep, you may pay {R}{R}{R}. If you don't, tap Rohgahh and all creatures named Kobolds of Kher Keep, then an opponent gains control of them.",
+        "Rohgahh of Kher Keep",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let execute = parsed.triggers[0].execute.as_ref().expect("upkeep execute");
+    let mut pending = vec![execute.as_ref()];
+    let mut transfers = 0;
+    while let Some(ability) = pending.pop() {
+        if let Effect::GainControl { target } = ability.effect.as_ref() {
+            assert_eq!(target, &TargetFilter::ParentTarget);
+            transfers += 1;
+        }
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            pending.push(sub);
+        }
+        if let Some(otherwise) = ability.else_ability.as_deref() {
+            pending.push(otherwise);
+        }
+    }
+    assert_eq!(
+        transfers, 1,
+        "printed plural control transfer must be reached"
+    );
+}
+
+#[test]
 fn akroan_horse_etb_parsed_trigger() {
     let parsed = parse_oracle_text(
         "Defender\nWhen this creature enters, an opponent gains control of it.\nAt the beginning of your upkeep, each opponent creates a 1/1 white Soldier creature token.",
