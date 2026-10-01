@@ -1417,21 +1417,6 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         });
     }
 
-    // CR 702.18a / CR 702.11b: "can't be the target [of ...]" on compound statics / grants
-    // (e.g. Shielding Plax: "Enchanted creature can't be the target of spells or abilities your opponents control",
-    // or compound grants like "Enchanted creature gets +1/+1 and can't be the target...").
-    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(&unquoted_lower) {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
-        };
-        if !modifications.iter().any(
-            |m| matches!(m, ContinuousModification::AddKeyword { keyword: k } if *k == keyword),
-        ) {
-            modifications.push(ContinuousModification::AddKeyword { keyword });
-        }
-    }
-
     // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
     // type" predicate — the Changeling-class type grant when it appears as
     // one conjunct in an Aura/Equipment compound static ("Enchanted creature
@@ -1826,21 +1811,6 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-        return;
-    }
-
-    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
-    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
-    // existing targeting checks apply the correct controller scope, rather than a
-    // scope-less rule static.
-    if let Some(scope) =
-        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
-    {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
-        };
-        modifications.push(ContinuousModification::AddKeyword { keyword });
         return;
     }
 

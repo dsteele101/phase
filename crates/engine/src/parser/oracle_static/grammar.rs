@@ -1083,6 +1083,33 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         );
     }
 
+    // --- "can't be the target of spells or abilities [your opponents control]" ---
+    // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(body_lower) {
+        let who = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::statics::ProhibitionScope::AllPlayers
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::statics::ProhibitionScope::Opponents
+            }
+        };
+        let mut def = StaticDefinition::new(StaticMode::CantBeTargeted { who })
+            .affected(affected.clone())
+            .description(description.to_string());
+        if let Some(condition) = &suffix_condition {
+            attach_gated_condition(&mut def, condition.clone(), &gap_text);
+        }
+        let companion_condition = def.condition.clone();
+        return with_keyword_companion(
+            def,
+            body_tp.original,
+            &affected,
+            description,
+            companion_condition.as_ref(),
+        );
+    }
+
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
     // Handles both "gets +1/+1 as long as ..." and "has flying as long as ..."
     //

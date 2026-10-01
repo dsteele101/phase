@@ -77,15 +77,16 @@ fn bramble_elemental_creates_tokens_when_enchanted_by_shielding_plax() {
     // 2. Shielding Plax ETB draws a card (hand delta since commit is +1)
     outcome.assert_hand_drawn(P0, 1);
 
-    // 3. Bramble Elemental has Hexproof from Shielding Plax
+    // 3. Shielding Plax carries CantBeTargeted { Opponents } affecting the enchanted creature,
+    // and does NOT grant Keyword::Hexproof directly to the creature (CR 109.5).
     assert!(
-        has_keyword(&runner.state().objects[&bramble], &Keyword::Hexproof),
-        "Bramble Elemental must have Hexproof granted by Shielding Plax"
+        !has_keyword(&runner.state().objects[&bramble], &Keyword::Hexproof),
+        "Shielding Plax must not grant Keyword::Hexproof directly to the creature"
     );
 }
 
 #[test]
-fn shielding_plax_grants_hexproof_to_enchanted_creature() {
+fn shielding_plax_restricts_targeting_of_enchanted_creature() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest"]);
@@ -111,21 +112,22 @@ fn shielding_plax_grants_hexproof_to_enchanted_creature() {
     // Cast Shielding Plax targeting Grizzly Bears
     runner.cast(plax).target_object(bear).resolve();
 
-    // After resolution, Grizzly Bears has Hexproof (opponents cannot target it)
+    // After resolution, Grizzly Bears does not receive the Hexproof keyword directly (CR 109.5);
+    // targeting is governed by the Aura's static CantBeTargeted ability.
     assert!(
-        has_keyword(&runner.state().objects[&bear], &Keyword::Hexproof),
-        "Grizzly Bears must have Hexproof granted by Shielding Plax"
+        !has_keyword(&runner.state().objects[&bear], &Keyword::Hexproof),
+        "Shielding Plax must not grant Hexproof keyword (governed by CantBeTargeted static)"
     );
 
     // Shielding Plax itself is NOT the creature and does not have Hexproof on itself
     assert!(
         !has_keyword(&runner.state().objects[&plax], &Keyword::Hexproof),
-        "Shielding Plax itself must not have Hexproof (the static ability affects the enchanted creature)"
+        "Shielding Plax itself must not have Hexproof"
     );
 }
 
 #[test]
-fn compound_aura_grants_pt_and_hexproof_to_enchanted_creature() {
+fn compound_aura_grants_pt_and_cant_be_targeted_to_enchanted_creature() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -143,7 +145,7 @@ fn compound_aura_grants_pt_and_hexproof_to_enchanted_creature() {
 
     runner.cast(aura).target_object(bear).resolve();
 
-    // Grizzly Bears gets +1/+1 and Hexproof
+    // Grizzly Bears gets +1/+1
     let bear_obj = &runner.state().objects[&bear];
     assert_eq!(
         bear_obj.power,
@@ -156,8 +158,8 @@ fn compound_aura_grants_pt_and_hexproof_to_enchanted_creature() {
         "Grizzly Bears should get +1/+1 (toughness 3)"
     );
     assert!(
-        has_keyword(bear_obj, &Keyword::Hexproof),
-        "Grizzly Bears must have Hexproof granted by compound Aura"
+        !has_keyword(bear_obj, &Keyword::Hexproof),
+        "Compound Aura must not grant Hexproof keyword (governed by CantBeTargeted static)"
     );
 }
 
@@ -273,6 +275,127 @@ fn opponent_cannot_target_creature_enchanted_by_shielding_plax() {
     assert!(
         choose_valid.is_ok(),
         "Opponent choosing unprotected creature must succeed"
+    );
+}
+
+#[test]
+fn shielding_plax_different_controller_scope_cr_109_5() {
+    // CR 109.5: "For a static ability, this is the current controller of the object it's on."
+    // Shielding Plax says: "Enchanted creature can't be the target of spells or abilities your opponents control."
+    // Here, P0 controls Shielding Plax attached to P1's creature.
+    // P0's opponents are prohibited from targeting the creature (so P1 cannot target their own creature).
+    // P0 is NOT an opponent of P0, so P0 CAN target P1's enchanted creature.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest"]);
+
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let p1_unprotected_bear_1 = scenario
+        .add_creature(P1, "P1 Unprotected Bear 1", 2, 2)
+        .id();
+    let p1_unprotected_bear_2 = scenario
+        .add_creature(P1, "P1 Unprotected Bear 2", 2, 2)
+        .id();
+
+    let plax = scenario
+        .add_spell_to_hand(P0, "Shielding Plax", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(&["Enchant"], SHIELDING_PLAX)
+        .id();
+
+    let p0_buff = scenario
+        .add_spell_to_hand(P0, "Giant Growth", false)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Target creature gets +3/+3 until end of turn.")
+        .id();
+
+    let spitting_earth = scenario
+        .add_spell_to_hand(P1, "Spitting Earth", false)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Spitting Earth deals damage to target creature equal to the number of Mountains you control.")
+        .id();
+
+    let mut runner = scenario.build();
+
+    // P0 enchants P1's creature with Shielding Plax
+    runner.cast(plax).target_object(p1_bear).resolve();
+
+    // Positive Control: P0 (Aura controller) CAN target P1's creature
+    let p0_result = runner.cast(p0_buff).target_object(p1_bear).try_resolve();
+    assert!(
+        p0_result.is_ok(),
+        "Aura controller (P0) must be able to target P1's creature enchanted by P0's Shielding Plax"
+    );
+
+    // Pass turn / priority to P1 (creature controller, but opponent of Aura controller)
+    runner.state_mut().active_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.state_mut().priority_player = P1;
+
+    // Negative Test: P1 tries to target P1 Bear
+    let cast_res = runner.act(GameAction::CastSpell {
+        object_id: spitting_earth,
+        card_id: runner.state().objects[&spitting_earth].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(
+        cast_res.is_ok(),
+        "Initiating cast must enter target selection"
+    );
+
+    // Verify p1_bear is excluded from legal_targets for P1
+    let waiting = runner.state().waiting_for.clone();
+    if let WaitingFor::TargetSelection {
+        ref target_slots, ..
+    } = waiting
+    {
+        assert!(
+            !target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(p1_bear)),
+            "P1's creature enchanted by P0's Shielding Plax must NOT be a legal target for P1 (P0's opponent)"
+        );
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(p1_unprotected_bear_1)),
+            "P1's unprotected creature 1 must be a legal target for P1"
+        );
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(p1_unprotected_bear_2)),
+            "P1's unprotected creature 2 must be a legal target for P1"
+        );
+    } else {
+        panic!("Expected WaitingFor::TargetSelection, got: {waiting:?}");
+    }
+
+    // Attempting to select p1_bear must fail with Illegal target
+    let choose_res = runner.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(p1_bear)),
+    });
+    match choose_res {
+        Err(EngineError::InvalidAction(ref msg)) => {
+            assert!(
+                msg.contains("Illegal target"),
+                "Expected illegal target rejection message, got: {msg}"
+            );
+        }
+        Err(other) => panic!("Expected InvalidAction(Illegal target), got: {other:?}"),
+        Ok(_) => panic!("P1 targeting creature enchanted by P0's Shielding Plax must fail"),
+    }
+
+    // Positive Control 2: Selecting p1_unprotected_bear_1 succeeds
+    let choose_valid = runner.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(p1_unprotected_bear_1)),
+    });
+    assert!(
+        choose_valid.is_ok(),
+        "P1 selecting their own unprotected creature must succeed"
     );
 }
 

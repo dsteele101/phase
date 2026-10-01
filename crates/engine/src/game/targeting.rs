@@ -3012,6 +3012,27 @@ fn hexproof_filter_matches(
     }
 }
 
+/// CR 109.5 + CR 702.18a / CR 702.11b: Determine whether `source_controller` is
+/// prohibited from targeting by a `ProhibitionScope` defined on a static ability.
+fn is_prohibited_from_targeting(
+    who: &crate::types::statics::ProhibitionScope,
+    static_controller: PlayerId,
+    source_controller: PlayerId,
+) -> bool {
+    match who {
+        crate::types::statics::ProhibitionScope::AllPlayers => true,
+        crate::types::statics::ProhibitionScope::Opponents => {
+            source_controller != static_controller
+        }
+        crate::types::statics::ProhibitionScope::Controller => {
+            source_controller == static_controller
+        }
+        crate::types::statics::ProhibitionScope::EnchantedCreatureController => {
+            source_controller != static_controller
+        }
+    }
+}
+
 /// Full battlefield targeting check: shroud + hexproof + protection (CR 702.16b).
 fn can_target(
     obj: &crate::game::game_object::GameObject,
@@ -3061,19 +3082,51 @@ fn can_target(
     if is_protected_from(obj, source_id, state) {
         return false;
     }
-    // CR 702.18a: A static "can't be the target of spells or abilities" is the
-    // descriptive (non-keyworded) form of Shroud — the permanent can't be the
-    // target of any spell or ability, regardless of controller. It is modeled as
-    // `StaticMode::CantBeTargeted`, living on the object's own static definitions
-    // (a self-referential static, or propagated onto a subject via `AddStaticMode`
-    // — see `static_mode_needs_grant_propagation`). The opponent-scoped variant
-    // ("... your opponents control") is parsed as `Keyword::Hexproof` instead, so
-    // it is handled by the Hexproof branch above rather than here.
-    // Per-object (reads `obj`'s own static definitions) — correctly NOT hoisted.
-    if super::functioning_abilities::active_static_definitions(state, obj)
-        .any(|def| matches!(def.mode, crate::types::statics::StaticMode::CantBeTargeted))
-    {
-        return false;
+    // CR 702.18a / CR 702.11b / CR 109.5: A static "can't be the target of spells or abilities
+    // [your opponents control]" is modeled as `StaticMode::CantBeTargeted { who }`.
+    // 1. Direct on `obj` (self-referential or granted):
+    for def in super::functioning_abilities::active_static_definitions(state, obj) {
+        if let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode {
+            if is_prohibited_from_targeting(who, obj.controller, source_controller) {
+                return false;
+            }
+        }
+    }
+
+    // 2. Battlefield-scoped statics (e.g. Shielding Plax on an enchanted creature, or an anthem):
+    if super::functioning_abilities::static_kind_present(
+        state,
+        crate::types::statics::StaticModeKind::CantBeTargeted,
+    ) {
+        for (source_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+            if let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode {
+                if let Some(ref filter) = def.affected {
+                    if crate::game::filter::matches_target_filter(
+                        state,
+                        obj.id,
+                        filter,
+                        &crate::game::filter::FilterContext::from_source(state, source_obj.id),
+                    ) && super::static_abilities::static_condition_matches_context(
+                        state,
+                        source_obj.id,
+                        source_obj.controller,
+                        def,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(obj.id),
+                            ..Default::default()
+                        },
+                    ) {
+                        if is_prohibited_from_targeting(
+                            who,
+                            source_obj.controller,
+                            source_controller,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
     }
     // CR 702.21a: Ward is a triggered ability, not a targeting restriction.
     // Targeting is legal; the ward trigger fires via process_triggers() and
@@ -4302,7 +4355,9 @@ mod tests {
         // a self-referential static / the `AddStaticMode` propagation onto a subject.
         state.objects.get_mut(&c1).unwrap().static_definitions.push(
             crate::types::ability::StaticDefinition::new(
-                crate::types::statics::StaticMode::CantBeTargeted,
+                crate::types::statics::StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::AllPlayers,
+                },
             )
             .affected(crate::types::ability::TargetFilter::SelfRef),
         );
@@ -4316,6 +4371,48 @@ mod tests {
         assert!(
             !targets_p1.contains(&TargetRef::Object(c1)),
             "the controller cannot target it either (Shroud semantics, not Hexproof)"
+        );
+    }
+
+    /// CR 109.5 + CR 702.11b: A `StaticMode::CantBeTargeted { who: ProhibitionScope::Opponents }`
+    /// static on an Aura controlled by P0 attached to P1's creature prohibits P0's opponents
+    /// (including P1) from targeting the creature, while P0 (the Aura's controller) CAN target it.
+    #[test]
+    fn cant_be_targeted_opponents_static_scopes_to_static_controller() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        // c1 is controlled by P1.
+        // P0 controls an Aura on the battlefield attached to c1.
+        let aura_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Shielding Plax".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = state.objects.get_mut(&aura_id).unwrap();
+        aura.attached_to = Some(crate::game::game_object::AttachTarget::Object(c1));
+        aura.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::Opponents,
+                },
+            )
+            .affected(crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
+            )),
+        );
+
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+
+        assert!(
+            targets_p0.contains(&TargetRef::Object(c1)),
+            "CR 109.5: Aura controller (P0) MUST be able to target enchanted creature even though it's controlled by P1"
+        );
+        assert!(
+            !targets_p1.contains(&TargetRef::Object(c1)),
+            "CR 109.5: P1 is an opponent of the Aura's controller and MUST be prohibited from targeting"
         );
     }
 

@@ -20738,7 +20738,11 @@ mod tests {
         assert!(static_mode_names_no_referent(&StaticMode::MustBeBlocked {
             by: None
         }));
-        assert!(!static_mode_names_no_referent(&StaticMode::CantBeTargeted));
+        assert!(!static_mode_names_no_referent(
+            &StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            }
+        ));
     }
 
     /// Phase 7, J-3 (the building block): after a declined gate, each later
