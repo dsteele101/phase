@@ -17691,6 +17691,51 @@ fn trigger_blocks_a_creature() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
+/// CR 509.1 + CR 603.7a + CR 608.2c: Wall of Tears
+/// "Whenever this creature blocks a creature, return that creature to its owner's hand at end of combat."
+/// "that creature" inside the delayed trigger refers to the blocked creature (the attacker),
+/// which resolves to `ParentTarget` from the `BlockersDeclared` trigger event.
+#[test]
+fn trigger_wall_of_tears_blocks_a_creature() {
+    let def = parse_trigger_line(
+        "Whenever Wall of Tears blocks a creature, return that creature to its owner's hand at end of combat.",
+        "Wall of Tears",
+    );
+    assert_eq!(def.mode, TriggerMode::Blocks);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(TypedFilter::creature()))
+    );
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("Wall of Tears must lower to an execute ability");
+    match execute.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            assert_eq!(
+                *condition,
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat
+                }
+            );
+            match effect.effect.as_ref() {
+                Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => {
+                    assert_eq!(
+                        *target,
+                        TargetFilter::ParentTarget,
+                        "Wall of Tears must target the blocked creature via ParentTarget, not SelfRef"
+                    );
+                }
+                other => panic!("expected Bounce or ChangeZone, got {other:?}"),
+            }
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+}
+
 #[test]
 fn trigger_blocks_or_becomes_blocked() {
     // CR 509.1h + CR 509.3d: "blocks or becomes blocked" is a compound trigger —
