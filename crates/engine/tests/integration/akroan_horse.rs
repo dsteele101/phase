@@ -7,7 +7,10 @@
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::ChoiceType;
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -146,10 +149,6 @@ fn akroan_horse_etb_three_player_choice_transfers_control_to_selected_opponent()
 
 #[test]
 fn akroan_horse_etb_three_player_choice_prompts_all_opponents() {
-    use engine::types::ability::ChoiceType;
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::WaitingFor;
-
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let horse = scenario
