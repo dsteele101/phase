@@ -1,6 +1,8 @@
 //! Tests for Fire Prophecy (and the "You may put a card from your hand on the bottom of your library. If you do, draw a card" class).
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::parser::oracle_effect::parse_effect_chain;
+use engine::types::ability::{AbilityCondition, AbilityKind, Effect, LibraryPosition};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -20,6 +22,27 @@ fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
 
 #[test]
 fn fire_prophecy_empty_hand_does_not_prompt_and_draws_nothing() {
+    let parsed = parse_effect_chain(FIRE_PROPHECY, AbilityKind::Spell);
+    assert!(matches!(parsed.effect, Effect::DealDamage { .. }));
+    let bottom = parsed
+        .sub_ability
+        .as_ref()
+        .expect("implemented bottoming rider");
+    assert!(bottom.optional);
+    assert!(matches!(
+        bottom.effect,
+        Effect::PutAtLibraryPosition {
+            position: LibraryPosition::Bottom,
+            ..
+        }
+    ));
+    let draw = bottom.sub_ability.as_ref().expect("conditional draw rider");
+    assert!(matches!(draw.effect, Effect::Draw { .. }));
+    assert!(draw
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed));
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -50,6 +73,14 @@ fn fire_prophecy_empty_hand_does_not_prompt_and_draws_nothing() {
     let initial_library_len = runner.state().players[P0.0 as usize].library.len();
 
     runner.advance_until_stack_empty();
+
+    assert!(runner.state().stack.is_empty(), "resolution must complete");
+    assert_eq!(runner.state().objects[&prophecy].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Graveyard,
+        "the damage instruction must execute"
+    );
 
     // CR 608.2d: Infeasible optional effect (empty hand) must auto-decline without prompting.
     assert!(

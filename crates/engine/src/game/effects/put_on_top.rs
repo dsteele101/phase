@@ -29,7 +29,9 @@ pub(super) fn private_zone_selection<'a>(
     let candidates = match source_zone {
         Zone::Hand => &player.hand,
         Zone::Library => &player.library,
-        _ => return None,
+        Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => {
+            return None;
+        }
     };
     let ctx =
         crate::game::filter::FilterContext::from_ability_with_controller(ability, choosing_player);
@@ -303,10 +305,9 @@ pub fn resolve(
             });
             return Ok(());
         }
-        if let Some((choosing_player, source_zone, eligible)) =
-            private_zone_selection(state, ability, &target_filter)
-        {
-            let eligible: Vec<_> = eligible.collect();
+        let private_selection = private_zone_selection(state, ability, &target_filter)
+            .map(|(player, zone, eligible)| (player, zone, eligible.collect::<Vec<_>>()));
+        if let Some((choosing_player, source_zone, eligible)) = private_selection {
             let eligible_count = eligible.len();
             if eligible.is_empty() {
                 events.push(GameEvent::EffectResolved {
