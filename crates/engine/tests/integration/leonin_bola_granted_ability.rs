@@ -119,3 +119,157 @@ fn leonin_bola_granted_ability_on_creature_with_activated_ability() {
         "target creature should be tapped by resolved ability"
     );
 }
+
+#[test]
+fn leonin_bola_granted_ability_distinct_controllers() {
+    // CR 301.5d + CR 701.3d: P0 controls Leonin Bola, attached to P1's creature.
+    // P1 activates the granted ability and unattaches P0's Leonin Bola.
+    let mut scenario = GameScenario::new();
+
+    // Target creature for P0
+    let target = scenario.add_creature(P0, "Bear", 2, 2);
+    let target_id = target.id();
+
+    // Host creature controlled by P1
+    let host = scenario.add_creature_from_oracle(
+        P1,
+        "Prodigal Pyromancer",
+        1,
+        1,
+        "{T}: ~ deals 1 damage to any target.",
+    );
+    let host_id = host.id();
+
+    // Leonin Bola controlled by P0
+    let mut bola = scenario.add_artifact_from_oracle(P0, "Leonin Bola", LEONIN_BOLA);
+    bola.with_subtypes(vec!["Equipment"]);
+    let bola_id = bola.id();
+
+    let mut runner = scenario.build();
+
+    // Attach P0's Leonin Bola to P1's host
+    {
+        let bola_obj = runner.state_mut().objects.get_mut(&bola_id).unwrap();
+        assert_eq!(bola_obj.controller, P0);
+        bola_obj.attached_to = Some(AttachTarget::Object(host_id));
+        let host_obj = runner.state_mut().objects.get_mut(&host_id).unwrap();
+        assert_eq!(host_obj.controller, P1);
+        host_obj.attachments.push(bola_id);
+    }
+
+    // Flush layers so P1's host receives the granted ability
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    // P1's host should have ability 1 activatable by P1
+    let can_activate =
+        engine::game::casting::can_activate_ability_now(runner.state(), P1, host_id, 1);
+    assert!(
+        can_activate,
+        "P1 should be able to activate Leonin Bola's granted ability on P1's creature"
+    );
+
+    // P1 activates granted ability targeting P0's creature (set priority to P1)
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = engine::types::game_state::WaitingFor::Priority { player: P1 };
+    runner
+        .activate(host_id, 1)
+        .target_object(target_id)
+        .resolve();
+
+    // After activation, P1's host is tapped, P0's Leonin Bola is unattached but still controlled by P0
+    assert!(
+        runner.state().objects.get(&host_id).unwrap().tapped,
+        "P1's host should be tapped as cost"
+    );
+    let bola_obj = runner.state().objects.get(&bola_id).unwrap();
+    assert!(
+        bola_obj.attached_to.is_none(),
+        "P0's Leonin Bola should be unattached as cost"
+    );
+    assert_eq!(
+        bola_obj.controller, P0,
+        "P0 should still control Leonin Bola after unattachment"
+    );
+
+    // Target creature is tapped
+    assert!(
+        runner.state().objects.get(&target_id).unwrap().tapped,
+        "target creature should be tapped by resolved ability"
+    );
+}
+
+#[test]
+fn leonin_bola_granted_ability_distinct_granters() {
+    // P0 controls two Leonin Bolas attached to two different creatures.
+    // Activating ability on Creature 1 unattaches only Bola 1, leaving Bola 2 attached.
+    let mut scenario = GameScenario::new();
+
+    let target = scenario.add_creature(P1, "Bear", 2, 2);
+    let target_id = target.id();
+
+    let host1 = scenario.add_creature(P0, "Creature 1", 1, 1);
+    let host1_id = host1.id();
+    let host2 = scenario.add_creature(P0, "Creature 2", 1, 1);
+    let host2_id = host2.id();
+
+    let mut bola1 = scenario.add_artifact_from_oracle(P0, "Leonin Bola", LEONIN_BOLA);
+    bola1.with_subtypes(vec!["Equipment"]);
+    let bola1_id = bola1.id();
+
+    let mut bola2 = scenario.add_artifact_from_oracle(P0, "Leonin Bola", LEONIN_BOLA);
+    bola2.with_subtypes(vec!["Equipment"]);
+    let bola2_id = bola2.id();
+
+    let mut runner = scenario.build();
+
+    // Attach Bola 1 to Host 1, Bola 2 to Host 2
+    {
+        let b1 = runner.state_mut().objects.get_mut(&bola1_id).unwrap();
+        b1.attached_to = Some(AttachTarget::Object(host1_id));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&host1_id)
+            .unwrap()
+            .attachments
+            .push(bola1_id);
+
+        let b2 = runner.state_mut().objects.get_mut(&bola2_id).unwrap();
+        b2.attached_to = Some(AttachTarget::Object(host2_id));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&host2_id)
+            .unwrap()
+            .attachments
+            .push(bola2_id);
+    }
+
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    // Activate on Host 1
+    runner
+        .activate(host1_id, 0)
+        .target_object(target_id)
+        .resolve();
+
+    // Bola 1 should be unattached, Bola 2 should remain attached to Host 2
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&bola1_id)
+            .unwrap()
+            .attached_to
+            .is_none(),
+        "Bola 1 should be unattached"
+    );
+    assert_eq!(
+        runner.state().objects.get(&bola2_id).unwrap().attached_to,
+        Some(AttachTarget::Object(host2_id)),
+        "Bola 2 should still be attached to Host 2"
+    );
+}

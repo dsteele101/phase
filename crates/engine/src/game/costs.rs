@@ -1579,40 +1579,20 @@ fn pay_ability_cost_inner(
             }
             set_speed(state, player, Some(current_speed - amount), events);
         }
-        // CR 701.3d: Explicit unattach cost. Legality is pre-gated by
+        // CR 701.3d + CR 301.5d: Explicit unattach cost. Legality is pre-gated by
         // `AbilityCost::is_payable`; payment clears both sides of the
         // attachment graph and keeps the Equipment on the battlefield.
+        // The unattached Equipment need not be controlled by the payer when granted
+        // to an equipped creature (CR 301.5d).
         AbilityCost::Unattach { target } => {
-            let to_unattach = match target {
-                None => Some(source_id),
-                Some(filter) => {
-                    let obj = state.objects.get(&source_id).ok_or_else(|| {
-                        EngineError::InvalidAction(
-                            "Source object not found for unattach cost".to_string(),
-                        )
-                    })?;
-                    if obj.zone == Zone::Battlefield
-                        && obj.controller == player
-                        && obj.attached_to.is_some()
-                        && super::filter::matches_target_filter(
-                            state,
-                            source_id,
-                            filter,
-                            &super::filter::FilterContext::from_source(state, source_id),
-                        )
-                    {
-                        Some(source_id)
-                    } else {
-                        let eligible = super::casting::find_eligible_unattach_for_cost_targets(
-                            state, player, source_id, filter, 0,
-                        );
-                        eligible.first().copied()
-                    }
-                }
-            };
-            let Some(attach_id) = to_unattach else {
+            let Some(attach_id) = super::casting::find_eligible_unattach_target(
+                state,
+                player,
+                source_id,
+                target.as_ref(),
+            ) else {
                 return Ok(payment_failed(
-                    "Cannot unattach: no matching attachment found",
+                    "Cannot unattach: no matching attached Equipment found",
                 ));
             };
             let obj = state.objects.get(&attach_id).ok_or_else(|| {
@@ -1621,7 +1601,6 @@ fn pay_ability_cost_inner(
                 )
             })?;
             if obj.zone != Zone::Battlefield
-                || obj.controller != player
                 || !obj
                     .card_types
                     .subtypes
@@ -1629,7 +1608,7 @@ fn pay_ability_cost_inner(
                     .any(|subtype| subtype == "Equipment")
             {
                 return Ok(payment_failed(
-                    "Cannot unattach: target is not a controlled battlefield Equipment",
+                    "Cannot unattach: target is not a battlefield Equipment",
                 ));
             }
             if obj.attached_to.is_none() {
