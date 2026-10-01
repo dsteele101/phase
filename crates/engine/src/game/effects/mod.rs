@@ -4165,8 +4165,16 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
 /// exile-linked card remain bound continuations rather than fresh choices.
 fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
     let (target, origin) = match &sub.effect {
-        Effect::ChangeZone { origin, target, .. } => (target, *origin),
-        Effect::PutAtLibraryPosition { target, .. } => (target, target.extract_in_zone()),
+        Effect::ChangeZone { origin, target, .. }
+            if sub.target_choice_timing == TargetChoiceTiming::Resolution =>
+        {
+            (target, *origin)
+        }
+        Effect::PutAtLibraryPosition { target, .. }
+            if matches!(target.extract_in_zone(), Some(Zone::Hand | Zone::Library)) =>
+        {
+            (target, target.extract_in_zone())
+        }
         _ => return false,
     };
     let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);
