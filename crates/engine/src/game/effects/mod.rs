@@ -10988,15 +10988,18 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // An optional placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
         // "You may put a card from your hand on the bottom of your library. If
         // you do, draw a card.") is impossible when the player has no eligible
-        // cards in that zone.
-        Effect::PutAtLibraryPosition { target, .. } => {
+        // cards in that zone and must select a positive exact count. Zero
+        // cards remains a legal choice for zero-count and up-to placements.
+        Effect::PutAtLibraryPosition { target, count, .. } => {
             if matches!(target, TargetFilter::ParentTarget)
                 && ability.parent_target_missing_reason.is_some()
             {
                 return true;
             }
-            put_on_top::private_zone_selection(state, ability, target)
-                .is_some_and(|(_, _, mut eligible)| eligible.next().is_none())
+            !count.is_up_to()
+                && crate::game::quantity::resolve_quantity_with_targets(state, count, ability) > 0
+                && put_on_top::private_zone_selection(state, ability, target)
+                    .is_some_and(|(_, _, mut eligible)| eligible.next().is_none())
         }
         Effect::CastFromZone {
             mode,
@@ -20377,6 +20380,65 @@ mod tests {
 
     fn effect_from_json(json: &str) -> Effect {
         serde_json::from_str(json).expect("test effect shape must deserialize")
+    }
+
+    /// CR 608.2d: choosing zero is legal for zero-count and up-to placements,
+    /// while an exact positive placement needs an eligible card.
+    #[test]
+    fn optional_private_zone_placement_preserves_zero_selection_choices() {
+        for zone in [Zone::Hand, Zone::Library] {
+            for count in [
+                QuantityExpr::Fixed { value: 0 },
+                QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }),
+                QuantityExpr::Fixed { value: 1 },
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let source = create_object(
+                    &mut state,
+                    CardId(900),
+                    PlayerId(0),
+                    "Placement Source".to_string(),
+                    Zone::Battlefield,
+                );
+                let permits_zero =
+                    count.is_up_to() || matches!(count, QuantityExpr::Fixed { value: 0 });
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Card)
+                                .properties(vec![FilterProp::InZone { zone }]),
+                        ),
+                        count,
+                        position: crate::types::ability::LibraryPosition::Bottom,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                );
+                ability.optional = true;
+                assert!(state.players[0].hand.is_empty());
+                assert!(state.players[0].library.is_empty());
+
+                resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+                    .expect("empty private-zone placement must resolve or offer its legal choice");
+                assert_eq!(
+                    matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+                    permits_zero,
+                    "only a positive exact count is impossible with an empty {zone:?}"
+                );
+                if permits_zero {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .expect("accepting a zero-card placement must succeed");
+                }
+                assert!(state.active_optional_effect_frame().is_none());
+                assert!(state.players[0].hand.is_empty());
+                assert!(state.players[0].library.is_empty());
+                assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+            }
+        }
     }
 
     #[test]
