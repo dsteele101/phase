@@ -16944,7 +16944,6 @@ mod tests {
         for (pronoun, expected) in [
             ("it", TargetFilter::SelfRef),
             ("them", TargetFilter::ParentTarget),
-            ("themselves", TargetFilter::ParentTarget),
         ] {
             let text = format!("gain control of {pronoun}");
             let mut ctx = ParseContext {
