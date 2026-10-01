@@ -395,7 +395,7 @@ interface MultiplayerDraftActions {
   retryWorkspaceSync: () => Promise<void>;
   setIntergameWorkspaceState: (next: DraftWorkspaceState) => void;
   /** Both: submit the built deck. */
-  submitDeck: (commanders?: string[]) => Promise<void>;
+  submitDeck: (commanders?: string[], companion?: string | null) => Promise<void>;
   /** Host: kick a player from the pod. */
   kickPlayer: (seat: number, reason?: string) => void;
   /** Host: pause the draft. */
@@ -2148,14 +2148,14 @@ export const useMultiplayerDraftStore = create<
     set({ intergameWorkspaceState: workspace });
   },
 
-  submitDeck: async (commanders = []) => {
+  submitDeck: async (commanders = [], companion = null) => {
     const { role, view, workspaceState } = get();
     if (!view || !workspaceState) return;
     const workspace = reconcileWorkspaceState(workspaceState, view.pool);
     const partition = projectWorkspacePartition(workspace, view.pool);
 
     if (role === "host" && activeHostAdapter) {
-      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
+      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion);
       installWorkspace({
         view: nextView,
         base: workspace,
@@ -2166,15 +2166,15 @@ export const useMultiplayerDraftStore = create<
           submittedPartition: partition,
         },
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
+      void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
       set({
         submittedDeck: partition.mainDeck,
         submittedWorkspaceState: cloneWorkspace(workspace),
         submittedPartition: partition,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
+      void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     }
   },
 

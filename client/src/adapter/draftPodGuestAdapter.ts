@@ -467,9 +467,9 @@ export class DraftPodGuestAdapter {
     await this.guest.submitSharedStackDecision(pile, decision);
   }
 
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
-    await this.guest.submitDeck(mainDeck, commanders);
+    await this.guest.submitDeck(mainDeck, commanders, companion);
   }
 
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {

@@ -90,8 +90,8 @@ export interface DraftMatchPayload {
    * Cube source applies.
    */
   booster_pack_pool?: string[] | null;
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+  player: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
   ai_decks: never[];
 }
 

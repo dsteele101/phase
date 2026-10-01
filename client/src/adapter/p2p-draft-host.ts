@@ -1181,7 +1181,7 @@ export class P2PDraftHost {
           });
           return;
         }
-        await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId);
+        await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId, msg.companion);
         break;
       }
       case "draft_workspace_update": {
@@ -1423,7 +1423,7 @@ export class P2PDraftHost {
   /**
    * Host submits their own deck (seat 0).
    */
-  async submitHostDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+  async submitHostDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     return this.enqueueAuthoritativeMutation(() => {
       if (!this.draftStarted) throw new Error("Draft not started");
       // CR 903.3: the designation is part of the payload's identity, so it
@@ -1431,11 +1431,11 @@ export class P2PDraftHost {
       // resubmit that changes only the commander reuse the prior receipt and
       // resolve straight to the recovered-receipt branch, never reaching the
       // reducer with the new designation.
-      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders, companion);
       const priorSubmission = [...this.deckSubmissionReceipts.entries()].find(
         ([, receipt]) => receipt.seat === 0 && receipt.payloadFingerprint === payloadFingerprint,
       )?.[0];
-      return this.handleDeckSubmission(0, mainDeck, commanders, priorSubmission ?? crypto.randomUUID());
+      return this.handleDeckSubmission(0, mainDeck, commanders, priorSubmission ?? crypto.randomUUID(), companion);
     });
   }
 
@@ -1760,11 +1760,12 @@ export class P2PDraftHost {
     mainDeck: string[],
     commanders: string[],
     submissionId: string,
+    companion?: string | null,
   ): Promise<DraftPlayerView> {
     let submissionAccepted = false;
     let receiptDurable = false;
     try {
-      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders, companion);
       const previous = this.deckSubmissionReceipts.get(submissionId);
       let view: DraftPlayerView;
       if (previous) {
@@ -1779,7 +1780,7 @@ export class P2PDraftHost {
         await this.persistSessionStrict();
         receiptDurable = true;
       } else {
-        view = await this.adapter.submitDeckForSeat(seat, mainDeck, commanders);
+        view = await this.adapter.submitDeckForSeat(seat, mainDeck, commanders, companion);
         // Record before saving the post-reducer snapshot. A retry after a host
         // reload therefore sees the same result and cannot feed the reducer a
         // second submission.
@@ -1817,8 +1818,8 @@ export class P2PDraftHost {
    * designation. Both call sites must agree, or a receipt lookup and a receipt
    * comparison can disagree about whether two submissions are the same.
    */
-  private deckPayloadFingerprint(mainDeck: string[], commanders: string[]): string {
-    return `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+  private deckPayloadFingerprint(mainDeck: string[], commanders: string[], companion?: string | null): string {
+    return `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}|${companion ?? ""}`;
   }
 
   private async publishAcceptedDeckSubmission(
