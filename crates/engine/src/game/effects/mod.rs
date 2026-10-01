@@ -10976,8 +10976,8 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             target: TargetFilter::ParentTarget,
             ..
         } => ability.parent_target_missing_reason.is_some(),
-        // CR 608.2d: "A player can't choose an impossible option." An optional
-        // placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
+        // CR 608.2d: "The player can’t choose an option that’s illegal or impossible".
+        // An optional placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
         // "You may put a card from your hand on the bottom of your library. If
         // you do, draw a card.") is impossible when the player has no eligible
         // cards in that zone.
@@ -10987,47 +10987,8 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             {
                 return true;
             }
-            if let Some(source_zone) = target.extract_in_zone() {
-                if matches!(source_zone, Zone::Hand | Zone::Library) {
-                    let choosing_player = crate::game::effects::controller_for_relative_filter(
-                        state, ability, target,
-                    );
-                    let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
-                        ability,
-                        choosing_player,
-                    );
-                    let has_eligible =
-                        match source_zone {
-                            Zone::Hand => state.players[choosing_player.0 as usize]
-                                .hand
-                                .iter()
-                                .any(|&id| {
-                                    crate::game::filter::matches_target_filter_for_zone(
-                                        state,
-                                        id,
-                                        source_zone,
-                                        target,
-                                        &ctx,
-                                    )
-                                }),
-                            Zone::Library => state.players[choosing_player.0 as usize]
-                                .library
-                                .iter()
-                                .any(|&id| {
-                                    crate::game::filter::matches_target_filter_for_zone(
-                                        state,
-                                        id,
-                                        source_zone,
-                                        target,
-                                        &ctx,
-                                    )
-                                }),
-                            _ => false,
-                        };
-                    return !has_eligible;
-                }
-            }
-            false
+            put_on_top::private_zone_selection(state, ability, target)
+                .is_some_and(|(_, _, mut eligible)| eligible.next().is_none())
         }
         Effect::CastFromZone {
             mode,
