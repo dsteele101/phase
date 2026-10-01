@@ -36266,3 +36266,58 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         false
     )));
 }
+
+#[test]
+fn akroan_horse_etb_parsed_trigger() {
+    let parsed = parse_oracle_text(
+        "Defender\nWhen this creature enters, an opponent gains control of it.\nAt the beginning of your upkeep, each opponent creates a 1/1 white Soldier creature token.",
+        "Akroan Horse",
+        &["Defender".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Horse".to_string()],
+    );
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Defender]);
+    assert_eq!(parsed.triggers.len(), 2);
+
+    let etb_trigger = &parsed.triggers[0];
+    assert_eq!(etb_trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(etb_trigger.destination, Some(Zone::Battlefield));
+    assert_eq!(etb_trigger.valid_card, Some(TargetFilter::SelfRef));
+    let etb_exec = etb_trigger.execute.as_ref().expect("ETB execute");
+    assert_eq!(
+        etb_exec.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::opponent(),
+            persist: false,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
+        }
+    );
+    let sub = etb_exec
+        .sub_ability
+        .as_ref()
+        .expect("GainControl sub-ability");
+    assert_eq!(
+        sub.effect.as_ref(),
+        &Effect::GainControl {
+            target: TargetFilter::SelfRef,
+        }
+    );
+
+    let upkeep_trigger = &parsed.triggers[1];
+    assert_eq!(upkeep_trigger.mode, TriggerMode::Phase);
+    assert_eq!(upkeep_trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        upkeep_trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    let upkeep_exec = upkeep_trigger.execute.as_ref().expect("Upkeep execute");
+    assert!(matches!(
+        upkeep_exec.effect.as_ref(),
+        Effect::Token {
+            name,
+            ref colors,
+            ..
+        } if name == "Soldier" && colors == &vec![ManaColor::White]
+    ));
+    assert_eq!(upkeep_exec.player_scope, Some(PlayerFilter::Opponent));
+}

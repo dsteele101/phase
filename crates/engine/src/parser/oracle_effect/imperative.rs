@@ -2723,9 +2723,20 @@ pub(super) fn parse_targeted_action_ast(
         // creatures" collapsed to a single optional slot and only one creature
         // could be chosen (issue #6205).
         let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
-        #[cfg(debug_assertions)]
-        assert_no_compound_remainder(_rem, text);
+        // CR 608.2k: A bare object pronoun ("gains control of it") in a subject-bearing
+        // clause is an anaphor, not a parent-target chain. Route it through
+        // `resolve_it_pronoun` — identical to the tap/sacrifice/counter clauses — so
+        // "When this creature enters, an opponent gains control of it" binds the
+        // control transfer to `SelfRef` (the named source). Without a subject (a true
+        // parent-target chain), the guard falls through to `parse_target_with_ctx` → `ParentTarget`.
+        let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
+            resolve_it_pronoun(ctx)
+        } else {
+            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            #[cfg(debug_assertions)]
+            assert_no_compound_remainder(_rem, text);
+            target
+        };
         return Some(TargetedImperativeAst::GainControl {
             target,
             all,
