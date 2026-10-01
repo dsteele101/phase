@@ -334,7 +334,11 @@ pub fn resolve(
                     player: choosing_player,
                     cards: eligible,
                     count: expected.min(eligible_count),
-                    min_count: 0,
+                    min_count: if count_is_up_to {
+                        0
+                    } else {
+                        expected.min(eligible_count)
+                    },
                     // load-bearing: the any-number placement prompt.
                     up_to: count_is_up_to,
                     source_id: ability.source_id,
@@ -389,7 +393,7 @@ pub fn resolve(
             player: ability.controller,
             cards: collected_targets,
             count: expected,
-            min_count: 0,
+            min_count: if count_is_up_to { 0 } else { expected },
             // Set for parity with the eligible-pool prompt so the two constructions
             // cannot drift; no any-number placement reaches this prompt today.
             up_to: count_is_up_to,

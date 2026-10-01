@@ -366,6 +366,7 @@ mod fight_for_the_throne_monarch_gated_on_commander;
 mod fin_sidequest_turn_history_conditions;
 mod finality_counter_death_to_exile;
 mod fire_lord_ozai_each_opponent_library_top;
+mod fire_prophecy;
 mod fireball_x_cost_surcharge_timing;
 mod first_family_union_color_count;
 mod fixture_deck_size_conformance;

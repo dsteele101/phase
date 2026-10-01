@@ -4139,6 +4139,7 @@ pub(crate) fn should_propagate_parent_targets(
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
         && sub.reads_chosen_group.is_none()
+        && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
             // CR 608.2c: a resolution-time instruction can still consume an
             // object selected by its parent. `ParentTarget` is not a fresh
@@ -4163,11 +4164,10 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
 /// (Worldsoul's Rage), while context references such as Beseech the Mirror's
 /// exile-linked card remain bound continuations rather than fresh choices.
 fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
-    if sub.target_choice_timing != TargetChoiceTiming::Resolution {
-        return false;
-    }
-    let Effect::ChangeZone { origin, target, .. } = &sub.effect else {
-        return false;
+    let (target, origin) = match &sub.effect {
+        Effect::ChangeZone { origin, target, .. } => (target, *origin),
+        Effect::PutAtLibraryPosition { target, .. } => (target, target.extract_in_zone()),
+        _ => return false,
     };
     let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);
     !selection_zones.is_empty()
@@ -10976,6 +10976,59 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             target: TargetFilter::ParentTarget,
             ..
         } => ability.parent_target_missing_reason.is_some(),
+        // CR 608.2d: "A player can't choose an impossible option." An optional
+        // placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
+        // "You may put a card from your hand on the bottom of your library. If
+        // you do, draw a card.") is impossible when the player has no eligible
+        // cards in that zone.
+        Effect::PutAtLibraryPosition { target, .. } => {
+            if matches!(target, TargetFilter::ParentTarget)
+                && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
+            if let Some(source_zone) = target.extract_in_zone() {
+                if matches!(source_zone, Zone::Hand | Zone::Library) {
+                    let choosing_player = crate::game::effects::controller_for_relative_filter(
+                        state, ability, target,
+                    );
+                    let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
+                        ability,
+                        choosing_player,
+                    );
+                    let has_eligible =
+                        match source_zone {
+                            Zone::Hand => state.players[choosing_player.0 as usize]
+                                .hand
+                                .iter()
+                                .any(|&id| {
+                                    crate::game::filter::matches_target_filter_for_zone(
+                                        state,
+                                        id,
+                                        source_zone,
+                                        target,
+                                        &ctx,
+                                    )
+                                }),
+                            Zone::Library => state.players[choosing_player.0 as usize]
+                                .library
+                                .iter()
+                                .any(|&id| {
+                                    crate::game::filter::matches_target_filter_for_zone(
+                                        state,
+                                        id,
+                                        source_zone,
+                                        target,
+                                        &ctx,
+                                    )
+                                }),
+                            _ => false,
+                        };
+                    return !has_eligible;
+                }
+            }
+            false
+        }
         Effect::CastFromZone {
             mode,
             target,
@@ -15638,6 +15691,7 @@ fn resolve_chain_body(
                 cardinality: Some(ObjectSelectionCardinality::Exactly { .. }),
                 ..
             }
+            | Effect::PutAtLibraryPosition { .. }
     );
     if optional_is_infeasible && auto_decline_infeasible_optional {
         return resolve_optional_effect_decision(
