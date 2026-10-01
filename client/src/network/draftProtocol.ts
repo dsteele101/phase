@@ -266,6 +266,7 @@ export interface DraftDeckPayload {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  companion?: string[];
 }
 
 export interface DraftMatchDeckPayload {

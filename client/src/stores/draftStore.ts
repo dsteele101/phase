@@ -1049,7 +1049,12 @@ function withBoosterPackPool(
 
 function matchPayload(run: DraftRunState): DraftMatchPayload {
   return {
-    player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+    player: {
+      main_deck: run.playerDeck,
+      sideboard: [],
+      commander: [],
+      companion: run.companion ? [run.companion] : [],
+    },
     opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
     booster_pack_pool: run.booster_pack_pool,
@@ -1678,6 +1683,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           };
         });
         sessionJson = prepared.sessionJson;
+        let companion: string | null = null;
+        try {
+          const parsedSession = JSON.parse(prepared.sessionJson) as {
+            submitted_decks?: Record<string, { seat: number; companion?: string | null }>;
+          };
+          const playerSubmitted = Object.values(parsedSession.submitted_decks ?? {}).find(
+            (deck) => deck.seat === 0,
+          );
+          companion = playerSubmitted?.companion ?? null;
+        } catch {
+          companion = null;
+        }
         const { botSeat, opponentDeck } = await selectViableOpponent(
           playerDeck, [], state.view, codes, selectedMatchType, fresh,
         );
@@ -1689,6 +1706,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           results: [],
           playerDeck,
           opponentDeck,
+          companion,
           usedBotSeats: [botSeat],
           lastOpponentSeat: botSeat,
           draft_set_codes: codes,

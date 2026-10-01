@@ -2155,7 +2155,9 @@ export const useMultiplayerDraftStore = create<
     const partition = projectWorkspacePartition(workspace, view.pool);
 
     if (role === "host" && activeHostAdapter) {
-      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion);
+      const nextView = companion
+        ? await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion)
+        : await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
       installWorkspace({
         view: nextView,
         base: workspace,
@@ -2168,7 +2170,11 @@ export const useMultiplayerDraftStore = create<
       });
       void autosaveDraftDeck({ view, setCode: null, partition, commanders, companion });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
+      if (companion) {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
+      } else {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      }
       set({
         submittedDeck: partition.mainDeck,
         submittedWorkspaceState: cloneWorkspace(workspace),

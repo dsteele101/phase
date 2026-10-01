@@ -292,21 +292,18 @@ fn companion_offers(
 ) -> Vec<CompanionRevealChoice> {
     let starting =
         companion_starting_deck(&pool.current_main, &pool.current_commander, uses_commander);
-    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> = if uses_commander {
-        pool.current_companion
-            .first()
-            .map(|entry| (CompanionChoiceSource::Dedicated, entry))
-            .into_iter()
-            .collect()
-    } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
-        pool.current_sideboard
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> =
+        if let Some(entry) = pool.current_companion.first() {
+            vec![(CompanionChoiceSource::Dedicated, entry)]
+        } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
+            pool.current_sideboard
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     candidates
         .into_iter()
@@ -439,7 +436,8 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Dedicated companion offer is stale".to_string())?;
-                if !state.format_config.uses_commander
+                if (!state.format_config.uses_commander
+                    && state.format_config.format != GameFormat::Limited)
                     || !is_eligible_companion_with_min_deck_size(
                         &entry,
                         &starting,

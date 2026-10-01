@@ -52,6 +52,7 @@ export interface DraftRunState {
   lastOpponentSeat?: number;
   /** Exact engine tokens; an empty array is authoritative, absence is legacy. */
   draft_set_codes?: string[];
+  companion?: string | null;
   activeMatch?: DraftRunActiveMatch;
 }
 

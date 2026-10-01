@@ -385,6 +385,7 @@ interface ExportedDraftSession {
        * plural-submission wire landed has none.
        */
       commanders?: string[];
+      companion?: string | null;
     }
   >;
 }
@@ -399,8 +400,9 @@ function deckPayload(
   mainDeck: string[],
   sideboard: string[],
   commander: string[] = [],
+  companion: string[] = [],
 ): DraftDeckPayload {
-  return { main_deck: mainDeck, sideboard, commander };
+  return { main_deck: mainDeck, sideboard, commander, companion };
 }
 
 function deckCardCounts(cards: readonly string[]): DeckCardCount[] {
@@ -2995,6 +2997,7 @@ export class P2PDraftHost {
       submitted.main_deck,
       sideboardFromPool(session, seat, submitted.main_deck),
       submitted.commanders ?? [],
+      submitted.companion ? [submitted.companion] : [],
     );
   }
 

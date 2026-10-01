@@ -867,7 +867,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // game pool; construction validation remains responsible for rejecting an
     // oversized submitted list.
     let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if !state.format_config.uses_commander {
+        if !state.format_config.uses_commander
+            && state.format_config.format != crate::types::format::GameFormat::Limited
+        {
             return Vec::new();
         }
         submitted

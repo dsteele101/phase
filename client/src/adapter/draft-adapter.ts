@@ -951,11 +951,17 @@ export class DraftEngineOperationLease {
     return this.wasm.get_view() as DraftPlayerView;
   }
 
-  submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): DraftPlayerView {
+  submitDeck(mainDeck: string[], commanders: string[] = [], companion?: string | null): DraftPlayerView {
+    if (companion !== undefined && companion !== null) {
+      return this.wasm.submit_deck(
+        JSON.stringify(mainDeck),
+        JSON.stringify(commanders),
+        companion,
+      ) as DraftPlayerView;
+    }
     return this.wasm.submit_deck(
       JSON.stringify(mainDeck),
       JSON.stringify(commanders),
-      companion ?? null,
     ) as DraftPlayerView;
   }
 
@@ -1096,14 +1102,21 @@ export class DraftEngineOperationLease {
   submitDeckForSeat(
     seat: number,
     mainDeck: string[],
-    commanders: string[],
+    commanders: string[] = [],
     companion?: string | null,
   ): DraftPlayerView {
+    if (companion !== undefined && companion !== null) {
+      return this.wasm.submit_deck_for_seat(
+        seat,
+        JSON.stringify(mainDeck),
+        JSON.stringify(commanders),
+        companion,
+      ) as DraftPlayerView;
+    }
     return this.wasm.submit_deck_for_seat(
       seat,
       JSON.stringify(mainDeck),
       JSON.stringify(commanders),
-      companion ?? null,
     ) as DraftPlayerView;
   }
 
