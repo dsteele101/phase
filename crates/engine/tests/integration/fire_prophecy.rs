@@ -23,21 +23,21 @@ fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
 #[test]
 fn fire_prophecy_empty_hand_does_not_prompt_and_draws_nothing() {
     let parsed = parse_effect_chain(FIRE_PROPHECY, AbilityKind::Spell);
-    assert!(matches!(parsed.effect, Effect::DealDamage { .. }));
+    assert!(matches!(parsed.effect.as_ref(), Effect::DealDamage { .. }));
     let bottom = parsed
         .sub_ability
         .as_ref()
         .expect("implemented bottoming rider");
     assert!(bottom.optional);
     assert!(matches!(
-        bottom.effect,
+        bottom.effect.as_ref(),
         Effect::PutAtLibraryPosition {
             position: LibraryPosition::Bottom,
             ..
         }
     ));
     let draw = bottom.sub_ability.as_ref().expect("conditional draw rider");
-    assert!(matches!(draw.effect, Effect::Draw { .. }));
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
     assert!(draw
         .condition
         .as_ref()
