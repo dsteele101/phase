@@ -9014,7 +9014,7 @@ fn static_cant_be_the_target() {
 
 #[test]
 fn static_enchanted_creature_cant_be_targeted_by_opponents() {
-    // CR 702.11a + CR 303.4: "Enchanted creature can't be the target of spells or
+    // CR 702.11b + CR 303.4: "Enchanted creature can't be the target of spells or
     // abilities your opponents control." (Shielding Plax) grants Hexproof to the
     // enchanted creature.
     let def = parse_static_line(
@@ -9025,6 +9025,30 @@ fn static_enchanted_creature_cant_be_targeted_by_opponents() {
     let expected_filter =
         TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
     assert_eq!(def.affected, Some(expected_filter));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        }));
+}
+
+#[test]
+fn static_enchanted_creature_gets_pt_and_cant_be_targeted_by_opponents() {
+    // CR 702.11b + CR 613.4c: Compound static preserving both P/T boost and Hexproof.
+    let def = parse_static_line(
+        "Enchanted creature gets +1/+1 and can't be the target of spells or abilities your opponents control.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let expected_filter =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+    assert_eq!(def.affected, Some(expected_filter));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddKeyword {

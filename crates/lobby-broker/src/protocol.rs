@@ -59,7 +59,11 @@ pub struct TournamentRequestId(pub u64);
 /// the new field, an old server that omits it produces a silent feature loss
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
-///
+/// 95 — `GameEvent::Attached` (`{"type":"Attached","attachment_id":...,"target":...}`)
+///      emitted when an Aura or Equipment becomes attached to an object or player
+///      (CR 701.3a + CR 603.2e). It reaches the Full `StateUpdate.events` payload,
+///      and a v94 peer cannot deserialize the new tagged enum variant. Full-game
+///      peers and P2P move in lockstep (wire 77); lobby messages are unchanged.
 /// 94 — `SpellContext.creation_lookback_event` (`#[serde(default,
 ///      skip_serializing_if = "Option::is_none")]`) carries the battlefield
 ///      departure a phase-delayed triggered ability was created under (CR 603.7
@@ -782,7 +786,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 94;
+pub const PROTOCOL_VERSION: u32 = 95;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the

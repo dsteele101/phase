@@ -1657,6 +1657,19 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 {
                     Some(TargetRef::Object(*object_id))
                 }
+                // CR 701.3a + CR 603.2: "that creature" / "that permanent" on an Attached
+                // trigger is the attachment target when the source is the attachment, or the
+                // attachment when the source is the target.
+                crate::types::events::GameEvent::Attached {
+                    attachment_id,
+                    target,
+                } => {
+                    if *attachment_id == source_id {
+                        Some(target.clone())
+                    } else {
+                        Some(TargetRef::Object(*attachment_id))
+                    }
+                }
                 _ => None,
             }
         }
@@ -2056,14 +2069,9 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
-        GameEvent::Attached {
-            target: TargetRef::Object(object_id),
-            ..
+        GameEvent::Attached { attachment_id, .. } | GameEvent::Unattached { attachment_id, .. } => {
+            Some(*attachment_id)
         }
-        | GameEvent::Unattached {
-            old_target: TargetRef::Object(object_id),
-            ..
-        } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         // CR 701.17c: "that card" / "a milled card" is the milled card, and an
         // effect can find it in the zone it moved to from the library — "as long
@@ -2154,6 +2162,14 @@ pub(crate) fn extract_target_object_from_event(
         } => Some(*id),
         GameEvent::BecomesTarget {
             target: TargetRef::Object(id),
+            ..
+        } => Some(*id),
+        GameEvent::Attached {
+            target: TargetRef::Object(id),
+            ..
+        } => Some(*id),
+        GameEvent::Unattached {
+            old_target: TargetRef::Object(id),
             ..
         } => Some(*id),
         GameEvent::DamageDealt {

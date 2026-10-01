@@ -34,7 +34,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // option's `additional_cost`, and the announced graveyard permission (the
 // option's `authority`, the slot prompt's `permission`, the latched terms).
 // v91 retypes PendingManaAbility's required chosen-counter count (#9207).
-// v93 adds the SacrificedForCost reduction provenance.
+// v93 adds the SacrificedForCost reduction provenance. v95 adds the
+// tagged GameEvent::Attached event.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -58,7 +59,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +22: the v93 SacrificedForCost reduction provenance.
 // +23: the v94 phase-delayed departure look-back carrier
 // (SpellContext.creation_lookback_event) and TriggerSourceContext.mana_cost.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 23;
+// +24: the v95 GameEvent::Attached event tag.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 24;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -104,7 +106,8 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +20: wire 74 moves with full-game v92 for the serialized reveal-until verdict.
 // +21: wire 75 moves with full-game v93 for the SacrificedForCost provenance.
 // +22: wire 76 moves with full-game v94 for the departure look-back carrier.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 22;
+// +23: wire 77 moves with full-game v95 for the Attached event tag.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 23;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

@@ -1417,6 +1417,21 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         });
     }
 
+    // CR 702.18a / CR 702.11b: "can't be the target [of ...]" on compound statics / grants
+    // (e.g. Shielding Plax: "Enchanted creature can't be the target of spells or abilities your opponents control",
+    // or compound grants like "Enchanted creature gets +1/+1 and can't be the target...").
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(&unquoted_lower) {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
+        };
+        if !modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddKeyword { keyword: k } if *k == keyword),
+        ) {
+            modifications.push(ContinuousModification::AddKeyword { keyword });
+        }
+    }
+
     // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
     // type" predicate — the Changeling-class type grant when it appears as
     // one conjunct in an Aura/Equipment compound static ("Enchanted creature
