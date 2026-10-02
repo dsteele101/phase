@@ -386,3 +386,99 @@ fn metalworker_activated_during_spell_mana_payment_resumes_and_finalizes_cast() 
     // Spell is now on the stack
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
 }
+
+#[test]
+fn metalworker_independent_sequential_activations_isolate_tracked_sets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+
+    let art1 = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact()
+        .id();
+
+    let art2 = scenario
+        .add_creature_to_hand(P0, "Memnite", 1, 1)
+        .as_artifact()
+        .id();
+
+    let mut runner = scenario.build();
+
+    // 1st activation: reveal Art1 -> produces {C}{C} (pool = 2)
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: metalworker,
+            ability_index: 0,
+        })
+        .expect("1st activation succeeds");
+    runner
+        .act(GameAction::SelectCards { cards: vec![art1] })
+        .expect("reveal art1 succeeds");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        2,
+        "expected 2 colorless mana after revealing 1st artifact"
+    );
+
+    // Untap Metalworker for 2nd independent activation
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&metalworker)
+        .unwrap()
+        .tapped = false;
+
+    // 2nd activation: choose empty (0 cards) -> produces 0 mana (pool remains 2)
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: metalworker,
+            ability_index: 0,
+        })
+        .expect("2nd activation succeeds");
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("empty reveal succeeds");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        2,
+        "expected pool to remain 2 after choosing 0 cards (not retaining prior activation's set)"
+    );
+
+    // Untap Metalworker for 3rd independent activation
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&metalworker)
+        .unwrap()
+        .tapped = false;
+
+    // 3rd activation: reveal Art2 -> produces {C}{C} (pool = 2 + 2 = 4)
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: metalworker,
+            ability_index: 0,
+        })
+        .expect("3rd activation succeeds");
+    runner
+        .act(GameAction::SelectCards { cards: vec![art2] })
+        .expect("reveal art2 succeeds");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        4,
+        "expected 4 total colorless mana after 3rd activation revealing 1 artifact (not unioned with art1)"
+    );
+}

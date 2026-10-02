@@ -1451,6 +1451,10 @@ pub(crate) fn handle_reveal_choice_for_mana_ability(
         });
     }
 
+    // CR 603.7: Each independent activation of a mana ability owns a fresh tracked set.
+    // Reset `chain_tracked_set_id` before publishing so this activation does not union
+    // into the population of any prior activation or resolution chain.
+    state.chain_tracked_set_id = None;
     super::effects::publish_tracked_set(state, chosen);
 
     let ability_def = mana_ability_definition(state, &pending)?;
@@ -1478,6 +1482,8 @@ pub(crate) fn handle_reveal_choice_for_mana_ability(
             events,
         );
     });
+
+    state.chain_tracked_set_id = None;
 
     if let Some(pause) = collect_completed_mana_frame_events(
         state,
@@ -3453,7 +3459,9 @@ fn finish_mana_ability_cost_payment(
                 }
                 return Ok(resume);
             } else {
+                state.chain_tracked_set_id = None;
                 super::effects::publish_tracked_set(state, Vec::new());
+                state.chain_tracked_set_id = None;
             }
         }
     }
@@ -4049,13 +4057,17 @@ pub(crate) fn resume_mana_ability_cost_move(
     continue_mana_ability_cost_payment(state, *pending, cursor, events, 0)
 }
 
-/// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
-/// Mana abilities don't use the stack, so non-mana clauses ("This land deals
-/// 1 damage to you.") resolve atomically with the mana production. Walks the
-/// full chain via `resolve_ability_chain` so nested effects (DealDamage on
-/// controller, GainLife, etc.) route through the standard effect handlers.
-/// `Effect::Mana` sub-abilities are already resolved and deposited by
-/// `produce_mana_from_ability`, so they are skipped here to avoid duplication.
+/// CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
+/// effect chain (e.g. painlands' "This land deals 1 damage to you.")
+/// resolves that chain inline — mana abilities don't use the stack, so
+/// the sub-ability runs as part of the same atomic resolution.
+///
+/// When the root ability is `Effect::Mana`, root production consumed only the root,
+/// so its `sub_ability` (which may contain conditional `Effect::Mana` additions like
+/// Urza's Tower or Ugin's Labyrinth) must execute. When the root is a non-Mana effect
+/// (e.g. `Effect::RevealHand` for Metalworker), `produce_mana_from_ability` already
+/// consumed the `Effect::Mana` sub-node, so we skip only that consumed node and resolve
+/// any remaining sub-ability tail.
 fn resolve_mana_ability_sub_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -4064,27 +4076,23 @@ fn resolve_mana_ability_sub_chain(
     let Some(sub) = ability.sub_ability.as_deref() else {
         return;
     };
+    if matches!(ability.effect, Effect::Mana { .. }) {
+        state.mana_subresolution_depth += 1;
+        let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
+        state.mana_subresolution_depth -= 1;
+        return;
+    }
+
     if matches!(sub.effect, Effect::Mana { .. }) {
         if let Some(next_sub) = sub.sub_ability.as_deref() {
-            resolve_mana_ability_sub_chain_inner(state, next_sub, events);
+            state.mana_subresolution_depth += 1;
+            let _ = super::effects::resolve_ability_chain(state, next_sub, events, 0);
+            state.mana_subresolution_depth -= 1;
         }
         return;
     }
-    resolve_mana_ability_sub_chain_inner(state, sub, events);
-}
-
-fn resolve_mana_ability_sub_chain_inner(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) {
-    // Errors during the sub-chain are non-fatal — mana has already been
-    // added to the pool and the cost has been paid. The damage/life clause
-    // of a painland cannot legitimately fail in a well-formed game state.
-    // CR 605.3b: the sub-chain is an inline subresolution; see
-    // `GameState::mana_subresolution_depth`.
     state.mana_subresolution_depth += 1;
-    let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+    let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
     state.mana_subresolution_depth -= 1;
 }
 
