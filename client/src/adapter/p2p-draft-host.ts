@@ -1782,7 +1782,10 @@ export class P2PDraftHost {
         await this.persistSessionStrict();
         receiptDurable = true;
       } else {
-        view = await this.adapter.submitDeckForSeat(seat, mainDeck, commanders, companion);
+        view =
+          companion !== undefined
+            ? await this.adapter.submitDeckForSeat(seat, mainDeck, commanders, companion)
+            : await this.adapter.submitDeckForSeat(seat, mainDeck, commanders);
         // Record before saving the post-reducer snapshot. A retry after a host
         // reload therefore sees the same result and cannot feed the reducer a
         // second submission.

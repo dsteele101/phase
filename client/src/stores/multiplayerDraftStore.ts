@@ -3697,7 +3697,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       break;
     case "recoveredDeckSubmissionAccepted": {
       const partition = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
-      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders });
+      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders, companion: event.companion });
       break;
     }
   }

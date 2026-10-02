@@ -225,7 +225,7 @@ import type {
  *       TypeScript mirrors are REQUIRED rather than optional, for that same
  *       reason — a client never constructs one of these views.
  */
-export const DRAFT_PROTOCOL_VERSION = 30 as const;
+export const DRAFT_PROTOCOL_VERSION = 31 as const;
 
 /** Canonical multiset fingerprint: deck order is UI-only, card counts are not. */
 export function deckSubmissionFingerprint(mainDeck: readonly string[]): string {

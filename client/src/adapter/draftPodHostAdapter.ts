@@ -575,7 +575,10 @@ export class DraftPodHostAdapter {
 
   async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
-    return this.host.submitHostDeck(mainDeck, commanders, companion);
+    if (companion !== undefined) {
+      return this.host.submitHostDeck(mainDeck, commanders, companion);
+    }
+    return this.host.submitHostDeck(mainDeck, commanders);
   }
 
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {

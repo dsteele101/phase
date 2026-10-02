@@ -58,7 +58,7 @@ export type DraftGuestEvent =
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
-  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; view: DraftPlayerView }
+  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; companion?: string | null; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -171,6 +171,7 @@ export class P2PDraftGuest {
       activeAttempts: number;
       mainDeck: string[];
       commanders: string[];
+      companion?: string | null;
       callerAttempts: number;
       acknowledged: boolean;
     }
@@ -456,7 +457,7 @@ export class P2PDraftGuest {
       });
       waiter = {
         acknowledgement, resolve, reject, activeAttempts: 0,
-        mainDeck, commanders, callerAttempts: 0, acknowledged: false,
+        mainDeck, commanders, companion, callerAttempts: 0, acknowledged: false,
       };
       this.deckSubmissionWaiters.set(submissionId, waiter);
     }
@@ -681,6 +682,7 @@ export class P2PDraftGuest {
               type: "recoveredDeckSubmissionAccepted",
               mainDeck: ackWaiter.mainDeck,
               commanders: ackWaiter.commanders,
+              companion: ackWaiter.companion,
               view: msg.view,
             });
           }

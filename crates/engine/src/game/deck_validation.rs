@@ -149,8 +149,10 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
             if !is_companion {
                 return None;
             }
-            let starting_main = if let Some(idx) = request.main_deck.iter().position(|n| n == &name)
-            {
+            let is_already_registered = request.companion.iter().any(|c| c == &name);
+            let starting_main = if is_already_registered {
+                request.main_deck.clone()
+            } else if let Some(idx) = request.main_deck.iter().position(|n| n == &name) {
                 let mut rem = request.main_deck.clone();
                 rem.remove(idx);
                 rem
@@ -5970,6 +5972,67 @@ mod tests {
             .selected_format_reasons
             .iter()
             .any(|reason| reason.contains("Commander Banned (banned)")));
+    }
+
+    #[test]
+    fn companion_candidates_preserves_main_deck_for_already_registered_companion() {
+        let mut db_json: Value = serde_json::from_str(&test_db_json()).unwrap();
+        db_json["lurrus"] = serde_json::json!({
+            "name": "Lurrus",
+            "mana_cost": { "type": "Cost", "shards": [], "generic": 3 },
+            "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [
+                { "Companion": { "type": "MaxPermanentManaValue", "data": 2 } }
+            ],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "scryfall_oracle_id": null,
+            "legalities": { "standard": "legal", "commander": "legal" }
+        });
+        let db = CardDatabase::from_json_str(&db_json.to_string()).unwrap();
+
+        // When Lurrus is registered as companion AND a second Lurrus copy is in the main deck,
+        // the starting main deck contains a permanent with MV 3 (violating Lurrus's requirement).
+        // The candidate check must NOT remove the main-deck copy when Lurrus is already in request.companion.
+        let mut main = expand("Plains", 39);
+        main.push("Lurrus".to_string());
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            companion: vec!["Lurrus".to_string()],
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Limited)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let candidates = companion_candidates(&db, &request);
+        assert!(
+            !candidates.contains(&"Lurrus".to_string()),
+            "Lurrus must not be eligible when a second Lurrus copy remains in the starting main deck"
+        );
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("not a legal companion for this starting deck")));
     }
 
     #[test]

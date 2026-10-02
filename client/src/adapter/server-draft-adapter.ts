@@ -539,7 +539,7 @@ export class ServerDraftAdapter implements EngineAdapter {
               seat: this.seatIndex,
               main_deck: mainDeck,
               commanders,
-              companion: companion ?? null,
+              ...(companion !== undefined ? { companion } : {}),
             },
           },
         },

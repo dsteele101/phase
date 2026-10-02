@@ -762,13 +762,6 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         state.format_config.sideboard_policy,
         crate::types::format::SideboardPolicy::Forbidden
     );
-    let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if drop_sideboard {
-            Vec::new()
-        } else {
-            submitted.to_vec()
-        }
-    };
     // CR 903.5a: the commander is one of the 100 — a decklist that names it in
     // both the command zone and the main deck describes ONE physical card, not
     // two. The validator nets exactly this double-listing out of its deck-size
@@ -881,6 +874,29 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             })
             .unwrap_or_default()
     };
+    let allocate_companion_and_sideboard = |submitted_side: &[DeckEntry],
+                                            submitted_companion: &[DeckEntry]|
+     -> (Vec<DeckEntry>, Vec<DeckEntry>) {
+        let companion = dedicated_companion_for(submitted_companion);
+        if drop_sideboard {
+            return (Vec::new(), companion);
+        }
+        let mut side = submitted_side.to_vec();
+        if state.format_config.format == crate::types::format::GameFormat::Limited {
+            // CR 100.4b + CR 702.139a/b: Net the dedicated companion out of the sideboard
+            // pool so the single physical drafted card is not represented in both zones.
+            for comp in &companion {
+                if let Some(target) = side
+                    .iter_mut()
+                    .find(|s| s.card.name.eq_ignore_ascii_case(&comp.card.name))
+                {
+                    target.count = target.count.saturating_sub(comp.count);
+                }
+            }
+            side.retain(|entry| entry.count > 0);
+        }
+        (side, companion)
+    };
     let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
             submitted.to_vec()
@@ -891,10 +907,12 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
     // they start identical and diverge via Arc::make_mut on first mutation.
+    let (p0_side_entries, p0_comp_entries) =
+        allocate_companion_and_sideboard(&payload.player.sideboard, &payload.player.companion);
     let p0_main = std::sync::Arc::new(main_deck_for(&payload.player));
-    let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
+    let p0_side = std::sync::Arc::new(p0_side_entries);
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
-    let p0_companion = std::sync::Arc::new(dedicated_companion_for(&payload.player.companion));
+    let p0_companion = std::sync::Arc::new(p0_comp_entries);
     let p0_sig = std::sync::Arc::new(signature_spell_for(&payload.player.signature_spell));
     let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
     let p0_scheme = std::sync::Arc::new(payload.player.scheme_deck.clone());
@@ -917,10 +935,12 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
         });
+    let (p1_side_entries, p1_comp_entries) =
+        allocate_companion_and_sideboard(&payload.opponent.sideboard, &payload.opponent.companion);
     let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
-    let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
+    let p1_side = std::sync::Arc::new(p1_side_entries);
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
-    let p1_companion = std::sync::Arc::new(dedicated_companion_for(&payload.opponent.companion));
+    let p1_companion = std::sync::Arc::new(p1_comp_entries);
     let p1_sig = std::sync::Arc::new(signature_spell_for(&payload.opponent.signature_spell));
     let p1_scheme = std::sync::Arc::new(payload.opponent.scheme_deck.clone());
     state
@@ -944,10 +964,12 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
+        let (ai_side_entries, ai_comp_entries) =
+            allocate_companion_and_sideboard(&ai_deck.sideboard, &ai_deck.companion);
         let main = std::sync::Arc::new(main_deck_for(ai_deck));
-        let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
+        let side = std::sync::Arc::new(ai_side_entries);
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
-        let companion = std::sync::Arc::new(dedicated_companion_for(&ai_deck.companion));
+        let companion = std::sync::Arc::new(ai_comp_entries);
         let sig = std::sync::Arc::new(signature_spell_for(&ai_deck.signature_spell));
         let scheme = std::sync::Arc::new(ai_deck.scheme_deck.clone());
         state

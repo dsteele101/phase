@@ -442,6 +442,9 @@ pub fn handle_submit_sideboard(
         for (name, count) in entries_to_count_map(&pool.registered_sideboard) {
             *map.entry(name).or_insert(0) += count;
         }
+        for (name, count) in entries_to_count_map(&pool.registered_companion) {
+            *map.entry(name).or_insert(0) += count;
+        }
         map
     };
     if submitted_pool_map != registered_pool_map {
