@@ -4894,9 +4894,16 @@ pub(super) fn handle_resolution_choice(
                 optional,
                 decline_runs_continuation,
                 any_number,
+                pending_mana_ability,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            if let Some(pending) = pending_mana_ability {
+                return super::mana_abilities::handle_reveal_choice_for_mana_ability(
+                    state, *pending, &cards, &filter, chosen, events,
+                )
+                .map(ResolutionChoiceOutcome::WaitingFor);
+            }
             if any_number {
                 for &chosen_id in &chosen {
                     if !cards.contains(&chosen_id) {

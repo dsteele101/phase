@@ -14460,6 +14460,10 @@ pub enum WaitingFor {
         /// choosing 0..=cards.len() cards.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         any_number: bool,
+        /// Optional pending mana ability being activated if this reveal choice was
+        /// surfaced by an activated mana ability (e.g. Metalworker).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_mana_ability: Option<Box<PendingManaAbility>>,
     },
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {

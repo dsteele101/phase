@@ -163,6 +163,7 @@ pub fn resolve(
             optional: true,
             decline_runs_continuation: true,
             any_number: true,
+            pending_mana_ability: None,
         };
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
@@ -202,6 +203,7 @@ pub fn resolve(
                 optional: true,
                 decline_runs_continuation: false,
                 any_number: false,
+                pending_mana_ability: None,
             };
         }
         events.push(GameEvent::EffectResolved {
@@ -293,6 +295,7 @@ pub fn resolve(
                 optional: true,
                 decline_runs_continuation: false,
                 any_number: false,
+                pending_mana_ability: None,
             };
         }
         events.push(GameEvent::EffectResolved {
@@ -310,6 +313,7 @@ pub fn resolve(
         optional: choice_optional,
         decline_runs_continuation: false,
         any_number: false,
+        pending_mana_ability: None,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -1130,6 +1134,7 @@ mod tests {
             optional: true,
             decline_runs_continuation: false,
             any_number: false,
+            pending_mana_ability: None,
         };
         let mut continuation = ResolvedAbility::new(
             Effect::GainLife {
@@ -1153,6 +1158,7 @@ mod tests {
                 optional: true,
                 decline_runs_continuation: false,
                 any_number: false,
+                pending_mana_ability: None,
             },
             GameAction::SelectCards { cards: vec![] },
             &mut events,

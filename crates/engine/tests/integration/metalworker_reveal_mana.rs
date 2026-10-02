@@ -12,12 +12,15 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaType;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const METALWORKER_ORACLE: &str =
     "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
+const KINNAN_ORACLE: &str =
+    "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.";
 
 #[test]
 fn metalworker_reveal_two_artifacts_adds_four_colorless_mana() {
@@ -224,4 +227,162 @@ fn metalworker_with_no_artifacts_in_hand_resolves_immediately_with_zero_mana() {
         0,
         "expected 0 colorless mana"
     );
+}
+
+#[test]
+fn metalworker_with_kinnan_produces_three_colorless_and_one_tapped_for_mana_event() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+
+    let _kinnan = scenario
+        .add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE)
+        .id();
+
+    let art1 = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact()
+        .id();
+
+    let mut runner = scenario.build();
+
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: metalworker,
+        ability_index: 0,
+    });
+    assert!(result.is_ok(), "activation succeeds: {result:?}");
+
+    let result = runner.act(GameAction::SelectCards { cards: vec![art1] });
+    assert!(result.is_ok(), "reveal selection succeeds: {result:?}");
+    let outcome = result.unwrap();
+
+    // 1 artifact revealed -> Metalworker produces {C}{C}, Kinnan adds {C} -> 3 total colorless mana
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        3,
+        "expected 3 colorless mana ({{C}}{{C}} from Metalworker + {{C}} from Kinnan)"
+    );
+
+    // Exactly one TappedForMana event emitted for Metalworker's aggregate activation
+    let tapped_for_mana_events: Vec<_> = outcome
+        .events
+        .iter()
+        .filter(
+            |e| matches!(e, GameEvent::TappedForMana { source_id, .. } if *source_id == metalworker),
+        )
+        .collect();
+    assert_eq!(
+        tapped_for_mana_events.len(),
+        1,
+        "expected exactly one TappedForMana event for Metalworker activation, got {tapped_for_mana_events:?}"
+    );
+
+    let mana_produced_events: Vec<_> = outcome
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(e, GameEvent::ManaAbilityProduced { source_id, .. } if *source_id == metalworker)
+        })
+        .collect();
+    assert_eq!(
+        mana_produced_events.len(),
+        1,
+        "expected exactly one ManaAbilityProduced event for Metalworker activation, got {mana_produced_events:?}"
+    );
+}
+
+#[test]
+fn metalworker_activated_during_spell_mana_payment_resumes_and_finalizes_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+
+    let art1 = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact()
+        .id();
+
+    let art2 = scenario
+        .add_creature_to_hand(P0, "Memnite", 1, 1)
+        .as_artifact()
+        .id();
+
+    let spell = scenario
+        .add_spell_to_hand(P0, "Juggernaut", true)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+
+    // Begin casting the spell in manual payment mode
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast begins and reaches mana payment prompt");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "expected WaitingFor::ManaPayment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Activate Metalworker during spell mana payment
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: metalworker,
+            ability_index: 0,
+        })
+        .expect("Metalworker activation during spell payment succeeds");
+
+    // Engine pauses at WaitingFor::RevealChoice with pending_mana_ability preserving payment resume
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
+        "expected WaitingFor::RevealChoice, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Reveal 2 artifacts to produce 4 colorless mana
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![art1, art2],
+        })
+        .expect("reveal selection succeeds");
+
+    // Engine must have resumed exactly to the spell's mana payment context
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "expected return to WaitingFor::ManaPayment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        4,
+        "expected 4 colorless mana in pool from Metalworker"
+    );
+
+    // Finalize payment / cast the spell
+    runner
+        .act(GameAction::PassPriority)
+        .expect("spell mana payment succeeds and cast completes");
+
+    // Spell is now on the stack
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
 }

@@ -116,6 +116,7 @@ pub fn resolve(
         optional: true,
         decline_runs_continuation: true,
         any_number: false,
+        pending_mana_ability: None,
     };
 
     events.push(GameEvent::EffectResolved {
