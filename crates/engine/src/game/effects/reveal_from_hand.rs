@@ -115,6 +115,7 @@ pub fn resolve(
         filter: card_filter,
         optional: true,
         decline_runs_continuation: true,
+        any_number: false,
     };
 
     events.push(GameEvent::EffectResolved {

@@ -14301,6 +14301,7 @@ mod tests {
             filter: TargetFilter::Any,
             optional: false,
             decline_runs_continuation: false,
+            any_number: false,
         });
         push("SearchChoice", &|state| WaitingFor::SearchChoice {
             player: PlayerId(0),

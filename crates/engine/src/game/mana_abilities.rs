@@ -60,31 +60,32 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 /// any declared role means the ability targets and must use the stack. The
 /// `multi_target` mechanism is checked alongside it.
 fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
-    // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
-    // declared filters: ANY declared role — recipient or count source — means
-    // the ability names a target and therefore uses the stack (Jeska's Will
-    // mode 1: "Add {R} for each card in target opponent's hand").
-    // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
-    // makes this not-a-mana-ability under today's behavior, and this change
-    // must not widen mana-ability status for any shipping card.
-    let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
-        _ => return false,
-    };
+    let mut adds_mana = false;
+    let mut targets = false;
+    let _ = visit_ability_def_scoped(
+        ability_def,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |effect| {
+            if let Effect::Mana { target, .. } = effect {
+                adds_mana = true;
+                if target
+                    .as_ref()
+                    .is_some_and(|role| role.declared_filters().next().is_some())
+                {
+                    targets = true;
+                }
+            }
+            if super::triggers::extract_target_filter_from_effect(effect).is_some() {
+                targets = true;
+            }
+            ControlFlow::Continue(())
+        },
+    );
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
-    // Reject both the explicit `multi_target` mechanism and the embedded
-    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
-    // card in target opponent's hand" — the spell targets, so it must use the
-    // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
+    if !adds_mana || targets || ability_def.multi_target.is_some() {
         return false;
     }
-    // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
-    // that happens to add mana — e.g. Chandra, Bold Pyromancer's `[+1]: Add
-    // {R}{R}` — is NOT a mana ability: it uses the stack and obeys loyalty-ability
-    // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
-    // off the instant-speed mana-ability path.
-    // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
+    // CR 605.1a: "...and it's not a loyalty ability."
     if mana_sources::cost_has_component(&ability_def.cost, |c| {
         matches!(c, AbilityCost::Loyalty { .. })
     }) {
@@ -701,6 +702,15 @@ fn produce_mana_from_ability(
         chosen_x,
         cost_paid_object,
     );
+
+    // CR 605.3b + CR 605.1a: If the root effect is not Effect::Mana (e.g. Metalworker's
+    // Effect::RevealHand), resolve the full ability chain inline.
+    if !matches!(*ability_def.effect, Effect::Mana { .. }) {
+        state.mana_subresolution_depth += 1;
+        let _ = super::effects::resolve_ability_chain(state, &resolved_for_quantity, events, 0);
+        state.mana_subresolution_depth -= 1;
+        return;
+    }
 
     // CR 106.12: a permanent is "tapped for mana" when the activated mana
     // ability's cost includes the `{T}` symbol.
@@ -3371,6 +3381,10 @@ fn finish_mana_ability_cost_payment(
         ) {
             return Ok(pause);
         }
+    }
+
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(state.waiting_for.clone());
     }
 
     let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;

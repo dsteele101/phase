@@ -14456,6 +14456,10 @@ pub enum WaitingFor {
         /// use an empty selection to skip their follow-up instead.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         decline_runs_continuation: bool,
+        /// CR 701.20a: "Reveal any number of [filter] cards" — the prompt permits
+        /// choosing 0..=cards.len() cards.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_number: bool,
     },
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
@@ -30376,6 +30380,7 @@ mod resolved_information_tests {
                 selection: CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                any_number: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
