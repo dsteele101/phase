@@ -10564,7 +10564,7 @@ fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
         state
             .waiting_for
             .has_pending_cast()
-            .then(|| state.pending_cast.as_deref())
+            .then_some(state.pending_cast.as_deref())
             .flatten()
     });
     let permission_index = match (active_cast, &state.waiting_for) {
