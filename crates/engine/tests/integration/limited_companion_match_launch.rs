@@ -1,6 +1,6 @@
 use engine::game::companion::can_activate_companion;
 use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
-use engine::game::match_flow::handle_submit_sideboard;
+use engine::game::match_flow::{handle_choose_play_draw, handle_submit_sideboard};
 use engine::game::scenario::GameRunner;
 use engine::game::{apply, start_game_with_starting_player};
 use engine::types::actions::GameAction;
@@ -19,6 +19,7 @@ use engine::types::zones::Zone;
 use engine::types::{ObjectId, PlayerId};
 
 const P0: PlayerId = PlayerId(0);
+const P1: PlayerId = PlayerId(1);
 
 fn creature(name: &str, mv: u32) -> DeckEntry {
     DeckEntry {
@@ -346,8 +347,11 @@ fn limited_companion_match_launch_rejects_unbacked_companion_selection() {
 /// CR 100.4b + CR 702.139a/b: A single drafted companion copy is not duplicated
 /// between dedicated companion and sideboard pool at launch, during reveal,
 /// or across between-games BO3 sideboarding transitions.
+/// When the single drafted copy moves into the main deck for Game 2, the production
+/// ChoosePlayDraw/next-game rebuild conserves the 45-card pool (45 cards) and suppresses
+/// the outside-game companion designation.
 #[test]
-fn test_one_drafted_copy_p2p_payload_reveal_and_bo3_sideboarding_conservation() {
+fn test_one_drafted_copy_bo3_move_to_main_suppresses_outside_companion() {
     let mut state = GameState::new(FormatConfig::limited(), 2, 42);
 
     let mut main_deck: Vec<DeckEntry> = Vec::new();
@@ -370,6 +374,7 @@ fn test_one_drafted_copy_p2p_payload_reveal_and_bo3_sideboarding_conservation() 
         },
         opponent: PlayerDeckPayload {
             main_deck: main_deck.clone(),
+            sideboard: vec![land("Plains", 5)],
             ..Default::default()
         },
         ..Default::default()
@@ -410,7 +415,7 @@ fn test_one_drafted_copy_p2p_payload_reveal_and_bo3_sideboarding_conservation() 
         "Total registered card pool must be exactly 45 cards"
     );
 
-    // Start game and reveal Gyruda
+    // Start game 1 and reveal Gyruda
     let start_result = start_game_with_starting_player(&mut state, P0);
     state.waiting_for = start_result.waiting_for;
 
@@ -435,16 +440,220 @@ fn test_one_drafted_copy_p2p_payload_reveal_and_bo3_sideboarding_conservation() 
     // Transition to BetweenGames BO3 sideboarding
     state.match_phase = MatchPhase::BetweenGames;
     state.game_number = 1;
+    state.next_game_chooser = Some(P0);
 
-    // Player submits 40 main deck cards and 5 sideboard cards (including Gyruda + 4 Plains)
-    let new_main: Vec<DeckCardCount> = main_deck
+    // Player moves Gyruda into main deck for Game 2 (replacing Even Creature 0)
+    let mut new_main: Vec<DeckCardCount> = main_deck[1..]
         .iter()
         .map(|e| DeckCardCount {
             name: e.card.name.clone(),
             count: e.count,
         })
         .collect();
+    new_main.push(DeckCardCount {
+        name: "Gyruda, Doom of Depths".to_string(),
+        count: 1,
+    });
+
     let new_sideboard = vec![
+        DeckCardCount {
+            name: main_deck[0].card.name.clone(),
+            count: 1,
+        },
+        DeckCardCount {
+            name: "Plains".to_string(),
+            count: 4,
+        },
+    ];
+
+    let mut events = Vec::new();
+    let p0_submit = handle_submit_sideboard(&mut state, P0, new_main, new_sideboard, &mut events);
+    assert!(
+        p0_submit.is_ok(),
+        "P0 sideboard submission must conserve the 45-card pool"
+    );
+
+    // Opponent submits sideboard to complete the sideboarding phase
+    let p1_main: Vec<DeckCardCount> = main_deck
+        .iter()
+        .map(|e| DeckCardCount {
+            name: e.card.name.clone(),
+            count: e.count,
+        })
+        .collect();
+    let p1_sideboard = vec![DeckCardCount {
+        name: "Plains".to_string(),
+        count: 5,
+    }];
+    let p1_submit = handle_submit_sideboard(&mut state, P1, p1_main, p1_sideboard, &mut events);
+    assert!(p1_submit.is_ok(), "P1 sideboard submission must succeed");
+
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::BetweenGamesChoosePlayDraw { .. }
+    ));
+
+    // Execute production ChoosePlayDraw and next-game rebuild
+    let choose_result = handle_choose_play_draw(&mut state, P0, true, &mut events);
+    assert!(choose_result.is_ok(), "ChoosePlayDraw restart must succeed");
+
+    // In Game 2:
+    let p0_game2_pool = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    let total_game2_pool: u32 = p0_game2_pool
+        .registered_main
+        .iter()
+        .map(|e| e.count)
+        .sum::<u32>()
+        + p0_game2_pool
+            .registered_sideboard
+            .iter()
+            .map(|e| e.count)
+            .sum::<u32>()
+        + p0_game2_pool
+            .registered_companion
+            .iter()
+            .map(|e| e.count)
+            .sum::<u32>();
+    assert_eq!(
+        total_game2_pool, 45,
+        "Game 2 card pool must remain exactly 45 cards (no duplicate card created)"
+    );
+
+    // Main deck contains Gyruda
+    assert!(p0_game2_pool
+        .current_main
+        .iter()
+        .any(|e| e.card.name == "Gyruda, Doom of Depths" && e.count == 1));
+
+    // Sideboard does NOT contain Gyruda
+    assert!(!p0_game2_pool
+        .current_sideboard
+        .iter()
+        .any(|e| e.card.name == "Gyruda, Doom of Depths"));
+
+    // Outside-game companion is empty (suppressed because the sole copy is in main deck)
+    assert_eq!(p0_game2_pool.current_companion.len(), 0);
+
+    // Companion reveal is NOT offered (proceeds to mulligans/gameplay)
+    match &state.waiting_for {
+        WaitingFor::CompanionReveal {
+            eligible_companions,
+            ..
+        } => {
+            assert!(
+                !eligible_companions
+                    .iter()
+                    .any(|c| c.name == "Gyruda, Doom of Depths"),
+                "Gyruda must not be offered as companion when the sole copy is in the main deck"
+            );
+        }
+        WaitingFor::MulliganDecision { .. } => {
+            // Correctly skipped companion reveal
+        }
+        other => panic!("unexpected waiting state in game 2: {other:?}"),
+    }
+
+    assert!(state.players[0].companion.is_none());
+}
+
+/// CR 100.4b + CR 702.139a/b: When two physical copies of a companion exist in the pool,
+/// one copy may be in the main deck while the other is designated and revealed as companion
+/// outside the game in Game 1 and across BO3 next-game rebuild.
+#[test]
+fn test_two_drafted_copies_bo3_one_in_main_one_outside_preserves_companion() {
+    let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+
+    let mut main_deck: Vec<DeckEntry> = Vec::new();
+    // 22 creatures with even mana value + 1 Gyruda = 23 even creatures
+    for i in 0..22 {
+        main_deck.push(creature(&format!("Even Creature {i}"), 2));
+    }
+    main_deck.push(gyruda_companion());
+    main_deck.push(land("Plains", 17));
+
+    // Sideboard has the second Gyruda + 4 Plains = 5 cards
+    let sideboard = vec![gyruda_companion(), land("Plains", 4)];
+    let companion = vec![gyruda_companion()];
+
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: main_deck.clone(),
+            sideboard: sideboard.clone(),
+            companion: companion.clone(),
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: main_deck.clone(),
+            sideboard: vec![land("Plains", 5)],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    load_deck_into_state(&mut state, &payload);
+
+    let p0_pool = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    // Main deck has 1 Gyruda, Companion has 1 Gyruda, Sideboard has 4 Plains
+    assert_eq!(p0_pool.registered_companion.len(), 1);
+    assert_eq!(
+        p0_pool.registered_companion[0].card.name,
+        "Gyruda, Doom of Depths"
+    );
+    assert_eq!(p0_pool.registered_sideboard.len(), 1);
+    assert_eq!(p0_pool.registered_sideboard[0].count, 4); // 4 Plains
+
+    let total_registered_cards: u32 = p0_pool.registered_main.iter().map(|e| e.count).sum::<u32>()
+        + p0_pool
+            .registered_sideboard
+            .iter()
+            .map(|e| e.count)
+            .sum::<u32>()
+        + p0_pool
+            .registered_companion
+            .iter()
+            .map(|e| e.count)
+            .sum::<u32>();
+    assert_eq!(
+        total_registered_cards, 45,
+        "Total registered pool must be exactly 45 cards (2 Gyrudas)"
+    );
+
+    // Start Game 1: companion is offered and revealed
+    let start_result = start_game_with_starting_player(&mut state, P0);
+    state.waiting_for = start_result.waiting_for;
+
+    let reveal_choice = CompanionDeclaration::Reveal(CompanionRevealChoice {
+        name: "Gyruda, Doom of Depths".to_string(),
+        source: CompanionChoiceSource::Dedicated,
+    });
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: reveal_choice.clone(),
+        },
+    )
+    .expect("Game 1 Gyruda reveal must succeed");
+
+    assert!(state.players[0]
+        .companion
+        .as_ref()
+        .is_some_and(|c| c.card.card.name == "Gyruda, Doom of Depths"));
+
+    // Transition to BetweenGames BO3 sideboarding
+    state.match_phase = MatchPhase::BetweenGames;
+    state.game_number = 1;
+    state.next_game_chooser = Some(P0);
+
+    // Submit Game 2: 1 Gyruda in main, 1 Gyruda in sideboard
+    let p0_main: Vec<DeckCardCount> = main_deck
+        .iter()
+        .map(|e| DeckCardCount {
+            name: e.card.name.clone(),
+            count: e.count,
+        })
+        .collect();
+    let p0_sideboard = vec![
         DeckCardCount {
             name: "Gyruda, Doom of Depths".to_string(),
             count: 1,
@@ -456,11 +665,77 @@ fn test_one_drafted_copy_p2p_payload_reveal_and_bo3_sideboarding_conservation() 
     ];
 
     let mut events = Vec::new();
-    let submit_result =
-        handle_submit_sideboard(&mut state, P0, new_main, new_sideboard, &mut events);
+    let p0_submit = handle_submit_sideboard(&mut state, P0, p0_main, p0_sideboard, &mut events);
     assert!(
-        submit_result.is_ok(),
-        "Sideboard submission must conserve the 45-card pool (main + side + companion)"
+        p0_submit.is_ok(),
+        "P0 2-copy sideboard submission must succeed"
+    );
+
+    let p1_main: Vec<DeckCardCount> = main_deck
+        .iter()
+        .map(|e| DeckCardCount {
+            name: e.card.name.clone(),
+            count: e.count,
+        })
+        .collect();
+    let p1_sideboard = vec![DeckCardCount {
+        name: "Plains".to_string(),
+        count: 5,
+    }];
+    let p1_submit = handle_submit_sideboard(&mut state, P1, p1_main, p1_sideboard, &mut events);
+    assert!(p1_submit.is_ok(), "P1 sideboard submission must succeed");
+
+    // Execute ChoosePlayDraw rebuild
+    let choose_result = handle_choose_play_draw(&mut state, P0, true, &mut events);
+    assert!(choose_result.is_ok(), "Game 2 rebuild must succeed");
+
+    // In Game 2:
+    let p0_game2_pool = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    let total_game2_pool: u32 = p0_game2_pool
+        .registered_main
+        .iter()
+        .map(|e| e.count)
+        .sum::<u32>()
+        + p0_game2_pool
+            .registered_sideboard
+            .iter()
+            .map(|e| e.count)
+            .sum::<u32>()
+        + p0_game2_pool
+            .registered_companion
+            .iter()
+            .map(|e| e.count)
+            .sum::<u32>();
+    assert_eq!(total_game2_pool, 45);
+
+    // 1 Gyruda in main deck, 1 Gyruda as companion, 4 Plains in sideboard
+    assert!(p0_game2_pool
+        .current_main
+        .iter()
+        .any(|e| e.card.name == "Gyruda, Doom of Depths" && e.count == 1));
+    assert_eq!(p0_game2_pool.current_companion.len(), 1);
+    assert_eq!(
+        p0_game2_pool.current_companion[0].card.name,
+        "Gyruda, Doom of Depths"
+    );
+    assert_eq!(p0_game2_pool.current_sideboard.len(), 1);
+    assert_eq!(p0_game2_pool.current_sideboard[0].count, 4);
+
+    // Game 2 offers companion reveal for the outside-the-game copy
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::CompanionReveal { .. }
+    ));
+    let reveal_g2 = apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: reveal_choice,
+        },
+    );
+    assert!(
+        reveal_g2.is_ok(),
+        "Game 2 Gyruda reveal must succeed for 2-copy pool"
     );
 }
 

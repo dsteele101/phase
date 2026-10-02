@@ -883,19 +883,31 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
         let mut side = submitted_side.to_vec();
         if state.format_config.format == crate::types::format::GameFormat::Limited {
-            // CR 100.4b + CR 702.139a/b: Net the dedicated companion out of the sideboard
-            // pool so the single physical drafted card is not represented in both zones.
-            for comp in &companion {
-                if let Some(target) = side
-                    .iter_mut()
-                    .find(|s| s.card.name.eq_ignore_ascii_case(&comp.card.name))
-                {
-                    target.count = target.count.saturating_sub(comp.count);
+            // CR 100.4b + CR 702.139a/b: In Limited, all cards owned outside the main deck
+            // are in the sideboard. A dedicated companion must be allocated from an
+            // available physical copy in the sideboard pool. If a copy is available,
+            // net it from the sideboard; if no copy is available (e.g. all copies were
+            // submitted in the main deck), it cannot be designated outside the game.
+            if !submitted_side.is_empty() {
+                let mut allocated_companion = Vec::new();
+                for mut comp in companion {
+                    if let Some(target) = side
+                        .iter_mut()
+                        .find(|s| s.card.name.eq_ignore_ascii_case(&comp.card.name) && s.count > 0)
+                    {
+                        target.count = target.count.saturating_sub(1);
+                        comp.count = 1;
+                        allocated_companion.push(comp);
+                    }
                 }
+                side.retain(|entry| entry.count > 0);
+                (side, allocated_companion)
+            } else {
+                (side, companion)
             }
-            side.retain(|entry| entry.count > 0);
+        } else {
+            (side, companion)
         }
-        (side, companion)
     };
     let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
