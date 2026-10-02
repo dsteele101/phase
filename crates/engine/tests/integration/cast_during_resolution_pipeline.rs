@@ -1824,3 +1824,93 @@ fn ripple_cast_with_target_pause_keeps_bottom_pile_revealed() {
         );
     }
 }
+
+/// CR 701.20a: an effect's reveal lasts only as long as needed. Once Ripple has
+/// finished, a lingering resolution permission on the still-stacked accepted
+/// hit must not keep an unrelated momentary reveal public past the next action.
+#[test]
+fn finished_ripple_with_stacked_hit_does_not_retain_later_reveal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    red_pool(&mut scenario, 2);
+    scenario.add_creature_from_oracle(P0, "Thrumming Stone", 1, 1, THRUMMING_STONE_ORACLE);
+    let rat_a = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let rat_b = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rat Colony", 2, 1, RAT_COLONY_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let other = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unrelated Card", true, "Draw a card.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for id in [rat_b, other] {
+            engine::game::zones::remove_from_zone(state, id, Zone::Hand, P0);
+            engine::game::zones::add_to_zone(state, id, Zone::Library, P0);
+            state.objects.get_mut(&id).expect("library card").zone = Zone::Library;
+        }
+    }
+    let card_id = runner.state().objects[&rat_a].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rat_a,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast first Rat Colony");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast revealed Rat Colony");
+
+    // Ripple is finished; the accepted hit is still on the stack and still
+    // carries its resolution-owned permission.
+    assert_eq!(runner.state().objects[&rat_b].zone, Zone::Stack);
+    assert!(
+        runner.state().objects[&rat_b]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(_),
+                    ..
+                }
+            )),
+        "precondition: the stacked hit retains its resolution permission"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. }
+    ));
+
+    // A separate momentary reveal (e.g. an ordinary reveal-the-top effect).
+    runner.state_mut().revealed_cards.insert(other);
+    let action = match runner.state().waiting_for.clone() {
+        WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        },
+        _ => GameAction::PassPriority,
+    };
+    runner.act(action).expect("ordinary action");
+    assert!(
+        !runner.state().revealed_cards.contains(&other),
+        "the next normal action must clear the unrelated reveal"
+    );
+    for viewer in [P0, P1] {
+        let view = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        assert!(
+            view.objects[&other].face_down,
+            "the unrelated library card must be hidden from {viewer:?}"
+        );
+    }
+}
