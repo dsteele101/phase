@@ -13561,9 +13561,13 @@ fn emit_sacrifice_batch_follow_ups(
             continue;
         }
         match follow_up {
-            PendingPlayerScopeSacrificeFollowUp::Exploit { exploiter } => {
+            PendingPlayerScopeSacrificeFollowUp::Exploit {
+                exploiter,
+                exploiter_incarnation,
+            } => {
                 events.push(GameEvent::CreatureExploited {
                     exploiter,
+                    exploiter_incarnation,
                     sacrificed,
                     record,
                 });
@@ -19071,7 +19075,12 @@ pub(crate) fn evaluate_condition(
                     && record
                         .exploiter_incarnation
                         .is_none_or(|recorded| source_incarnation == Some(recorded))
-                    && record.sacrificed == dying_object
+                    && crate::game::triggers::exploit_record_matches_dying_object(
+                        state,
+                        record,
+                        dying_object,
+                        state.current_trigger_event.as_ref(),
+                    )
             })
         }
         // CR 702.33d + CR 702.33f + CR 608.2c: Parameterized additional-cost
@@ -21490,7 +21499,10 @@ mod tests {
     ) -> PendingPlayerScopeSacrificeCompletion {
         PendingPlayerScopeSacrificeCompletion {
             announced: vec![victim],
-            follow_up: Some(PendingPlayerScopeSacrificeFollowUp::Exploit { exploiter }),
+            follow_up: Some(PendingPlayerScopeSacrificeFollowUp::Exploit {
+                exploiter,
+                exploiter_incarnation: None,
+            }),
             ..Default::default()
         }
     }
@@ -21516,6 +21528,7 @@ mod tests {
                     exploiter: event_exploiter,
                     sacrificed,
                     record,
+                    ..
                 } if *event_exploiter == exploiter
                     && *sacrificed == victim
                     && record == &expected_record
