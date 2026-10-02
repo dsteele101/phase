@@ -6032,6 +6032,7 @@ fn condition_reads_filter_population(
         AbilityCondition::PreviousEffectAmount { rhs, .. } => has_quantity(rhs),
         // Leaves: nothing filter- or quantity-shaped to read.
         AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
@@ -6499,9 +6500,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-decline branch selector — it reads the flip, not the
             // declined effect.
             | AbilityCondition::CoinFlipOutcome { .. }
-            // The frozen trigger-event damage read is independent of an
+            // The frozen trigger-event damage/exploit read is independent of an
             // optional-effect decision, so it cannot select a decline branch.
             | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
             | AbilityCondition::WhenYouDo
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
@@ -19043,6 +19045,33 @@ pub(crate) fn evaluate_condition(
                         dying_object,
                         state.current_trigger_event.as_ref(),
                     )
+            })
+        }
+        // CR 702.110b + CR 608.2c: resolution-time check that the trigger's dying
+        // creature was exploited by this source this turn (Silumgar Scavenger).
+        AbilityCondition::TriggerEventTargetExploitedBySource => {
+            let Some(dying_object) =
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(|event| match event {
+                        GameEvent::CreatureDestroyed { object_id, .. }
+                        | GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                        GameEvent::CreatureExploited { sacrificed, .. } => Some(*sacrificed),
+                        _ => None,
+                    })
+            else {
+                return false;
+            };
+            let source_incarnation = ability
+                .trigger_source_incarnation()
+                .or(ability.source_incarnation);
+            state.creatures_exploited_this_turn.iter().any(|record| {
+                record.exploiter == ability.source_id
+                    && record
+                        .exploiter_incarnation
+                        .is_none_or(|recorded| source_incarnation == Some(recorded))
+                    && record.sacrificed == dying_object
             })
         }
         // CR 702.33d + CR 702.33f + CR 608.2c: Parameterized additional-cost

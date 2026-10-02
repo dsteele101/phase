@@ -1721,6 +1721,7 @@ mod sheriff_base_plus_additional_counters_runtime;
 mod shiko_reflexive_copy_draw_1370;
 mod shilgengar_return_each_to_battlefield;
 mod shuffle_that_pile_manifest;
+mod silumgar_scavenger_exploit_haste;
 mod skullspore_nexus_dynamic_pt;
 mod slime_molding_x_token_pt;
 mod solitude_up_to_one_exile_lifegain_rider;
