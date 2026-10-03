@@ -7118,8 +7118,8 @@ mod tests {
         );
         let strict_mana_readiness_clones =
             strict_baseline.strict_fast_path_mana_readiness_state_clones;
-        assert_eq!(strict_mana_readiness_clones, 5);
-        assert_eq!(strict_baseline.strict_fast_path_state_clones, 7);
+        assert_eq!(strict_mana_readiness_clones, 2);
+        assert_eq!(strict_baseline.strict_fast_path_state_clones, 4);
         assert_eq!(
             strict_baseline.strict_fast_path_state_clones,
             strict_baseline.strict_fast_path_auto_payment_wrapper_calls

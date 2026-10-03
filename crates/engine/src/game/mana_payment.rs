@@ -52,6 +52,25 @@ pub(crate) const INFINITE_MANA_AXES: [ResourceAxis; 6] = {
     axes
 };
 
+/// Objects whose static abilities can feed the layer system: battlefield
+/// permanents and command-zone objects, the same zones
+/// `layers::for_each_static_effect_source` draws continuous effects from.
+///
+/// CR 113.6 + CR 611.3: Static abilities of objects in other zones (library,
+/// hand, graveyard) generate no continuous effects, so they can never make
+/// spending mana a layer-relevant event. This is a superset of the layer
+/// system's sources (it does not skip phased-out permanents), which keeps the
+/// check conservative.
+fn static_effect_source_candidates(
+    state: &GameState,
+) -> impl Iterator<Item = &crate::game::game_object::GameObject> {
+    state
+        .battlefield
+        .iter()
+        .chain(state.command_zone.iter())
+        .filter_map(|id| state.objects.get(id))
+}
+
 pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
     state.transient_continuous_effects.iter().any(|effect| {
         effect
@@ -62,7 +81,7 @@ pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
                 .modifications
                 .iter()
                 .any(continuous_modification_uses_unspent_mana)
-    }) || state.objects.values().any(|obj| {
+    }) || static_effect_source_candidates(state).any(|obj| {
         obj.static_definitions.iter_all().any(|def| {
             def.mode == StaticMode::Continuous
                 && (def
