@@ -76,7 +76,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaSourcePenalty};
 use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
@@ -311,15 +311,21 @@ impl XBudget {
                 if extra_x == 0 {
                     return None;
                 }
-                // A creature that yields mana by tapping only sits out a turn
-                // of combat; one that yields it any other way (sacrificing
-                // itself, say) is given up outright.
-                let given_up =
-                    if engine::game::mana_sources::max_mana_yield(state, creature, player) > 0 {
-                        tap_weight
-                    } else {
-                        1.0
-                    };
+                // A creature whose mana comes from a tap-only method sits out
+                // a turn of combat; one whose every method sacrifices it
+                // (Blood Pet, Generator Servant's `{T}, Sacrifice`) is given
+                // up outright. The engine's mana-option penalty is the
+                // authority on which cost classes a method carries.
+                let given_up = if engine::game::mana_sources::activatable_mana_options(
+                    state, creature, player,
+                )
+                .iter()
+                .any(|option| option.penalty != ManaSourcePenalty::Sacrifices)
+                {
+                    tap_weight
+                } else {
+                    1.0
+                };
                 Some(CreatureManaSource {
                     extra_x,
                     cost: crate::eval::evaluate_creature_intrinsic(state, creature) * given_up,
@@ -1098,17 +1104,17 @@ mod tests {
         obj.card_types.subtypes.push("Forest".to_string());
         // CR 305.6: a Forest's intrinsic `{T}: Add {G}`. Normally granted by the
         // layer pass; written directly so the test needs no layer evaluation.
-        Arc::make_mut(&mut obj.abilities).push(tap_for_green());
+        Arc::make_mut(&mut obj.abilities).push(green_mana_ability(AbilityCost::Tap));
         id
     }
 
-    /// A `power/toughness` creature with `{T}: Add {G}` that has been under its
-    /// controller's control since their last turn began.
-    fn add_mana_creature(
+    /// A `power/toughness` creature whose `{G}` mana ability is paid with `cost`.
+    fn add_mana_creature_with_cost(
         state: &mut GameState,
         player: PlayerId,
         power: i32,
         toughness: i32,
+        cost: AbilityCost,
     ) -> ObjectId {
         let id = engine::game::zones::create_object(
             state,
@@ -1124,12 +1130,12 @@ mod tests {
         obj.toughness = Some(toughness);
         obj.summoning_sick = false;
         obj.entered_battlefield_turn = Some(0);
-        Arc::make_mut(&mut obj.abilities).push(tap_for_green());
+        Arc::make_mut(&mut obj.abilities).push(green_mana_ability(cost));
         id
     }
 
-    /// `{T}: Add {G}`.
-    fn tap_for_green() -> AbilityDefinition {
+    /// `{cost}: Add {G}`.
+    fn green_mana_ability(cost: AbilityCost) -> AbilityDefinition {
         let mut mana = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
@@ -1143,19 +1149,27 @@ mod tests {
                 target: None,
             },
         );
-        mana.cost = Some(AbilityCost::Tap);
+        mana.cost = Some(cost);
         mana
     }
 
     /// On the draw's third own turn: three Forests and a mana creature of the
     /// given size, the Momir emblem, and a full curve pool.
     fn draw_turn_three_board(dork_power: i32, dork_toughness: i32) -> (GameState, ObjectId) {
+        draw_turn_three_board_with_cost(dork_power, dork_toughness, AbilityCost::Tap)
+    }
+
+    fn draw_turn_three_board_with_cost(
+        dork_power: i32,
+        dork_toughness: i32,
+        cost: AbilityCost,
+    ) -> (GameState, ObjectId) {
         let mut state = momir_state(P1, 6);
         install_curve_pool(&mut state, 1..=15);
         for _ in 0..3 {
             add_forest(&mut state, P0);
         }
-        add_mana_creature(&mut state, P0, dork_power, dork_toughness);
+        add_mana_creature_with_cost(&mut state, P0, dork_power, dork_toughness, cost);
         let emblem = engine::game::effects::create_emblem::grant_emblem(
             &mut state,
             P0,
@@ -1278,5 +1292,84 @@ mod tests {
     fn registry_keeps_a_big_mana_creature_untapped() {
         let (mut state, emblem) = draw_turn_three_board(6, 6);
         assert_eq!(registry_top_x(&mut state, emblem, 4), 3);
+    }
+
+    fn self_sacrifice() -> AbilityCost {
+        AbilityCost::Sacrifice(engine::types::ability::SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        ))
+    }
+
+    fn tap_and_sacrifice() -> AbilityCost {
+        AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sacrifice()],
+        }
+    }
+
+    /// Whichever cost class the creature's only mana method carries, the
+    /// engine's own mana-option classification is what prices it.
+    fn x_with_dork_cost(power: i32, toughness: i32, cost: AbilityCost) -> u32 {
+        let (mut state, emblem) = draw_turn_three_board_with_cost(power, toughness, cost);
+        registry_top_x(&mut state, emblem, 4)
+    }
+
+    /// A pool whose mana-value-4 rung is worth more than a tapped-out 3/3's
+    /// discounted body but less than the 3/3 given up outright.
+    fn sacrifice_priced_board(cost: AbilityCost) -> (GameState, ObjectId) {
+        draw_turn_three_board_with_cost(3, 3, cost)
+    }
+
+    /// CONTROL: a tap-only 3/3 only sits out combat, so X moves ahead to 4.
+    #[test]
+    fn registry_taps_a_mid_size_creature_for_the_extra_rung() {
+        let (mut state, emblem) = sacrifice_priced_board(AbilityCost::Tap);
+        assert_eq!(registry_top_x(&mut state, emblem, 4), 4);
+    }
+
+    /// Sacrificing the creature for its mana gives it up outright, so the same
+    /// 3/3 is not worth the extra rung.
+    #[test]
+    fn registry_does_not_sacrifice_a_mid_size_creature_for_the_extra_rung() {
+        assert_eq!(x_with_dork_cost(3, 3, self_sacrifice()), 3);
+    }
+
+    /// `{T}, Sacrifice` (Generator Servant) is still a sacrifice.
+    #[test]
+    fn registry_does_not_tap_and_sacrifice_a_mid_size_creature_for_the_extra_rung() {
+        assert_eq!(x_with_dork_cost(3, 3, tap_and_sacrifice()), 3);
+    }
+
+    /// The classification the pricing reads: both sacrifice shapes carry the
+    /// engine's `Sacrifices` penalty, the tap-only control does not.
+    #[test]
+    fn sacrifice_mana_methods_carry_the_sacrifices_penalty() {
+        for (cost, sacrifices) in [
+            (AbilityCost::Tap, false),
+            (self_sacrifice(), true),
+            (tap_and_sacrifice(), true),
+        ] {
+            let (state, _) = sacrifice_priced_board(cost);
+            let creature = state
+                .battlefield
+                .iter()
+                .copied()
+                .find(|id| {
+                    state.objects[id]
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Creature)
+                })
+                .expect("mana creature");
+            let options =
+                engine::game::mana_sources::activatable_mana_options(&state, creature, P0);
+            assert!(!options.is_empty());
+            assert_eq!(
+                options
+                    .iter()
+                    .all(|o| o.penalty == ManaSourcePenalty::Sacrifices),
+                sacrifices
+            );
+        }
     }
 }
