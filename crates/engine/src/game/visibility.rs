@@ -1012,6 +1012,14 @@ pub(crate) fn identity_projection_for_viewer(
         .battlefield
         .iter()
         .copied()
+        .chain(state.battlefield.iter().flat_map(|root_id| {
+            state
+                .objects
+                .get(root_id)
+                .into_iter()
+                .flat_map(|root| root.merged_components.iter().copied())
+                .filter(move |component_id| component_id != root_id)
+        }))
         .chain(state.stack.iter().map(|entry| entry.id))
         .filter(|obj_id| {
             state
@@ -1029,8 +1037,8 @@ pub(crate) fn identity_projection_for_viewer(
         // face-down permanent if they control an active "you may look at
         // face-down [filter] any time" static (CR 708.5 exception) whose
         // affected filter matches this permanent.
-        // CR 708.9: at the end of each game, all face-down permanents and
-        // spells must be revealed to all players.
+        // CR 708.9: at the end of each game, all face-down permanents,
+        // components of merged permanents, and spells are revealed to all players.
         let viewer_may_look = matches!(state.waiting_for, WaitingFor::GameOver { .. })
             || can_view_private_for_player(source.controller)
             || viewer_may_look_at_face_down(state, obj_id, &can_view_private_for_player);
@@ -3796,7 +3804,8 @@ fn redact_hidden_library_identity_carriers(
 mod tests {
     use super::*;
     use crate::game::engine::{apply, EngineError};
-    use crate::game::morph::manifest;
+    use crate::game::merge::{merge_object_onto, MergeSide};
+    use crate::game::morph::{apply_face_down_creature_characteristics, manifest};
     use crate::game::printed_cards::snapshot_object_face;
     use crate::game::replacement::{
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
@@ -3805,7 +3814,8 @@ mod tests {
     use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
-        Effect, QuantityExpr, ReplacementDefinition, ResolvedAbility, TargetFilter,
+        Effect, FaceDownProfile, QuantityExpr, ReplacementDefinition, ResolvedAbility,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
@@ -5232,6 +5242,59 @@ mod tests {
         state.waiting_for = WaitingFor::GameOver { winner: None };
         let revealed = filter_state_for_viewer(&state, PlayerId(1));
         assert_eq!(revealed.objects[&secret].name, "Secret Manifest");
+    }
+
+    /// CR 708.9: face-down components are revealed at game end even when
+    /// absorption leaves them outside the independent battlefield membership.
+    #[test]
+    fn game_over_reveals_absorbed_face_down_component_to_observer() {
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let root = create_object(
+            &mut state,
+            CardId(8),
+            controller,
+            "Face-up root".to_string(),
+            Zone::Battlefield,
+        );
+        let component = create_object(
+            &mut state,
+            CardId(9),
+            controller,
+            "Secret component".to_string(),
+            Zone::Stack,
+        );
+        let printed_face = snapshot_object_face(&state.objects[&component]);
+        state.objects.get_mut(&component).unwrap().back_face = Some(printed_face);
+        apply_face_down_creature_characteristics(
+            state.objects.get_mut(&component).unwrap(),
+            &FaceDownProfile::vanilla_2_2(),
+        );
+        // The stack resolver has already popped the component before this
+        // production merge boundary absorbs it into the battlefield survivor.
+        merge_object_onto(
+            &mut state,
+            component,
+            root,
+            MergeSide::Bottom,
+            &mut Vec::new(),
+        );
+        assert_eq!(state.objects[&component].zone, Zone::Battlefield);
+        assert!(!state.battlefield.contains(&component));
+        assert!(state.objects[&root].merged_components.contains(&component));
+        assert!(!state.objects[&root].face_down);
+
+        let hidden = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(hidden.objects[&component].name, "Hidden Card");
+        assert!(hidden.objects[&component].back_face.is_none());
+        let own_view = filter_state_for_viewer(&state, controller);
+        assert_eq!(own_view.objects[&component].name, "Secret component");
+
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        let revealed = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(revealed.objects[&component].name, "Secret component");
+        assert!(revealed.objects[&component].back_face.is_some());
+        assert!(state.objects[&component].face_down);
     }
 
     /// CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
