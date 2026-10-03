@@ -904,8 +904,9 @@ pub struct PriorityCastProbe {
 /// later query resumes exactly where an earlier, early-exiting one stopped.
 #[derive(Default)]
 struct FilterLandRouteCache {
-    started: bool,
-    frontier: Vec<FilterLandRouteStep>,
+    /// Unexplored route-tree nodes: `None` before the walk starts,
+    /// `Some(empty)` once every route has been found.
+    frontier: Option<Vec<FilterLandRouteStep>>,
     routes: Vec<GameState>,
 }
 
@@ -959,15 +960,15 @@ impl PriorityCastProbe {
         if cache.routes.iter().any(&mut accepts) {
             return true;
         }
-        if !cache.started {
-            cache.started = true;
-            cache.frontier = filter_land_route_producers(&self.state, self.player)
+        let FilterLandRouteCache { frontier, routes } = &mut *cache;
+        let frontier = frontier.get_or_insert_with(|| {
+            filter_land_route_producers(&self.state, self.player)
                 .into_iter()
                 .rev()
                 .map(FilterLandRouteStep::Producer)
-                .collect();
-        }
-        while let Some(step) = cache.frontier.pop() {
+                .collect()
+        });
+        while let Some(step) = frontier.pop() {
             match step {
                 FilterLandRouteStep::Producer(producer) => {
                     let mut children = Vec::new();
@@ -983,7 +984,7 @@ impl PriorityCastProbe {
                             });
                         }
                     }
-                    cache.frontier.extend(children.into_iter().rev());
+                    frontier.extend(children.into_iter().rev());
                 }
                 FilterLandRouteStep::Filter {
                     after_producer,
@@ -994,7 +995,7 @@ impl PriorityCastProbe {
                         exact_mana_ability_successors(*after_producer, self.player, &filter)
                     {
                         found = found || accepts(&after_filter);
-                        cache.routes.push(after_filter);
+                        routes.push(after_filter);
                     }
                     if found {
                         return true;

@@ -52,25 +52,18 @@ pub(crate) const INFINITE_MANA_AXES: [ResourceAxis; 6] = {
     axes
 };
 
-/// Objects whose static abilities can feed the layer system: battlefield
-/// permanents and command-zone objects, the same zones
-/// `layers::for_each_static_effect_source` draws continuous effects from.
+/// CR 106.4 + CR 613.1: Whether any active continuous effect reads unspent
+/// mana (Omnath's "+1/+1 for each unspent green mana"), so that spending or
+/// adding pool mana must re-evaluate layers.
 ///
-/// CR 113.6 + CR 611.3: Static abilities of objects in other zones (library,
-/// hand, graveyard) generate no continuous effects, so they can never make
-/// spending mana a layer-relevant event. This is a superset of the layer
-/// system's sources (it does not skip phased-out permanents), which keeps the
-/// check conservative.
-fn static_effect_source_candidates(
-    state: &GameState,
-) -> impl Iterator<Item = &crate::game::game_object::GameObject> {
-    state
-        .battlefield
-        .iter()
-        .chain(state.command_zone.iter())
-        .filter_map(|id| state.objects.get(id))
-}
-
+/// Static sources come from the layer system's own enumeration
+/// (`layers::for_each_static_effect_source`) and each definition passes the
+/// same zone-of-function gate the layers apply
+/// (`functioning_abilities::static_functions_in_zone`). That admits exactly
+/// the sources the layers would evaluate: battlefield and command-zone
+/// statics, off-zone statics that opt into their zone (CR 113.6b), and
+/// characteristic-defining abilities in any zone (CR 604.3), while an
+/// ordinary static on a card in a library, hand, or graveyard does not count.
 pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
     state.transient_continuous_effects.iter().any(|effect| {
         effect
@@ -81,19 +74,27 @@ pub(crate) fn has_unspent_mana_continuous_effects(state: &GameState) -> bool {
                 .modifications
                 .iter()
                 .any(continuous_modification_uses_unspent_mana)
-    }) || static_effect_source_candidates(state).any(|obj| {
-        obj.static_definitions.iter_all().any(|def| {
-            def.mode == StaticMode::Continuous
-                && (def
-                    .condition
-                    .as_ref()
-                    .is_some_and(static_condition_uses_unspent_mana)
-                    || def
-                        .modifications
-                        .iter()
-                        .any(continuous_modification_uses_unspent_mana))
-        })
-    })
+    }) || static_source_reads_unspent_mana(state)
+}
+
+fn static_source_reads_unspent_mana(state: &GameState) -> bool {
+    let mut found = false;
+    super::layers::for_each_static_effect_source(state, |_, obj| {
+        found = found
+            || obj.static_definitions.iter_all().any(|def| {
+                def.mode == StaticMode::Continuous
+                    && super::functioning_abilities::static_functions_in_zone(obj, def)
+                    && (def
+                        .condition
+                        .as_ref()
+                        .is_some_and(static_condition_uses_unspent_mana)
+                        || def
+                            .modifications
+                            .iter()
+                            .any(continuous_modification_uses_unspent_mana))
+            });
+    });
+    found
 }
 
 /// Debug/loop-detector: top every player whose `GameState::unbounded_resources`
@@ -3039,6 +3040,70 @@ mod tests {
         );
 
         assert_eq!(state.layers_dirty, LayersDirty::Clean);
+    }
+
+    /// Put a card carrying `def` in `zone` (outside the battlefield), produce
+    /// one green mana, and report whether the pool change dirtied layers.
+    fn off_zone_unspent_mana_static_dirties_layers(zone: Zone, def: StaticDefinition) -> bool {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(99);
+        let mut source = GameObject::new(
+            source_id,
+            CardId(1),
+            PlayerId(0),
+            "Off-Zone Unspent Mana Static".to_string(),
+            zone,
+        );
+        source.static_definitions.push(def.clone());
+        source.base_static_definitions = Arc::new(vec![def]);
+        state.objects.insert(source_id, source);
+        state.layers_dirty = LayersDirty::Clean;
+
+        let mut events = Vec::new();
+        produce_mana(
+            &mut state,
+            ObjectId(5),
+            ManaType::Green,
+            PlayerId(0),
+            true,
+            &mut events,
+        );
+        state.layers_dirty.is_dirty()
+    }
+
+    fn green_unspent_mana_power() -> ContinuousModification {
+        ContinuousModification::AddDynamicPower {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::UnspentMana {
+                    color: Some(crate::types::mana::ManaColor::Green),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn unspent_mana_static_follows_the_layer_zone_of_function_gate() {
+        // CR 113.6b: a static that states it functions from the graveyard
+        // feeds the layers from there, so a pool change must re-evaluate.
+        assert!(off_zone_unspent_mana_static_dirties_layers(
+            Zone::Graveyard,
+            StaticDefinition::continuous()
+                .modifications(vec![green_unspent_mana_power()])
+                .active_zones(vec![Zone::Graveyard]),
+        ));
+        // CR 604.3: a characteristic-defining ability functions in every zone.
+        assert!(off_zone_unspent_mana_static_dirties_layers(
+            Zone::Hand,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![green_unspent_mana_power()])
+                .cda(),
+        ));
+        // CR 113.6: an ordinary static on a library card is inactive.
+        assert!(!off_zone_unspent_mana_static_dirties_layers(
+            Zone::Library,
+            StaticDefinition::continuous().modifications(vec![green_unspent_mana_power()]),
+        ));
     }
 
     #[test]
