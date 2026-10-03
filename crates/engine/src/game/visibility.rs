@@ -1012,14 +1012,20 @@ pub(crate) fn identity_projection_for_viewer(
         .battlefield
         .iter()
         .copied()
-        .chain(state.battlefield.iter().flat_map(|root_id| {
+        .chain(
             state
-                .objects
-                .get(root_id)
-                .into_iter()
-                .flat_map(|root| root.merged_components.iter().copied())
-                .filter(move |component_id| component_id != root_id)
-        }))
+                .battlefield
+                .iter()
+                .filter(|_| matches!(state.waiting_for, WaitingFor::GameOver { .. }))
+                .flat_map(|root_id| {
+                    state
+                        .objects
+                        .get(root_id)
+                        .into_iter()
+                        .flat_map(|root| root.merged_components.iter().copied())
+                        .filter(move |component_id| component_id != root_id)
+                }),
+        )
         .chain(state.stack.iter().map(|entry| entry.id))
         .filter(|obj_id| {
             state
@@ -5284,11 +5290,11 @@ mod tests {
         assert!(state.objects[&root].merged_components.contains(&component));
         assert!(!state.objects[&root].face_down);
 
-        let hidden = filter_state_for_viewer(&state, PlayerId(1));
-        assert_eq!(hidden.objects[&component].name, "Hidden Card");
-        assert!(hidden.objects[&component].back_face.is_none());
-        let own_view = filter_state_for_viewer(&state, controller);
-        assert_eq!(own_view.objects[&component].name, "Secret component");
+        assert!(identity_projection_for_viewer(&state, PlayerId(1))
+            .get(&component)
+            .is_none());
+        let before_game_end = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(before_game_end.objects[&component].name, "");
 
         state.waiting_for = WaitingFor::GameOver { winner: None };
         let revealed = filter_state_for_viewer(&state, PlayerId(1));
