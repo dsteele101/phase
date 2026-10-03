@@ -1499,15 +1499,31 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
     }
 }
 
-fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
-    targets.iter().filter_map(target_ref_object)
-}
-
 fn target_ref_object(target: &TargetRef) -> Option<ObjectId> {
     match target {
         TargetRef::Object(id) => Some(*id),
         TargetRef::Player(_) => None,
     }
+}
+
+fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
+    targets.iter().filter_map(target_ref_object)
+}
+
+fn resolve_source_attached_to(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<crate::game::game_object::AttachTarget> {
+    if let Some(host) = state.objects.get(&source_id).and_then(|o| o.attached_to) {
+        return Some(host);
+    }
+    // CR 113.7a + CR 608.2k: Last-known information when the source permanent has left the battlefield.
+    state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|r| r.object_id == source_id && r.from_zone == Some(Zone::Battlefield))
+        .and_then(|r| r.attached_to)
 }
 
 pub(crate) fn resolve_event_context_target_for_event_or_state(
@@ -1669,7 +1685,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             // CR 301.5a + CR 303.4b + CR 608.2k: Aura/Equipment fallback — when no
             // trigger event supplies an antecedent object (e.g. an Aura/Equipment phase
             // trigger or static ability), fall back to the source's attached host.
-            let host = state.objects.get(&source_id)?.attached_to?;
+            let host = resolve_source_attached_to(state, source_id)?;
             match host {
                 crate::game::game_object::AttachTarget::Object(id) => Some(TargetRef::Object(id)),
                 crate::game::game_object::AttachTarget::Player(player) => {
@@ -1702,7 +1718,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 .map(TargetRef::Player)
         }
         TargetFilter::AttachedTo => {
-            let host = state.objects.get(&source_id)?.attached_to?;
+            let host = resolve_source_attached_to(state, source_id)?;
             match host {
                 crate::game::game_object::AttachTarget::Object(id) => Some(TargetRef::Object(id)),
                 crate::game::game_object::AttachTarget::Player(player) => {
@@ -1720,14 +1736,22 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                     }
                 }
             }
-            // CR 301.5 + CR 303.4: Aura/Equipment fallback — the controller of the
+            // CR 301.5 + CR 303.4 + CR 113.7a: Aura/Equipment fallback — the controller of the
             // source's attached host is the controller of "that creature/permanent".
-            let host = state.objects.get(&source_id)?.attached_to?;
+            let host = resolve_source_attached_to(state, source_id)?;
             match host {
                 crate::game::game_object::AttachTarget::Object(id) => state
                     .objects
                     .get(&id)
-                    .map(|obj| TargetRef::Player(obj.controller)),
+                    .map(|obj| TargetRef::Player(obj.controller))
+                    .or_else(|| {
+                        state
+                            .zone_changes_this_turn
+                            .iter()
+                            .rev()
+                            .find(|r| r.object_id == id && r.from_zone == Some(Zone::Battlefield))
+                            .map(|r| TargetRef::Player(r.controller))
+                    }),
                 crate::game::game_object::AttachTarget::Player(player) => {
                     Some(TargetRef::Player(player))
                 }
@@ -1746,14 +1770,22 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                     }
                 }
             }
-            // CR 301.5 + CR 303.4: Aura/Equipment fallback — the source's
+            // CR 301.5 + CR 303.4 + CR 113.7a: Aura/Equipment fallback — the source's
             // attached host is the implicit "it" subject of the sentence.
-            let host = state.objects.get(&source_id)?.attached_to?;
+            let host = resolve_source_attached_to(state, source_id)?;
             match host {
                 crate::game::game_object::AttachTarget::Object(id) => state
                     .objects
                     .get(&id)
-                    .map(|obj| TargetRef::Player(obj.owner)),
+                    .map(|obj| TargetRef::Player(obj.owner))
+                    .or_else(|| {
+                        state
+                            .zone_changes_this_turn
+                            .iter()
+                            .rev()
+                            .find(|r| r.object_id == id && r.from_zone == Some(Zone::Battlefield))
+                            .map(|r| TargetRef::Player(r.owner))
+                    }),
                 crate::game::game_object::AttachTarget::Player(player) => {
                     Some(TargetRef::Player(player))
                 }

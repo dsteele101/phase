@@ -162,3 +162,152 @@ fn slow_motion_paying_cost_keeps_creature_and_aura_on_battlefield() {
         "Slow Motion must remain on battlefield when cost is paid"
     );
 }
+
+#[test]
+fn slow_motion_aura_removed_while_upkeep_trigger_on_stack_still_sacrifices_creature() {
+    // CR 113.7a + CR 608.2k: Removing the Aura source while its upkeep trigger is on the stack
+    // does not prevent the ability from resolving against the enchanted creature.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let slow_motion = scenario
+        .add_enchantment_from_oracle(P0, "Slow Motion", SLOW_MOTION_ORACLE)
+        .with_subtypes(vec!["Aura"])
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), slow_motion, victim);
+
+    // P1's upkeep begins
+    runner.state_mut().active_player = P1;
+    process_triggers(
+        runner.state_mut(),
+        &[GameEvent::PhaseChanged {
+            phase: Phase::Upkeep,
+        }],
+    );
+
+    // Trigger is on the stack. Now destroy Slow Motion before resolving the upkeep trigger.
+    // Move Slow Motion to graveyard (simulating Disenchant/Naturalize or destruction).
+    // This triggers Slow Motion's leaves-battlefield trigger ("return it to its owner's hand").
+    let mut destroy_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        slow_motion,
+        Zone::Graveyard,
+        &mut destroy_events,
+    );
+    process_triggers(runner.state_mut(), &destroy_events);
+
+    // Advance stack - Slow Motion's leaves-battlefield trigger resolves and returns it to hand.
+    // Then the upkeep trigger prompts P1 for payment.
+    runner.advance_until_stack_empty();
+
+    // P1 is prompted to pay {2} for the upkeep trigger
+    let waiting = runner.state().waiting_for.clone();
+    assert!(
+        matches!(waiting, WaitingFor::UnlessPayment { player, .. } if player == P1),
+        "P1 must be prompted for unless payment even if Slow Motion left the battlefield, got {:?}",
+        waiting
+    );
+
+    // P1 declines to pay
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("decline upkeep payment");
+    runner.advance_until_stack_empty();
+
+    // The creature was sacrificed to P1's graveyard per CR 113.7a and CR 608.2k
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Graveyard,
+        "enchanted creature must be sacrificed even if Slow Motion left battlefield before resolution"
+    );
+
+    // Slow Motion is in P0's hand
+    assert_eq!(
+        runner.state().objects[&slow_motion].zone,
+        Zone::Hand,
+        "Slow Motion must be in hand from its dies trigger"
+    );
+}
+
+const BREATH_OF_FURY_ORACLE: &str = "Enchant creature you control\n\
+When enchanted creature deals combat damage to a player, sacrifice it and attach Breath of Fury to a creature you control. If you do, untap all creatures you control and after this phase, there is an additional combat phase.";
+
+#[test]
+fn breath_of_fury_oracle_parses() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        BREATH_OF_FURY_ORACLE,
+        "Breath of Fury",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "Breath of Fury must parse its combat damage trigger"
+    );
+}
+
+#[test]
+fn breath_of_fury_trigger_does_not_sacrifice_creature_if_control_changed() {
+    // CR 109.5 + CR 701.21a: When enchanted creature deals combat damage, P0's Breath of Fury
+    // trigger instructs P0 ("you") to sacrifice it. If P1 gains control of the creature
+    // before the trigger resolves, P0 cannot sacrifice a creature they do not control,
+    // and the "if you do" continuation does not occur.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::CombatDamage);
+
+    let creature = scenario.add_creature(P0, "Raging Goblin", 1, 1).id();
+    let other_creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let breath_of_fury = scenario
+        .add_enchantment_from_oracle(P0, "Breath of Fury", BREATH_OF_FURY_ORACLE)
+        .with_subtypes(vec!["Aura"])
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), breath_of_fury, creature);
+
+    // Creature deals combat damage to P1, firing Breath of Fury's trigger
+    process_triggers(
+        runner.state_mut(),
+        &[GameEvent::CombatDamageDealtToPlayer {
+            player_id: P1,
+            source_amounts: vec![(creature, 1)],
+            total_damage: 1,
+        }],
+    );
+
+    // While trigger is on stack, P1 gains control of `creature` (e.g. Act of Treason / Control Magic)
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .controller = P1;
+
+    // Advance stack to resolve Breath of Fury trigger
+    runner.advance_until_stack_empty();
+
+    // Creature must NOT have been sacrificed because P0 does not control it (CR 701.21a)
+    assert_eq!(
+        runner.state().objects[&creature].zone,
+        Zone::Battlefield,
+        "P1's creature must not be sacrificed on P0's trigger"
+    );
+    assert_eq!(
+        runner.state().objects[&creature].controller,
+        P1,
+        "creature is still controlled by P1"
+    );
+
+    // Breath of Fury must not have moved to other_creature (the "if you do" failed)
+    assert_eq!(
+        runner.state().objects[&breath_of_fury].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(creature)),
+        "Breath of Fury must not reattach if creature was not sacrificed"
+    );
+    let _ = other_creature;
+}
