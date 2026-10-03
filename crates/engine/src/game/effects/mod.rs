@@ -14511,6 +14511,27 @@ pub fn resolve_ability_chain(
     result
 }
 
+/// Replace the `LastRevealed` pile of every mass placement later in `ability`'s
+/// continuation with the exact revealed cards (see the call site).
+fn bind_revealed_pile_placement(ability: &mut ResolvedAbility, revealed: &[ObjectId]) {
+    if let Effect::ChangeZoneAll { target, .. } = &mut ability.effect {
+        if *target == TargetFilter::LastRevealed {
+            *target = TargetFilter::Or {
+                filters: revealed
+                    .iter()
+                    .map(|&id| TargetFilter::SpecificObject { id })
+                    .collect(),
+            };
+        }
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        bind_revealed_pile_placement(sub, revealed);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        bind_revealed_pile_placement(else_ability, revealed);
+    }
+}
+
 /// The per-resolution state `resolve_ability_chain` clears before a top-level
 /// chain's first instruction.
 fn reset_top_level_resolution_state(state: &mut GameState) {
@@ -17062,6 +17083,28 @@ fn resolve_chain_body(
         owned.set_effect_context_object_recursive(snapshot.clone());
         effect_context_owned = owned;
         &effect_context_owned
+    } else {
+        ability
+    };
+
+    // CR 608.2c: "the revealed cards" of a reveal-only until-loop name the cards
+    // THAT reveal looked at. Bind the later pile placement to those exact cards
+    // now, on the continuation itself, so an instruction that resolves in between
+    // — a replacement's own child chain, with its own reveal and any pause —
+    // cannot change which cards the placement moves.
+    let revealed_pile_owned;
+    let ability = if matches!(
+        &ability.effect,
+        Effect::RevealUntil {
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            ..
+        }
+    ) && ability.sub_ability.is_some()
+    {
+        let mut owned = ability.clone();
+        bind_revealed_pile_placement(&mut owned, &state.last_revealed_ids);
+        revealed_pile_owned = owned;
+        &revealed_pile_owned
     } else {
         ability
     };
@@ -20525,6 +20568,60 @@ fn resolve_add_pending_enters_modifications(
 mod tests {
     use super::*;
     use crate::database::synthesis::synthesize_extort;
+
+    /// CR 608.2c: the pile placement after a reveal-only until-loop is bound to the
+    /// exact cards that reveal looked at, on the continuation itself — so an
+    /// instruction resolving in between (a replacement's own reveal) cannot change
+    /// which cards the placement moves. Only the `LastRevealed` placement is bound.
+    #[test]
+    fn reveal_pile_placement_binds_to_the_exact_revealed_cards() {
+        let placement = |target| {
+            ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Library,
+                    target,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: Some(crate::types::ability::LibraryPosition::Bottom),
+                    library_shuffle: Default::default(),
+                    random_order: false,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let mut chain = placement(TargetFilter::Controller);
+        chain.sub_ability = Some(Box::new(placement(TargetFilter::LastRevealed)));
+
+        bind_revealed_pile_placement(&mut chain, &[ObjectId(7), ObjectId(8)]);
+
+        let Effect::ChangeZoneAll { target, .. } = &chain.effect else {
+            panic!("expected ChangeZoneAll");
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::Controller,
+            "other targets are untouched"
+        );
+        let Effect::ChangeZoneAll { target, .. } = &chain.sub_ability.as_ref().unwrap().effect
+        else {
+            panic!("expected ChangeZoneAll");
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: ObjectId(7) },
+                    TargetFilter::SpecificObject { id: ObjectId(8) },
+                ]
+            }
+        );
+    }
 
     /// CR 608.2b: only an empty node carrying measured removal evidence refuses
     /// parent-target inheritance; an intentionally empty node retains it.

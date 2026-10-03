@@ -3133,18 +3133,7 @@ fn resolve_post_replacement_chain(
             player: state.priority_player,
         },
     );
-    // CR 608.2c + CR 615.5: the replaced event happens in the middle of the
-    // instruction that proposed it, and the rest of that resolution follows it
-    // ("reveal … deals damage … put the revealed cards on the bottom"). This
-    // child chain starts as a top-level resolution, which clears the revealed
-    // cards, so hold the parent's and hand them back when the child revealed
-    // none of its own — or the instructions after the replaced event lose the
-    // cards they refer to.
-    let parent_revealed = state.last_revealed_ids.clone();
     let _ = effects::resolve_ability_chain(state, resolved, events, 0);
-    if state.last_revealed_ids.is_empty() {
-        state.last_revealed_ids = parent_revealed;
-    }
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => {

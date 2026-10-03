@@ -230,3 +230,50 @@ fn pile_is_placed_after_damage_and_its_replacement() {
         "the revealed land is bottomed last"
     );
 }
+
+/// CR 401.2 + CR 701.20a: the revealed set is the engine's own "revealed this
+/// way" population, in reveal order. Its members end in hidden library
+/// positions, so no audience's serialized state may carry their ids — while the
+/// engine's own copy keeps the full population for its quantity readers.
+#[test]
+fn revealed_population_is_not_exposed_in_any_audiences_payload() {
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+
+    let (mut runner, revealed, _deep) = stage(3, "Forest", "Forest");
+    activate_and_finish(&mut runner, &revealed);
+
+    let engine_set_members: Vec<ObjectId> = runner
+        .state()
+        .tracked_object_sets
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    for id in &revealed {
+        assert!(
+            engine_set_members.contains(id),
+            "reach guard: the engine keeps the full revealed population"
+        );
+    }
+
+    for (label, projected) in [
+        ("P0", filter_state_for_viewer(runner.state(), P0)),
+        ("P1", filter_state_for_viewer(runner.state(), P1)),
+        ("unseated", filter_state_for_unseated_viewer(runner.state())),
+    ] {
+        let payload = serde_json::to_value(&projected).expect("projected state serializes");
+        let carried: Vec<u64> = payload["tracked_object_sets"]
+            .as_object()
+            .expect("tracked sets serialize as a map")
+            .values()
+            .flat_map(|members| members.as_array().expect("members").iter())
+            .filter_map(serde_json::Value::as_u64)
+            .collect();
+        for id in &revealed {
+            assert!(
+                !carried.contains(&id.0),
+                "{label}: tracked_object_sets carries the library card {id:?}"
+            );
+        }
+    }
+}
