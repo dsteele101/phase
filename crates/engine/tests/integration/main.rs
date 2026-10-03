@@ -1817,6 +1817,7 @@ mod event_deadline_duration;
 mod exchange_control_of_a_spell;
 mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;
+mod fathom_trawl_revealed_population;
 mod foreign_subject_split_guard;
 mod goblin_charbelcher;
 mod graveyard_permission_turn_timing;

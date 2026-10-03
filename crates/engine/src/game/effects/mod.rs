@@ -17542,10 +17542,9 @@ fn resolve_chain_body(
                             state.active_ability_continuation().is_none(),
                             "pending_continuation overwritten before consumption — else_ability chain will be lost"
                         );
-                        state.park_ability_continuation(PendingContinuation::new(
-                            Box::new(resolved),
-                            state,
-                        ));
+                        // The shared continuation authority places it relative to
+                        // whatever paused (a draw pair, a direct choice).
+                        append_to_pending_continuation(state, Some(Box::new(resolved)));
                     } else {
                         resolve_ability_chain(state, &resolved, events, depth + 1)?;
                     }
@@ -17630,10 +17629,10 @@ fn resolve_chain_body(
                                 state.active_ability_continuation().is_none(),
                                 "pending_continuation overwritten before consumption — instead-tail chain will be lost"
                             );
-                            state.park_ability_continuation(PendingContinuation::new(
-                                Box::new(resolved),
-                                state,
-                            ));
+                            // CR 608.2c: the tail is a later instruction of the
+                            // parent; the shared continuation authority keeps it
+                            // outside a paused replacement draw pair.
+                            append_to_pending_continuation(state, Some(Box::new(resolved)));
                         } else {
                             resolve_ability_chain(state, &resolved, events, depth + 1)?;
                         }

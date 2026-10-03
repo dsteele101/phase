@@ -43839,7 +43839,27 @@ fn try_parse_put_zone_change_parts(
             let is_mass = is_mass || pool_bound;
             let target = match plural_pool {
                 Some(pool) => pool,
-                None => parse_target(target_text).0,
+                None => {
+                    let parsed = parse_target(target_text).0;
+                    // CR 608.2c: a definite plural subject ("the nonland cards
+                    // revealed this way") restricts the anaphor's set to its named
+                    // type. The determiner is not part of the type phrase, so when
+                    // the bare parse found nothing, retry without it.
+                    if matches!(parsed, TargetFilter::Any) {
+                        let lower = target_text.to_lowercase();
+                        match nom_on_lower(target_text, &lower, |i| {
+                            value((), tag::<_, _, OracleError<'_>>("the ")).parse(i)
+                        }) {
+                            Some(((), rest)) => match parse_target(rest).0 {
+                                TargetFilter::Any => parsed,
+                                restricted => restricted,
+                            },
+                            None => parsed,
+                        }
+                    } else {
+                        parsed
+                    }
+                }
             };
             let multi_origin_zones = put_hand_graveyard_origin_zones(before.lower);
             let target = match multi_origin_zones.as_ref() {
