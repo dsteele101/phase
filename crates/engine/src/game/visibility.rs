@@ -5290,9 +5290,7 @@ mod tests {
         assert!(state.objects[&root].merged_components.contains(&component));
         assert!(!state.objects[&root].face_down);
 
-        assert!(identity_projection_for_viewer(&state, PlayerId(1))
-            .get(&component)
-            .is_none());
+        assert!(!identity_projection_for_viewer(&state, PlayerId(1)).contains_key(&component));
         let before_game_end = filter_state_for_viewer(&state, PlayerId(1));
         assert_eq!(before_game_end.objects[&component].name, "");
 
