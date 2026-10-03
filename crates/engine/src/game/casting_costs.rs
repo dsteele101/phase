@@ -13453,6 +13453,21 @@ pub fn max_x_value(
     max_x_value_excluding(state, player, cost, object_id, &HashSet::new())
 }
 
+/// Every mana method `permanent` could pay with toward the spell `object_id`,
+/// each with its net yield and typed penalty — the per-method form of the
+/// capacity [`max_x_value`] sums per permanent. CR 106.6: restricted mana is
+/// judged against the spell being announced, exactly as `max_x_value` does.
+pub fn feasible_mana_methods_for_spell(
+    state: &GameState,
+    player: PlayerId,
+    permanent: ObjectId,
+    object_id: Option<ObjectId>,
+) -> Vec<mana_sources::FeasibleManaMethod> {
+    let spell_meta = object_id.and_then(|oid| super::casting::build_spell_meta(state, player, oid));
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    mana_sources::feasible_mana_methods(state, permanent, player, spell_ctx.as_ref())
+}
+
 /// [`max_x_value`] with `excluded_sources` withheld from the permanent-capacity
 /// sweep: the largest X payable without activating any mana ability of those
 /// objects. Lets a caller price how much of its X budget depends on particular

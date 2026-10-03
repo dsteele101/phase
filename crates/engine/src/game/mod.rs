@@ -211,7 +211,9 @@ pub use bracket_estimate::{
 // `casting_costs` is otherwise `pub(crate)`; this exposes exactly those
 // functions from it. The governing rule annotation lives on the function
 // definition in `casting_costs.rs`, not on this visibility re-export.
-pub use casting_costs::{extract_x_mana_cost, max_x_value, max_x_value_excluding};
+pub use casting_costs::{
+    extract_x_mana_cost, feasible_mana_methods_for_spell, max_x_value, max_x_value_excluding,
+};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,

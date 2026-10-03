@@ -256,13 +256,62 @@ struct XBudget {
     creature_sources: Vec<CreatureManaSource>,
 }
 
-/// One creature's contribution to the X budget.
-#[derive(Debug, Clone, Copy)]
+/// One creature's contribution to the X budget: each way it can pay, with the
+/// yield and the board value given up kept together. A creature offering
+/// `{T}: Add {G}` and `Sacrifice this: Add {B}{B}` covers a one-point rung by
+/// tapping and a two-point rung only by being sacrificed, so the price depends
+/// on how much X is asked of it.
+#[derive(Debug, Clone)]
 struct CreatureManaSource {
+    methods: Vec<CreatureManaMethod>,
+}
+
+/// One mana method of a creature, priced.
+#[derive(Debug, Clone, Copy)]
+struct CreatureManaMethod {
     /// How much X it adds on top of the free mana.
     extra_x: u32,
     /// Board value given up by paying with it.
     cost: f64,
+}
+
+impl CreatureManaSource {
+    /// The most X this creature can add by any method.
+    fn max_extra_x(&self) -> u32 {
+        self.methods
+            .iter()
+            .map(|method| method.extra_x)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Cheapest board value per point of X over its methods; orders sources.
+    fn best_cost_per_x(&self) -> f64 {
+        self.methods
+            .iter()
+            .map(|method| method.cost / f64::from(method.extra_x))
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// The method that pays `needed` points of X at the lowest price, and the X
+    /// it contributes. When no single method covers `needed`, the largest
+    /// contribution wins (cheapest among equals) and the remainder falls to the
+    /// next source.
+    fn method_for(&self, needed: u32) -> Option<CreatureManaMethod> {
+        let cheapest = |a: &&CreatureManaMethod, b: &&CreatureManaMethod| a.cost.total_cmp(&b.cost);
+        self.methods
+            .iter()
+            .filter(|method| method.extra_x >= needed)
+            .min_by(cheapest)
+            .or_else(|| {
+                let largest = self.max_extra_x();
+                self.methods
+                    .iter()
+                    .filter(|method| method.extra_x == largest)
+                    .min_by(cheapest)
+            })
+            .copied()
+    }
 }
 
 impl XBudget {
@@ -311,30 +360,44 @@ impl XBudget {
                 if extra_x == 0 {
                     return None;
                 }
-                // A creature whose mana comes from a tap-only method sits out
-                // a turn of combat; one whose every method sacrifices it
-                // (Blood Pet, Generator Servant's `{T}, Sacrifice`) is given
-                // up outright. The engine's mana-option penalty is the
-                // authority on which cost classes a method carries.
-                let given_up = if engine::game::mana_sources::activatable_mana_options(
-                    state, creature, player,
-                )
-                .iter()
-                .any(|option| option.penalty != ManaSourcePenalty::Sacrifices)
-                {
-                    tap_weight
-                } else {
-                    1.0
-                };
-                Some(CreatureManaSource {
-                    extra_x,
-                    cost: crate::eval::evaluate_creature_intrinsic(state, creature) * given_up,
-                })
+                let body = crate::eval::evaluate_creature_intrinsic(state, creature);
+                // A method that only TAPs the creature sits out a turn of
+                // combat; one that sacrifices it (Blood Pet, Generator
+                // Servant's `{T}, Sacrifice`) gives it up outright. The
+                // engine's per-method penalty is the authority on which cost
+                // classes a method carries, and each method's own yield is
+                // what it can add toward X.
+                let mut methods: Vec<CreatureManaMethod> =
+                    engine::game::feasible_mana_methods_for_spell(
+                        state,
+                        player,
+                        creature,
+                        Some(source_id),
+                    )
+                    .into_iter()
+                    .filter(|method| method.net_yield > 0)
+                    .map(|method| CreatureManaMethod {
+                        extra_x: method.net_yield.min(extra_x),
+                        cost: body
+                            * if method.penalty == ManaSourcePenalty::Sacrifices {
+                                1.0
+                            } else {
+                                tap_weight
+                            },
+                    })
+                    .collect();
+                if methods.is_empty() {
+                    // X paid by tapping the creature for a spell keyword
+                    // (Convoke, Improvise), not by a mana ability.
+                    methods.push(CreatureManaMethod {
+                        extra_x,
+                        cost: body * tap_weight,
+                    });
+                }
+                Some(CreatureManaSource { methods })
             })
             .collect();
-        creature_sources.sort_by(|a, b| {
-            (a.cost / f64::from(a.extra_x)).total_cmp(&(b.cost / f64::from(b.extra_x)))
-        });
+        creature_sources.sort_by(|a, b| a.best_cost_per_x().total_cmp(&b.best_cost_per_x()));
         Self {
             total,
             free,
@@ -366,8 +429,9 @@ impl XBudget {
             if needed == 0 {
                 break;
             }
-            cost += source.cost;
-            needed = needed.saturating_sub(source.extra_x);
+            let method = source.method_for(needed)?;
+            cost += method.cost;
+            needed = needed.saturating_sub(method.extra_x);
         }
         (needed == 0).then_some(cost)
     }
@@ -979,7 +1043,9 @@ mod tests {
             free,
             creature_sources: costs
                 .iter()
-                .map(|&cost| CreatureManaSource { extra_x: 1, cost })
+                .map(|&cost| CreatureManaSource {
+                    methods: vec![CreatureManaMethod { extra_x: 1, cost }],
+                })
                 .collect(),
         }
     }
@@ -1083,7 +1149,7 @@ mod tests {
         let mut budget = budget(3, &[5.0, 1.0]);
         budget
             .creature_sources
-            .sort_by(|a, b| a.cost.total_cmp(&b.cost));
+            .sort_by(|a, b| a.best_cost_per_x().total_cmp(&b.best_cost_per_x()));
         assert_eq!(budget.creature_cost(3), Some(0.0));
         assert_eq!(budget.creature_cost(4), Some(1.0));
         assert_eq!(budget.creature_cost(5), Some(6.0));
@@ -1136,11 +1202,16 @@ mod tests {
 
     /// `{cost}: Add {G}`.
     fn green_mana_ability(cost: AbilityCost) -> AbilityDefinition {
+        mana_ability(cost, vec![ManaColor::Green])
+    }
+
+    /// `{cost}: Add` one mana of each of `colors`.
+    fn mana_ability(cost: AbilityCost, colors: Vec<ManaColor>) -> AbilityDefinition {
         let mut mana = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
                 produced: ManaProduction::Fixed {
-                    colors: vec![ManaColor::Green],
+                    colors,
                     contribution: ManaContribution::Base,
                 },
                 restrictions: vec![],
@@ -1151,6 +1222,77 @@ mod tests {
         );
         mana.cost = Some(cost);
         mana
+    }
+
+    /// A creature offering both `{T}: Add {G}` and `Sacrifice this: Add {B}{B}`
+    /// (a Sliver holding Gemhide's and Basal's granted abilities).
+    fn add_tap_one_or_sacrifice_two(state: &mut GameState, power: i32) -> ObjectId {
+        let id = add_mana_creature_with_cost(state, P0, power, power, AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(mana_ability(
+            self_sacrifice(),
+            vec![ManaColor::Black, ManaColor::Black],
+        ));
+        id
+    }
+
+    fn alternative_yield_board(power: i32) -> (GameState, ObjectId, ObjectId) {
+        let mut state = momir_state(P1, 6);
+        install_curve_pool(&mut state, 1..=15);
+        for _ in 0..3 {
+            add_forest(&mut state, P0);
+        }
+        let creature = add_tap_one_or_sacrifice_two(&mut state, power);
+        let emblem = engine::game::effects::create_emblem::grant_emblem(
+            &mut state,
+            P0,
+            Vec::new(),
+            Vec::new(),
+            vec![momir_emblem_ability()],
+        );
+        (state, emblem, creature)
+    }
+
+    /// Both methods are eligible with their own yield and penalty, and the
+    /// budget keeps them paired: the one-point rung prices as a tap, the
+    /// two-point rung only as the sacrifice.
+    #[test]
+    fn alternative_methods_price_each_rung_by_its_own_method() {
+        let (state, emblem, creature) = alternative_yield_board(3);
+        let mut methods =
+            engine::game::feasible_mana_methods_for_spell(&state, P0, creature, Some(emblem));
+        methods.sort_by_key(|method| method.net_yield);
+        assert_eq!(
+            methods
+                .iter()
+                .map(|method| (method.net_yield, method.penalty))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, ManaSourcePenalty::None),
+                (2, ManaSourcePenalty::Sacrifices)
+            ]
+        );
+        let (total, cost) = affordable_x(&state, P0, &emblem, 0).expect("{X} leg");
+        assert_eq!(total, 5);
+        let budget = XBudget::price(&state, P0, &cost, emblem, total, 0.25);
+        let body = crate::eval::evaluate_creature_intrinsic(&state, creature);
+        assert_eq!(budget.creature_cost(3), Some(0.0));
+        assert_eq!(budget.creature_cost(4), Some(body * 0.25));
+        assert_eq!(budget.creature_cost(5), Some(body));
+    }
+
+    /// A 3/3 is worth tapping for the fourth point but not worth sacrificing
+    /// for the fifth, so X stops at the tap-only rung.
+    #[test]
+    fn registry_taps_but_does_not_sacrifice_a_mid_size_alternative_creature() {
+        let (mut state, emblem, _) = alternative_yield_board(3);
+        assert_eq!(registry_top_x(&mut state, emblem, 5), 4);
+    }
+
+    /// A 1/1 is cheap enough that the sacrifice-only fifth point is worth it.
+    #[test]
+    fn registry_sacrifices_a_small_alternative_creature_for_the_higher_rung() {
+        let (mut state, emblem, _) = alternative_yield_board(1);
+        assert_eq!(registry_top_x(&mut state, emblem, 5), 5);
     }
 
     /// On the draw's third own turn: three Forests and a mana creature of the
@@ -1190,8 +1332,10 @@ mod tests {
         let budget = XBudget::price(&state, P0, &cost, emblem, total, 0.25);
         assert_eq!(budget.free, 3);
         assert_eq!(budget.creature_sources.len(), 1);
-        assert_eq!(budget.creature_sources[0].extra_x, 1);
-        assert_eq!(budget.creature_sources[0].cost, ONE_ONE_BODY * 0.25);
+        let methods = &budget.creature_sources[0].methods;
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].extra_x, 1);
+        assert_eq!(methods[0].cost, ONE_ONE_BODY * 0.25);
     }
 
     /// A board with no creatures prices every point of X as free.

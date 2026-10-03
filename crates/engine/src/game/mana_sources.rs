@@ -2012,14 +2012,42 @@ pub(crate) fn feasible_mana_capacity(
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> u32 {
+    feasible_mana_methods(state, object_id, controller, payment_context)
+        .iter()
+        .map(|method| method.net_yield)
+        .max()
+        .unwrap_or(0)
+}
+
+/// One way a permanent could pay mana: the net mana a single activation yields
+/// and the typed penalty that activation carries. A permanent with several
+/// methods (a Sliver granted both `{T}: Add one mana` and `Sacrifice this
+/// permanent: Add {B}{B}`) offers one entry per method — the yield and the
+/// penalty belong together, so a caller pricing a payment pairs them rather
+/// than reading a per-object maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeasibleManaMethod {
+    pub net_yield: u32,
+    pub penalty: ManaSourcePenalty,
+}
+
+/// CR 117.1d + CR 601.2g: Every mana method of this permanent the controller
+/// could currently activate, each with its net yield (CR 605.3b) and penalty.
+/// [`feasible_mana_capacity`] is the maximum net yield over these.
+pub(crate) fn feasible_mana_methods(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+) -> Vec<FeasibleManaMethod> {
     let Some(obj) = state.objects.get(&object_id) else {
-        return 0;
+        return Vec::new();
     };
     if obj.zone != Zone::Battlefield || obj.controller != controller {
-        return 0;
+        return Vec::new();
     }
 
-    let explicit_max = obj
+    let methods: Vec<FeasibleManaMethod> = obj
         .abilities
         .iter()
         .enumerate()
@@ -2085,22 +2113,26 @@ pub(crate) fn feasible_mana_capacity(
                 // rather than collapsed to `mana_value`.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
                     .map_or(0, |cost| cost.mana_value());
-                Some(gross.saturating_sub(activation_cost))
+                Some(FeasibleManaMethod {
+                    net_yield: gross.saturating_sub(activation_cost),
+                    penalty: object_mana_ability_penalty(state, object_id, ability),
+                })
             }
             _ => None,
         })
-        .max();
+        .collect();
 
-    match explicit_max {
-        Some(amount) => amount,
-        // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
-        None if obj.card_types.core_types.contains(&CoreType::Land)
-            && !activatable_mana_options(state, object_id, controller).is_empty() =>
-        {
-            1
-        }
-        None => 0,
+    // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
+    if methods.is_empty()
+        && obj.card_types.core_types.contains(&CoreType::Land)
+        && !activatable_mana_options(state, object_id, controller).is_empty()
+    {
+        return vec![FeasibleManaMethod {
+            net_yield: 1,
+            penalty: ManaSourcePenalty::None,
+        }];
     }
+    methods
 }
 
 /// CR 117.1d + CR 601.2g: True when cost payment can involve a currently
