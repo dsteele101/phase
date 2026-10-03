@@ -18996,6 +18996,15 @@ fn revealed_card_type_condition_subject<'a>(
     state: &'a GameState,
     ability: &'a ResolvedAbility,
 ) -> Option<(ObjectId, Option<&'a crate::types::game_state::LKISnapshot>)> {
+    // CR 608.2c + CR 701.20a: a reveal that looks at several cards ("reveal cards
+    // until you reveal a land card") designates one of them — the card that met
+    // its until-condition — as the demonstrative referent. "The revealed land
+    // card" is that card, not whichever card was revealed first.
+    if let Some(snapshot) = ability.effect_context_object.as_ref() {
+        if state.last_revealed_ids.contains(&snapshot.object_id) {
+            return Some((snapshot.object_id, Some(&snapshot.lki)));
+        }
+    }
     state
         .last_revealed_ids
         .first()

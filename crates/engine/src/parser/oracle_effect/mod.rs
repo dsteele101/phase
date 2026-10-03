@@ -43057,8 +43057,21 @@ fn parse_effect_chain_ir_body(
                 // pile. `RevealUntilKept` is never bound across clauses: its "put it" /
                 // "put that card" anaphor names the nearest referent, and its application
                 // patches only the immediately preceding definition.
+                // A conditional "instead" override of an intervening damage
+                // instruction ("If the revealed land card was a Mountain, ~ deals
+                // double that damage instead") is lookback-transparent: it restates
+                // the instruction it replaces and neither selects nor re-binds the
+                // reveal's cards, so its placeholder does not end the scan.
                 non_absorbed
                     .iter()
+                    .filter(|c| {
+                        !matches!(
+                            c.disposition,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(_)
+                            }
+                        )
+                    })
                     .map(|c| effective_effect_of(c))
                     .take_while(|effect| !matches!(effect, Effect::Unimplemented { .. }))
                     .find_map(|deeper| match deeper {

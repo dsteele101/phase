@@ -1818,6 +1818,7 @@ mod exchange_control_of_a_spell;
 mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;
 mod foreign_subject_split_guard;
+mod goblin_charbelcher;
 mod graveyard_permission_turn_timing;
 mod issue_vex_draw_card;
 mod locke_milled_single_use_cast;
