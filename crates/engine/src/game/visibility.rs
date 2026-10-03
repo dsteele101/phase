@@ -1029,7 +1029,10 @@ pub(crate) fn identity_projection_for_viewer(
         // face-down permanent if they control an active "you may look at
         // face-down [filter] any time" static (CR 708.5 exception) whose
         // affected filter matches this permanent.
-        let viewer_may_look = can_view_private_for_player(source.controller)
+        // CR 708.9: at the end of each game, all face-down permanents and
+        // spells must be revealed to all players.
+        let viewer_may_look = matches!(state.waiting_for, WaitingFor::GameOver { .. })
+            || can_view_private_for_player(source.controller)
             || viewer_may_look_at_face_down(state, obj_id, &can_view_private_for_player);
         projections.insert(
             obj_id,
@@ -5200,6 +5203,35 @@ mod tests {
                 .contains("each opponent loses 2 life"),
             "hidden card's serialized payload must not quote its printed text"
         );
+    }
+
+    /// CR 708.9: at the end of the game, face-down permanents are revealed to
+    /// all players, so an opponent's projection carries the real identity.
+    #[test]
+    fn game_over_reveals_face_down_permanent_to_observer() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let controller = PlayerId(0);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&secret).unwrap().card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        };
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+
+        let hidden = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(hidden.objects[&secret].name, "Hidden Card");
+
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        let revealed = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(revealed.objects[&secret].name, "Secret Manifest");
     }
 
     /// CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
