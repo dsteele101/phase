@@ -19001,7 +19001,9 @@ fn revealed_card_type_condition_subject<'a>(
     // its until-condition — as the demonstrative referent. "The revealed land
     // card" is that card, not whichever card was revealed first.
     if let Some(snapshot) = ability.effect_context_object.as_ref() {
-        if state.last_revealed_ids.contains(&snapshot.object_id) {
+        if state.last_revealed_ids.len() > 1
+            && state.last_revealed_ids.contains(&snapshot.object_id)
+        {
             return Some((snapshot.object_id, Some(&snapshot.lki)));
         }
     }

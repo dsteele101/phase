@@ -231,7 +231,11 @@ fn resolve_reveal(
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    super::publish_tracked_set(state, all_revealed.clone());
+    // Only a reveal-only until-loop leaves the cards in place for later
+    // instructions to read; one that routes them at once has no such reader.
+    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly) {
+        super::publish_tracked_set(state, all_revealed.clone());
+    }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).

@@ -343,7 +343,7 @@ fn where_x_that_card_after_a_multi_hit_reveal_until_stays_unsupported() {
 const GOBLIN_CHARBELCHER: &str = "{3}, {T}: Reveal cards from the top of your library until you reveal a land card. ~ deals damage equal to the number of nonland cards revealed this way to any target. If the revealed land card was a Mountain, ~ deals double that damage instead. Put the revealed cards on the bottom of your library in any order.";
 
 /// CR 701.20a + CR 608.2c: the whole revealed pile — the land included — goes to
-/// the library bottom (no card is kept for a hand), the damage counts the
+/// the library bottom AFTER the damage (no card is kept for a hand), the damage counts the
 /// nonland cards of the revealed set, and the Mountain override replaces that
 /// damage with a doubled copy of the same count.
 #[test]
@@ -357,18 +357,16 @@ fn goblin_charbelcher_lowers_to_typed_damage_override_and_whole_pile_bottom() {
     );
     assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
     let reveal = &parsed.abilities[0];
+    // CR 608.2c: the reveal only reveals; the cards stay in the library until the
+    // placement instruction, which follows the damage.
     let Effect::RevealUntil {
-        kept_destination,
-        rest_destination,
-        rest_order,
+        matched_disposition,
         ..
     } = reveal.effect.as_ref()
     else {
         panic!("expected a RevealUntil root, got {:?}", reveal.effect);
     };
-    assert_eq!(*kept_destination, Zone::Library);
-    assert_eq!(*rest_destination, Zone::Library);
-    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+    assert_eq!(*matched_disposition, RevealUntilDisposition::RevealOnly);
 
     let damage = gate_sub(reveal);
     let nonland_revealed = QuantityExpr::Ref {
@@ -408,10 +406,24 @@ fn goblin_charbelcher_lowers_to_typed_damage_override_and_whole_pile_bottom() {
             }),
         })
     );
-    assert!(
-        doubled.sub_ability.is_none() && doubled.else_ability.is_none(),
-        "the pile placement is absorbed into the RevealUntil, not left as a sibling"
-    );
+    let placement = gate_sub(doubled);
+    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        library_position,
+        random_order,
+        ..
+    } = placement.effect.as_ref()
+    else {
+        panic!("expected the pile placement, got {:?}", placement.effect);
+    };
+    assert_eq!(*origin, Some(Zone::Library));
+    assert_eq!(*destination, Zone::Library);
+    assert_eq!(*target, TargetFilter::LastRevealed);
+    assert_eq!(*library_position, Some(LibraryPosition::Bottom));
+    assert!(!random_order, "\"in any order\" is the owner's arrangement");
 }
 
 fn nonland_card() -> TargetFilter {
