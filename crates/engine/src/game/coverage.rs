@@ -13758,14 +13758,6 @@ mod tests {
         }
     }
 
-    /// CR 601.2f: a cost modifier's `dynamic_count` is parse-significant but
-    /// invisible to the `StaticMode` Display label ("ReduceCost"). The coverage
-    /// receipt must surface it, or a fix that changes Cemetery Prowler's bare
-    /// `ObjectCount` to the spell/exile `SharedCardTypes` intersection (#6898)
-    /// renders as a false "no card-parse changes detected" in the parse-diff.
-    ///
-    /// Discriminating by construction: the two counts render differently, and
-    /// the no-count form emits no `dynamic_count` detail at all.
     #[test]
     fn draw_replacement_details_distinguish_substitute_player_scope() {
         let make = |scope| Effect::CreateDrawReplacement {
@@ -13778,6 +13770,14 @@ mod tests {
         assert_ne!(effect_details(&each_player), effect_details(&each_opponent));
     }
 
+    /// CR 601.2f: a cost modifier's `dynamic_count` is parse-significant but
+    /// invisible to the `StaticMode` Display label ("ReduceCost"). The coverage
+    /// receipt must surface it, or a fix that changes Cemetery Prowler's bare
+    /// `ObjectCount` to the spell/exile `SharedCardTypes` intersection (#6898)
+    /// renders as a false "no card-parse changes detected" in the parse-diff.
+    ///
+    /// Discriminating by construction: the two counts render differently, and
+    /// the no-count form emits no `dynamic_count` detail at all.
     #[test]
     fn modify_cost_dynamic_count_is_surfaced_in_static_details() {
         let with_shared = StaticDefinition::new(StaticMode::ModifyCost {
