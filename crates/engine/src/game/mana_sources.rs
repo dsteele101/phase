@@ -35,6 +35,7 @@ use crate::types::TriggerMode;
 
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
+use super::mana_abilities::ManaPayabilityMode;
 use super::mana_payment;
 use super::restrictions;
 use super::triggers::trigger_source_context_for_latch;
@@ -548,7 +549,14 @@ fn current_mana_source_options(
         let penalty = object_mana_ability_penalty(state, object_id, ability);
         let source_could_produce_two_or_more_colors =
             source_could_produce_two_or_more_colors(state, object_id, player);
-        for row in emit_source_rows(state, player, object_id, ability_index, ability, true) {
+        for row in emit_source_rows(
+            state,
+            player,
+            object_id,
+            ability_index,
+            ability,
+            ManaPayabilityMode::Current,
+        ) {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
@@ -1548,7 +1556,15 @@ pub fn activatable_land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
-    land_mana_options(state, object_id, controller, true, true, None, None)
+    land_mana_options(
+        state,
+        object_id,
+        controller,
+        true,
+        ManaPayabilityMode::Current,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn activatable_land_mana_options_indexed_gated(
@@ -1563,7 +1579,7 @@ pub(crate) fn activatable_land_mana_options_indexed_gated(
         object_id,
         controller,
         true,
-        true,
+        ManaPayabilityMode::Current,
         Some(aura_sources),
         Some(gates),
     )
@@ -1595,7 +1611,7 @@ pub(crate) fn auto_tap_land_mana_options_indexed_gated(
         object_id,
         controller,
         true,
-        false,
+        ManaPayabilityMode::Planning,
         Some(aura_sources),
         gates,
     )
@@ -1879,7 +1895,14 @@ pub fn activatable_mana_options(
     if restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, true, None)
+    scan_mana_abilities(
+        state,
+        obj,
+        object_id,
+        controller,
+        ManaPayabilityMode::Current,
+        None,
+    )
 }
 
 pub(crate) fn auto_tap_mana_options(
@@ -1918,7 +1941,14 @@ pub(crate) fn auto_tap_mana_options_gated(
     {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, false, gates)
+    scan_mana_abilities(
+        state,
+        obj,
+        object_id,
+        controller,
+        ManaPayabilityMode::Planning,
+        gates,
+    )
 }
 
 /// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
@@ -1949,7 +1979,15 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
-            is_active_tap_mana_ability(state, object_id, controller, *idx, ability, true, None)
+            is_active_tap_mana_ability(
+                state,
+                object_id,
+                controller,
+                *idx,
+                ability,
+                ManaPayabilityMode::Current,
+                None,
+            )
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
@@ -2594,7 +2632,7 @@ fn land_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
     require_untapped: bool,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     // Precomputed TapsForMana trigger-source list for the board-global sweeps;
     // `None` means compute it for this land (single-land / display / test
     // callers). Byte-identical either way — the indexed and full scans visit the
@@ -2621,14 +2659,8 @@ fn land_mana_options(
         return Vec::new();
     }
 
-    let mut options = scan_mana_abilities(
-        state,
-        obj,
-        object_id,
-        controller,
-        require_current_payability,
-        gates,
-    );
+    let mut options =
+        scan_mana_abilities(state, obj, object_id, controller, payability_mode, gates);
 
     // CR 305.6 + CR 602.5: Legacy fallback for basic-land subtype-only objects that
     // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
@@ -2763,7 +2795,7 @@ fn is_active_tap_mana_ability(
     controller: PlayerId,
     ability_index: usize,
     ability: &AbilityDefinition,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> bool {
     if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
@@ -2781,27 +2813,32 @@ fn is_active_tap_mana_ability(
             &default_gates
         }
     };
-    if require_current_payability {
-        if !mana_abilities::can_activate_mana_ability_now_gated(
-            state,
-            controller,
-            object_id,
-            ability_index,
-            ability,
-            gates,
-        ) {
-            return false;
+    match payability_mode {
+        ManaPayabilityMode::Current => {
+            if !mana_abilities::can_activate_mana_ability_now_gated(
+                state,
+                controller,
+                object_id,
+                ability_index,
+                ability,
+                gates,
+            ) {
+                return false;
+            }
         }
-    } else if !mana_abilities::mana_ability_ready_without_simulation_gated(
-        state,
-        controller,
-        object_id,
-        ability_index,
-        ability,
-        false,
-        gates,
-    ) {
-        return false;
+        ManaPayabilityMode::Planning => {
+            if !mana_abilities::mana_ability_ready_without_simulation_gated(
+                state,
+                controller,
+                object_id,
+                ability_index,
+                ability,
+                ManaPayabilityMode::Planning,
+                gates,
+            ) {
+                return false;
+            }
+        }
     }
     activation_condition_satisfied(state, controller, object_id, ability_index, ability)
 }
@@ -2814,7 +2851,7 @@ fn scan_mana_abilities(
     obj: &crate::game::game_object::GameObject,
     object_id: ObjectId,
     controller: PlayerId,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
@@ -2825,7 +2862,7 @@ fn scan_mana_abilities(
             controller,
             ability_index,
             ability,
-            require_current_payability,
+            payability_mode,
             gates,
         ) {
             continue;
@@ -2840,7 +2877,7 @@ fn scan_mana_abilities(
             object_id,
             ability_index,
             ability,
-            require_current_payability,
+            payability_mode,
         ) {
             let option = ManaSourceOption {
                 object_id,
@@ -2875,7 +2912,7 @@ fn emit_source_rows(
     object_id: ObjectId,
     _ability_index: usize,
     ability: &AbilityDefinition,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
 ) -> Vec<SourceRow> {
     let Effect::Mana {
         produced,
@@ -2927,7 +2964,7 @@ fn emit_source_rows(
         ManaProduction::ChosenColor {
             fixed_alternative: None,
             ..
-        } if !require_current_payability
+        } if payability_mode == ManaPayabilityMode::Planning
             && state
                 .objects
                 .get(&object_id)

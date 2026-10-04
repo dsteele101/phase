@@ -38,6 +38,30 @@ use super::mana_sources::{mana_color_to_type, mana_type_to_color};
 use super::sacrifice;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
+/// CR 605.3a + CR 601.2h: Distinguishes whether the cost-payability check
+/// inside [`mana_ability_ready_without_simulation_gated`] should treat the
+/// current game state as authoritative (`Current`) or as a planning estimate
+/// (`Planning`).
+///
+/// * `Current` — used by the activation legality gate and the readiness
+///   display. Delegates to [`AbilityCost::is_payable_for_mana_ability`], which
+///   checks mana affordability through the full auto-tap witness (CR 601.2g)
+///   and honors tag-scoped mana via the correct ability index (CR 106.6).
+/// * `Planning` — used by auto-tap source scanning. Delegates to
+///   [`AbilityCost::is_payable_for_activation`] with the known `ability_index`.
+///   That function already returns `true` for `AbilityCost::Mana` sub-costs
+///   (CR 601.2g defers them to the mana payment step), so filter-land / Signet
+///   costs are treated as payable during planning without duplicating the
+///   traversal. All other components (sacrifice, pay life, discard, tap) are
+///   still checked against the current game state through the same authority.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManaPayabilityMode {
+    /// Full current-state payability: mana affordability is checked now.
+    Current,
+    /// Planning mode: mana sub-costs are deferred; other costs checked now.
+    Planning,
+}
+
 /// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
 /// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
 /// fourth criterion ("its cost and effect don't move any card to or from a
@@ -1734,7 +1758,7 @@ pub(crate) fn intrinsic_land_mana_ability_blocked(
             object_id,
             0,
             &ability_def,
-            true,
+            ManaPayabilityMode::Current,
             gates,
         ),
         None => {
@@ -1761,7 +1785,7 @@ fn mana_ability_ready_without_simulation(
         source_id,
         ability_index,
         ability_def,
-        true,
+        ManaPayabilityMode::Current,
         &gates,
     )
 }
@@ -1772,7 +1796,7 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
     source_id: ObjectId,
     ability_index: usize,
     ability_def: &AbilityDefinition,
-    require_current_payability: bool,
+    payability_mode: ManaPayabilityMode,
     gates: &ManaActivationGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&source_id) else {
@@ -1863,17 +1887,31 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
     {
         return false;
     }
-    // CR 605.3a + CR 601.2h: When require_current_payability is true, the mana sub-cost
-    // (pool + choice-of-object) must be currently payable. When false (auto-tap planning),
-    // non-mana cost components must still be payable (e.g. sacrifice not prohibited by Yasharn),
-    // while mana sub-costs are deferred to auto-tap Phase 3.
+    // CR 605.3a + CR 601.2h: Gate on cost payability, using the shared authority
+    // from cost_payability.rs.
+    //
+    // `Current` — delegates to `is_payable_for_mana_ability`, which checks mana
+    // affordability via the auto-tap witness (CR 601.2g) and honors tag-scoped mana
+    // via the correct ability index (CR 106.6).
+    //
+    // `Planning` — delegates to `is_payable_for_activation(…, Some(ability_index))`. That function
+    // already returns `true` for `AbilityCost::Mana` sub-costs (CR 601.2g defers
+    // them to the mana payment step), so filter-land / Signet costs are treated as
+    // payable during planning. All other components (sacrifice, pay life, discard,
+    // tap) are still checked through the same existing cost-payability authority,
+    // preventing them from drifting from the full-legality path.
     if let Some(cost) = &ability_def.cost {
-        if require_current_payability {
-            if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
-                return false;
+        match payability_mode {
+            ManaPayabilityMode::Current => {
+                if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
+                    return false;
+                }
             }
-        } else if !cost.is_payable_for_mana_ability_planning(state, player, source_id) {
-            return false;
+            ManaPayabilityMode::Planning => {
+                if !cost.is_payable_for_activation(state, player, source_id, Some(ability_index)) {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -1982,7 +2020,7 @@ pub fn can_activate_mana_ability_now_gated(
         source_id,
         ability_index,
         ability_def,
-        true,
+        ManaPayabilityMode::Current,
         gates,
     ) {
         return false;

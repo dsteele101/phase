@@ -410,36 +410,6 @@ impl AbilityCost {
         }
     }
 
-    /// CR 601.2g + CR 605.3a: Cost payability check for auto-tap *planning* (`require_current_payability == false`).
-    ///
-    /// When auto-tap plans a mana activation sequence, embedded `AbilityCost::Mana` components (e.g. {1} on a Signet
-    /// or Filter Land) do not require mana to already be in the pool because auto-tap will schedule other sources to
-    /// pay for them in Phase 3. However, all non-mana cost components (tap, untap, sacrifice, pay life, discard) must
-    /// still be legally payable.
-    pub fn is_payable_for_mana_ability_planning(
-        &self,
-        state: &GameState,
-        player: PlayerId,
-        source: ObjectId,
-    ) -> bool {
-        match self {
-            AbilityCost::Mana { .. } => true,
-            AbilityCost::Composite { costs } => {
-                let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
-                costs.iter().all(|c| match c {
-                    AbilityCost::TapCreatures {
-                        requirement,
-                        filter,
-                    } if has_tap => {
-                        has_enough_tap_creatures(state, player, source, requirement, filter, true)
-                    }
-                    other => other.is_payable_for_mana_ability_planning(state, player, source),
-                })
-            }
-            other => other.is_payable(state, player, source),
-        }
-    }
-
     /// CR 118.3 + CR 601.2h: Returns true if this cost can be paid given the
     /// current game state. Returns false only when the cost requires a choice of
     /// object and no legal object exists, or a hard resource check fails (e.g.,
