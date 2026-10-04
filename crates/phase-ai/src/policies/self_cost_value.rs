@@ -67,15 +67,16 @@
 
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
-    appraise_benefit, cost_is_material, real_self_cost, resolve_payable_cost, self_cost_in_scope,
-    self_counter_cost_preview, self_sacrifice_option_premium, synergy_justifies_self_cost,
-    BenefitAppraisal, SelfCounterCostPreview,
+    appraise_benefit, branch_is_dearer_than_payable_alternative, cost_is_material, real_self_cost,
+    resolve_payable_cost, self_cost_in_scope, self_counter_cost_preview,
+    self_sacrifice_option_premium, synergy_justifies_self_cost, BenefitAppraisal,
+    SelfCounterCostPreview,
 };
 use crate::features::DeckFeatures;
 
@@ -107,6 +108,32 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+        // CR 118.3 + CR 601.2h: the later "pay this branch" prompt answers to the
+        // same price the activation verdict used, so the verdict's assumption
+        // about what gets paid (e.g. the source surviving) holds.
+        if let (
+            GameAction::ChooseActivationCostBranch { index },
+            WaitingFor::ActivationCostOneOfChoice {
+                costs,
+                pending_cast,
+                ..
+            },
+        ) = (&ctx.candidate.action, &ctx.state.waiting_for)
+        {
+            return if branch_is_dearer_than_payable_alternative(
+                ctx.state,
+                ctx.ai_player,
+                pending_cast,
+                costs,
+                *index,
+                ctx.penalties(),
+            ) {
+                PolicyVerdict::reject(PolicyReason::new("self_cost_branch_dearer"))
+            } else {
+                PolicyVerdict::neutral(PolicyReason::new("self_cost_branch_cheapest"))
+            };
+        }
+
         let GameAction::ActivateAbility {
             source_id,
             ability_index,
@@ -1165,6 +1192,114 @@ mod tests {
         assert_neutral(
             &verdict_for(&state, source, plain_features()),
             "self_cost_benefit_covers_cost",
+        );
+    }
+
+    #[test]
+    fn activation_through_the_branch_prompt_pays_the_priced_branch() {
+        // CR 118.3 + CR 601.2h + CR 602.2b: "{2} or sacrifice this" with the mana
+        // to pay it. The activation verdict prices the mana branch (the source
+        // survives); the branch prompt must steer to that same branch, so the
+        // payment actually made is the one that was priced.
+        use engine::ai_support::candidate_actions;
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::SacrificeCost;
+        use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(P0, "Sacrificial Pinger", 2, 2)
+            .with_ability_definition(activated(
+                // Untargeted, so the branch prompt is the first activation prompt.
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                AbilityCost::OneOf {
+                    costs: vec![
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(2),
+                        },
+                    ],
+                },
+            ))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("activation must be legal");
+        let state = runner.state().clone();
+        let WaitingFor::ActivationCostOneOfChoice { costs, .. } = &state.waiting_for else {
+            panic!(
+                "both branches are payable, so the player must be asked; got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(costs.len(), 2);
+
+        let config = AiConfig::default();
+        let context = context_for(&config, plain_features());
+        let candidates: Vec<_> = candidate_actions(&state)
+            .into_iter()
+            .filter(|c| matches!(c.action, GameAction::ChooseActivationCostBranch { .. }))
+            .collect();
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: candidates.clone(),
+        };
+        let verdicts: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                let ctx = PolicyContext {
+                    state: &state,
+                    decision: &decision,
+                    candidate,
+                    ai_player: AI,
+                    config: &config,
+                    context: &context,
+                    cast_facts: None,
+                    search_depth: crate::policies::context::SearchDepth::Root,
+                };
+                (candidate.action.clone(), SelfCostValuePolicy.verdict(&ctx))
+            })
+            .collect();
+
+        let chosen = verdicts
+            .iter()
+            .find(|(_, verdict)| !matches!(verdict, PolicyVerdict::Reject { .. }))
+            .map(|(action, _)| action.clone())
+            .expect("the priced branch must stay available");
+        assert!(
+            verdicts.iter().any(|(action, verdict)| {
+                matches!(action, GameAction::ChooseActivationCostBranch { index: 0 })
+                    && matches!(verdict, PolicyVerdict::Reject { .. })
+            }),
+            "the sacrifice branch is dearer than the payable mana branch"
+        );
+
+        let mut applied = state;
+        engine::game::engine::apply_as_current(&mut applied, chosen)
+            .expect("the chosen branch must complete the activation");
+        assert_eq!(
+            applied.objects[&source].zone,
+            Zone::Battlefield,
+            "paying the priced branch must not sacrifice the source"
+        );
+        assert_eq!(
+            applied.players[0].mana_pool.total(),
+            0,
+            "the {{2}} branch spent the mana"
         );
     }
 

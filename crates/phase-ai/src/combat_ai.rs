@@ -1740,17 +1740,26 @@ pub fn choose_blockers_with_profile(
     let unblocked_of =
         |id: ObjectId| -> i32 { unblocked_by_attacker.get(&id).copied().unwrap_or(0) };
     let incoming_damage: i32 = unblocked_by_attacker.values().sum();
+    // CR 510.1c + CR 702.19b + CR 702.2c: the damage `blocker` alone keeps from
+    // the player that `attacker_id` would otherwise deal, read from the engine's
+    // damage authority so trample excess, deathtouch-lethal, marked damage and
+    // both strike steps are all accounted for.
+    let damage_prevented_by = |attacker_id: ObjectId, blocker_id: ObjectId| -> i32 {
+        (unblocked_of(attacker_id)
+            - engine::game::combat_damage::combat_damage_to_defender(
+                state,
+                attacker_id,
+                &[blocker_id],
+            ))
+        .max(0)
+    };
     // The damage the attack still deals the player once the blocks committed so
     // far are in place. Every later block is priced at this margin, so life a
     // block already saved is never credited to the next one.
     let mut remaining_incoming = incoming_damage
         - assignments
             .iter()
-            .map(|&(bid, aid)| {
-                (unblocked_of(aid)
-                    - engine::game::combat_damage::combat_damage_to_defender(state, aid, &[bid]))
-                .max(0)
-            })
+            .map(|&(bid, aid)| damage_prevented_by(aid, bid))
             .sum::<i32>();
 
     // What a block buys beyond the exchange itself: the life it saves, priced by
@@ -1818,11 +1827,7 @@ pub fn choose_blockers_with_profile(
                         // including CR 702.19b trample (a dying blocker only stops
                         // its own toughness worth of damage).
                         let priority = (survives as u8) * 2 + (kills as u8);
-                        let damage_prevented = if attacker.has_keyword(&Keyword::Trample) {
-                            blocker.toughness.unwrap_or(1)
-                        } else {
-                            unblocked_of(aid)
-                        };
+                        let damage_prevented = damage_prevented_by(aid, bid);
                         let favorable_trade = priority != 1
                             || selected_blocker_value
                                 <= attacker_value
@@ -1930,19 +1935,12 @@ pub fn choose_blockers_with_profile(
 
             // Chump block: sacrifice the blocker to prevent significant damage
             // when life total is threatened (attacker power >= 3 and life <= 3x that)
-            // CR 702.19b: Trample means a chump blocker only prevents blocker_toughness
-            // damage, not the full attacker_power. Skip chump blocking tramplers when
-            // the blocker is too small to make a meaningful difference.
-            let has_trample = attacker.has_keyword(&Keyword::Trample);
-            let blocker_toughness = blocker_obj.and_then(|b| b.toughness).unwrap_or(1);
             // CR 510.1c: a blocked nontrampler deals the player nothing, so the
             // block saves everything it would have dealt unblocked — both strikes
-            // of a double striker (CR 702.4b), not one step's power.
-            let damage_prevented = if has_trample {
-                blocker_toughness
-            } else {
-                unblocked_of(attacker_id)
-            };
+            // of a double striker (CR 702.4b). CR 702.19b + CR 702.2c: a trampler
+            // still connects with whatever lethal assignment leaves over, so the
+            // engine's damage helper decides what this block actually prevents.
+            let damage_prevented = damage_prevented_by(attacker_id, blocker_id);
 
             // For damage-reflection creatures, the net life change from blocking is
             // (damage_prevented - reflected_damage). If net is non-positive, blocking
@@ -6624,6 +6622,38 @@ mod tests {
             blockers.contains(&(chump, bear)),
             "Should chump the non-trampler to prevent more damage, got {:?}",
             blockers
+        );
+    }
+
+    /// CR 702.2c + CR 702.19b: a 5-power deathtouch trampler needs only 1 damage
+    /// assigned to a 4-toughness blocker, so 4 still reaches the player. Blocking
+    /// it prevents 1, not the blocker's toughness; with a second 2-power attacker
+    /// the block of the trampler leaves 6 incoming against 6 life (still lethal),
+    /// while blocking the other attacker leaves 5 and saves the player.
+    #[test]
+    fn deathtouch_trampler_block_is_priced_by_what_it_actually_prevents() {
+        let mut state = setup();
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Deathtouch Trampler",
+            5,
+            5,
+            vec![Keyword::Trample, Keyword::Deathtouch],
+        );
+        let bear = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        let wall = add_creature(&mut state, PlayerId(1), "Wall", 1, 4, vec![]);
+        state.players[1].life = 6;
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[trampler, bear]);
+
+        assert!(
+            blockers.contains(&(wall, bear)),
+            "blocking the bear is the block that leaves the player alive, got {blockers:?}"
+        );
+        assert!(
+            !blockers.contains(&(wall, trampler)),
+            "the wall absorbs 1 of the trampler's 5, not 4, got {blockers:?}"
         );
     }
 

@@ -53,7 +53,7 @@ use engine::types::ability::{
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, PendingCast};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -211,30 +211,131 @@ pub(crate) fn resolve_payable_cost(
 ) -> AbilityCost {
     let mut resolved = cost.clone();
     while let Some(branches) = find_one_of_cost(&resolved) {
-        let cheapest = branches
-            .iter()
-            .filter(|branch| {
-                one_of_branch_payable_in(
-                    state,
-                    ai_player,
-                    source_id,
-                    &resolved,
-                    branch,
-                    ability_index,
-                )
-            })
-            .filter_map(|branch| resolved.resolve_first_one_of(branch))
-            .map(|candidate| {
-                let price = real_self_cost(state, ai_player, source_id, &candidate, penalties);
-                (price, candidate)
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        match cheapest {
+        match cheapest_payable_branch(
+            state,
+            ai_player,
+            source_id,
+            &resolved,
+            branches,
+            ability_index,
+            penalties,
+        ) {
             Some((_, candidate)) => resolved = candidate,
             None => break,
         }
     }
     resolved
+}
+
+/// Every branch of a cost choice payable inside `whole`, with its index in
+/// `branches`, its price by [`real_self_cost`], and `whole` settled on it.
+fn priced_payable_branches(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    whole: &AbilityCost,
+    branches: &[AbilityCost],
+    ability_index: Option<usize>,
+    penalties: &PolicyPenalties,
+) -> Vec<(usize, f64, AbilityCost)> {
+    branches
+        .iter()
+        .enumerate()
+        .filter(|(_, branch)| {
+            one_of_branch_payable_in(state, ai_player, source_id, whole, branch, ability_index)
+        })
+        .filter_map(|(index, branch)| Some((index, whole.resolve_first_one_of(branch)?)))
+        .map(|(index, candidate)| {
+            let price = real_self_cost(state, ai_player, source_id, &candidate, penalties);
+            (index, price, candidate)
+        })
+        .collect()
+}
+
+/// The single authority for which branch of a cost choice the AI pays: the
+/// cheapest by [`real_self_cost`] among those payable inside `whole`, the first
+/// of equals. Returns that branch's index in `branches` and `whole` settled on
+/// it. The activation verdict ([`resolve_payable_cost`]) and the later branch
+/// prompt ([`branch_is_dearer_than_payable_alternative`],
+/// [`cheapest_payable_branch_index`]) all choose through here, so the branch
+/// that was priced is the branch that gets paid.
+fn cheapest_payable_branch(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    whole: &AbilityCost,
+    branches: &[AbilityCost],
+    ability_index: Option<usize>,
+    penalties: &PolicyPenalties,
+) -> Option<(usize, AbilityCost)> {
+    priced_payable_branches(
+        state,
+        ai_player,
+        source_id,
+        whole,
+        branches,
+        ability_index,
+        penalties,
+    )
+    .into_iter()
+    .min_by(|a, b| a.1.total_cmp(&b.1))
+    .map(|(index, _, candidate)| (index, candidate))
+}
+
+/// CR 118.3 + CR 601.2h: the index in `choices` (the prompt's payable branches)
+/// of the branch [`resolve_payable_cost`] priced for this activation, so the
+/// branch prompt pays what the activation verdict assumed — never a cheaper-
+/// looking earlier branch that, say, sacrifices the source.
+pub(crate) fn cheapest_payable_branch_index(
+    state: &GameState,
+    ai_player: PlayerId,
+    pending: &PendingCast,
+    choices: &[AbilityCost],
+    penalties: &PolicyPenalties,
+) -> Option<usize> {
+    let whole = pending.activation_cost.as_ref()?;
+    cheapest_payable_branch(
+        state,
+        ai_player,
+        pending.object_id,
+        whole,
+        choices,
+        pending.activation_ability_index,
+        penalties,
+    )
+    .map(|(index, _)| index)
+}
+
+/// CR 118.3 + CR 601.2h: is branch `index` of the prompt strictly dearer than
+/// another payable branch? Equal prices are not dearer, so a tie is the
+/// player's free choice; a branch the activation verdict never priced (the
+/// source sacrificed when mana would do) is.
+pub(crate) fn branch_is_dearer_than_payable_alternative(
+    state: &GameState,
+    ai_player: PlayerId,
+    pending: &PendingCast,
+    choices: &[AbilityCost],
+    index: usize,
+    penalties: &PolicyPenalties,
+) -> bool {
+    let Some(whole) = pending.activation_cost.as_ref() else {
+        return false;
+    };
+    let priced = priced_payable_branches(
+        state,
+        ai_player,
+        pending.object_id,
+        whole,
+        choices,
+        pending.activation_ability_index,
+        penalties,
+    );
+    let Some(chosen) = priced.iter().find(|(i, ..)| *i == index).map(|p| p.1) else {
+        return false;
+    };
+    priced
+        .iter()
+        .any(|(_, price, _)| chosen - price > f64::EPSILON)
 }
 
 /// Price the self-inflicted portion of `cost` in card-equivalent units.
