@@ -63,20 +63,27 @@ fn charbelcher(runner: &GameRunner) -> ObjectId {
         .expect("Goblin Charbelcher on the battlefield")
 }
 
-/// Answer the library-bottom ordering prompt (if the engine raises one) with
-/// the given order, then let the stack empty.
+/// Answer the library-bottom ordering prompt with the given order, then let the
+/// stack empty. A pile of several cards must raise the prompt; a single card has
+/// nothing to arrange.
 fn finish(runner: &mut GameRunner, order: &[ObjectId]) {
-    if let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for {
-        assert_eq!(
-            cards.len(),
-            order.len(),
-            "the whole remaining pile is ordered"
-        );
-        runner
-            .act(GameAction::SelectCards {
-                cards: order.to_vec(),
-            })
-            .expect("bottom order is accepted");
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => {
+            assert_eq!(
+                cards.len(),
+                order.len(),
+                "the whole remaining pile is ordered"
+            );
+            runner
+                .act(GameAction::SelectCards {
+                    cards: order.to_vec(),
+                })
+                .expect("bottom order is accepted");
+        }
+        other => assert!(
+            order.len() <= 1,
+            "a pile of several cards must be offered for arrangement, got {other:?}"
+        ),
     }
     runner.advance_until_stack_empty();
 }
@@ -365,5 +372,169 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         library,
         vec![deep, forest],
         "Charbelcher's leftover revealed land is still put on the bottom"
+    );
+}
+
+/// CR 608.2c + CR 401.4: "in any order" — with several revealed cards left to
+/// place, the controller is offered the arrangement and the submitted order, not
+/// the encounter order, decides the library bottom. The deeper card is untouched.
+#[test]
+fn the_pile_is_arranged_in_the_submitted_order() {
+    let (mut runner, revealed, deep) = stage(3, "Forest", "Forest");
+    let source = charbelcher(&runner);
+    runner.activate(source, 0).target_player(P1).resolve();
+
+    let WaitingFor::EffectZoneChoice { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected the any-order prompt for a four-card pile, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        cards
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        revealed.iter().copied().collect(),
+        "the whole revealed pile is offered for arrangement"
+    );
+
+    // A permutation that is neither the encounter order nor its reverse.
+    let submitted = vec![revealed[2], revealed[0], revealed[3], revealed[1]];
+    runner
+        .act(GameAction::SelectCards {
+            cards: submitted.clone(),
+        })
+        .expect("the arrangement is accepted");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    let mut expected = vec![deep];
+    expected.extend(submitted);
+    assert_eq!(library, expected, "the bottom follows the submitted order");
+}
+
+/// A prevention creature whose rider draws exactly one card, however much damage
+/// was prevented — one replaced draw, so one child reveal.
+const ONE_CARD_SHIELD: &str = "If a source would deal damage to this creature, prevent that damage. The source's controller draws a card.";
+
+/// CR 608.2c + CR 615.5: each pile is arranged by its own instruction. The shield
+/// prevents Charbelcher's two damage and its controller draws one card; Abundance
+/// replaces that draw with a reveal of its own (two misses, so ITS ordering prompt
+/// is raised and answered). Charbelcher's own placement then still offers the two
+/// revealed cards left in the library and arranges them in the order submitted
+/// for THAT pile, not the child's.
+#[test]
+fn nested_ordering_pauses_arrange_each_pile_separately() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Goblin Charbelcher", CHARBELCHER);
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE);
+    let shield = scenario
+        .add_creature_from_oracle(P1, "Shield Creature", 4, 3, ONE_CARD_SHIELD)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    // Bottom to top: three deeper cards, then Forest, then two nonland cards.
+    let d3 = scenario.add_spell_to_library_top(P0, "Deep 3", false).id();
+    let d2 = scenario.add_spell_to_library_top(P0, "Deep 2", false).id();
+    let d1 = scenario.add_spell_to_library_top(P0, "Deep 1", false).id();
+    let forest = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let b = scenario.add_spell_to_library_top(P0, "Spell B", false).id();
+    let a = scenario.add_spell_to_library_top(P0, "Spell A", false).id();
+    let mut runner = scenario.build();
+
+    let source = charbelcher(&runner);
+    runner.activate(source, 0).target_object(shield).resolve();
+
+    let mut child_order_prompts = 0;
+    let mut parent_order_prompts = 0;
+    let mut replacement_offers = 0;
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                replacement_offers += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept Abundance's optional replacement");
+            }
+            WaitingFor::NamedChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Land".to_string(),
+                    })
+                    .expect("choose Land");
+            }
+            WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+                child_order_prompts += 1;
+                assert_eq!(
+                    cards
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [a, b].into_iter().collect(),
+                    "the child orders ITS two misses"
+                );
+                runner
+                    .act(GameAction::SelectCards { cards: vec![b, a] })
+                    .expect("the child's arrangement is accepted");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                parent_order_prompts += 1;
+                assert_eq!(
+                    cards
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    [a, b].into_iter().collect(),
+                    "the parent's remaining pile is the two cards still in the library"
+                );
+                runner
+                    .act(GameAction::SelectCards { cards: vec![a, b] })
+                    .expect("the parent's arrangement is accepted");
+            }
+            _ => break,
+        }
+        // Let the stack settle only when no prompt is pending: the settle helper
+        // would answer a pending ordering prompt with the default order.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner.advance_until_stack_empty();
+        }
+    }
+    assert_eq!(replacement_offers, 1, "Abundance's replacement was offered");
+    assert_eq!(
+        child_order_prompts, 1,
+        "the child's ordering pause was reached"
+    );
+    assert_eq!(parent_order_prompts, 1, "the parent's ordering was offered");
+
+    let state = runner.state();
+    let hand: Vec<ObjectId> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    assert_eq!(
+        hand,
+        vec![forest],
+        "Abundance's reveal delivered the Forest"
+    );
+    let library: Vec<ObjectId> = state.players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        library,
+        vec![d1, d2, d3, a, b],
+        "the parent's arrangement [A, B], not the child's [B, A], decides the bottom"
     );
 }

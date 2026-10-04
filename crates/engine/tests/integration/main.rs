@@ -1813,6 +1813,7 @@ mod controls_commander_statics;
 mod declared_target_damage_source;
 mod dismantle;
 mod ebondeath_not_named_died_condition;
+mod erratic_explosion;
 mod event_deadline_duration;
 mod exchange_control_of_a_spell;
 mod exploit_ceased_exploiter_lki;
