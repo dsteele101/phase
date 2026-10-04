@@ -606,30 +606,32 @@ pub fn resolve(
         //
         // CR 701.21a + CR 109.5: "To sacrifice a permanent, its controller moves it..."
         // Determine the player authorized / instructed to perform the sacrifice:
-        // 1. If the ability carries an explicit scoped player (e.g. Slow Motion's
-        //    "At the beginning of the upkeep of enchanted creature's controller, that
-        //    player sacrifices that creature"), that specific player was instructed to
-        //    sacrifice. If that player no longer controls the permanent at resolution
-        //    time, CR 701.21a prohibits them from sacrificing it, and no other player
-        //    was instructed to do so.
-        // 2. If the filter carries an explicit controller scope (e.g. ParentTargetController,
-        //    Opponent, TargetPlayer), resolve that authorized player scope.
-        // 3. For genuine object-controller anaphors with no scoped player (e.g. Animate Dead's
-        //    delayed trigger or Mercy Killing: "that creature's controller sacrifices it"),
-        //    the permanent's current controller is instructed to sacrifice.
-        // 4. For implicit "you" instructions and all other filters (e.g. Breath of Fury's
+        // 1. If the filter carries an explicit controller scope (e.g. ParentTargetController,
+        //    Opponent, TargetPlayer, ScopedPlayer), resolve that authorized player scope.
+        // 2. For ParentTarget / ParentTargetSlot (e.g. Slow Motion or Animate Dead):
+        //    - If the ability carries an explicit scoped player from an upkeep/phase trigger
+        //      (e.g. Slow Motion's "At the beginning of the upkeep of enchanted creature's controller,
+        //      that player sacrifices that creature"), that specific player was instructed to sacrifice.
+        //      If that player no longer controls the permanent at resolution time, CR 701.21a prohibits
+        //      them from sacrificing it, and no other player was instructed to do so.
+        //    - If no scoped player is present (e.g. Animate Dead's leaves-battlefield delayed trigger:
+        //      "that creature's controller sacrifices it"), the permanent's current controller is instructed.
+        // 3. For implicit "you" instructions and all other filters (e.g. Breath of Fury's
         //    TriggeringSource, SelfRef, CostPaidObject), CR 109.5 binds the instruction to
-        //    ability.controller. If the object is not controlled by ability.controller,
+        //    ability.controller regardless of any event-context scoped player (e.g. a damaged player
+        //    from a combat damage trigger). If the object is not controlled by ability.controller,
         //    it cannot be sacrificed.
-        let authorized_sacrificers = if let Some(scoped_player) = ability.scoped_player {
-            vec![scoped_player]
-        } else if sacrifice_controller_scope(filter).is_some() {
+        let authorized_sacrificers = if sacrifice_controller_scope(filter).is_some() {
             resolve_sacrifice_scope(state, ability, filter)
         } else if matches!(
             filter,
             TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
         ) {
-            vec![obj.controller]
+            if let Some(scoped_player) = ability.scoped_player {
+                vec![scoped_player]
+            } else {
+                vec![obj.controller]
+            }
         } else {
             vec![ability.controller]
         };
