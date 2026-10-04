@@ -277,3 +277,93 @@ fn revealed_population_is_not_exposed_in_any_audiences_payload() {
         }
     }
 }
+
+const ABUNDANCE: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
+
+/// CR 608.2c + CR 615.5: Swans of Bryn Argoll's prevention draw is replaced by
+/// Abundance, whose own reveal-until (with its own choices) runs mid-resolution.
+/// Charbelcher's pile placement must still move ITS revealed cards: the child
+/// reveals a different population (the first nonland card only), puts it in hand,
+/// and the parent's leftover revealed land is then bottomed.
+#[test]
+fn replacement_child_reveal_does_not_replace_the_parents_pile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Goblin Charbelcher", CHARBELCHER);
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE);
+    let swans = scenario
+        .add_creature_from_oracle(P1, "Swans of Bryn Argoll", 4, 3, SWANS)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let deep = scenario
+        .add_spell_to_library_top(P0, "Deep Spell", false)
+        .id();
+    let forest = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let spell = scenario.add_spell_to_library_top(P0, "Spell A", false).id();
+    let mut runner = scenario.build();
+
+    let source = charbelcher(&runner);
+    runner.activate(source, 0).target_object(swans).resolve();
+
+    // Reach guards: the interactive replacement path actually ran.
+    let mut saw_replacement_choice = false;
+    let mut saw_kind_choice = false;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                saw_replacement_choice = true;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept Abundance's optional replacement");
+            }
+            WaitingFor::NamedChoice { .. } => {
+                saw_kind_choice = true;
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "Nonland".to_string(),
+                    })
+                    .expect("choose Nonland");
+            }
+            WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::EffectZoneChoice { cards, .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("bottom order is accepted");
+            }
+            _ => break,
+        }
+        runner.advance_until_stack_empty();
+    }
+    assert!(
+        saw_replacement_choice,
+        "Abundance's optional replacement was offered"
+    );
+    assert!(saw_kind_choice, "the land-or-nonland choice was made");
+
+    let state = runner.state();
+    let hand: Vec<ObjectId> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    assert_eq!(
+        hand,
+        vec![spell],
+        "Abundance's reveal puts the first nonland card into hand in place of the draw"
+    );
+    let library: Vec<ObjectId> = state.players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        library,
+        vec![deep, forest],
+        "Charbelcher's leftover revealed land is still put on the bottom"
+    );
+}

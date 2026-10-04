@@ -1287,6 +1287,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
             state.finish_active_paused_post_replacement_dispatch();
+            // CR 608.2c: retiring a nested dispatch can expose the outer
+            // dispatch's own later instructions as the active continuation;
+            // they are the next written instructions, so run them now.
+            if !waits_for_resolution_choice(&state.waiting_for)
+                && state.active_ability_continuation().is_some()
+            {
+                drain_pending_continuation(state, events);
+            }
         }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
