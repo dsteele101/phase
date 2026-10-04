@@ -3729,5 +3729,3 @@ describe("Limited companion support", () => {
     );
   });
 });
-
-

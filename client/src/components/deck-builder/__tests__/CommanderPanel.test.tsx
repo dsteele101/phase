@@ -220,4 +220,3 @@ describe("CommanderPanel", () => {
     expect(onRemoveCompanion).toHaveBeenCalled();
   });
 });
-
