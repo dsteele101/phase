@@ -515,7 +515,7 @@ function LimitedCompanionPanel({
             <button
               type="button"
               onClick={onRemoveCompanion}
-              className="text-xs text-red-400 hover:text-red-300"
+              className="min-h-11 px-2 text-xs text-red-400 hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
             >
               {tDeckBuilder("commanderPanel.companion.remove")}
             </button>
@@ -563,7 +563,7 @@ function LimitedCompanionPanel({
                 onClick={() => onSetCompanion(name)}
                 onMouseEnter={() => onCardHover?.({ name })}
                 onMouseLeave={() => onCardHover?.(null)}
-                className="block w-full truncate rounded bg-blue-800/40 px-2 py-1 text-left text-xs text-blue-300 hover:bg-blue-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
+                className="block min-h-11 w-full truncate rounded bg-blue-800/40 px-2 py-1 text-left text-xs text-blue-300 hover:bg-blue-700/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
               >
                 {name}
               </button>
