@@ -1573,11 +1573,22 @@ pub(crate) fn activatable_land_mana_options_indexed_gated(
 /// precomputes the TapsForMana trigger-source list once
 /// (`taps_for_mana_trigger_sources`) and threads it through each land, avoiding
 /// a per-land full-battlefield scan. Byte-identical to a per-land form.
+#[cfg(test)]
 pub(crate) fn auto_tap_land_mana_options_indexed(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     aura_sources: &[ObjectId],
+) -> Vec<ManaSourceOption> {
+    auto_tap_land_mana_options_indexed_gated(state, object_id, controller, aura_sources, None)
+}
+
+pub(crate) fn auto_tap_land_mana_options_indexed_gated(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    aura_sources: &[ObjectId],
+    gates: Option<&mana_abilities::ManaActivationGates>,
 ) -> Vec<ManaSourceOption> {
     land_mana_options(
         state,
@@ -1586,7 +1597,7 @@ pub(crate) fn auto_tap_land_mana_options_indexed(
         true,
         false,
         Some(aura_sources),
-        None,
+        gates,
     )
 }
 
@@ -1876,6 +1887,15 @@ pub(crate) fn auto_tap_mana_options(
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Vec<ManaSourceOption> {
+    auto_tap_mana_options_gated(state, object_id, controller, None)
+}
+
+pub(crate) fn auto_tap_mana_options_gated(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    gates: Option<&mana_abilities::ManaActivationGates>,
+) -> Vec<ManaSourceOption> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
@@ -1898,7 +1918,7 @@ pub(crate) fn auto_tap_mana_options(
     {
         return Vec::new();
     }
-    scan_mana_abilities(state, obj, object_id, controller, false, None)
+    scan_mana_abilities(state, obj, object_id, controller, false, gates)
 }
 
 /// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
@@ -2641,18 +2661,12 @@ fn land_mana_options(
             // (phased-out, detained, tapped/can't-tap, summoning sickness,
             // CantBeActivated/CantActivateDuring, static activation
             // restrictions) must apply to it too, not just the two activation-
-            // prohibition statics. Mirrors the `require_current_payability`
-            // gating `is_active_tap_mana_ability` applies to a real ability: the
-            // auto-tap PLANNING pass (`require_current_payability == false`)
-            // does not consult per-source legality gates for ANY mana source,
-            // real or intrinsic, so this only fires on the interactive/
-            // legal-action path.
-            let blocked = require_current_payability
-                && mana_type_to_color(mana_type).is_some_and(|color| {
-                    mana_abilities::intrinsic_land_mana_ability_blocked(
-                        state, controller, object_id, color, gates,
-                    )
-                });
+            // prohibition statics.
+            let blocked = mana_type_to_color(mana_type).is_some_and(|color| {
+                mana_abilities::intrinsic_land_mana_ability_blocked(
+                    state, controller, object_id, color, gates,
+                )
+            });
             if !blocked {
                 options.push(ManaSourceOption {
                     object_id,
@@ -2755,30 +2769,38 @@ fn is_active_tap_mana_ability(
     if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
         return false;
     }
-    if require_current_payability {
-        let activatable = match gates {
-            Some(gates) => mana_abilities::can_activate_mana_ability_now_gated(
-                state,
-                controller,
-                object_id,
-                ability_index,
-                ability,
-                gates,
-            ),
-            None => mana_abilities::can_activate_mana_ability_now(
-                state,
-                controller,
-                object_id,
-                ability_index,
-                ability,
-            ),
-        };
-        if !activatable {
-            return false;
-        }
-    }
     if !has_tap_component(&ability.cost) && !has_unambiguous_self_sacrifice_component(&ability.cost)
     {
+        return false;
+    }
+    let default_gates;
+    let gates = match gates {
+        Some(gates) => gates,
+        None => {
+            default_gates = mana_abilities::ManaActivationGates::compute(state);
+            &default_gates
+        }
+    };
+    if require_current_payability {
+        if !mana_abilities::can_activate_mana_ability_now_gated(
+            state,
+            controller,
+            object_id,
+            ability_index,
+            ability,
+            gates,
+        ) {
+            return false;
+        }
+    } else if !mana_abilities::mana_ability_ready_without_simulation_gated(
+        state,
+        controller,
+        object_id,
+        ability_index,
+        ability,
+        false,
+        gates,
+    ) {
         return false;
     }
     activation_condition_satisfied(state, controller, object_id, ability_index, ability)
@@ -2797,28 +2819,6 @@ fn scan_mana_abilities(
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
     for (ability_index, ability) in obj.abilities.iter().enumerate() {
-        // CR 106.12 + CR 302.6 + CR 107.6: On the auto-tap path
-        // (`require_current_payability == false`) `is_active_tap_mana_ability`
-        // does not consult the current-payability gate, so a `{T}`/`{Q}` ability
-        // of a *tapped* or summoning-sick source would otherwise be offered.
-        // This can only be reached when the object-level tapped/summoning-sick
-        // prefilter was skipped because the source carries a tapless
-        // self-sacrifice mana ability (Gold); its own `{T}` abilities (if any)
-        // must still be excluded here. A pure cost/field check — no legality
-        // simulation, so it never triggers a readiness call and leaves the
-        // `require_current_payability == true` callers (which already gate via
-        // `can_activate_mana_ability_now`) untouched.
-        if !require_current_payability
-            && (has_tap_component(&ability.cost) || has_untap_component(&ability.cost))
-        {
-            let tap_gated = has_tap_component(&ability.cost)
-                && (obj.tapped || restrictions::object_cant_tap(state, object_id));
-            let untap_gated = has_untap_component(&ability.cost) && !obj.tapped;
-            let sick_gated = restrictions::summoning_sick_for_tap_ability(state, obj);
-            if tap_gated || untap_gated || sick_gated {
-                continue;
-            }
-        }
         if !is_active_tap_mana_ability(
             state,
             object_id,

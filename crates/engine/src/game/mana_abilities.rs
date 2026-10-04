@@ -571,6 +571,17 @@ pub(super) fn resolve_mana_ability_excluding(
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
     let waiting_before = state.waiting_for.clone();
+    // CR 602.5: Defense-in-depth: enforce activation prohibitions at resolution time.
+    if super::casting::is_blocked_by_cant_be_activated(state, player, source_id, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if super::casting::is_blocked_by_cant_activate_during(state, player, ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Activated abilities can't be activated at this time (CR 602.5)".to_string(),
+        ));
+    }
     let ability_index = state.objects.get(&source_id).and_then(|object| {
         object
             .abilities
@@ -1723,6 +1734,7 @@ pub(crate) fn intrinsic_land_mana_ability_blocked(
             object_id,
             0,
             &ability_def,
+            true,
             gates,
         ),
         None => {
@@ -1749,16 +1761,18 @@ fn mana_ability_ready_without_simulation(
         source_id,
         ability_index,
         ability_def,
+        true,
         &gates,
     )
 }
 
-fn mana_ability_ready_without_simulation_gated(
+pub(crate) fn mana_ability_ready_without_simulation_gated(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     ability_def: &AbilityDefinition,
+    require_current_payability: bool,
     gates: &ManaActivationGates,
 ) -> bool {
     let Some(obj) = state.objects.get(&source_id) else {
@@ -1849,11 +1863,16 @@ fn mana_ability_ready_without_simulation_gated(
     {
         return false;
     }
-    // CR 605.3a + CR 601.2h: The mana sub-cost (pool + choice-of-object) must be
-    // currently payable. is_payable_for_mana_ability's Mana arm uses auto_tap with
-    // require_current_payability=false, so it does not recurse here.
+    // CR 605.3a + CR 601.2h: When require_current_payability is true, the mana sub-cost
+    // (pool + choice-of-object) must be currently payable. When false (auto-tap planning),
+    // non-mana cost components must still be payable (e.g. sacrifice not prohibited by Yasharn),
+    // while mana sub-costs are deferred to auto-tap Phase 3.
     if let Some(cost) = &ability_def.cost {
-        if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
+        if require_current_payability {
+            if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
+                return false;
+            }
+        } else if !cost.is_payable_for_mana_ability_planning(state, player, source_id) {
             return false;
         }
     }
@@ -1963,6 +1982,7 @@ pub fn can_activate_mana_ability_now_gated(
         source_id,
         ability_index,
         ability_def,
+        true,
         gates,
     ) {
         return false;
