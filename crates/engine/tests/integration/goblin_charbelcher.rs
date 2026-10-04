@@ -9,6 +9,7 @@
 //! included, goes to the library bottom.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -244,8 +245,6 @@ fn pile_is_placed_after_damage_and_its_replacement() {
 /// engine's own copy keeps the full population for its quantity readers.
 #[test]
 fn revealed_population_is_not_exposed_in_any_audiences_payload() {
-    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
-
     let (mut runner, revealed, _deep) = stage(3, "Forest", "Forest");
     activate_and_finish(&mut runner, &revealed);
 
