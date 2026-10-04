@@ -53,11 +53,21 @@ pub fn resolve(
     // CR 115.1c + CR 602.2b: a "target" in the substitute (Words of War's "any
     // target") was chosen as this ability was activated and surfaced as this
     // node's target slot; hand those chosen targets to the substitute.
-    let substitute = build_resolved_from_def_with_targets(
+    let mut substitute = build_resolved_from_def_with_targets(
         replacement_effect,
         ability.source_id,
         ability.controller,
         ability.targets.clone(),
+    );
+    // CR 400.7: freeze the announced object identities in the stored substitute;
+    // a later draw must not affect a new incarnation after a zone change.
+    substitute.set_target_incarnations_recursive(
+        ability
+            .target_incarnations
+            .iter()
+            .chain(&ability.selected_target_incarnations)
+            .cloned()
+            .collect(),
     );
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution

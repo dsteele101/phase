@@ -3843,6 +3843,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 "replacement_effect".into(),
                 crate::types::ability::effect_variant_name(&replacement_effect.effect).to_string(),
             ));
+            if let Some(scope) = &replacement_effect.player_scope {
+                d.push(("replacement_player_scope".into(), fmt_player_filter(scope)));
+            }
         }
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             d.push((
@@ -13763,6 +13766,18 @@ mod tests {
     ///
     /// Discriminating by construction: the two counts render differently, and
     /// the no-count form emits no `dynamic_count` detail at all.
+    #[test]
+    fn draw_replacement_details_distinguish_substitute_player_scope() {
+        let make = |scope| Effect::CreateDrawReplacement {
+            replacement_effect: Box::new(
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).player_scope(scope),
+            ),
+        };
+        let each_player = make(PlayerFilter::All);
+        let each_opponent = make(PlayerFilter::Opponent);
+        assert_ne!(effect_details(&each_player), effect_details(&each_opponent));
+    }
+
     #[test]
     fn modify_cost_dynamic_count_is_surfaced_in_static_details() {
         let with_shared = StaticDefinition::new(StaticMode::ModifyCost {

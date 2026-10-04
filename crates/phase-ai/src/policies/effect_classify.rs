@@ -497,6 +497,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
 /// Extract the target filter from an effect, if present.
 pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            extract_target_filter(&replacement_effect.effect)
+        }
         // Beneficial effects
         Effect::Pump { target, .. }
         | Effect::PutCounter { target, .. }
@@ -2031,12 +2034,15 @@ mod grant_trigger_polarity_tests {
             excess: None,
         });
         assert_eq!(effect_polarity(&damage), EffectPolarity::Harmful);
+        assert_eq!(extract_target_filter(&damage), Some(&TargetFilter::Any));
         let pump = wrap(Effect::Pump {
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
             target: TargetFilter::Any,
         });
         assert_eq!(effect_polarity(&pump), EffectPolarity::Beneficial);
+        assert_eq!(extract_target_filter(&pump), Some(&TargetFilter::Any));
+        assert_eq!(extract_target_filter(&wrap(Effect::NoOp)), None);
     }
 
     #[test]

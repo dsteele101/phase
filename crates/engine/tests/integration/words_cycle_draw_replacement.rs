@@ -212,6 +212,58 @@ fn words_of_war_still_replaces_draw_when_target_left() {
         p1_life,
         "the damage is not redirected anywhere else"
     );
+    assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+}
+
+/// CR 400.7 + CR 614.6: the stored substitute keeps the announced target's
+/// identity; blinking it after shield installation does not make its new
+/// incarnation a damage recipient, while the next draw is still replaced.
+#[test]
+fn words_of_war_does_not_damage_a_target_that_left_and_returned() {
+    let Setup {
+        mut scenario,
+        words,
+        drawer,
+        library_top,
+    } = setup("Words of War", WORDS_OF_WAR, 1);
+    let bear = scenario.add_creature(P0, "Blink Target", 2, 3).id();
+    let blink = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Blink Probe",
+            "{T}: Exile target creature you control, then return it to the battlefield under its owner's control.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let announced_incarnation = runner.state().objects[&bear].incarnation;
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).target_object(bear).resolve();
+    resolve_stack(&mut runner);
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        1,
+        "reach-guard: Words installed its replacement before the blink"
+    );
+
+    let index = first_ability_index(&runner, blink);
+    runner.activate(blink, index).target_object(bear).resolve();
+    resolve_stack(&mut runner);
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_ne!(
+        runner.state().objects[&bear].incarnation,
+        announced_incarnation,
+        "reach-guard: the production blink returned a new object"
+    );
+
+    draw_one(&mut runner, drawer);
+
+    assert!(!in_hand(&runner, library_top), "the draw remains replaced");
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&bear].damage_marked,
+        0,
+        "the new incarnation must not receive the old target's damage"
+    );
 }
 
 /// CR 608.2b: if Words of War's only target is illegal as the ability tries to
