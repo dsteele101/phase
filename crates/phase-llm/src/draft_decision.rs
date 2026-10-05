@@ -15,6 +15,7 @@ use phase_ai::config::AiDifficulty;
 
 use crate::error::{LlmError, LlmResult};
 use crate::fingerprint::fingerprint_of;
+use crate::format_guidance::draft_format_brief;
 use crate::prompt::{
     decode_choice, difficulty_brief, multi_response_contract, numbered_options,
     option_domain_statement, option_value, untrusted_block, LlmPrompt, RESPONSE_CONTRACT,
@@ -74,11 +75,24 @@ pub fn pick_fingerprint(seat: u8, pack: &[DraftCardInstance]) -> String {
 /// 40-card minimum but CR 903.13f(1) requires at least 60 for Commander draft,
 /// and a Commander drafter told to build 40 is being contradicted by the format
 /// summary in its own user message.
-fn draft_system_prompt(difficulty: AiDifficulty, required: usize, min_deck_size: usize) -> String {
+///
+/// `format_brief` is the drafter's approach to the procedure being drafted
+/// (`draft_format_brief`); it may be empty at the lowest difficulty.
+fn draft_system_prompt(
+    difficulty: AiDifficulty,
+    required: usize,
+    min_deck_size: usize,
+    format_brief: &str,
+) -> String {
+    let format_section = if format_brief.is_empty() {
+        String::new()
+    } else {
+        format!("{format_brief}\n\n")
+    };
     format!(
         "You are drafting a Magic: The Gathering limited deck. You are one seat \
          in the pod and you are building the best {min_deck_size}-card deck you \
-         can from what you take.\n\n{}\n\n{}\n\nThe untrusted data block shows you \
+         can from what you take.\n\n{}\n\n{format_section}{}\n\nThe untrusted data block shows you \
          the format, your pool so far, and the pack in front of you as a numbered \
          list. Outside the block, the message states how many cards the pack holds \
          and which numbers are valid; that statement is authoritative. Pick only \
@@ -120,7 +134,12 @@ pub fn build_draft_pick_prompt(
     // instructions that contradict the format summary two lines below it.
     let min_deck_size = view.min_deck_size;
 
-    let system = draft_system_prompt(difficulty, required, min_deck_size);
+    let system = draft_system_prompt(
+        difficulty,
+        required,
+        min_deck_size,
+        &draft_format_brief(view, difficulty),
+    );
 
     let instruction = if required > 1 {
         // CR 903.13b: a Commander Draft seat takes two cards per step.
@@ -565,20 +584,20 @@ mod tests {
     /// publishes for this procedure, not the common case.
     #[test]
     fn the_brief_states_the_engine_published_minimum_deck_size() {
-        let limited = draft_system_prompt(AiDifficulty::Medium, 1, 40);
+        let limited = draft_system_prompt(AiDifficulty::Medium, 1, 40, "");
         assert!(limited.contains("best 40-card deck"), "{limited}");
         assert!(!limited.contains("60-card"), "{limited}");
 
         // A Commander draft seat (CR 903.13f(1)) builds at least 60.
-        let commander = draft_system_prompt(AiDifficulty::Medium, 2, 60);
+        let commander = draft_system_prompt(AiDifficulty::Medium, 2, 60, "");
         assert!(commander.contains("best 60-card deck"), "{commander}");
         assert!(!commander.contains("40-card"), "{commander}");
     }
 
     #[test]
     fn a_multi_card_step_uses_the_multi_pick_reply_contract() {
-        let single = draft_system_prompt(AiDifficulty::Medium, 1, 40);
-        let double = draft_system_prompt(AiDifficulty::Medium, 2, 60);
+        let single = draft_system_prompt(AiDifficulty::Medium, 1, 40, "");
+        let double = draft_system_prompt(AiDifficulty::Medium, 2, 60, "");
         assert!(single.contains("\"choice\": <the number"), "{single}");
         assert!(double.contains("2 option numbers"), "{double}");
     }
@@ -587,5 +606,74 @@ mod tests {
     fn the_lowest_difficulty_drafts_without_oracle_text() {
         assert_eq!(oracle_budget(AiDifficulty::VeryEasy), 0);
         assert!(oracle_budget(AiDifficulty::VeryHard) > 0);
+    }
+
+    // ── Format guidance ──────────────────────────────────────────────────
+
+    fn prompt_for(view: &DraftPlayerView, difficulty: AiDifficulty) -> String {
+        build_draft_pick_prompt(0, view, difficulty, None, &SetNames::new())
+            .unwrap()
+            .prompt
+            .system
+    }
+
+    #[test]
+    fn each_draft_kind_gets_its_own_approach() {
+        use draft_core::types::DraftKind;
+
+        let mut view = view_with(pack(), vec![]);
+        let mut seen = Vec::new();
+        for (kind, marker) in [
+            (DraftKind::Quick, "Booster draft"),
+            (DraftKind::Premier, "Booster draft"),
+            (DraftKind::Traditional, "Booster draft"),
+            (DraftKind::Sealed, "Sealed deck"),
+            (DraftKind::CommanderDraft, "Commander draft"),
+            (DraftKind::Winston, "Winston draft"),
+        ] {
+            view.kind = kind;
+            let system = prompt_for(&view, AiDifficulty::Medium);
+            assert!(system.contains(marker), "{kind:?}: {system}");
+            seen.push(marker);
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn a_cube_draft_adds_cube_guidance_and_a_set_draft_does_not() {
+        use draft_core::view::DraftSourceView;
+
+        let mut view = view_with(pack(), vec![]);
+        assert!(!prompt_for(&view, AiDifficulty::Medium).contains("This is a cube"));
+
+        view.source = DraftSourceView::Cube {
+            id: "vintage".to_string(),
+            name: "Vintage Cube".to_string(),
+        };
+        assert!(prompt_for(&view, AiDifficulty::Medium).contains("This is a cube"));
+    }
+
+    #[test]
+    fn the_lowest_difficulty_drafts_without_format_guidance() {
+        let view = view_with(pack(), vec![]);
+        let system = prompt_for(&view, AiDifficulty::VeryEasy);
+        assert!(!system.contains("Booster draft"), "{system}");
+        assert!(!system.contains("\n\n\n"), "{system}");
+    }
+
+    /// CR 903.13f(1): a Commander drafter builds at least 60 cards, so no part
+    /// of its guidance may tell it to build 40.
+    #[test]
+    fn commander_draft_guidance_does_not_contradict_the_deck_minimum() {
+        use draft_core::types::DraftKind;
+
+        let mut view = view_with(pack(), vec![]);
+        view.kind = DraftKind::CommanderDraft;
+        view.min_deck_size = 60;
+        let system = prompt_for(&view, AiDifficulty::Medium);
+        assert!(!system.contains("40-card"), "{system}");
+        assert!(!system.contains("40 cards"), "{system}");
     }
 }
