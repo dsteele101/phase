@@ -364,7 +364,7 @@ describe("persisted store hydration", () => {
 
       expect(useLlmStore.getState().seatBindings).toEqual({});
       // The read path that would have thrown.
-      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 0, [])).toBeUndefined();
     }
   });
 

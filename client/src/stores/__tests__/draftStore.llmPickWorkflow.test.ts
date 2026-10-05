@@ -6,6 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { DraftRunState } from "../../services/quickDraftPersistence";
+import type { LlmProviderCatalogEntry } from "../../services/llm/types";
+
+const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
+vi.mock("../../services/llm/catalog", () => catalogMock);
+
+const CATALOG: LlmProviderCatalogEntry[] = [{
+  provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
+  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+}];
 
 /**
  * End-to-end pick workflow for an LLM-driven draft, exercised through the real
@@ -138,6 +147,7 @@ async function startDraft(): Promise<void> {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  catalogMock.loadProviderCatalog.mockResolvedValue(CATALOG);
   vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
   persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
   useDraftStore.getState().reset();
@@ -164,6 +174,66 @@ afterEach(() => {
 });
 
 describe("LLM draft pick workflow", () => {
+  it("skips catalog loading when drafting is not opted in", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    wasm.submit_pick.mockReturnValue(view([card("picked")]));
+
+    await useDraftStore.getState().pickCard("picked");
+
+    expect(catalogMock.loadProviderCatalog).not.toHaveBeenCalled();
+    expect(wasm.submit_pick).toHaveBeenCalledWith("picked");
+  });
+
+  it("submits ordinarily when catalog metadata is unavailable", async () => {
+    catalogMock.loadProviderCatalog.mockResolvedValue([]);
+    wasm.submit_pick.mockReturnValue(view([card("picked")]));
+
+    await useDraftStore.getState().pickCard("picked");
+
+    expect(wasm.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(transport.executeLlmRequest).not.toHaveBeenCalled();
+    expect(wasm.submit_pick).toHaveBeenCalledWith("picked");
+  });
+
+  it("does not collect or submit after the draft changes during catalog loading", async () => {
+    let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+    catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+      resolveCatalog = resolve;
+    }));
+    const pick = useDraftStore.getState().pickCard("picked");
+    useDraftStore.getState().reset();
+    resolveCatalog(CATALOG);
+
+    expect(await pick).toEqual({ status: "ignored", reason: "stale" });
+    expect(wasm.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(transport.executeLlmRequest).not.toHaveBeenCalled();
+    expect(wasm.submitPickWithLlmBotPicks).not.toHaveBeenCalled();
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
+  });
+
+  it("uses the current draft profile after catalog loading", async () => {
+    let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+    catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+      resolveCatalog = resolve;
+    }));
+    const nextId = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "new-key", baseUrl: "https://new.example/v1", enabled: true,
+    });
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: "{}" });
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("picked")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+    const pick = useDraftStore.getState().pickCard("picked");
+    useLlmStore.getState().setDraftProfileId(nextId);
+    resolveCatalog(CATALOG);
+
+    expect(await pick).toEqual({ status: "acknowledged" });
+    const [endpointJson] = wasm.buildLlmDraftPickRequests.mock.calls[0] as string[];
+    const endpoint = JSON.parse(endpointJson);
+    expect(endpoint).toMatchObject({ baseUrl: "https://new.example/v1", apiKey: "new-key" });
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalled();
+  });
+
   it("drives the engine, the breaker and the fallback from a rejected status-bearing response", async () => {
     // The provider answers, but with a 401 — bytes that are NOT a usable pick.
     transport.executeLlmRequest.mockResolvedValue({

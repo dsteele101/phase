@@ -5,7 +5,13 @@ import "../../../test/helpers/persistedStorage";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../services/llm/catalog", () => ({ loadProviderCatalog: async () => [] }));
+vi.mock("../../../services/llm/catalog", () => ({
+  loadProviderCatalog: async () => [
+    { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
+    { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
+    { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [] },
+  ],
+}));
 const probe = vi.hoisted(() => ({
   testLlmEndpoint: vi.fn<() => Promise<{ ok: true }>>(async () => ({ ok: true })),
 }));
@@ -42,34 +48,43 @@ function addProfile(patch: Parameters<ReturnType<typeof useLlmStore.getState>["a
 }
 
 describe("default-opponent prompt on a provider card", () => {
-  it("is offered for a usable provider, and one click makes it the default", () => {
+  it("is offered for a usable provider, and one click makes it the default", async () => {
     const id = addProfile({});
     render(<LlmOpponentsSection />);
 
-    fireEvent.click(screen.getByRole("button", { name: /use as default/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /use as default/i }));
 
     expect(useLlmStore.getState().defaultOpponentProfileId).toBe(id);
-    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+    expect(profileForSeat(useLlmStore.getState(), 0, [{ provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] }])?.id).toBe(id);
   });
 
-  it("collapses to a badge once the provider is the default", () => {
+  it("collapses to a badge once the provider is the default", async () => {
     const id = addProfile({});
     useLlmStore.getState().setDefaultOpponentProfileId(id);
     render(<LlmOpponentsSection />);
 
     expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /use as default/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent(/default opponent/i);
+    expect(await screen.findByRole("status", { name: "" })).toHaveTextContent(/default opponent/i);
   });
 
-  it("is not offered for a provider the game would ignore", () => {
+  it("is not offered for a provider the game would ignore", async () => {
     // Keys are memory-only, so a reloaded profile has none: it cannot be used,
     // and inviting the player to default to it would set up a silent no-op.
     addProfile({ provider: "OpenAi", apiKey: "" });
     render(<LlmOpponentsSection />);
 
+    expect(await screen.findByText(/enter your API key again/i)).toBeInTheDocument();
     expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /use as default/i })).not.toBeInTheDocument();
+  });
+
+  it("offers a catalog-keyless provider without a key", async () => {
+    addProfile({ provider: "OpenAiCompatible", model: "llama3", apiKey: "" });
+    render(<LlmOpponentsSection />);
+
+    expect(await screen.findByRole("button", { name: /use as default/i })).toBeInTheDocument();
+    expect(screen.queryByText(/enter your API key again/i)).not.toBeInTheDocument();
   });
 
   it("is not offered for a disabled provider", () => {
@@ -82,7 +97,7 @@ describe("default-opponent prompt on a provider card", () => {
   it("acknowledges a passing connection test in its wording", async () => {
     addProfile({});
     render(<LlmOpponentsSection />);
-    expect(screen.getByText(PROMPT)).toBeInTheDocument();
+    expect(await screen.findByText(PROMPT)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /test connection/i }));
 

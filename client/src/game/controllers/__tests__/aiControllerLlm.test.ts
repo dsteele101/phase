@@ -13,6 +13,15 @@ import type {
   WaitingFor,
 } from "../../../adapter/types";
 import { buildGameState } from "../../../test/factories/gameStateFactory";
+import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
+
+const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
+vi.mock("../../../services/llm/catalog", () => catalogMock);
+
+const CATALOG: LlmProviderCatalogEntry[] = [{
+  provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
+  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+}];
 
 const dispatchMocks = vi.hoisted(() => ({
   dispatchAiActionProposal: vi.fn<
@@ -111,6 +120,8 @@ beforeEach(() => {
   dispatchMocks.dispatchAiActionProposal.mockReset();
   dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
   llmMocks.executeLlmRequest.mockReset();
+  catalogMock.loadProviderCatalog.mockReset();
+  catalogMock.loadProviderCatalog.mockResolvedValue(CATALOG);
   debugMocks.debugLog.mockReset();
   useLlmStore.setState({
     profiles: [],
@@ -138,6 +149,102 @@ afterEach(() => {
 });
 
 describe("LLM-driven AI seats", () => {
+  it("takes the heuristic path when catalog metadata is unavailable", async () => {
+    bindSeatToProvider();
+    catalogMock.loadProviderCatalog.mockResolvedValue([]);
+    const heuristic = proposal(PASS, "heuristic");
+    const buildLlmDecisionRequest = vi.fn();
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
+    controller.dispose();
+  });
+
+  it.each(["stop", "session replacement"])(
+    "does not start provider or heuristic work after catalog settles on %s",
+    async (invalidation) => {
+      bindSeatToProvider();
+      let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+      catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+        resolveCatalog = resolve;
+      }));
+      const getAiActionProposal = vi.fn(async () => proposal(PASS, "heuristic"));
+      const buildLlmDecisionRequest = vi.fn();
+      storeState.adapter = {
+        getAiActionProposal, buildLlmDecisionRequest,
+        getAiActionProposalFromLlmResponse: vi.fn(),
+      };
+      const controller = createAIController({
+        seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+      });
+      controller.start();
+      await Promise.resolve();
+      if (invalidation === "stop") controller.stop();
+      else storeState.gameSessionGeneration += 1;
+      resolveCatalog(CATALOG);
+      await runOnce();
+
+      expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
+      expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+      expect(getAiActionProposal).not.toHaveBeenCalled();
+      expect(dispatchMocks.dispatchAiActionProposal).not.toHaveBeenCalled();
+      controller.dispose();
+    },
+  );
+
+  it("uses the live seat binding after a catalog wait", async () => {
+    bindSeatToProvider();
+    let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+    catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+      resolveCatalog = resolve;
+    }));
+    const newId = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "new-key", baseUrl: "https://new.example/v1", enabled: true,
+    });
+    const buildLlmDecisionRequest = vi.fn<
+      (
+        difficulty: string,
+        playerId: number,
+        endpointJson: string,
+        historyJson: string,
+      ) => Promise<LlmDecisionRequestResult>
+    >(async () => ({
+      fingerprint: "fp-2", optionCount: 2, request: HTTP_SPEC,
+    }));
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: "{}" });
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => proposal(PASS, "heuristic")),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(async () => ({ proposal: proposal(CAST, "llm-bound") })),
+    };
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await Promise.resolve();
+    useLlmStore.getState().bindSeat(0, newId);
+    resolveCatalog(CATALOG);
+    await runOnce();
+
+    const endpointJson = buildLlmDecisionRequest.mock.calls[0]?.[2] ?? "";
+    expect(JSON.parse(endpointJson)).toMatchObject({ baseUrl: "https://new.example/v1", apiKey: "new-key" });
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(proposal(CAST, "llm-bound"));
+    controller.dispose();
+  });
+
   it("never touches the LLM path when no provider is bound to the seat", async () => {
     const heuristic = proposal(PASS, "heuristic");
     const buildLlmDecisionRequest = vi.fn();

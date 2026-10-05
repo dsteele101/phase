@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import { LLM_ENDPOINTS_KEY } from "../constants/storage";
-import type { LlmProfile, LlmProviderId } from "../services/llm/types";
+import type { LlmProfile, LlmProviderCatalogEntry, LlmProviderId } from "../services/llm/types";
 
 /**
  * How a profile is persisted: everything except the credential.
@@ -252,22 +252,13 @@ function retargetsCredential(profile: LlmProfile, patch: Partial<LlmProfile>): b
   return providerMoved || endpointMoved;
 }
 
-/**
- * Providers that run without a credential. Mirrors
- * `LlmProvider::requires_api_key` in `crates/phase-llm/src/provider.rs`, which
- * is the authority; this literal exists only so the synchronous usability gate
- * below does not wait on the async catalog.
- */
-const KEYLESS_PROVIDERS: readonly LlmProviderId[] = ["OpenAiCompatible"];
-
-/** Whether this provider refuses to build a request without an API key. */
-export function providerRequiresApiKey(provider: LlmProviderId): boolean {
-  return !KEYLESS_PROVIDERS.includes(provider);
-}
-
 /** An enabled profile that names a model but lacks the key its provider needs. */
-export function isMissingApiKey(profile: LlmProfile): boolean {
-  return providerRequiresApiKey(profile.provider) && profile.apiKey.trim() === "";
+export function isMissingApiKey(
+  profile: LlmProfile,
+  catalog: readonly LlmProviderCatalogEntry[],
+): boolean {
+  return catalog.find((row) => row.provider === profile.provider)?.requiresApiKey === true
+    && profile.apiKey.trim() === "";
 }
 
 /**
@@ -281,8 +272,13 @@ export function isMissingApiKey(profile: LlmProfile): boolean {
  * a draft and then silently do nothing, with no request ever sent. Gating here
  * keeps it out of both until the key is entered again.
  */
-export function isProfileUsable(profile: LlmProfile | undefined): profile is LlmProfile {
-  return Boolean(profile?.enabled && profile.model.trim() && !isMissingApiKey(profile));
+export function isProfileUsable(
+  profile: LlmProfile | undefined,
+  catalog: readonly LlmProviderCatalogEntry[],
+): profile is LlmProfile {
+  return Boolean(profile?.enabled && profile.model.trim()
+    && catalog.some((row) => row.provider === profile.provider)
+    && !isMissingApiKey(profile, catalog));
 }
 
 export const useLlmStore = create<LlmState>()(
@@ -443,18 +439,25 @@ export const useLlmStore = create<LlmState>()(
  * opponent. This is the single authority the setup picker and the game loop
  * both read, so what the picker shows is what the game will do.
  */
-export function profileForSeat(state: LlmState, seatIndex: number): LlmProfile | undefined {
+export function profileForSeat(
+  state: LlmState,
+  seatIndex: number,
+  catalog: readonly LlmProviderCatalogEntry[],
+): LlmProfile | undefined {
   const choice = state.seatBindings[seatIndex];
   const id = choice === undefined ? state.defaultOpponentProfileId : choice;
   if (!id) return undefined;
   const profile = state.profiles.find((candidate) => candidate.id === id);
-  return isProfileUsable(profile) ? profile : undefined;
+  return isProfileUsable(profile, catalog) ? profile : undefined;
 }
 
 /** The profile LLM drafters use, or `undefined` when drafting stays heuristic. */
-export function draftProfile(state: LlmState): LlmProfile | undefined {
+export function draftProfile(
+  state: LlmState,
+  catalog: readonly LlmProviderCatalogEntry[],
+): LlmProfile | undefined {
   if (!state.draftEnabled) return undefined;
   const explicit = state.profiles.find((profile) => profile.id === state.draftProfileId);
-  if (isProfileUsable(explicit)) return explicit;
-  return state.profiles.find(isProfileUsable);
+  if (isProfileUsable(explicit, catalog)) return explicit;
+  return state.profiles.find((profile) => isProfileUsable(profile, catalog));
 }

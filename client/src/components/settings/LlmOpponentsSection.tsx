@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { isMissingApiKey, isProfileUsable, useLlmStore } from "../../stores/llmStore";
-import { loadProviderCatalog } from "../../services/llm/catalog";
+import { useLlmProviderCatalog } from "../../hooks/useLlmProviderCatalog";
 import {
   useLlmConnectionTest,
   type LlmTestState,
@@ -53,9 +53,9 @@ export function LlmOpponentsSection() {
   const setDraftEnabled = useLlmStore((s) => s.setDraftEnabled);
   const draftProfileId = useLlmStore((s) => s.draftProfileId);
   const setDraftProfileId = useLlmStore((s) => s.setDraftProfileId);
-  const catalog = useProviderCatalog();
+  const catalog = useLlmProviderCatalog();
 
-  const usableProfiles = profiles.filter(isProfileUsable);
+  const usableProfiles = profiles.filter((profile) => isProfileUsable(profile, catalog));
   const defaultOpponent = usableProfiles.find((profile) => profile.id === defaultOpponentProfileId);
 
   return (
@@ -341,7 +341,7 @@ function ProfileCard({
           onChange={(e) => onChange({ apiKey: e.target.value })}
           className={FIELD_CLASS}
         />
-        {profile.enabled && isMissingApiKey(profile) ? (
+        {profile.enabled && isMissingApiKey(profile, catalog) ? (
           <p role="status" className="mt-1 text-[11px] leading-relaxed text-amber-300">
             {t("llm.apiKeyMissing")}
           </p>
@@ -390,7 +390,7 @@ function ProfileCard({
         )}
       </div>
 
-      {isProfileUsable(profile) && (
+      {isProfileUsable(profile, catalog) && (
         <DefaultOpponentPrompt
           connected={test.status === "ok"}
           isDefault={isDefaultOpponent}
@@ -445,23 +445,6 @@ function DefaultOpponentPrompt({
       </button>
     </div>
   );
-}
-
-/** The engine-owned provider catalog. */
-function useProviderCatalog(): LlmProviderCatalogEntry[] {
-  const [catalog, setCatalog] = useState<LlmProviderCatalogEntry[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadProviderCatalog().then((rows) => {
-      if (!cancelled) setCatalog(rows);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return useMemo(() => catalog, [catalog]);
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

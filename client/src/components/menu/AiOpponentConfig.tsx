@@ -15,6 +15,7 @@ import {
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
 import { isProfileUsable, profileForSeat, useLlmStore } from "../../stores/llmStore";
+import { useLlmProviderCatalog } from "../../hooks/useLlmProviderCatalog";
 import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
@@ -475,13 +476,17 @@ function AiSeatPanel({
  */
 function AiBrainPicker({ index }: { index: number }) {
   const { t } = useTranslation("menu");
+  const catalog = useLlmProviderCatalog();
   const profiles = useLlmStore((s) => s.profiles);
   const bindSeat = useLlmStore((s) => s.bindSeat);
   // The same lookup the game loop uses, so a seat that inherits the default
   // opponent shows it here rather than "built-in engine".
-  const driver = useLlmStore((s) => profileForSeat(s, index));
+  const driver = useLlmStore((s) => profileForSeat(s, index, catalog));
 
-  const usable = useMemo(() => profiles.filter(isProfileUsable), [profiles]);
+  const usable = useMemo(
+    () => profiles.filter((profile) => isProfileUsable(profile, catalog)),
+    [profiles, catalog],
+  );
   if (usable.length === 0) return null;
 
   const selected = driver?.id ?? ENGINE_BRAIN;

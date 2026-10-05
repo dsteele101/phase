@@ -5,8 +5,14 @@ import "../../test/helpers/persistedStorage";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { LLM_ENDPOINTS_KEY } from "../../constants/storage";
-import { draftProfile, isProfileUsable, profileForSeat, useLlmStore } from "../llmStore";
-import type { LlmProfile } from "../../services/llm/types";
+import { draftProfile, isMissingApiKey, isProfileUsable, profileForSeat, useLlmStore } from "../llmStore";
+import type { LlmProfile, LlmProviderCatalogEntry } from "../../services/llm/types";
+
+const CATALOG: readonly LlmProviderCatalogEntry[] = [
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
+  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [] },
+];
 
 function reset(): void {
   useLlmStore.setState({
@@ -28,11 +34,35 @@ function addUsable(name: string): string {
 beforeEach(reset);
 
 describe("llmStore", () => {
+  it("uses the catalog row rather than the provider name for credential policy", () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "", enabled: true,
+    });
+    useLlmStore.getState().bindSeat(0, id);
+    useLlmStore.getState().setDraftEnabled(true);
+    const profile = useLlmStore.getState().profiles[0];
+    const keylessRows = [{ ...CATALOG[0], requiresApiKey: false }];
+
+    expect(isMissingApiKey(profile, CATALOG)).toBe(true);
+    expect(isMissingApiKey(profile, keylessRows)).toBe(false);
+    expect(isMissingApiKey(profile, [])).toBe(false);
+    expect(isProfileUsable(profile, CATALOG)).toBe(false);
+    expect(isProfileUsable(profile, keylessRows)).toBe(true);
+    expect(profileForSeat(useLlmStore.getState(), 0, keylessRows)?.id).toBe(id);
+    expect(draftProfile(useLlmStore.getState(), keylessRows)?.id).toBe(id);
+    expect(isProfileUsable(profile, [])).toBe(false);
+    expect(profileForSeat(useLlmStore.getState(), 0, [])).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState(), [])).toBeUndefined();
+
+    useLlmStore.getState().updateProfile(id, { apiKey: "sk-test" });
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(id);
+  });
+
   it("starts with no providers, so no LLM path is reachable", () => {
     const state = useLlmStore.getState();
     expect(state.profiles).toEqual([]);
-    expect(profileForSeat(state, 0)).toBeUndefined();
-    expect(draftProfile(state)).toBeUndefined();
+    expect(profileForSeat(state, 0, CATALOG)).toBeUndefined();
+    expect(draftProfile(state, CATALOG)).toBeUndefined();
   });
 
   it("creates new profiles enabled, yet unreachable until they are complete", () => {
@@ -45,17 +75,17 @@ describe("llmStore", () => {
     expect(started()?.enabled).toBe(true);
     // Enabled is the player's switch, not a promise the profile works: a
     // half-filled endpoint must not be offered to a seat, the default, or a draft.
-    expect(isProfileUsable(started())).toBe(false);
-    expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
-    expect(draftProfile(useLlmStore.getState())).toBeUndefined();
+    expect(isProfileUsable(started(), CATALOG)).toBe(false);
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState(), CATALOG)).toBeUndefined();
 
     // A model alone is not enough for a provider that needs a key.
     useLlmStore.getState().updateProfile(id, { model: "gpt-5" });
-    expect(isProfileUsable(started())).toBe(false);
+    expect(isProfileUsable(started(), CATALOG)).toBe(false);
 
     useLlmStore.getState().updateProfile(id, { apiKey: "sk-test" });
-    expect(isProfileUsable(started())).toBe(true);
-    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+    expect(isProfileUsable(started(), CATALOG)).toBe(true);
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(id);
   });
 
   it("keeps a profile enabled when its provider changes, but never carries its key over", () => {
@@ -66,13 +96,13 @@ describe("llmStore", () => {
     const profile = useLlmStore.getState().profiles.find((p) => p.id === id);
     expect(profile?.enabled).toBe(true);
     expect(profile?.apiKey).toBe("");
-    expect(isProfileUsable(profile)).toBe(false);
+    expect(isProfileUsable(profile, CATALOG)).toBe(false);
   });
 
   it("treats an enabled profile with no model as unusable", () => {
     const id = useLlmStore.getState().addProfile({ enabled: true, model: "   " });
     useLlmStore.getState().bindSeat(0, id);
-    expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
   });
 
   // Keys are memory-only, so every reload rehydrates an enabled profile keyless.
@@ -85,12 +115,12 @@ describe("llmStore", () => {
     useLlmStore.getState().bindSeat(0, id);
     useLlmStore.getState().setDraftEnabled(true);
 
-    expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
-    expect(draftProfile(useLlmStore.getState())).toBeUndefined();
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState(), CATALOG)).toBeUndefined();
 
     useLlmStore.getState().updateProfile(id, { apiKey: "sk-test" });
-    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
-    expect(draftProfile(useLlmStore.getState())?.id).toBe(id);
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(id);
+    expect(draftProfile(useLlmStore.getState(), CATALOG)?.id).toBe(id);
   });
 
   it("lets a keyless provider such as a local server be used without a key", () => {
@@ -101,22 +131,22 @@ describe("llmStore", () => {
       enabled: true,
     });
     useLlmStore.getState().bindSeat(0, id);
-    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(id);
   });
 
   describe("default opponent", () => {
     it("is off by default, so an unchosen seat stays on the built-in AI", () => {
       addUsable("Claude");
       expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
-      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
     });
 
     it("drives every seat the player has not chosen for", () => {
       const id = addUsable("Claude");
       useLlmStore.getState().setDefaultOpponentProfileId(id);
 
-      expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
-      expect(profileForSeat(useLlmStore.getState(), 3)?.id).toBe(id);
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(id);
+      expect(profileForSeat(useLlmStore.getState(), 3, CATALOG)?.id).toBe(id);
     });
 
     it("yields to an explicit choice for a seat, including the built-in engine", () => {
@@ -127,9 +157,9 @@ describe("llmStore", () => {
       useLlmStore.getState().bindSeat(0, other);
       useLlmStore.getState().bindSeat(1, null);
 
-      expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(other);
-      expect(profileForSeat(useLlmStore.getState(), 1)).toBeUndefined();
-      expect(profileForSeat(useLlmStore.getState(), 2)?.id).toBe(fallback);
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(other);
+      expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 2, CATALOG)?.id).toBe(fallback);
     });
 
     it("is not used while its profile is unusable", () => {
@@ -137,7 +167,7 @@ describe("llmStore", () => {
         .getState()
         .addProfile({ model: "gpt-5", provider: "OpenAi", apiKey: "", enabled: true });
       useLlmStore.getState().setDefaultOpponentProfileId(id);
-      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
     });
 
     it("is cleared when its profile is removed", () => {
@@ -161,11 +191,11 @@ describe("llmStore", () => {
   it("binds a seat to a usable profile and unbinds it again", () => {
     const id = addUsable("Claude");
     useLlmStore.getState().bindSeat(1, id);
-    expect(profileForSeat(useLlmStore.getState(), 1)?.id).toBe(id);
-    expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)?.id).toBe(id);
+    expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
 
     useLlmStore.getState().bindSeat(1, null);
-    expect(profileForSeat(useLlmStore.getState(), 1)).toBeUndefined();
+    expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)).toBeUndefined();
   });
 
   it("drops every binding to a removed profile in the same commit", () => {
@@ -179,15 +209,15 @@ describe("llmStore", () => {
     const state = useLlmStore.getState();
     expect(state.seatBindings).toEqual({});
     expect(state.draftProfileId).toBeNull();
-    expect(profileForSeat(state, 0)).toBeUndefined();
+    expect(profileForSeat(state, 0, CATALOG)).toBeUndefined();
   });
 
   it("keeps drafting heuristic until it is explicitly enabled", () => {
     const id = addUsable("Claude");
-    expect(draftProfile(useLlmStore.getState())).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState(), CATALOG)).toBeUndefined();
 
     useLlmStore.getState().setDraftEnabled(true);
-    expect(draftProfile(useLlmStore.getState())?.id).toBe(id);
+    expect(draftProfile(useLlmStore.getState(), CATALOG)?.id).toBe(id);
   });
 
   it("falls back to the first usable profile when the chosen draft profile is gone", () => {
@@ -195,7 +225,7 @@ describe("llmStore", () => {
     useLlmStore.getState().setDraftEnabled(true);
     useLlmStore.getState().setDraftProfileId("no-such-profile");
 
-    expect(draftProfile(useLlmStore.getState())?.id).toBe(first);
+    expect(draftProfile(useLlmStore.getState(), CATALOG)?.id).toBe(first);
   });
 
   it("does not resolve a draft profile when every profile is disabled", () => {
@@ -203,7 +233,7 @@ describe("llmStore", () => {
     useLlmStore.getState().setDraftEnabled(true);
     useLlmStore.getState().updateProfile(id, { enabled: false });
 
-    expect(draftProfile(useLlmStore.getState())).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState(), CATALOG)).toBeUndefined();
   });
 
   it("carries the API key only in the profile record", () => {
@@ -235,7 +265,7 @@ describe("llmStore", () => {
     // An OpenAI key must never be sent to Anthropic.
     expect(profile?.apiKey).toBe("");
     // And the profile is no longer usable until a new key is supplied.
-    expect(isProfileUsable(profile)).toBe(false);
+    expect(isProfileUsable(profile, CATALOG)).toBe(false);
   });
 
   it("keeps the credential when the provider is unchanged", () => {
@@ -312,7 +342,7 @@ describe("llmStore", () => {
 
     const profile = useLlmStore.getState().profiles.find((p) => p.id === id);
     expect(profile?.apiKey).toBe("");
-    expect(isProfileUsable(profile)).toBe(false);
+    expect(isProfileUsable(profile, CATALOG)).toBe(false);
   });
 
   it("drops the credential when the endpoint is cleared back to the default", () => {
