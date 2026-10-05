@@ -206,13 +206,16 @@ describe("LLM-driven AI seats", () => {
 
   it("uses the live seat binding after a catalog wait", async () => {
     bindSeatToProvider();
+    const initialId = useLlmStore.getState().seatBindings[0];
     let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
     catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
       resolveCatalog = resolve;
     }));
+    vi.setSystemTime(Date.now() + 1);
     const newId = useLlmStore.getState().addProfile({
       provider: "OpenAi", model: "gpt-5", apiKey: "new-key", baseUrl: "https://new.example/v1", enabled: true,
     });
+    expect(newId).not.toBe(initialId);
     const buildLlmDecisionRequest = vi.fn<
       (
         difficulty: string,
