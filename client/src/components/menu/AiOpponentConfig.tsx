@@ -14,7 +14,7 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
-import { isProfileUsable, useLlmStore } from "../../stores/llmStore";
+import { isProfileUsable, profileForSeat, useLlmStore } from "../../stores/llmStore";
 import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
@@ -476,14 +476,15 @@ function AiSeatPanel({
 function AiBrainPicker({ index }: { index: number }) {
   const { t } = useTranslation("menu");
   const profiles = useLlmStore((s) => s.profiles);
-  const seatBindings = useLlmStore((s) => s.seatBindings);
   const bindSeat = useLlmStore((s) => s.bindSeat);
+  // The same lookup the game loop uses, so a seat that inherits the default
+  // opponent shows it here rather than "built-in engine".
+  const driver = useLlmStore((s) => profileForSeat(s, index));
 
   const usable = useMemo(() => profiles.filter(isProfileUsable), [profiles]);
   if (usable.length === 0) return null;
 
-  const bound = seatBindings[index];
-  const selected = usable.some((profile) => profile.id === bound) ? bound : ENGINE_BRAIN;
+  const selected = driver?.id ?? ENGINE_BRAIN;
   const items = [
     { value: ENGINE_BRAIN, label: t("aiOpponent.brainEngine") },
     ...usable.map((profile) => ({

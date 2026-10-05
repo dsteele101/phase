@@ -12,13 +12,16 @@ function reset(): void {
   useLlmStore.setState({
     profiles: [],
     seatBindings: {},
+    defaultOpponentProfileId: null,
     draftEnabled: false,
     draftProfileId: null,
   });
 }
 
 function addUsable(name: string): string {
-  const id = useLlmStore.getState().addProfile({ name, model: "gpt-5", enabled: true });
+  const id = useLlmStore
+    .getState()
+    .addProfile({ name, model: "gpt-5", apiKey: "sk-test", enabled: true });
   return id;
 }
 
@@ -32,10 +35,37 @@ describe("llmStore", () => {
     expect(draftProfile(state)).toBeUndefined();
   });
 
-  it("creates new profiles disabled so a half-filled endpoint is never reachable", () => {
+  it("creates new profiles enabled, yet unreachable until they are complete", () => {
     const id = useLlmStore.getState().addProfile();
+    useLlmStore.getState().bindSeat(0, id);
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    useLlmStore.getState().setDraftEnabled(true);
+
+    const started = () => useLlmStore.getState().profiles.find((p) => p.id === id);
+    expect(started()?.enabled).toBe(true);
+    // Enabled is the player's switch, not a promise the profile works: a
+    // half-filled endpoint must not be offered to a seat, the default, or a draft.
+    expect(isProfileUsable(started())).toBe(false);
+    expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState())).toBeUndefined();
+
+    // A model alone is not enough for a provider that needs a key.
+    useLlmStore.getState().updateProfile(id, { model: "gpt-5" });
+    expect(isProfileUsable(started())).toBe(false);
+
+    useLlmStore.getState().updateProfile(id, { apiKey: "sk-test" });
+    expect(isProfileUsable(started())).toBe(true);
+    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+  });
+
+  it("keeps a profile enabled when its provider changes, but never carries its key over", () => {
+    const id = useLlmStore.getState().addProfile({ provider: "OpenAi", model: "gpt-5", apiKey: "sk-openai" });
+
+    useLlmStore.getState().updateProfile(id, { provider: "Anthropic", model: "claude-sonnet-5" });
+
     const profile = useLlmStore.getState().profiles.find((p) => p.id === id);
-    expect(profile?.enabled).toBe(false);
+    expect(profile?.enabled).toBe(true);
+    expect(profile?.apiKey).toBe("");
     expect(isProfileUsable(profile)).toBe(false);
   });
 
@@ -43,6 +73,89 @@ describe("llmStore", () => {
     const id = useLlmStore.getState().addProfile({ enabled: true, model: "   " });
     useLlmStore.getState().bindSeat(0, id);
     expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+  });
+
+  // Keys are memory-only, so every reload rehydrates an enabled profile keyless.
+  // The engine refuses to build a request for it, which used to surface as a
+  // seat that quietly played as the built-in AI and never called the provider.
+  it("treats a key-requiring profile with no key as unusable for seats and drafts", () => {
+    const id = useLlmStore
+      .getState()
+      .addProfile({ model: "gpt-5", provider: "OpenAi", apiKey: "  ", enabled: true });
+    useLlmStore.getState().bindSeat(0, id);
+    useLlmStore.getState().setDraftEnabled(true);
+
+    expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    expect(draftProfile(useLlmStore.getState())).toBeUndefined();
+
+    useLlmStore.getState().updateProfile(id, { apiKey: "sk-test" });
+    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+    expect(draftProfile(useLlmStore.getState())?.id).toBe(id);
+  });
+
+  it("lets a keyless provider such as a local server be used without a key", () => {
+    const id = useLlmStore.getState().addProfile({
+      model: "llama3",
+      provider: "OpenAiCompatible",
+      baseUrl: "http://localhost:11434/v1",
+      enabled: true,
+    });
+    useLlmStore.getState().bindSeat(0, id);
+    expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+  });
+
+  describe("default opponent", () => {
+    it("is off by default, so an unchosen seat stays on the built-in AI", () => {
+      addUsable("Claude");
+      expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    });
+
+    it("drives every seat the player has not chosen for", () => {
+      const id = addUsable("Claude");
+      useLlmStore.getState().setDefaultOpponentProfileId(id);
+
+      expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(id);
+      expect(profileForSeat(useLlmStore.getState(), 3)?.id).toBe(id);
+    });
+
+    it("yields to an explicit choice for a seat, including the built-in engine", () => {
+      const fallback = addUsable("Claude");
+      const other = addUsable("Other");
+      useLlmStore.getState().setDefaultOpponentProfileId(fallback);
+
+      useLlmStore.getState().bindSeat(0, other);
+      useLlmStore.getState().bindSeat(1, null);
+
+      expect(profileForSeat(useLlmStore.getState(), 0)?.id).toBe(other);
+      expect(profileForSeat(useLlmStore.getState(), 1)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 2)?.id).toBe(fallback);
+    });
+
+    it("is not used while its profile is unusable", () => {
+      const id = useLlmStore
+        .getState()
+        .addProfile({ model: "gpt-5", provider: "OpenAi", apiKey: "", enabled: true });
+      useLlmStore.getState().setDefaultOpponentProfileId(id);
+      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+    });
+
+    it("is cleared when its profile is removed", () => {
+      const id = addUsable("Claude");
+      useLlmStore.getState().setDefaultOpponentProfileId(id);
+      useLlmStore.getState().removeProfile(id);
+      expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+    });
+
+    it("persists the default and an explicit engine choice", () => {
+      const id = addUsable("Claude");
+      useLlmStore.getState().setDefaultOpponentProfileId(id);
+      useLlmStore.getState().bindSeat(0, null);
+
+      const raw = JSON.parse(localStorage.getItem(LLM_ENDPOINTS_KEY) ?? "{}");
+      expect(raw.state.defaultOpponentProfileId).toBe(id);
+      expect(raw.state.seatBindings).toEqual({ 0: null });
+    });
   });
 
   it("binds a seat to a usable profile and unbinds it again", () => {

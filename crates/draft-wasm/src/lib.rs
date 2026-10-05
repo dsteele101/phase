@@ -930,7 +930,15 @@ fn resolve_llm_draft_pick(
     ) {
         return Err(phase_llm::LlmError::StaleDecision);
     }
-    let Some(Some(pack)) = draft_session.current_pack.get(usize::from(response.seat)) else {
+    // The pack is read through the same per-seat projection the request was
+    // built from, never from `session.current_pack`. The projection can reorder
+    // a pack for presentation (a set draft lists it by rarity), and the prompt's
+    // numbered options, the fingerprint and the model's reply all speak in THAT
+    // order. Fingerprinting or indexing the raw pack instead would refuse every
+    // reply as stale, and where it did match would resolve the model's option
+    // number to a different card.
+    let view = filter_for_player(draft_session, response.seat);
+    let Some(pack) = view.current_pack.as_deref().filter(|pack| !pack.is_empty()) else {
         return Err(phase_llm::LlmError::StaleDecision);
     };
     let provider = phase_llm::LlmProvider::from_label(&response.provider);
@@ -940,7 +948,7 @@ fn resolve_llm_draft_pick(
     let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
     phase_llm::select_picks(
         response.seat,
-        &pack.0,
+        pack,
         required,
         &response.fingerprint,
         &completion,
@@ -2318,6 +2326,156 @@ mod shared_stack_bot_loop_tests {
         let deltas = drive_shared_stack_bot_turns(&mut healthy, AiDifficulty::Medium, None, bound)
             .expect("the derived bound is not reachable from a legal state");
         assert!(decisions_in(&deltas).len() > 1);
+    }
+}
+
+#[cfg(test)]
+mod llm_draft_resolution_tests {
+    use super::*;
+    use draft_core::pack_source::FixturePackSource;
+    use engine::types::player::PlayerId;
+
+    /// A Quick pod (seat 0 human, seats 1..8 bots), started and dealt.
+    fn started_quick_pod() -> DraftSession {
+        let config = DraftConfig {
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Quick,
+            pod_size: 8,
+            cards_per_pack: 15,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 20_261_004,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let seats: Vec<DraftSeat> = (0..8)
+            .map(|i| {
+                if i == 0 {
+                    DraftSeat::Human {
+                        player_id: PlayerId(0),
+                        display_name: "Player".to_string(),
+                    }
+                } else {
+                    DraftSeat::Bot {
+                        name: format!("Bot {i}"),
+                    }
+                }
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "LLM-RES".to_string());
+        session::apply(
+            &mut session,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: 15,
+            }),
+        )
+        .expect("a Quick pod starts");
+        session
+    }
+
+    /// A well-formed OpenAI-compatible reply choosing option `choice`.
+    fn reply_choosing(choice: usize) -> String {
+        let content = format!(r#"{{"choice": {choice}, "reason": "test"}}"#);
+        serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] })
+            .to_string()
+    }
+
+    /// The request side's own recipe: the seat's projected view, rendered into a
+    /// prompt whose fingerprint the reply will carry back.
+    fn issued_fingerprint(session: &DraftSession, seat: u8) -> String {
+        let view = filter_for_player(session, seat);
+        phase_llm::build_draft_pick_prompt(
+            seat,
+            &view,
+            AiDifficulty::Medium,
+            None,
+            &phase_llm::draft_decision::set_names_from_pairs(Vec::new()),
+        )
+        .expect("a dealt pack renders")
+        .fingerprint
+    }
+
+    fn response(session: &DraftSession, seat: u8, choice: usize) -> LlmDraftResponse {
+        LlmDraftResponse {
+            seat,
+            fingerprint: issued_fingerprint(session, seat),
+            provider: "OpenAiCompatible".to_string(),
+            status: 200,
+            body: reply_choosing(choice),
+        }
+    }
+
+    /// A set draft presents each pack by rarity, so the order the model reads
+    /// its options in is not the order the session stores the pack in. A reply
+    /// to a request this bridge issued must resolve against the order the
+    /// prompt used: refused as stale, or bound to a different card, would mean
+    /// the LLM never drafts for a set pod at all.
+    #[test]
+    fn a_reply_resolves_against_the_pack_in_the_order_the_prompt_presented() {
+        let mut session = started_quick_pod();
+        // Store seat 1's pack in the reverse of its presented (rarity) order.
+        session.current_pack[1]
+            .as_mut()
+            .expect("seat 1 holds a pack")
+            .0
+            .reverse();
+        let view_pack = filter_for_player(&session, 1)
+            .current_pack
+            .expect("seat 1 is shown its pack");
+        let raw_pack = session.current_pack[1].as_ref().unwrap().0.clone();
+        assert_ne!(
+            view_pack.iter().map(|c| &c.instance_id).collect::<Vec<_>>(),
+            raw_pack.iter().map(|c| &c.instance_id).collect::<Vec<_>>(),
+            "fixture must make the presented order differ from the stored order"
+        );
+
+        let selection = resolve_llm_draft_pick(&session, &response(&session, 1, 0))
+            .expect("a reply to an issued request is not stale");
+
+        assert_eq!(
+            selection.card_instance_ids,
+            vec![view_pack[0].instance_id.clone()],
+            "option 0 is the first card the model was shown"
+        );
+    }
+
+    #[test]
+    fn a_reply_for_a_pack_that_has_moved_on_is_refused_as_stale() {
+        let mut session = started_quick_pod();
+        let stale = response(&session, 1, 0);
+        // The seat's pack changes under the in-flight request.
+        session.current_pack[1].as_mut().unwrap().0.pop();
+
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &stale),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn an_emptied_pack_is_refused_rather_than_resolved() {
+        let mut session = started_quick_pod();
+        let reply = response(&session, 1, 0);
+        session.current_pack[1].as_mut().unwrap().0.clear();
+
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &reply),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
+    }
+
+    #[test]
+    fn a_reply_naming_the_human_seat_is_refused() {
+        let session = started_quick_pod();
+        assert!(matches!(
+            resolve_llm_draft_pick(&session, &response(&session, 0, 0)),
+            Err(phase_llm::LlmError::StaleDecision)
+        ));
     }
 }
 
