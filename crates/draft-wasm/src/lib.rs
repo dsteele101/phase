@@ -680,7 +680,8 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
 pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
     let card_id = card_instance_id.to_string();
     with_draft_mut(|draft_session| {
-        apply_human_pick_and_resolve_bots(draft_session, card_id).map_err(|e| JsValue::from_str(&e))?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)
+            .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -703,7 +704,8 @@ pub fn submit_pick_with_draft_effect(
                 effect_card_instance_id,
                 card_instance_ids,
             },
-        ).map_err(|e| JsValue::from_str(&e))?;
+        )
+        .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -741,7 +743,8 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         });
         RNG.with(|cell| cell.set(Some(rng)));
 
-        apply_human_pick_and_resolve_bots(draft_session, card_id).map_err(|e| JsValue::from_str(&e))?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id)
+            .map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -889,7 +892,9 @@ pub fn submit_pick_with_llm_bot_picks(
 ) -> Result<JsValue, JsValue> {
     let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(card_instance_id, responses_json)
         .map_err(|e| JsValue::from_str(&e))?;
-    Ok(to_js(&serde_json::json!({ "view": view, "llmOutcomes": outcomes })))
+    Ok(to_js(
+        &serde_json::json!({ "view": view, "llmOutcomes": outcomes }),
+    ))
 }
 
 fn submit_pick_with_llm_bot_picks_inner(
@@ -2507,7 +2512,9 @@ mod llm_draft_resolution_tests {
         let projected = filter_for_player(&start, 1).current_pack.unwrap();
         let stored = &start.current_pack[1].as_ref().unwrap().0;
         assert_ne!(projected[0].instance_id, stored[0].instance_id);
-        let human_id = start.current_pack[0].as_ref().unwrap().0[0].instance_id.clone();
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
         DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
         RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
@@ -2531,10 +2538,16 @@ mod llm_draft_resolution_tests {
         let issued = requests.iter().find(|request| request.seat == 1).unwrap();
         assert_eq!(issued.option_count, projected.len());
         assert_eq!(issued.required_pick_count, 1);
-        assert!(issued.request.body.contains(&format!("[{choice}] {}", chosen.name)));
+        assert!(issued
+            .request
+            .body
+            .contains(&format!("[{choice}] {}", chosen.name)));
         let wire = serde_json::to_value(issued).unwrap();
         assert_eq!(wire["seat"].as_u64(), Some(1));
-        assert_eq!(wire["fingerprint"].as_str(), Some(issued.fingerprint.as_str()));
+        assert_eq!(
+            wire["fingerprint"].as_str(),
+            Some(issued.fingerprint.as_str())
+        );
         assert_eq!(wire["optionCount"].as_u64(), Some(projected.len() as u64));
         assert_eq!(wire["requiredPickCount"].as_u64(), Some(1));
         assert_eq!(wire["request"]["method"].as_str(), Some("POST"));
@@ -2545,14 +2558,17 @@ mod llm_draft_resolution_tests {
             "status": 200,
             "body": reply_choosing(choice),
         }]);
-        let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
-            .expect("the issued response submits through the installed draft");
+        let (view, outcomes) =
+            submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+                .expect("the issued response submits through the installed draft");
         assert!(outcomes[0].used);
         assert!(view.pool.iter().any(|card| card.instance_id == human_id));
         session_cell::with_installed(|session| {
             assert_eq!(session.pools[1][0].instance_id, chosen.instance_id);
             assert_ne!(session.pools[1][0].instance_id, ordinary_id);
-            assert!(session.pools[0].iter().any(|card| card.instance_id == human_id));
+            assert!(session.pools[0]
+                .iter()
+                .any(|card| card.instance_id == human_id));
         });
         session_cell::clear();
     }
@@ -2560,7 +2576,9 @@ mod llm_draft_resolution_tests {
     #[test]
     fn submit_core_refuses_human_and_stale_responses_while_valid_bot_and_fallback_advance() {
         let start = started_quick_pod();
-        let human_id = start.current_pack[0].as_ref().unwrap().0[0].instance_id.clone();
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
         session_cell::install(start);
         DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
         CARD_DB.with(|cell| *cell.borrow_mut() = None);
@@ -2581,9 +2599,16 @@ mod llm_draft_resolution_tests {
             { "seat": 1, "fingerprint": stale.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
             { "seat": 2, "fingerprint": valid.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
         ]);
-        let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
-            .expect("invalid LLM responses fall back without blocking the human pick");
-        assert_eq!(outcomes.iter().map(|outcome| outcome.used).collect::<Vec<_>>(), vec![false, false, true]);
+        let (view, outcomes) =
+            submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+                .expect("invalid LLM responses fall back without blocking the human pick");
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.used)
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
         assert_eq!(view.pool.len(), 1);
         session_cell::with_installed(|session| {
             assert_eq!(session.pools[0].len(), 1);
