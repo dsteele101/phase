@@ -305,6 +305,51 @@ describe("LLM draft pick workflow", () => {
     expect(wasm.submit_pick).not.toHaveBeenCalled();
   });
 
+  it("keeps submitting successful LLM picks through four acknowledged rounds", async () => {
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    const pool: DraftCardInstance[] = [];
+
+    for (let round = 0; round < 4; round += 1) {
+      const id = `pick-${round}`;
+      pool.push(card(id));
+      wasm.submitPickWithLlmBotPicks.mockReturnValueOnce({
+        view: view([...pool]), llmOutcomes: [{ seat: 1, used: true }],
+      });
+      expect(await useDraftStore.getState().pickCard(id)).toEqual({ status: "acknowledged" });
+      expect(useDraftStore.getState().view?.pool.map((picked) => picked.instance_id))
+        .toEqual(pool.map((picked) => picked.instance_id));
+      expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
+    }
+
+    expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(4);
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(4);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(4);
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
+  });
+
+  it("resets consecutive refusals after a used pick and still calls the provider on round five", async () => {
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    const pool: DraftCardInstance[] = [];
+    const usedByRound = [false, false, true, false, false];
+
+    for (const [round, used] of usedByRound.entries()) {
+      const id = `mixed-${round}`;
+      pool.push(card(id));
+      wasm.submitPickWithLlmBotPicks.mockReturnValueOnce({
+        view: view([...pool]), llmOutcomes: [{ seat: 1, used }],
+      });
+      expect(await useDraftStore.getState().pickCard(id)).toEqual({ status: "acknowledged" });
+      expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
+    }
+
+    expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(5);
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(5);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(5);
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
+    expect(useDraftStore.getState().view?.pool.map((picked) => picked.instance_id))
+      .toEqual(pool.map((picked) => picked.instance_id));
+  });
+
   it("never asks the client for a seat list — the engine names its own bot seats", async () => {
     transport.executeLlmRequest.mockResolvedValue({
       status: 200,

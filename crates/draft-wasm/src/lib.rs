@@ -12,7 +12,7 @@ use draft_core::pack_generator::PackGenerator;
 use draft_core::session;
 use draft_core::set_pool::LimitedSetPool;
 use draft_core::types::*;
-use draft_core::view::filter_for_player;
+use draft_core::view::{filter_for_player, DraftPlayerView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 
@@ -563,7 +563,7 @@ pub fn start_quick_cube_draft(
 fn apply_human_pick_and_resolve_bots(
     draft_session: &mut DraftSession,
     human_card_id: String,
-) -> Result<(), JsValue> {
+) -> Result<(), String> {
     apply_human_pick_and_resolve_bots_with_action(
         draft_session,
         DraftAction::Pick {
@@ -576,7 +576,7 @@ fn apply_human_pick_and_resolve_bots(
 fn apply_human_pick_and_resolve_bots_with_action(
     draft_session: &mut DraftSession,
     human_action: DraftAction,
-) -> Result<(), JsValue> {
+) -> Result<(), String> {
     apply_human_pick_and_resolve_bots_with_overrides(
         draft_session,
         human_action,
@@ -596,20 +596,18 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
     draft_session: &mut DraftSession,
     human_action: DraftAction,
     overrides: &std::collections::BTreeMap<u8, Vec<String>>,
-) -> Result<(), JsValue> {
+) -> Result<(), String> {
     if !matches!(draft_session.config.kind, DraftKind::Quick) {
-        return Err(JsValue::from_str(
-            "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
-        ));
+        return Err("apply_human_pick_and_resolve_bots is only valid for Quick Draft".to_string());
     }
 
     session::apply(draft_session, human_action, None)
-        .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
+        .map_err(|e| format!("Human pick failed: {e}"))?;
 
     let difficulty = DIFFICULTY.with(|cell| cell.get());
     let mut rng = RNG
         .with(|cell| cell.take())
-        .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        .ok_or_else(|| "RNG not initialized".to_string())?;
 
     let result = CARD_DB.with(|cell| {
         let db_borrow = cell.borrow();
@@ -623,7 +621,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                 continue;
             }
 
-            // CR 903.13b: a bot owes its kind's whole pick step. This loop is
+            // CR 905.1a: a bot owes its kind's one-card Quick Draft pick step. This loop is
             // `Quick`-gated above, so `cards_per_pick` is 1 here today; reading
             // it from the procedure is what keeps that true by construction
             // rather than by coincidence.
@@ -665,10 +663,10 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                 },
                 None,
             )
-            .map_err(|e| JsValue::from_str(&format!("Bot {seat} pick failed: {}", e)))?;
+            .map_err(|e| format!("Bot {seat} pick failed: {e}"))?;
         }
 
-        Ok::<(), JsValue>(())
+        Ok::<(), String>(())
     });
 
     RNG.with(|cell| cell.set(Some(rng)));
@@ -682,7 +680,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
 pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
     let card_id = card_instance_id.to_string();
     with_draft_mut(|draft_session| {
-        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id).map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -705,7 +703,7 @@ pub fn submit_pick_with_draft_effect(
                 effect_card_instance_id,
                 card_instance_ids,
             },
-        )?;
+        ).map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -743,7 +741,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         });
         RNG.with(|cell| cell.set(Some(rng)));
 
-        apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        apply_human_pick_and_resolve_bots(draft_session, card_id).map_err(|e| JsValue::from_str(&e))?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }
@@ -788,6 +786,16 @@ struct LlmDraftOutcome {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDraftPickRequest {
+    seat: u8,
+    fingerprint: String,
+    option_count: usize,
+    required_pick_count: usize,
+    request: phase_llm::HttpRequestSpec,
+}
+
 /// The seats an LLM drafter may act for: the BOT seats of this pod, and nothing
 /// else.
 ///
@@ -825,8 +833,17 @@ pub fn build_llm_draft_pick_requests(
     endpoint_json: &str,
     set_names_json: &str,
 ) -> Result<JsValue, JsValue> {
+    let requests = build_llm_draft_pick_requests_inner(endpoint_json, set_names_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&requests))
+}
+
+fn build_llm_draft_pick_requests_inner(
+    endpoint_json: &str,
+    set_names_json: &str,
+) -> Result<Vec<LlmDraftPickRequest>, String> {
     let endpoint: phase_llm::LlmEndpointConfig = serde_json::from_str(endpoint_json)
-        .map_err(|e| JsValue::from_str(&format!("Invalid LLM endpoint config: {e}")))?;
+        .map_err(|e| format!("Invalid LLM endpoint config: {e}"))?;
     // A missing or unparsable name map degrades the brief to set codes; it is
     // never a reason to refuse a pick.
     let set_names: std::collections::BTreeMap<String, String> =
@@ -834,31 +851,30 @@ pub fn build_llm_draft_pick_requests(
     let set_names = phase_llm::draft_decision::set_names_from_pairs(set_names);
     let difficulty = DIFFICULTY.with(|cell| cell.get());
 
-    with_draft(|draft_session| {
-        let requests: Vec<serde_json::Value> = CARD_DB.with(|cell| {
+    with_draft_inner(|draft_session| {
+        let requests = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
             llm_eligible_bot_seats(draft_session)
                 .into_iter()
                 .filter_map(|seat| {
-                    let seat = &seat;
-                    let view = filter_for_player(draft_session, *seat);
+                    let view = filter_for_player(draft_session, seat);
                     let request = phase_llm::build_draft_pick_prompt(
-                        *seat, &view, difficulty, card_db, &set_names,
+                        seat, &view, difficulty, card_db, &set_names,
                     )
                     .ok()?;
                     let http = phase_llm::build_chat_request(&endpoint, &request.prompt).ok()?;
-                    Some(serde_json::json!({
-                        "seat": seat,
-                        "fingerprint": request.fingerprint,
-                        "optionCount": request.option_count,
-                        "requiredPickCount": request.required_pick_count,
-                        "request": http,
-                    }))
+                    Some(LlmDraftPickRequest {
+                        seat,
+                        fingerprint: request.fingerprint,
+                        option_count: request.option_count,
+                        required_pick_count: request.required_pick_count,
+                        request: http,
+                    })
                 })
                 .collect()
         });
-        to_js(&requests)
+        Ok(requests)
     })
 }
 
@@ -871,11 +887,20 @@ pub fn submit_pick_with_llm_bot_picks(
     card_instance_id: &str,
     responses_json: &str,
 ) -> Result<JsValue, JsValue> {
+    let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(card_instance_id, responses_json)
+        .map_err(|e| JsValue::from_str(&e))?;
+    Ok(to_js(&serde_json::json!({ "view": view, "llmOutcomes": outcomes })))
+}
+
+fn submit_pick_with_llm_bot_picks_inner(
+    card_instance_id: &str,
+    responses_json: &str,
+) -> Result<(DraftPlayerView, Vec<LlmDraftOutcome>), String> {
     let responses: Vec<LlmDraftResponse> = serde_json::from_str(responses_json)
-        .map_err(|e| JsValue::from_str(&format!("Invalid LLM draft responses: {e}")))?;
+        .map_err(|e| format!("Invalid LLM draft responses: {e}"))?;
     let card_id = card_instance_id.to_string();
 
-    with_draft_mut(|draft_session| {
+    with_draft_mut_inner(|draft_session| {
         let mut overrides: std::collections::BTreeMap<u8, Vec<String>> =
             std::collections::BTreeMap::new();
         let mut outcomes: Vec<LlmDraftOutcome> = Vec::with_capacity(responses.len());
@@ -909,10 +934,7 @@ pub fn submit_pick_with_llm_bot_picks(
             &overrides,
         )?;
 
-        Ok(to_js(&serde_json::json!({
-            "view": filter_for_player(draft_session, 0),
-            "llmOutcomes": outcomes,
-        })))
+        Ok((filter_for_player(draft_session, 0), outcomes))
     })
 }
 
@@ -944,7 +966,7 @@ fn resolve_llm_draft_pick(
     let provider = phase_llm::LlmProvider::from_label(&response.provider);
     let completion =
         phase_llm::completion_from_response(provider, response.status, &response.body)?;
-    // CR 903.13b: the step's card count is the procedure's, not the model's.
+    // CR 905.1a / CR 903.13b: the configured procedure supplies the ordinary or Commander Draft pick-step count.
     let required = usize::from(draft_session.config.kind.procedure().cards_per_pick);
     phase_llm::select_picks(
         response.seat,
@@ -2476,6 +2498,100 @@ mod llm_draft_resolution_tests {
             resolve_llm_draft_pick(&session, &response(&session, 0, 0)),
             Err(phase_llm::LlmError::StaleDecision)
         ));
+    }
+
+    #[test]
+    fn issued_rarity_ordered_request_selects_the_specific_bot_pool_card() {
+        let mut start = started_quick_pod();
+        start.current_pack[1].as_mut().unwrap().0.reverse();
+        let projected = filter_for_player(&start, 1).current_pack.unwrap();
+        let stored = &start.current_pack[1].as_ref().unwrap().0;
+        assert_ne!(projected[0].instance_id, stored[0].instance_id);
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0].instance_id.clone();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        let mut ordinary = start.clone();
+        apply_human_pick_and_resolve_bots(&mut ordinary, human_id.clone()).unwrap();
+        let ordinary_id = ordinary.pools[1][0].instance_id.clone();
+        let (choice, chosen) = projected
+            .iter()
+            .enumerate()
+            .find(|(_, card)| card.instance_id != ordinary_id)
+            .expect("the displayed pack offers a non-heuristic option");
+
+        session_cell::install(start);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(42))));
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 7);
+        let issued = requests.iter().find(|request| request.seat == 1).unwrap();
+        assert_eq!(issued.option_count, projected.len());
+        assert_eq!(issued.required_pick_count, 1);
+        assert!(issued.request.body.contains(&format!("[{choice}] {}", chosen.name)));
+        let wire = serde_json::to_value(issued).unwrap();
+        assert_eq!(wire["seat"].as_u64(), Some(1));
+        assert_eq!(wire["fingerprint"].as_str(), Some(issued.fingerprint.as_str()));
+        assert_eq!(wire["optionCount"].as_u64(), Some(projected.len() as u64));
+        assert_eq!(wire["requiredPickCount"].as_u64(), Some(1));
+        assert_eq!(wire["request"]["method"].as_str(), Some("POST"));
+        let responses = serde_json::json!([{
+            "seat": 1,
+            "fingerprint": issued.fingerprint,
+            "provider": "OpenAiCompatible",
+            "status": 200,
+            "body": reply_choosing(choice),
+        }]);
+        let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+            .expect("the issued response submits through the installed draft");
+        assert!(outcomes[0].used);
+        assert!(view.pool.iter().any(|card| card.instance_id == human_id));
+        session_cell::with_installed(|session| {
+            assert_eq!(session.pools[1][0].instance_id, chosen.instance_id);
+            assert_ne!(session.pools[1][0].instance_id, ordinary_id);
+            assert!(session.pools[0].iter().any(|card| card.instance_id == human_id));
+        });
+        session_cell::clear();
+    }
+
+    #[test]
+    fn submit_core_refuses_human_and_stale_responses_while_valid_bot_and_fallback_advance() {
+        let start = started_quick_pod();
+        let human_id = start.current_pack[0].as_ref().unwrap().0[0].instance_id.clone();
+        session_cell::install(start);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(43))));
+        let requests = build_llm_draft_pick_requests_inner(
+            r#"{"provider":"OpenAiCompatible","baseUrl":"https://provider.test/v1","model":"test"}"#,
+            "{}",
+        )
+        .unwrap();
+        assert!(requests.iter().all(|request| request.seat != 0));
+        let stale = requests.iter().find(|request| request.seat == 1).unwrap();
+        let valid = requests.iter().find(|request| request.seat == 2).unwrap();
+        session_cell::with_installed_mut(|session| {
+            session.current_pack[1].as_mut().unwrap().0.pop();
+        });
+        let responses = serde_json::json!([
+            { "seat": 0, "fingerprint": "forged", "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+            { "seat": 1, "fingerprint": stale.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+            { "seat": 2, "fingerprint": valid.fingerprint, "provider": "OpenAiCompatible", "status": 200, "body": reply_choosing(0) },
+        ]);
+        let (view, outcomes) = submit_pick_with_llm_bot_picks_inner(&human_id, &responses.to_string())
+            .expect("invalid LLM responses fall back without blocking the human pick");
+        assert_eq!(outcomes.iter().map(|outcome| outcome.used).collect::<Vec<_>>(), vec![false, false, true]);
+        assert_eq!(view.pool.len(), 1);
+        session_cell::with_installed(|session| {
+            assert_eq!(session.pools[0].len(), 1);
+            assert_eq!(session.pools[0][0].instance_id, human_id);
+            assert_eq!(session.pools[1].len(), 1);
+            assert_eq!(session.pools[2].len(), 1);
+        });
+        session_cell::clear();
     }
 }
 

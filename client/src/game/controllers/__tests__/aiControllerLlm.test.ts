@@ -14,6 +14,7 @@ import type {
 } from "../../../adapter/types";
 import { buildGameState } from "../../../test/factories/gameStateFactory";
 import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
+import { LLM_ENDPOINTS_KEY } from "../../../constants/storage";
 
 const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
 vi.mock("../../../services/llm/catalog", () => catalogMock);
@@ -126,6 +127,7 @@ beforeEach(() => {
   useLlmStore.setState({
     profiles: [],
     seatBindings: {},
+    defaultOpponentProfileId: null,
     draftEnabled: false,
     draftProfileId: null,
   });
@@ -250,6 +252,79 @@ describe("LLM-driven AI seats", () => {
 
   it("never touches the LLM path when no provider is bound to the seat", async () => {
     const heuristic = proposal(PASS, "heuristic");
+    const buildLlmDecisionRequest = vi.fn();
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
+    controller.dispose();
+  });
+
+  it("routes a persisted default through request, transport, binding and dispatch for an unbound seat", async () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "default-key", enabled: true,
+    });
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    expect(useLlmStore.getState().seatBindings[0]).toBeUndefined();
+    const stored = JSON.parse(localStorage.getItem(LLM_ENDPOINTS_KEY) ?? "{}");
+    expect(stored.state.defaultOpponentProfileId).toBe(id);
+    expect(stored.state.profiles[0]).not.toHaveProperty("apiKey");
+    expect(useLlmStore.getState().profiles[0].apiKey).toBe("default-key");
+
+    const llmProposal = proposal(CAST, "default-bound");
+    const buildLlmDecisionRequest = vi.fn<
+      (
+        difficulty: string,
+        playerId: number,
+        endpointJson: string,
+        historyJson: string,
+      ) => Promise<LlmDecisionRequestResult>
+    >(async () => ({
+      fingerprint: "default-fp", optionCount: 2, request: HTTP_SPEC,
+    }));
+    const getAiActionProposalFromLlmResponse = vi.fn(async () => ({ proposal: llmProposal }));
+    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":1}' });
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => proposal(PASS, "heuristic")),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse,
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Hard", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).toHaveBeenCalledWith("Hard", 1, expect.any(String), "[]");
+    const endpointJson = buildLlmDecisionRequest.mock.calls[0]?.[2] ?? "";
+    expect(JSON.parse(endpointJson)).toMatchObject({ provider: "OpenAi", apiKey: "default-key" });
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledWith(HTTP_SPEC, expect.anything());
+    expect(getAiActionProposalFromLlmResponse).toHaveBeenCalledWith(
+      1, "default-fp", "OpenAi", 200, '{"choice":1}',
+    );
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(llmProposal);
+    controller.dispose();
+  });
+
+  it("uses the heuristic proposal for an explicit engine seat despite a usable default", async () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "default-key", enabled: true,
+    });
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    useLlmStore.getState().bindSeat(0, null);
+    const heuristic = proposal(PASS, "explicit-engine");
     const buildLlmDecisionRequest = vi.fn();
     storeState.adapter = {
       getAiActionProposal: vi.fn(async () => heuristic),
