@@ -16,15 +16,21 @@ function renderPicker(value: CardAnimationStyle = "webgl") {
   const view = render(<CardAnimationStylePicker value={value} onChange={onChange} />);
   const group = screen.getByRole("radiogroup", { name: "Card Animations" });
   const videos = Array.from(view.container.querySelectorAll("video"));
-  return { onChange, group, videos };
+  return { onChange, group, videos, rerender: view.rerender };
 }
 
 describe("CardAnimationStylePicker", () => {
   let play: ReturnType<typeof vi.spyOn>;
   let pause: ReturnType<typeof vi.spyOn>;
+  let focusVisible = true;
 
   beforeEach(() => {
     reducedMotion = false;
+    focusVisible = true;
+    const matches = Element.prototype.matches;
+    vi.spyOn(Element.prototype, "matches").mockImplementation(function (this: Element, selector: string) {
+      return selector === ":focus-visible" ? focusVisible : matches.call(this, selector);
+    });
     play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   });
@@ -74,12 +80,14 @@ describe("CardAnimationStylePicker", () => {
   });
 
   it("keeps playing, without restarting, while the pointer stays", () => {
-    const { group } = renderPicker();
+    const { group, onChange } = renderPicker();
 
     fireEvent.pointerEnter(group, { pointerType: "mouse" });
     fireEvent.focus(screen.getByRole("radio", { name: "New" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Classic" }));
 
     expect(play).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledWith("classic");
   });
 
   it("labels the spell on screen as the loop moves between moments", () => {
@@ -119,17 +127,77 @@ describe("CardAnimationStylePicker", () => {
     expect(videos[0].paused).toBe(true);
   });
 
-  it("toggles the preview on a touch tap, since touch has no hover", () => {
-    const { group } = renderPicker();
+  it("toggles both previews when a touch tap changes the selected tile", () => {
+    const { onChange, videos, rerender } = renderPicker();
+    const newTile = screen.getByRole("radio", { name: "New" });
+    const classicTile = screen.getByRole("radio", { name: "Classic" });
+    focusVisible = false;
 
-    fireEvent.pointerEnter(group, { pointerType: "touch" });
+    fireEvent.pointerEnter(newTile, { pointerType: "touch" });
     expect(play).not.toHaveBeenCalled();
 
-    fireEvent.pointerDown(group, { pointerType: "touch" });
+    fireEvent.pointerDown(newTile, { pointerType: "touch" });
+    fireEvent.focus(newTile);
+    fireEvent.click(newTile);
     expect(play).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenLastCalledWith("webgl");
 
-    fireEvent.pointerDown(group, { pointerType: "touch" });
+    fireEvent.pointerDown(classicTile, { pointerType: "touch" });
+    fireEvent.blur(newTile, { relatedTarget: classicTile });
+    fireEvent.focus(classicTile);
+    fireEvent.click(classicTile);
     expect(pause).toHaveBeenCalledTimes(2);
+    expect(play).toHaveBeenCalledTimes(2);
+    expect(videos.map((video) => video.currentTime)).toEqual([
+      CARD_ANIMATION_PREVIEW_MOMENTS[0].peak,
+      CARD_ANIMATION_PREVIEW_MOMENTS[0].peak,
+    ]);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenLastCalledWith("classic");
+
+    rerender(<CardAnimationStylePicker value="classic" onChange={onChange} />);
+    expect(classicTile).toBeChecked();
+    expect(classicTile).toHaveAttribute("tabindex", "0");
+    expect(newTile).not.toBeChecked();
+
+    fireEvent.pointerDown(classicTile, { pointerType: "touch" });
+    fireEvent.click(classicTile);
+    expect(play).toHaveBeenCalledTimes(4);
+
+    fireEvent.pointerDown(classicTile, { pointerType: "touch" });
+    fireEvent.click(classicTile);
+    expect(pause).toHaveBeenCalledTimes(4);
+    expect(play).toHaveBeenCalledTimes(4);
+    expect(videos.map((video) => video.currentTime)).toEqual([
+      CARD_ANIMATION_PREVIEW_MOMENTS[0].peak,
+      CARD_ANIMATION_PREVIEW_MOMENTS[0].peak,
+    ]);
+  });
+
+  it("resumes keyboard preview after touch leaves a tile focused and stopped", () => {
+    const { onChange, videos, rerender } = renderPicker();
+    const newTile = screen.getByRole("radio", { name: "New" });
+    const classicTile = screen.getByRole("radio", { name: "Classic" });
+    focusVisible = false;
+
+    fireEvent.pointerDown(newTile, { pointerType: "touch" });
+    fireEvent.focus(newTile);
+    fireEvent.pointerDown(newTile, { pointerType: "touch" });
+    expect(pause).toHaveBeenCalledTimes(2);
+
+    focusVisible = true;
+    fireEvent.keyDown(newTile, { key: "ArrowRight" });
+    expect(onChange).toHaveBeenLastCalledWith("classic");
+    expect(play).toHaveBeenCalledTimes(4);
+    rerender(<CardAnimationStylePicker value="classic" onChange={onChange} />);
+    expect(classicTile).toBeChecked();
+
+    fireEvent.blur(classicTile, { relatedTarget: document.body });
+    expect(pause).toHaveBeenCalledTimes(4);
+    expect(videos.map((video) => video.currentTime)).toEqual([
+      CARD_ANIMATION_PREVIEW_MOMENTS[0].peak,
+      CARD_ANIMATION_PREVIEW_MOMENTS[0].peak,
+    ]);
   });
 
   it("moves the selection with the arrow keys", () => {
@@ -149,6 +217,7 @@ describe("CardAnimationStylePicker", () => {
     fireEvent.pointerEnter(group, { pointerType: "mouse" });
     fireEvent.focus(screen.getByRole("radio", { name: "New" }));
     fireEvent.pointerDown(group, { pointerType: "touch" });
+    fireEvent.keyDown(screen.getByRole("radio", { name: "New" }), { key: "ArrowRight" });
 
     expect(play).not.toHaveBeenCalled();
     expect(videos.every((video) => video.getAttribute("poster"))).toBe(true);

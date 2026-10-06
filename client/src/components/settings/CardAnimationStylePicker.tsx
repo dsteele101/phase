@@ -97,6 +97,9 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
   const handleBlur = (e: FocusEvent<HTMLDivElement>) => {
     if (!e.currentTarget.contains(e.relatedTarget)) stopPreview();
   };
+  const handleFocus = (e: FocusEvent<HTMLDivElement>) => {
+    if (e.target.matches(":focus-visible")) startPreview();
+  };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
@@ -105,6 +108,7 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
     const next = STYLES[(index + step + STYLES.length) % STYLES.length];
     onChange(next);
     e.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-style="${next}"]`)?.focus();
+    startPreview();
   };
 
   return (
@@ -116,7 +120,7 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
         onPointerEnter={handlePointerEnter}
         onPointerLeave={handlePointerLeave}
         onPointerDown={handlePointerDown}
-        onFocus={startPreview}
+        onFocus={handleFocus}
         onBlur={handleBlur}
       >
         {STYLES.map((style, index) => {
