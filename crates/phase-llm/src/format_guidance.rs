@@ -328,10 +328,9 @@ mod draft {
          pick is usually strong, so synergy and a coherent archetype matter more than raw card \
          power. Draft mana fixing and a plan, since there is no filler.";
 
-    const COMMANDER_DRAFT_PICKS: &str = "Commander draft: you take two cards per step and play a \
-         multiplayer Commander game with the result, so value cards that fit the plan of a \
-         multiplayer game — ramp, card advantage, removal, and a commander you will want to cast \
-         repeatedly.";
+    const COMMANDER_DRAFT_PICKS: &str = "Commander draft: you draft for a multiplayer Commander \
+         game, so value cards that fit the plan of a multiplayer game — ramp, card advantage, \
+         removal, and a commander you will want to cast repeatedly.";
 
     /// The format section of a draft system prompt.
     ///

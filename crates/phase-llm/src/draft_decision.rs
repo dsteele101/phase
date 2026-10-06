@@ -142,7 +142,7 @@ pub fn build_draft_pick_prompt(
     );
 
     let instruction = if required > 1 {
-        // CR 903.13b: a Commander Draft seat takes two cards per step.
+        // CR 903.13b: use the engine's published count for this pick step.
         format!("Take {required} cards from this pack, best first.")
     } else {
         "Take one card from this pack.".to_string()
@@ -766,11 +766,92 @@ mod tests {
         assert_eq!(view.required_pick_count, 2);
         let system = prompt_for(&view, AiDifficulty::Medium);
         assert!(
-            system.contains("Commander draft: you take two cards per step"),
+            system.contains("Commander draft: you draft for a multiplayer Commander game"),
             "{system}"
         );
         assert!(system.contains("at least 60 cards"), "{system}");
         assert!(!system.contains("40-card"), "{system}");
         assert!(!system.contains("40 cards"), "{system}");
+    }
+
+    /// CR 903.13b: an odd booster ends with one card after ordinary whole-pod
+    /// two-card pick steps; the prompt must use that projected step count.
+    #[test]
+    fn commander_draft_final_card_prompt_uses_the_projected_single_pick_count() {
+        let kind = DraftKind::CommanderDraft;
+        let procedure = kind.procedure();
+        let source = set_source();
+        let config = DraftConfig {
+            set_code: source.set_code(),
+            source,
+            kind,
+            pod_size: procedure.pod_size,
+            cards_per_pack: 15,
+            pack_count: procedure.packs_per_player,
+            min_deck_size: procedure.min_deck_size,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 7,
+            tournament_format: Default::default(),
+            pod_policy: Default::default(),
+            spectator_visibility: Default::default(),
+        };
+        let seats = (0..procedure.pod_size)
+            .map(|seat| DraftSeat::Bot {
+                name: format!("Bot {seat}"),
+            })
+            .collect();
+        let mut session = DraftSession::new(config, seats, "TEST".to_string());
+        let fixture = FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 15,
+        };
+        session::apply(&mut session, DraftAction::StartDraft, Some(&fixture))
+            .expect("Commander Draft session starts");
+
+        // Fifteen cards leave one after seven two-card steps per seat.
+        for _ in 0..7 {
+            for seat in 0..procedure.pod_size {
+                let card_instance_ids = session.current_pack[usize::from(seat)]
+                    .as_ref()
+                    .expect("seat has a pack")
+                    .0
+                    .iter()
+                    .take(2)
+                    .map(|card| card.instance_id.clone())
+                    .collect();
+                session::apply(
+                    &mut session,
+                    DraftAction::Pick {
+                        seat,
+                        card_instance_ids,
+                    },
+                    None,
+                )
+                .expect("whole-pod pick step succeeds");
+            }
+        }
+
+        let view = filter_for_player(&session, 0);
+        assert_eq!(view.kind, kind);
+        assert_eq!(view.status, DraftStatus::Drafting);
+        assert_eq!(view.current_pack.as_ref().map(Vec::len), Some(1));
+        assert_eq!(view.required_pick_count, 1);
+        let request = build_draft_pick_prompt(0, &view, AiDifficulty::Medium, None, &SetNames::new())
+            .expect("final card yields a pick prompt");
+        assert_eq!(request.required_pick_count, 1);
+        assert_eq!(request.option_count, 1);
+        assert!(!request.prompt.system.is_empty());
+        assert!(request
+            .prompt
+            .system
+            .contains("Commander draft: you draft for a multiplayer Commander game"));
+        assert!(request
+            .prompt
+            .user
+            .contains("Take one card from this pack."));
+        assert!(!request
+            .prompt
+            .system
+            .contains("you take two cards per step"));
     }
 }
