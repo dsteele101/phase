@@ -192,7 +192,7 @@ pub fn select_action(
 mod tests {
     use super::*;
     use crate::format_guidance::GENERIC_STRATEGY;
-    use crate::prompt::{UNTRUSTED_DATA_BEGIN, UNTRUSTED_DATA_DECLARATION, UNTRUSTED_DATA_END};
+    use crate::prompt::{UNTRUSTED_DATA_BEGIN, UNTRUSTED_DATA_END};
     use engine::ai_support::{ActionMetadata, CandidateAction, TacticalClass};
     use engine::game::create_object;
     use engine::types::custom_format::old_school_93_94;

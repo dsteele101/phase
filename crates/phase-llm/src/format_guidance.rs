@@ -537,10 +537,13 @@ mod tests {
 
     #[test]
     fn the_lowest_difficulty_gets_facts_but_no_strategy() {
-        let brief = brief(FormatConfig::modern(), AiDifficulty::VeryEasy);
-        assert!(brief.contains("Modern"), "{brief}");
-        assert!(!brief.contains(MODERN), "{brief}");
-        assert!(!brief.contains(UNIVERSAL_PRINCIPLES), "{brief}");
+        let very_easy_brief = brief(FormatConfig::modern(), AiDifficulty::VeryEasy);
+        assert!(very_easy_brief.contains("Modern"), "{very_easy_brief}");
+        assert!(!very_easy_brief.contains(MODERN), "{very_easy_brief}");
+        assert!(
+            !very_easy_brief.contains(UNIVERSAL_PRINCIPLES),
+            "{very_easy_brief}"
+        );
         for difficulty in DIFFICULTIES.into_iter().skip(1) {
             let brief = brief(FormatConfig::modern(), difficulty);
             assert!(brief.contains(MODERN), "{difficulty:?}: {brief}");
