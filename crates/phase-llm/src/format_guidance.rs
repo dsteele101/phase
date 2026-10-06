@@ -41,11 +41,13 @@ pub const UNIVERSAL_PRINCIPLES: &str = "In every format: decide whether you are 
      holding; know your outs and theirs; and when deciding whether to mulligan, remember that \
      a functional hand with fewer cards beats a non-functional seven.";
 
-/// The guide's guidance for an unknown or unconstrained metagame, and the
-/// strategy for every format with no fixed card pool or power level.
-pub const GENERIC_STRATEGY: &str = "This format has no fixed card pool, power level, or deck \
-     rule, so do not assume anything about your opponents' decks beyond what you can see. \
-     Play a consistent, proactive game: develop your mana and board, apply pressure with \
+/// The guide's guidance for an unknown metagame, and the strategy for every
+/// format with no format-specific approach. It makes no claim about the format's
+/// rules: a custom format may fix its card pool and deck rules, and the format
+/// facts stated beside this text are what say so.
+pub const GENERIC_STRATEGY: &str = "This format has no established metagame, so do not assume \
+     anything about your opponents' decks beyond what you can see; the format rules stated \
+     above are the only rules you can rely on. Play a consistent, proactive game: develop your mana and board, apply pressure with \
      what you have shown you can protect, and keep interaction for the cards that actually \
      threaten you.";
 
@@ -109,13 +111,15 @@ const TIMELESS: &str = "Timeless: an extremely high-powered Arena format. Speed 
 // CR 903.8: a commander may be cast from the command zone for an additional {2}
 // per previous cast, so recasting gets steadily more expensive.
 // CR 903.10a: 21 or more combat damage from the same commander eliminates a player.
-const COMMANDER: &str = "Commander: a social multiplayer game that rewards politics, resource \
-     management, and long-game planning over speed. Do not be the first or biggest threat — \
-     develop your board and resources while others fight, assess which opponent is the real \
-     threat, and consider when to hold removal rather than spend it. Your commander is a \
-     repeatable engine: protect it, and remember each recast costs more in commander tax. \
-     Commander damage is tracked per commander, so watch who is accumulating it. Singleton \
-     means redundancy comes from different cards with similar effects.";
+const COMMANDER: &str = "Commander: a command-zone format that rewards resource management and \
+     long-game planning over speed. At a table of more than two players it is also social: do \
+     not be the first or biggest threat — develop your board and resources while the others \
+     fight, assess which opponent is the real threat, and consider when to hold removal \
+     rather than spend it. In a two-player game, play the head-to-head matchup directly. \
+     Your commander is a repeatable engine: protect it, and remember each recast costs more in \
+     commander tax. Commander damage is tracked per commander, so watch who is accumulating \
+     it. If the format facts above say the deck is singleton, redundancy comes from different \
+     cards with similar effects.";
 
 const COMMANDER_DRAFT: &str = "Commander Draft: your deck came from a draft pool rather than a \
      tuned list, so play the strengths of the cards you actually have rather than an \
@@ -139,9 +143,9 @@ const OATHBREAKER: &str = "Oathbreaker: a tight, strategic singleton format buil
      ability and the signature spell as a reliable engine. Games usually run faster than \
      Commander because decks are smaller.";
 
-const BRAWL: &str = "Brawl: a 60-card commander format with a smaller card pool, so games feel \
-     faster and more focused than 100-card Commander. Build your play around your commander and \
-     your deck's synergy; every card in a smaller deck matters.";
+const BRAWL: &str = "Brawl: a commander format with a restricted card pool, so games tend to \
+     feel more focused than in unrestricted Commander. Build your play around your commander \
+     and your deck's synergy, within the deck size and card pool the format facts above state.";
 
 const FREE_FOR_ALL: &str = "Free-for-all: every player is playing for themselves. Avoid being the \
      biggest threat; politics and resource management matter more than raw aggression.";
@@ -211,10 +215,15 @@ fn format_strategy(format: GameFormat) -> Option<&'static [&'static str]> {
 /// Read from `config` rather than from the format's name so a custom format
 /// reports the rules it actually runs under.
 fn format_facts(config: &FormatConfig) -> String {
+    // The format's permitted seat counts, not this game's: the board shows who is
+    // actually seated.
     let players = if config.min_players == config.max_players {
-        format!("{} players", config.max_players)
+        format!("exactly {} players", config.max_players)
     } else {
-        format!("{}-{} players", config.min_players, config.max_players)
+        format!(
+            "allows {}-{} players",
+            config.min_players, config.max_players
+        )
     };
     let mut facts = vec![
         players,
@@ -429,9 +438,47 @@ mod tests {
         assert!(commander.contains("exactly 100"), "{commander}");
 
         let modern = game_format_brief(&FormatConfig::modern(), AiDifficulty::Medium);
-        assert!(modern.contains("2 players"), "{modern}");
+        assert!(modern.contains("exactly 2 players"), "{modern}");
         assert!(modern.contains("20 starting life"), "{modern}");
         assert!(!modern.contains("singleton"), "{modern}");
+    }
+
+    /// A custom format may fix its card pool and deck rules (the Old School
+    /// preset does), so the generic text must not deny rules that the facts beside
+    /// it state.
+    #[test]
+    fn generic_guidance_does_not_deny_the_rules_the_facts_state() {
+        assert!(!GENERIC_STRATEGY.contains("no fixed"), "{GENERIC_STRATEGY}");
+        assert!(
+            !GENERIC_STRATEGY.contains("deck rule"),
+            "{GENERIC_STRATEGY}"
+        );
+    }
+
+    /// Commander Draft is not singleton (CR 903.13f(2)) and Historic Brawl is 100
+    /// cards, so neither may inherit unconditional singleton or 60-card claims.
+    #[test]
+    fn shared_commander_and_brawl_text_does_not_contradict_the_variants() {
+        let commander_draft =
+            game_format_brief(&FormatConfig::commander_draft(), AiDifficulty::Hard);
+        assert!(commander_draft.contains("If the format facts above say the deck is singleton"));
+        assert!(
+            !commander_draft.contains("Singleton means"),
+            "{commander_draft}"
+        );
+
+        let historic = game_format_brief(&FormatConfig::historic_brawl(), AiDifficulty::Hard);
+        assert!(!historic.contains("60-card"), "{historic}");
+        assert!(historic.contains("exactly 100"), "{historic}");
+    }
+
+    /// Commander permits two players, so multiplayer politics is conditional.
+    #[test]
+    fn commander_politics_is_conditional_on_more_than_two_players() {
+        let brief = game_format_brief(&FormatConfig::commander(), AiDifficulty::Hard);
+        assert!(brief.contains("more than two players"), "{brief}");
+        assert!(brief.contains("allows 2-6 players"), "{brief}");
+        assert!(!brief.contains("social multiplayer game"), "{brief}");
     }
 
     #[test]

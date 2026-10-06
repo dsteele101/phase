@@ -238,9 +238,9 @@ mod tests {
 
         let contract = two_option_contract();
         for (config, expected) in [
-            (FormatConfig::commander(), "Commander: 2-6 players"),
-            (FormatConfig::modern(), "Modern: 2 players"),
-            (FormatConfig::limited(), "Limited: 2 players"),
+            (FormatConfig::commander(), "Commander: allows 2-6 players"),
+            (FormatConfig::modern(), "Modern: exactly 2 players"),
+            (FormatConfig::limited(), "Limited: exactly 2 players"),
         ] {
             let state = GameState::new(config, 2, 1);
             let request =
@@ -252,6 +252,27 @@ mod tests {
                 request.prompt.system
             );
         }
+    }
+
+    /// A legal two-seat Commander game, through the production builder: the
+    /// politics advice is conditional rather than telling the seat to wait while
+    /// "the others fight".
+    #[test]
+    fn a_two_seat_commander_prompt_does_not_assume_a_multiplayer_table() {
+        use engine::types::format::FormatConfig;
+
+        let state = GameState::new(FormatConfig::commander(), 2, 1);
+        let request = build_game_decision_prompt(
+            &state,
+            &two_option_contract(),
+            AiDifficulty::Hard,
+            None,
+            &[],
+        )
+        .unwrap();
+        let system = &request.prompt.system;
+        assert!(system.contains("more than two players"), "{system}");
+        assert!(!system.contains("social multiplayer game"), "{system}");
     }
 
     #[test]
