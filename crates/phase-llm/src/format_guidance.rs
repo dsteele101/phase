@@ -10,8 +10,8 @@
 //!
 //! # Two kinds of statement
 //!
-//! - **Facts** come from the engine's [`FormatConfig`] (player count, starting
-//!   life, deck-size rule, singleton, commander damage). They are read, never
+//! - **Facts** come from the engine's [`engine::types::format::FormatConfig`] and [`GameState`] (permitted
+//!   and current player counts, starting life, deck-size rule, singleton, commander damage). They are read, never
 //!   restated, so a format whose rules change cannot drift from the prompt.
 //! - **Strategy** is the per-format approach from the format strategy guide:
 //!   the mindset a player brings and the tendencies that follow from it. It is
@@ -24,12 +24,13 @@
 //!
 //! # Freeform
 //!
-//! `Freeform`, `FreeformCommander`, and `Custom` formats have no fixed card
-//! pool, power level, or deck rule, so there is no format-specific approach to
-//! teach. They receive [`GENERIC_STRATEGY`] — the guide's "unknown meta"
-//! guidance — plus whatever facts their `FormatConfig` carries.
+//! `Freeform`, `FreeformCommander`, and `Custom` receive [`GENERIC_STRATEGY`]
+//! for opponents whose decks are unknown, plus their configured facts. A custom format may
+//! still impose specific deck and card-pool rules.
 
-use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::format::{FormatTopology, GameFormat};
+use engine::types::game_state::GameState;
+use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 
 /// Principles that hold in every format. Appended after the format's own
@@ -41,13 +42,14 @@ pub const UNIVERSAL_PRINCIPLES: &str = "In every format: decide whether you are 
      holding; know your outs and theirs; and when deciding whether to mulligan, remember that \
      a functional hand with fewer cards beats a non-functional seven.";
 
-/// The guide's guidance for an unknown metagame, and the strategy for every
-/// format with no format-specific approach. It makes no claim about the format's
-/// rules: a custom format may fix its card pool and deck rules, and the format
-/// facts stated beside this text are what say so.
-pub const GENERIC_STRATEGY: &str = "This format has no established metagame, so do not assume \
-     anything about your opponents' decks beyond what you can see; the format rules stated \
-     above are the only rules you can rely on. Play a consistent, proactive game: develop your mana and board, apply pressure with \
+const DIFFICULTY_PRECEDENCE: &str = "If this format guidance and your playing-strength \
+     description disagree about how deeply to reason, how far ahead to plan, how fast or how \
+     aggressively to play, follow your playing-strength description.";
+
+/// Advice for playing against unknown opponents. Custom formats may still fix
+/// their card pools and deck rules; the engine-derived facts state those rules.
+pub const GENERIC_STRATEGY: &str = "Do not assume anything about your opponents' decks beyond what you can see. \
+     Play a consistent, proactive game: develop your mana and board, apply pressure with \
      what you have shown you can protect, and keep interaction for the cards that actually \
      threaten you.";
 
@@ -111,15 +113,18 @@ const TIMELESS: &str = "Timeless: an extremely high-powered Arena format. Speed 
 // CR 903.8: a commander may be cast from the command zone for an additional {2}
 // per previous cast, so recasting gets steadily more expensive.
 // CR 903.10a: 21 or more combat damage from the same commander eliminates a player.
-const COMMANDER: &str = "Commander: a command-zone format that rewards resource management and \
-     long-game planning over speed. At a table of more than two players it is also social: do \
-     not be the first or biggest threat — develop your board and resources while the others \
-     fight, assess which opponent is the real threat, and consider when to hold removal \
-     rather than spend it. In a two-player game, play the head-to-head matchup directly. \
-     Your commander is a repeatable engine: protect it, and remember each recast costs more in \
-     commander tax. Commander damage is tracked per commander, so watch who is accumulating \
-     it. If the format facts above say the deck is singleton, redundancy comes from different \
-     cards with similar effects.";
+const COMMANDER: &str = "Commander: manage resources and plan for a long game. Assess which \
+     opponent is the real threat, and consider when to hold removal rather than spend it. Your commander is a \
+     repeatable engine: protect it, and remember each recast costs more in commander tax. \
+     Commander damage is tracked per commander, so watch who is accumulating it.";
+
+const COMMANDER_MULTIPLAYER: &str = "With more than two players, politics matter: avoid being \
+     the first or biggest threat; develop your resources while other opponents fight.";
+
+const COMMANDER_TWO_PLAYER: &str = "In a two-player game, play the head-to-head matchup directly.";
+
+const COMMANDER_SINGLETON: &str = "Singleton means redundancy comes from different cards with \
+     similar effects.";
 
 const COMMANDER_DRAFT: &str = "Commander Draft: your deck came from a draft pool rather than a \
      tuned list, so play the strengths of the cards you actually have rather than an \
@@ -147,8 +152,11 @@ const BRAWL: &str = "Brawl: a commander format with a restricted card pool, so g
      feel more focused than in unrestricted Commander. Build your play around your commander \
      and your deck's synergy, within the deck size and card pool the format facts above state.";
 
-const FREE_FOR_ALL: &str = "Free-for-all: every player is playing for themselves. Avoid being the \
-     biggest threat; politics and resource management matter more than raw aggression.";
+const FREE_FOR_ALL: &str = "Free-for-all: every player is playing for themselves. Manage \
+     resources and assess each opponent's position.";
+
+const FREE_FOR_ALL_MULTIPLAYER: &str = "With more than two players, politics can matter: avoid \
+     becoming the biggest threat while other opponents fight.";
 
 // CR 810.9: damage, life loss, and life gain happen to each player individually
 // and the result is applied to the team's shared life total.
@@ -201,8 +209,7 @@ fn format_strategy(format: GameFormat) -> Option<&'static [&'static str]> {
         GameFormat::Archenemy => &[ARCHENEMY],
         GameFormat::Planechase => &[PLANECHASE],
         GameFormat::Momir => &[MOMIR],
-        // No fixed pool, power level, or deck rule: nothing format-specific to
-        // teach, so these take the generic guidance.
+        // No format-specific approach to teach; configured facts still apply.
         GameFormat::Freeform | GameFormat::FreeformCommander | GameFormat::Custom(_) => {
             return None;
         }
@@ -212,22 +219,32 @@ fn format_strategy(format: GameFormat) -> Option<&'static [&'static str]> {
 
 /// The engine-derived facts of a game format, as one sentence.
 ///
-/// Read from `config` rather than from the format's name so a custom format
-/// reports the rules it actually runs under.
-fn format_facts(config: &FormatConfig) -> String {
-    // The format's permitted seat counts, not this game's: the board shows who is
-    // actually seated.
+/// Read the resolved config and current table from `state` so a custom format
+/// reports the rules it actually runs under and the seat count actually playing.
+fn format_facts(state: &GameState, viewer: PlayerId) -> String {
+    let config = &state.format_config;
     let players = if config.min_players == config.max_players {
         format!("exactly {} players", config.max_players)
     } else {
-        format!(
-            "allows {}-{} players",
-            config.min_players, config.max_players
-        )
+        format!("allows {}-{} players", config.min_players, config.max_players)
+    };
+    // CR 103.4 / CR 810.4 / CR 904.5: Starting life is individual except
+    // for a shared team total; the archenemy and heroes have different totals.
+    let life = config.starting_life_total_for_player(viewer);
+    let starting_life = match config.topology() {
+        FormatTopology::IndividualSeats => format!("{life} individual starting life"),
+        FormatTopology::FixedTeams { .. } => format!("{life} shared team starting life"),
+        FormatTopology::OneVsMany { archenemy, .. } if viewer == archenemy => {
+            format!("you are the archenemy with {life} individual starting life")
+        }
+        FormatTopology::OneVsMany { .. } => {
+            format!("you are a hero with {life} individual starting life")
+        }
     };
     let mut facts = vec![
         players,
-        format!("{} starting life", config.starting_life),
+        format!("currently {} players", state.players.len()),
+        starting_life,
         format!("a deck of {} cards", config.deck_size.requirement_phrase()),
     ];
     if config.singleton {
@@ -250,21 +267,37 @@ fn format_facts(config: &FormatConfig) -> String {
 /// brand-new player does not know format theory — knowing the player count and
 /// starting life is not the same as knowing how to play to a metagame.
 ///
-/// The section yields to the difficulty brief on how hard and how fast to play:
+/// The section yields to the difficulty brief on reasoning depth and pace:
 /// format strategy says what the game is about, not how well to play it.
-pub fn game_format_brief(config: &FormatConfig, difficulty: AiDifficulty) -> String {
-    let facts = format_facts(config);
+pub fn game_format_brief(state: &GameState, viewer: PlayerId, difficulty: AiDifficulty) -> String {
+    let config = &state.format_config;
+    let facts = format_facts(state, viewer);
     if matches!(difficulty, AiDifficulty::VeryEasy) {
         return format!("FORMAT: {facts}");
     }
-    let strategy = match format_strategy(config.format) {
+    let mut strategy = match format_strategy(config.format) {
         Some(parts) => parts.join("\n"),
         None => GENERIC_STRATEGY.to_string(),
     };
+    if matches!(config.format, GameFormat::Commander | GameFormat::CommanderDraft) {
+        strategy.push('\n');
+        strategy.push_str(if state.players.len() > 2 {
+            COMMANDER_MULTIPLAYER
+        } else {
+            COMMANDER_TWO_PLAYER
+        });
+        // CR 903.5b / CR 903.13f: Commander is singleton, while Commander
+        // Draft permits repeated names from the drafted card pool.
+        if config.singleton {
+            strategy.push('\n');
+            strategy.push_str(COMMANDER_SINGLETON);
+        }
+    } else if matches!(config.format, GameFormat::FreeForAll) && state.players.len() > 2 {
+        strategy.push('\n');
+        strategy.push_str(FREE_FOR_ALL_MULTIPLAYER);
+    }
     format!(
-        "FORMAT: {facts}\n{strategy}\n{UNIVERSAL_PRINCIPLES}\nIf this format guidance and \
-         your playing-strength description disagree about how fast or how aggressively to \
-         play, follow your playing-strength description."
+        "FORMAT: {facts}\n{strategy}\n{UNIVERSAL_PRINCIPLES}\n{DIFFICULTY_PRECEDENCE}"
     )
 }
 
@@ -275,6 +308,8 @@ pub fn game_format_brief(config: &FormatConfig, difficulty: AiDifficulty) -> Str
 #[cfg(feature = "draft")]
 mod draft {
     use super::*;
+    use draft_core::types::DraftKind;
+    use draft_core::view::DraftSourceView;
 
     const BOOSTER_DRAFT: &str =
         "Booster draft: stay flexible early, settle on two colours (rarely \
@@ -282,15 +317,6 @@ mod draft {
          curve. Read signals — which colours are still flowing tells you what the players passing \
          to you are not taking. In pack 1 take the best card; in pack 2 adjust to what flowed; in \
          pack 3 fill the gaps in your curve.";
-
-    const SEALED: &str = "Sealed deck: you have more cards than you can play, so building is the \
-         skill. Build the most consistent deck rather than the one with the most flashy cards: pick \
-         the best two colours, count removal and bombs, build a smooth curve, and splash only for \
-         strong cards with easy mana.";
-
-    const WINSTON_DRAFT: &str = "Winston draft: information and denial are central. Each decision \
-         is two-sided — consider both what you want and what you would be leaving for your \
-         opponent.";
 
     const CUBE_DRAFT: &str =
         "This is a cube: its power level and themes decide how to draft. Every \
@@ -311,18 +337,17 @@ mod draft {
         view: &draft_core::view::DraftPlayerView,
         difficulty: AiDifficulty,
     ) -> String {
-        use draft_core::types::DraftKind;
-        use draft_core::view::DraftSourceView;
-
         if matches!(difficulty, AiDifficulty::VeryEasy) {
             return String::new();
         }
-        let mut parts = vec![match view.kind {
+        // This brief belongs to a current-pack pick. Sealed deckbuilding and
+        // Winston shared-stack decisions do not enter this builder.
+        let pick_guidance = match view.kind {
             DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional => BOOSTER_DRAFT,
-            DraftKind::Sealed => SEALED,
             DraftKind::CommanderDraft => COMMANDER_DRAFT_PICKS,
-            DraftKind::Winston => WINSTON_DRAFT,
-        }];
+            DraftKind::Sealed | DraftKind::Winston => return String::new(),
+        };
+        let mut parts = vec![pick_guidance];
         if matches!(view.source, DraftSourceView::Cube { .. }) {
             parts.push(CUBE_DRAFT);
         }
@@ -330,7 +355,7 @@ mod draft {
             "Limited decks are built around card quality, a smooth curve, and removal; \
              aggressive, consistent decks tend to beat clunky good-stuff piles.",
         );
-        format!("FORMAT GUIDANCE:\n{}", parts.join("\n"))
+        format!("FORMAT GUIDANCE:\n{}\n{DIFFICULTY_PRECEDENCE}", parts.join("\n"))
     }
 }
 
@@ -340,6 +365,9 @@ pub use draft::draft_format_brief;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::{UNTRUSTED_DATA_BEGIN, UNTRUSTED_DATA_END};
+    use engine::types::custom_format::old_school_93_94;
+    use engine::types::format::FormatConfig;
 
     const DIFFICULTIES: [AiDifficulty; 6] = [
         AiDifficulty::VeryEasy,
@@ -359,10 +387,16 @@ mod tests {
             .collect()
     }
 
+    fn brief(config: FormatConfig, difficulty: AiDifficulty) -> String {
+        let players = config.min_players;
+        let state = GameState::new(config, players, 1);
+        game_format_brief(&state, PlayerId(0), difficulty)
+    }
+
     #[test]
     fn every_builtin_format_gets_a_brief_naming_that_format() {
         for config in builtin_configs() {
-            let brief = game_format_brief(&config, AiDifficulty::Medium);
+            let brief = brief(config.clone(), AiDifficulty::Medium);
             assert!(
                 brief.contains(&*config.format.label()),
                 "{} brief does not name its format: {brief}",
@@ -372,12 +406,12 @@ mod tests {
         }
     }
 
-    /// Only the formats with no fixed pool or power level take generic guidance;
-    /// every other built-in format teaches something of its own.
+    /// Built-in Freeform formats take generic guidance; other built-ins teach
+    /// an approach of their own.
     #[test]
     fn only_freeform_formats_take_the_generic_strategy() {
         for config in builtin_configs() {
-            let brief = game_format_brief(&config, AiDifficulty::Medium);
+            let brief = brief(config.clone(), AiDifficulty::Medium);
             let generic = brief.contains(GENERIC_STRATEGY);
             let expects_generic = matches!(
                 config.format,
@@ -393,12 +427,12 @@ mod tests {
 
     #[test]
     fn a_custom_format_takes_generic_guidance_and_its_own_facts() {
-        let mut config = FormatConfig::standard();
-        config.format = GameFormat::Custom(engine::types::custom_format::CustomFormatId(9));
-        config.starting_life = 30;
-        let brief = game_format_brief(&config, AiDifficulty::Hard);
+        let config = FormatConfig::for_custom_rules(&old_school_93_94().rules);
+        let brief = brief(config, AiDifficulty::Hard);
         assert!(brief.contains(GENERIC_STRATEGY), "{brief}");
-        assert!(brief.contains("30 starting life"), "{brief}");
+        assert!(brief.contains("at least 60"), "{brief}");
+        assert!(!brief.contains("no fixed card pool"), "{brief}");
+        assert!(!brief.contains("no fixed card pool, power level, or deck rule"), "{brief}");
     }
 
     #[test]
@@ -428,8 +462,8 @@ mod tests {
 
     #[test]
     fn facts_come_from_the_engine_config() {
-        let commander = game_format_brief(&FormatConfig::commander(), AiDifficulty::Medium);
-        assert!(commander.contains("40 starting life"), "{commander}");
+        let commander = brief(FormatConfig::commander(), AiDifficulty::Medium);
+        assert!(commander.contains("40 individual starting life"), "{commander}");
         assert!(commander.contains("singleton"), "{commander}");
         assert!(
             commander.contains("21 commander damage eliminates a player"),
@@ -437,9 +471,10 @@ mod tests {
         );
         assert!(commander.contains("exactly 100"), "{commander}");
 
-        let modern = game_format_brief(&FormatConfig::modern(), AiDifficulty::Medium);
+        let modern = brief(FormatConfig::modern(), AiDifficulty::Medium);
         assert!(modern.contains("exactly 2 players"), "{modern}");
-        assert!(modern.contains("20 starting life"), "{modern}");
+        assert!(modern.contains("currently 2 players"), "{modern}");
+        assert!(modern.contains("20 individual starting life"), "{modern}");
         assert!(!modern.contains("singleton"), "{modern}");
     }
 
@@ -459,15 +494,14 @@ mod tests {
     /// cards, so neither may inherit unconditional singleton or 60-card claims.
     #[test]
     fn shared_commander_and_brawl_text_does_not_contradict_the_variants() {
-        let commander_draft =
-            game_format_brief(&FormatConfig::commander_draft(), AiDifficulty::Hard);
-        assert!(commander_draft.contains("If the format facts above say the deck is singleton"));
+        let commander_draft = brief(FormatConfig::commander_draft(), AiDifficulty::Hard);
+        assert!(commander_draft.contains(COMMANDER_DRAFT));
         assert!(
             !commander_draft.contains("Singleton means"),
             "{commander_draft}"
         );
 
-        let historic = game_format_brief(&FormatConfig::historic_brawl(), AiDifficulty::Hard);
+        let historic = brief(FormatConfig::historic_brawl(), AiDifficulty::Hard);
         assert!(!historic.contains("60-card"), "{historic}");
         assert!(historic.contains("exactly 100"), "{historic}");
     }
@@ -475,27 +509,33 @@ mod tests {
     /// Commander permits two players, so multiplayer politics is conditional.
     #[test]
     fn commander_politics_is_conditional_on_more_than_two_players() {
-        let brief = game_format_brief(&FormatConfig::commander(), AiDifficulty::Hard);
-        assert!(brief.contains("more than two players"), "{brief}");
-        assert!(brief.contains("allows 2-6 players"), "{brief}");
-        assert!(!brief.contains("social multiplayer game"), "{brief}");
+        let two = brief(FormatConfig::commander(), AiDifficulty::Hard);
+        assert!(two.contains("allows 2-6 players"), "{two}");
+        assert!(two.contains(COMMANDER_TWO_PLAYER), "{two}");
+        assert!(!two.contains(COMMANDER_MULTIPLAYER), "{two}");
+
+        let config = FormatConfig::commander();
+        let state = GameState::new(config, 4, 1);
+        let four = game_format_brief(&state, PlayerId(0), AiDifficulty::Hard);
+        assert!(four.contains(COMMANDER_MULTIPLAYER), "{four}");
+        assert!(!four.contains(COMMANDER_TWO_PLAYER), "{four}");
     }
 
     #[test]
     fn the_lowest_difficulty_gets_facts_but_no_strategy() {
-        let brief = game_format_brief(&FormatConfig::modern(), AiDifficulty::VeryEasy);
+        let brief = brief(FormatConfig::modern(), AiDifficulty::VeryEasy);
         assert!(brief.contains("Modern"), "{brief}");
         assert!(!brief.contains(MODERN), "{brief}");
         assert!(!brief.contains(UNIVERSAL_PRINCIPLES), "{brief}");
         for difficulty in DIFFICULTIES.into_iter().skip(1) {
-            let brief = game_format_brief(&FormatConfig::modern(), difficulty);
+            let brief = brief(FormatConfig::modern(), difficulty);
             assert!(brief.contains(MODERN), "{difficulty:?}: {brief}");
         }
     }
 
     #[test]
     fn the_brief_yields_to_the_difficulty_brief_on_pace() {
-        let brief = game_format_brief(&FormatConfig::commander(), AiDifficulty::CEDH);
+        let brief = brief(FormatConfig::commander(), AiDifficulty::CEDH);
         assert!(
             brief.contains("follow your playing-strength description"),
             "{brief}"
@@ -504,19 +544,19 @@ mod tests {
 
     #[test]
     fn commander_draft_teaches_commander_play_on_top_of_the_draft_framing() {
-        let brief = game_format_brief(&FormatConfig::commander_draft(), AiDifficulty::Medium);
+        let brief = brief(FormatConfig::commander_draft(), AiDifficulty::Medium);
         assert!(brief.contains(COMMANDER_DRAFT), "{brief}");
         assert!(brief.contains(COMMANDER), "{brief}");
+        assert!(!brief.contains(COMMANDER_SINGLETON), "{brief}");
     }
 
     /// The brief is static, engine-authored text living outside the data fence, so
     /// it must not itself contain a fence marker.
     #[test]
     fn no_brief_contains_a_fence_marker() {
-        use crate::prompt::{UNTRUSTED_DATA_BEGIN, UNTRUSTED_DATA_END};
         for config in builtin_configs() {
             for difficulty in DIFFICULTIES {
-                let brief = game_format_brief(&config, difficulty);
+                let brief = brief(config.clone(), difficulty);
                 assert!(!brief.contains(UNTRUSTED_DATA_BEGIN), "{brief}");
                 assert!(!brief.contains(UNTRUSTED_DATA_END), "{brief}");
             }
