@@ -836,8 +836,9 @@ mod tests {
         assert_eq!(view.status, DraftStatus::Drafting);
         assert_eq!(view.current_pack.as_ref().map(Vec::len), Some(1));
         assert_eq!(view.required_pick_count, 1);
-        let request = build_draft_pick_prompt(0, &view, AiDifficulty::Medium, None, &SetNames::new())
-            .expect("final card yields a pick prompt");
+        let request =
+            build_draft_pick_prompt(0, &view, AiDifficulty::Medium, None, &SetNames::new())
+                .expect("final card yields a pick prompt");
         assert_eq!(request.required_pick_count, 1);
         assert_eq!(request.option_count, 1);
         assert!(!request.prompt.system.is_empty());
