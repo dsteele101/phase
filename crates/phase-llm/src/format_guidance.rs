@@ -48,7 +48,8 @@ const DIFFICULTY_PRECEDENCE: &str = "If this format guidance and your playing-st
 
 /// Advice for playing against unknown opponents. Custom formats may still fix
 /// their card pools and deck rules; the engine-derived facts state those rules.
-pub const GENERIC_STRATEGY: &str = "Do not assume anything about your opponents' decks beyond what you can see. \
+pub const GENERIC_STRATEGY: &str =
+    "Do not assume anything about your opponents' decks beyond what you can see. \
      Play a consistent, proactive game: develop your mana and board, apply pressure with \
      what you have shown you can protect, and keep interaction for the cards that actually \
      threaten you.";
@@ -226,7 +227,10 @@ fn format_facts(state: &GameState, viewer: PlayerId) -> String {
     let players = if config.min_players == config.max_players {
         format!("exactly {} players", config.max_players)
     } else {
-        format!("allows {}-{} players", config.min_players, config.max_players)
+        format!(
+            "allows {}-{} players",
+            config.min_players, config.max_players
+        )
     };
     // CR 103.4 / CR 810.4 / CR 904.5: Starting life is individual except
     // for a shared team total; the archenemy and heroes have different totals.
@@ -279,7 +283,10 @@ pub fn game_format_brief(state: &GameState, viewer: PlayerId, difficulty: AiDiff
         Some(parts) => parts.join("\n"),
         None => GENERIC_STRATEGY.to_string(),
     };
-    if matches!(config.format, GameFormat::Commander | GameFormat::CommanderDraft) {
+    if matches!(
+        config.format,
+        GameFormat::Commander | GameFormat::CommanderDraft
+    ) {
         strategy.push('\n');
         strategy.push_str(if state.players.len() > 2 {
             COMMANDER_MULTIPLAYER
@@ -296,9 +303,7 @@ pub fn game_format_brief(state: &GameState, viewer: PlayerId, difficulty: AiDiff
         strategy.push('\n');
         strategy.push_str(FREE_FOR_ALL_MULTIPLAYER);
     }
-    format!(
-        "FORMAT: {facts}\n{strategy}\n{UNIVERSAL_PRINCIPLES}\n{DIFFICULTY_PRECEDENCE}"
-    )
+    format!("FORMAT: {facts}\n{strategy}\n{UNIVERSAL_PRINCIPLES}\n{DIFFICULTY_PRECEDENCE}")
 }
 
 // ── Draft strategy ───────────────────────────────────────────────────────────
@@ -355,7 +360,10 @@ mod draft {
             "Limited decks are built around card quality, a smooth curve, and removal; \
              aggressive, consistent decks tend to beat clunky good-stuff piles.",
         );
-        format!("FORMAT GUIDANCE:\n{}\n{DIFFICULTY_PRECEDENCE}", parts.join("\n"))
+        format!(
+            "FORMAT GUIDANCE:\n{}\n{DIFFICULTY_PRECEDENCE}",
+            parts.join("\n")
+        )
     }
 }
 
@@ -432,7 +440,10 @@ mod tests {
         assert!(brief.contains(GENERIC_STRATEGY), "{brief}");
         assert!(brief.contains("at least 60"), "{brief}");
         assert!(!brief.contains("no fixed card pool"), "{brief}");
-        assert!(!brief.contains("no fixed card pool, power level, or deck rule"), "{brief}");
+        assert!(
+            !brief.contains("no fixed card pool, power level, or deck rule"),
+            "{brief}"
+        );
     }
 
     #[test]
@@ -463,7 +474,10 @@ mod tests {
     #[test]
     fn facts_come_from_the_engine_config() {
         let commander = brief(FormatConfig::commander(), AiDifficulty::Medium);
-        assert!(commander.contains("40 individual starting life"), "{commander}");
+        assert!(
+            commander.contains("40 individual starting life"),
+            "{commander}"
+        );
         assert!(commander.contains("singleton"), "{commander}");
         assert!(
             commander.contains("21 commander damage eliminates a player"),

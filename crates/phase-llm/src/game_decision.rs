@@ -198,9 +198,7 @@ mod tests {
     use engine::types::custom_format::old_school_93_94;
     use engine::types::format::FormatConfig;
     use engine::types::identifiers::{CardId, ObjectId};
-    use engine::types::log::{
-        LogCategory, LogPresentation, LogSegment, LogVisibility,
-    };
+    use engine::types::log::{LogCategory, LogPresentation, LogSegment, LogVisibility};
     use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
@@ -295,7 +293,10 @@ mod tests {
         )
         .unwrap();
         let system = &request.prompt.system;
-        assert!(system.contains("In a two-player game, play the head-to-head matchup directly"), "{system}");
+        assert!(
+            system.contains("In a two-player game, play the head-to-head matchup directly"),
+            "{system}"
+        );
         assert!(!system.contains("while other opponents fight"), "{system}");
     }
 
@@ -321,19 +322,40 @@ mod tests {
         assert!(system.contains("a deck of at least 60 cards"), "{system}");
         assert!(system.contains(GENERIC_STRATEGY), "{system}");
         assert!(!system.contains("no fixed card pool"), "{system}");
-        assert!(!system.contains("no fixed card pool, power level, or deck rule"), "{system}");
+        assert!(
+            !system.contains("no fixed card pool, power level, or deck rule"),
+            "{system}"
+        );
     }
 
     #[test]
     fn commander_draft_and_brawl_variants_do_not_inherit_wrong_deck_advice() {
         let commander_draft = format_system(
-            FormatConfig::commander_draft(), 4, PlayerId(1), AiDifficulty::Medium,
+            FormatConfig::commander_draft(),
+            4,
+            PlayerId(1),
+            AiDifficulty::Medium,
         );
-        assert!(commander_draft.contains("FORMAT: Commander Draft"), "{commander_draft}");
-        assert!(commander_draft.contains("a deck of at least 60 cards"), "{commander_draft}");
-        assert!(commander_draft.contains("Commander Draft: your deck came from a draft pool"), "{commander_draft}");
-        assert!(!commander_draft.contains("Singleton means"), "{commander_draft}");
-        assert!(!commander_draft.contains(", singleton"), "{commander_draft}");
+        assert!(
+            commander_draft.contains("FORMAT: Commander Draft"),
+            "{commander_draft}"
+        );
+        assert!(
+            commander_draft.contains("a deck of at least 60 cards"),
+            "{commander_draft}"
+        );
+        assert!(
+            commander_draft.contains("Commander Draft: your deck came from a draft pool"),
+            "{commander_draft}"
+        );
+        assert!(
+            !commander_draft.contains("Singleton means"),
+            "{commander_draft}"
+        );
+        assert!(
+            !commander_draft.contains(", singleton"),
+            "{commander_draft}"
+        );
 
         for (config, deck_size) in [
             (FormatConfig::brawl(), "exactly 60 cards"),
@@ -342,8 +364,14 @@ mod tests {
             let system = format_system(config, 2, PlayerId(1), AiDifficulty::Medium);
             assert!(system.contains("FORMAT:"), "{system}");
             assert!(system.contains(deck_size), "{system}");
-            assert!(system.contains("within the deck size and card pool the format facts above state"), "{system}");
-            assert!(!system.contains("Brawl: a 60-card commander format"), "{system}");
+            assert!(
+                system.contains("within the deck size and card pool the format facts above state"),
+                "{system}"
+            );
+            assert!(
+                !system.contains("Brawl: a 60-card commander format"),
+                "{system}"
+            );
             assert!(!system.contains("every card in a smaller deck"), "{system}");
         }
     }
@@ -356,13 +384,19 @@ mod tests {
             assert!(two.contains("FORMAT:"), "{two}");
             assert!(two.contains("currently 2 players"), "{two}");
             assert!(!two.contains("while other opponents fight"), "{two}");
-            assert!(!two.contains("With more than two players, politics"), "{two}");
+            assert!(
+                !two.contains("With more than two players, politics"),
+                "{two}"
+            );
             assert_eq!(two.contains("Singleton means"), singleton, "{two}");
 
             let four = format_system(config, 4, PlayerId(1), AiDifficulty::Medium);
             assert!(four.contains("FORMAT:"), "{four}");
             assert!(four.contains("currently 4 players"), "{four}");
-            assert!(four.contains("With more than two players, politics"), "{four}");
+            assert!(
+                four.contains("With more than two players, politics"),
+                "{four}"
+            );
             assert!(four.contains("while other opponents fight"), "{four}");
         }
     }
@@ -373,26 +407,58 @@ mod tests {
         archenemy.archenemy_player = Some(PlayerId(2));
         let villain = format_system(archenemy.clone(), 3, PlayerId(2), AiDifficulty::Medium);
         assert!(villain.contains("FORMAT:"), "{villain}");
-        assert!(villain.contains("you are the archenemy with 40 individual starting life"), "{villain}");
-        assert!(!villain.contains("20 individual starting life"), "{villain}");
+        assert!(
+            villain.contains("you are the archenemy with 40 individual starting life"),
+            "{villain}"
+        );
+        assert!(
+            !villain.contains("20 individual starting life"),
+            "{villain}"
+        );
 
         let hero = format_system(archenemy, 3, PlayerId(1), AiDifficulty::Medium);
         assert!(hero.contains("FORMAT:"), "{hero}");
-        assert!(hero.contains("you are a hero with 20 individual starting life"), "{hero}");
+        assert!(
+            hero.contains("you are a hero with 20 individual starting life"),
+            "{hero}"
+        );
         assert!(!hero.contains("40 individual starting life"), "{hero}");
 
-        let teams = format_system(FormatConfig::two_headed_giant(), 4, PlayerId(1), AiDifficulty::Medium);
+        let teams = format_system(
+            FormatConfig::two_headed_giant(),
+            4,
+            PlayerId(1),
+            AiDifficulty::Medium,
+        );
         assert!(teams.contains("30 shared team starting life"), "{teams}");
         assert!(!teams.contains("30 individual starting life"), "{teams}");
 
-        let individual = format_system(FormatConfig::modern(), 2, PlayerId(1), AiDifficulty::Medium);
-        assert!(individual.contains("20 individual starting life"), "{individual}");
-        assert!(!individual.contains("shared team starting life"), "{individual}");
+        let individual =
+            format_system(FormatConfig::modern(), 2, PlayerId(1), AiDifficulty::Medium);
+        assert!(
+            individual.contains("20 individual starting life"),
+            "{individual}"
+        );
+        assert!(
+            !individual.contains("shared team starting life"),
+            "{individual}"
+        );
 
-        let easy_hero = format_system(FormatConfig::archenemy(), 3, PlayerId(1), AiDifficulty::VeryEasy);
+        let easy_hero = format_system(
+            FormatConfig::archenemy(),
+            3,
+            PlayerId(1),
+            AiDifficulty::VeryEasy,
+        );
         assert!(easy_hero.contains("FORMAT:"), "{easy_hero}");
-        assert!(easy_hero.contains("you are a hero with 20 individual starting life"), "{easy_hero}");
-        assert!(!easy_hero.contains("Archenemy: one archenemy"), "{easy_hero}");
+        assert!(
+            easy_hero.contains("you are a hero with 20 individual starting life"),
+            "{easy_hero}"
+        );
+        assert!(
+            !easy_hero.contains("Archenemy: one archenemy"),
+            "{easy_hero}"
+        );
     }
 
     /// The format section is static engine text: it sits in the system prompt,

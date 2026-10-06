@@ -661,16 +661,29 @@ mod tests {
             assert_eq!(view.kind, kind);
             assert_eq!(view.distribution, PackDistribution::PickAndPass);
             assert_eq!(view.status, DraftStatus::Drafting);
-            assert!(view.current_pack.as_ref().is_some_and(|pack| !pack.is_empty()));
-            let request = build_draft_pick_prompt(0, &view, AiDifficulty::Medium, None, &SetNames::new())
-                .expect("pick-and-pass view yields a pick prompt");
+            assert!(view
+                .current_pack
+                .as_ref()
+                .is_some_and(|pack| !pack.is_empty()));
+            let request =
+                build_draft_pick_prompt(0, &view, AiDifficulty::Medium, None, &SetNames::new())
+                    .expect("pick-and-pass view yields a pick prompt");
             let system = &request.prompt.system;
             assert!(system.contains("FORMAT GUIDANCE:"), "{kind:?}: {system}");
             assert!(system.contains(marker), "{kind:?}: {system}");
-            assert!(system.contains("follow your playing-strength description"), "{system}");
-            assert!(system.contains(&format!("at least {} cards", view.min_deck_size)), "{kind:?}: {system}");
+            assert!(
+                system.contains("follow your playing-strength description"),
+                "{system}"
+            );
+            assert!(
+                system.contains(&format!("at least {} cards", view.min_deck_size)),
+                "{kind:?}: {system}"
+            );
             assert_eq!(request.required_pick_count, view.required_pick_count);
-            assert_eq!(request.required_pick_count, kind.procedure().cards_per_pick as usize);
+            assert_eq!(
+                request.required_pick_count,
+                kind.procedure().cards_per_pick as usize
+            );
             assert!(!system.contains("Sealed deck:"), "{system}");
             assert!(!system.contains("Winston draft:"), "{system}");
         }
@@ -679,8 +692,16 @@ mod tests {
     #[test]
     fn real_sealed_and_winston_projections_have_no_current_pack_pick_prompt() {
         for (kind, distribution, status) in [
-            (DraftKind::Sealed, PackDistribution::AllAtOnce, DraftStatus::Deckbuilding),
-            (DraftKind::Winston, PackDistribution::SharedStackPiles { pile_count: 3 }, DraftStatus::Drafting),
+            (
+                DraftKind::Sealed,
+                PackDistribution::AllAtOnce,
+                DraftStatus::Deckbuilding,
+            ),
+            (
+                DraftKind::Winston,
+                PackDistribution::SharedStackPiles { pile_count: 3 },
+                DraftStatus::Drafting,
+            ),
         ] {
             let view = started_view(kind, set_source());
             assert_eq!(view.kind, kind);
@@ -692,11 +713,16 @@ mod tests {
                     assert!(view.sealed_packs.is_some());
                 }
                 DraftKind::Winston => assert!(view.shared_stack.is_some()),
-                DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::CommanderDraft => unreachable!(),
+                DraftKind::Quick
+                | DraftKind::Premier
+                | DraftKind::Traditional
+                | DraftKind::CommanderDraft => unreachable!(),
             }
             assert!(view.current_pack.is_none(), "{kind:?}");
             assert_eq!(view.required_pick_count, 0, "{kind:?}");
-            assert!(crate::format_guidance::draft_format_brief(&view, AiDifficulty::Medium).is_empty());
+            assert!(
+                crate::format_guidance::draft_format_brief(&view, AiDifficulty::Medium).is_empty()
+            );
             assert!(matches!(
                 build_draft_pick_prompt(0, &view, AiDifficulty::Medium, None, &SetNames::new()),
                 Err(LlmError::UndecodableChoice { .. })
@@ -710,10 +736,13 @@ mod tests {
         assert!(matches!(&set_view.source, DraftSourceView::Set { .. }));
         assert!(!prompt_for(&set_view, AiDifficulty::Medium).contains("This is a cube"));
 
-        let cube_view = started_view(DraftKind::Quick, DraftSource::Cube {
-            id: "vintage".to_string(),
-            name: "Vintage Cube".to_string(),
-        });
+        let cube_view = started_view(
+            DraftKind::Quick,
+            DraftSource::Cube {
+                id: "vintage".to_string(),
+                name: "Vintage Cube".to_string(),
+            },
+        );
         assert!(matches!(&cube_view.source, DraftSourceView::Cube { .. }));
         assert!(prompt_for(&cube_view, AiDifficulty::Medium).contains("This is a cube"));
     }
@@ -736,7 +765,10 @@ mod tests {
         assert_eq!(view.min_deck_size, 60);
         assert_eq!(view.required_pick_count, 2);
         let system = prompt_for(&view, AiDifficulty::Medium);
-        assert!(system.contains("Commander draft: you take two cards per step"), "{system}");
+        assert!(
+            system.contains("Commander draft: you take two cards per step"),
+            "{system}"
+        );
         assert!(system.contains("at least 60 cards"), "{system}");
         assert!(!system.contains("40-card"), "{system}");
         assert!(!system.contains("40 cards"), "{system}");
