@@ -1,4 +1,5 @@
-import { useRef, useState, type FocusEvent, type KeyboardEvent, type PointerEvent } from "react";
+import { useReducedMotion } from "framer-motion";
+import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { CardAnimationStyle } from "../../animation/types.ts";
@@ -24,7 +25,8 @@ interface CardAnimationStylePickerProps {
  * Hovering (or focusing) the tiles plays the same game moment in each style,
  * side by side and in lockstep, looping for as long as the pointer stays.
  * Leaving pauses on the frame where the styles differ most. Clicking only
- * selects. Touch screens have no hover, so a tap toggles the preview.
+ * selects. Touch screens have no hover, so a tap toggles the preview. With
+ * reduced motion requested, nothing plays: the posters and the selection stay.
  */
 export function CardAnimationStylePicker({ value, onChange }: CardAnimationStylePickerProps) {
   const { t } = useTranslation("settings");
@@ -32,6 +34,7 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
   const previewingRef = useRef(false);
   const [previewing, setPreviewing] = useState(false);
   const [momentIndex, setMomentIndex] = useState(0);
+  const reduceMotion = useReducedMotion();
 
   const forEachVideo = (fn: (video: HTMLVideoElement) => void) => {
     for (const style of STYLES) {
@@ -41,7 +44,7 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
   };
 
   const startPreview = () => {
-    if (previewingRef.current) return;
+    if (previewingRef.current || reduceMotion) return;
     previewingRef.current = true;
     setPreviewing(true);
     forEachVideo((video) => {
@@ -60,6 +63,12 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
       video.currentTime = CARD_ANIMATION_PREVIEW_MOMENTS[momentIndex].peak;
     });
   };
+
+  useEffect(() => {
+    if (reduceMotion) stopPreview();
+    // stopPreview only reads refs and the current moment; re-run on the preference alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reduceMotion]);
 
   const handleTimeUpdate = () => {
     const lead = videos.current[STYLES[0]];
@@ -149,7 +158,7 @@ export function CardAnimationStylePicker({ value, onChange }: CardAnimationStyle
                 />
                 <span
                   className={`pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-slate-950/80 px-2 py-1 text-[0.6rem] font-semibold uppercase tracking-[0.12em] text-white transition-opacity ${
-                    previewing ? "opacity-0" : "opacity-100"
+                    previewing || reduceMotion ? "opacity-0" : "opacity-100"
                   }`}
                 >
                   <span className="pointer-coarse:hidden">{t("visual.cardAnimationPreviewHintHover")}</span>

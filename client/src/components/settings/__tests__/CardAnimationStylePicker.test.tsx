@@ -5,6 +5,12 @@ import type { CardAnimationStyle } from "../../../animation/types.ts";
 import { CARD_ANIMATION_PREVIEW_MOMENTS, momentIndexAt } from "../cardAnimationPreview.ts";
 import { CardAnimationStylePicker } from "../CardAnimationStylePicker.tsx";
 
+let reducedMotion = false;
+vi.mock("framer-motion", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("framer-motion")>()),
+  useReducedMotion: () => reducedMotion,
+}));
+
 function renderPicker(value: CardAnimationStyle = "webgl") {
   const onChange = vi.fn();
   const view = render(<CardAnimationStylePicker value={value} onChange={onChange} />);
@@ -18,6 +24,7 @@ describe("CardAnimationStylePicker", () => {
   let pause: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    reducedMotion = false;
     play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   });
@@ -133,6 +140,32 @@ describe("CardAnimationStylePicker", () => {
 
     fireEvent.keyDown(screen.getByRole("radio", { name: "New" }), { key: "ArrowLeft" });
     expect(onChange).toHaveBeenLastCalledWith("classic");
+  });
+
+  it("plays nothing on hover or focus when reduced motion is requested, but still selects", () => {
+    reducedMotion = true;
+    const { onChange, group, videos } = renderPicker();
+
+    fireEvent.pointerEnter(group, { pointerType: "mouse" });
+    fireEvent.focus(screen.getByRole("radio", { name: "New" }));
+    fireEvent.pointerDown(group, { pointerType: "touch" });
+
+    expect(play).not.toHaveBeenCalled();
+    expect(videos.every((video) => video.getAttribute("poster"))).toBe(true);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Classic" }));
+    expect(onChange).toHaveBeenCalledWith("classic");
+  });
+
+  it("pauses an active preview when reduced motion turns on", () => {
+    const view = render(<CardAnimationStylePicker value="webgl" onChange={vi.fn()} />);
+    fireEvent.pointerEnter(screen.getByRole("radiogroup"), { pointerType: "mouse" });
+    expect(play).toHaveBeenCalledTimes(2);
+
+    reducedMotion = true;
+    view.rerender(<CardAnimationStylePicker value="webgl" onChange={vi.fn()} />);
+
+    expect(pause).toHaveBeenCalledTimes(2);
   });
 
   it("keeps only the selected tile in the tab order", () => {
