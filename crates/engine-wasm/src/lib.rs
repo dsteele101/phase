@@ -3944,7 +3944,14 @@ pub fn build_llm_decision_request(
         };
         let http = match phase_llm::build_chat_request(&endpoint, &request.prompt) {
             Ok(http) => http,
-            Err(error) => return Ok(to_js(&serde_json::json!({ "error": error.to_string() }))),
+            // The kind rides along so the caller can tell "this provider cannot
+            // be asked this decision" (a forced move put to Jev) from a
+            // misconfigured endpoint, and only count the latter against the seat.
+            Err(error) => {
+                return Ok(to_js(
+                    &serde_json::json!({ "error": error.to_string(), "errorKind": error }),
+                ))
+            }
         };
         Ok(to_js(&serde_json::json!({
             "fingerprint": request.fingerprint,

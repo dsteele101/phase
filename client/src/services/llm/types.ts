@@ -13,7 +13,8 @@ export type LlmProviderId =
   | "Anthropic"
   | "Gemini"
   | "DeepSeek"
-  | "OpenAiCompatible";
+  | "OpenAiCompatible"
+  | "Jev";
 
 /** One row of `phase_llm::catalog::provider_catalog`. */
 export interface LlmModelOption {

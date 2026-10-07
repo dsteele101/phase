@@ -92,6 +92,7 @@ const KNOWN_PROVIDERS: readonly LlmProviderId[] = [
   "Gemini",
   "DeepSeek",
   "OpenAiCompatible",
+  "Jev",
 ] as const;
 
 /**

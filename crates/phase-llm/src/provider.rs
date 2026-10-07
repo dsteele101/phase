@@ -18,6 +18,11 @@ pub enum LlmProvider {
     /// Any third-party endpoint implementing OpenAI's `/chat/completions`
     /// contract (Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, ...).
     OpenAiCompatible,
+    /// TypeSafe's Jev, a System One model that answers typed questions rather
+    /// than generating text. Reached through a phase-server relay
+    /// (`POST {base}/jev/systemone`): TypeSafe's API refuses browser CORS, so
+    /// the key travels in the relay envelope and never in a header.
+    Jev,
 }
 
 /// The HTTP contract a provider speaks. Several vendors share one protocol;
@@ -32,6 +37,10 @@ pub enum WireProtocol {
     AnthropicMessages,
     /// `POST {base}/models/{model}:generateContent` — Google Gemini.
     GeminiGenerateContent,
+    /// `POST {base}/jev/systemone` — the phase-server relay to TypeSafe's
+    /// System One API. The decision is posed as one typed Choice question over
+    /// the engine-issued options.
+    SystemOneRelay,
 }
 
 /// Every label [`LlmProvider::from_label`] maps to a real provider rather than
@@ -44,6 +53,7 @@ pub const ACCEPTED_PROVIDER_LABELS: &[&str] = &[
     "Gemini",
     "DeepSeek",
     "OpenAiCompatible",
+    "Jev",
 ];
 
 impl LlmProvider {
@@ -66,6 +76,7 @@ impl LlmProvider {
             "anthropic" | "claude" => LlmProvider::Anthropic,
             "gemini" | "google" | "googleai" => LlmProvider::Gemini,
             "deepseek" => LlmProvider::DeepSeek,
+            "jev" | "typesafe" | "systemone" => LlmProvider::Jev,
             _ => LlmProvider::OpenAiCompatible,
         }
     }
@@ -78,6 +89,7 @@ impl LlmProvider {
             LlmProvider::Gemini => "Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
             LlmProvider::OpenAiCompatible => "OpenAiCompatible",
+            LlmProvider::Jev => "Jev",
         }
     }
 
@@ -89,6 +101,7 @@ impl LlmProvider {
             LlmProvider::Gemini => "Google Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
             LlmProvider::OpenAiCompatible => "OpenAI-compatible endpoint",
+            LlmProvider::Jev => "Jev (TypeSafe)",
         }
     }
 
@@ -99,6 +112,7 @@ impl LlmProvider {
             }
             LlmProvider::Anthropic => WireProtocol::AnthropicMessages,
             LlmProvider::Gemini => WireProtocol::GeminiGenerateContent,
+            LlmProvider::Jev => WireProtocol::SystemOneRelay,
         }
     }
 
@@ -110,7 +124,9 @@ impl LlmProvider {
             LlmProvider::Anthropic => Some("https://api.anthropic.com/v1"),
             LlmProvider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta"),
             LlmProvider::DeepSeek => Some("https://api.deepseek.com/v1"),
-            LlmProvider::OpenAiCompatible => None,
+            // The relay is a phase-server, which the display layer knows (the
+            // multiplayer server the player is connected to), not a vendor.
+            LlmProvider::OpenAiCompatible | LlmProvider::Jev => None,
         }
     }
 
@@ -164,10 +180,15 @@ impl LlmEndpointConfig {
             .filter(|url| !url.is_empty())
             .or(self.provider.default_base_url())
             .ok_or_else(|| LlmError::Configuration {
-                detail: format!(
-                    "{} has no default endpoint; enter the base URL of your server",
-                    self.provider.display_name()
-                ),
+                detail: match self.provider {
+                    LlmProvider::Jev => "Jev is reached through a phase server relay; connect \
+                                         to a multiplayer server or enter the server's URL"
+                        .to_string(),
+                    _ => format!(
+                        "{} has no default endpoint; enter the base URL of your server",
+                        self.provider.display_name()
+                    ),
+                },
             })?;
         Ok(normalize_base_url(self.provider.wire(), raw))
     }
@@ -312,6 +333,7 @@ fn normalize_base_url(wire: WireProtocol, raw: &str) -> String {
         WireProtocol::OpenAiChat => strip_suffix_path(trimmed, "/chat/completions"),
         WireProtocol::AnthropicMessages => strip_suffix_path(trimmed, "/messages"),
         WireProtocol::GeminiGenerateContent => strip_gemini_call_path(trimmed),
+        WireProtocol::SystemOneRelay => strip_suffix_path(trimmed, "/jev/systemone"),
     }
 }
 
@@ -389,6 +411,7 @@ mod tests {
             LlmProvider::Gemini,
             LlmProvider::DeepSeek,
             LlmProvider::OpenAiCompatible,
+            LlmProvider::Jev,
         ] {
             let label = match provider {
                 LlmProvider::OpenAi => "OpenAi",
@@ -396,6 +419,7 @@ mod tests {
                 LlmProvider::Gemini => "Gemini",
                 LlmProvider::DeepSeek => "DeepSeek",
                 LlmProvider::OpenAiCompatible => "OpenAiCompatible",
+                LlmProvider::Jev => "Jev",
             };
             assert!(ACCEPTED_PROVIDER_LABELS.contains(&label));
             assert_eq!(LlmProvider::from_label(label), provider);
@@ -614,6 +638,7 @@ mod tests {
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
             user: "u".to_string(),
+            frame: Default::default(),
         };
         assert!(matches!(
             crate::wire::build_chat_request(&config, &prompt),
@@ -723,6 +748,7 @@ mod tests {
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
             user: "u".to_string(),
+            frame: Default::default(),
         };
         for url in ["http:example.com/v1", "http:/example.com/v1"] {
             let config = LlmEndpointConfig {
@@ -801,6 +827,7 @@ mod tests {
         let prompt = crate::prompt::LlmPrompt {
             system: "s".to_string(),
             user: "u".to_string(),
+            frame: Default::default(),
         };
 
         for (provider, endpoint, expected_host) in [
