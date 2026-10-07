@@ -372,6 +372,25 @@ pub struct HttpRequestSpec {
     pub method: &'static str,
     pub headers: Vec<HttpHeader>,
     pub body: String,
+    /// What the transport does with a 3xx answer. Part of the engine-owned
+    /// contract because only the engine knows where the credential sits.
+    pub redirect: RedirectPolicy,
+}
+
+/// A request's redirect policy, spelled exactly as `fetch`'s `RequestRedirect`
+/// so the transport passes it through unchanged.
+///
+/// A credential that travels in a header the browser strips on a cross-origin
+/// hop (`Authorization`) survives a followed redirect; one in the BODY does not:
+/// the fetch spec replays a 307/308 body verbatim to whatever origin `Location`
+/// names. A request whose body carries the key must therefore refuse to follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedirectPolicy {
+    /// Follow redirects (fetch's default). Credentials ride only in headers.
+    Follow,
+    /// Fail the request on any redirect; nothing is re-sent anywhere.
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -11,7 +11,9 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{LlmError, LlmResult};
 use crate::prompt::{DecisionFrame, LlmPrompt};
-use crate::provider::{HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, WireProtocol};
+use crate::provider::{
+    HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, RedirectPolicy, WireProtocol,
+};
 
 /// Output budget used when a config names none. Sized for a short JSON decision
 /// plus a sentence of reasoning — the prompt asks for nothing longer, and a
@@ -55,6 +57,7 @@ pub fn build_chat_request(
     let api_key = config.api_key.trim();
 
     let mut headers = vec![HttpHeader::new("content-type", JSON_CONTENT_TYPE)];
+    let mut redirect = RedirectPolicy::Follow;
 
     let (url, body) = match config.provider.wire() {
         WireProtocol::OpenAiChat => {
@@ -118,6 +121,10 @@ pub fn build_chat_request(
             // request carries the key in the envelope, and the key's only
             // destination is that body.
             headers = vec![HttpHeader::new("content-type", RELAY_CONTENT_TYPE)];
+            // The key is in the BODY, which a followed 307/308 would replay to
+            // whatever origin `Location` names. The relay answers directly or
+            // not at all.
+            redirect = RedirectPolicy::Error;
             let body = json!({
                 "apiKey": api_key,
                 "request": system_one_request(model, &prompt.frame)?,
@@ -146,6 +153,7 @@ pub fn build_chat_request(
         method: "POST",
         headers,
         body: body.to_string(),
+        redirect,
     })
 }
 
@@ -412,6 +420,23 @@ mod tests {
     }
 
     #[test]
+    fn header_credential_providers_keep_fetchs_default_redirect_policy() {
+        for provider in [
+            LlmProvider::OpenAi,
+            LlmProvider::Anthropic,
+            LlmProvider::Gemini,
+            LlmProvider::DeepSeek,
+        ] {
+            let spec = build_chat_request(&config(provider), &prompt()).unwrap();
+            assert_eq!(spec.redirect, RedirectPolicy::Follow, "{provider:?}");
+            assert_eq!(
+                serde_json::to_value(&spec).unwrap()["redirect"],
+                json!("follow")
+            );
+        }
+    }
+
+    #[test]
     fn compatible_endpoints_keep_the_legacy_token_key() {
         let mut config = config(LlmProvider::OpenAiCompatible);
         config.base_url = Some("http://localhost:1234/v1".to_string());
@@ -651,6 +676,12 @@ mod tests {
         assert_eq!(body["request"]["model"], json!("model-x"));
         assert_eq!(body.as_object().unwrap().len(), 2);
         assert!(!spec.body.contains("Bearer"));
+        // The key is in the body, so a redirect must fail rather than replay it.
+        assert_eq!(spec.redirect, RedirectPolicy::Error);
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap()["redirect"],
+            json!("error")
+        );
     }
 
     #[test]

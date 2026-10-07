@@ -55,7 +55,7 @@ pub use game_decision::{
 pub use probe::{connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};
 pub use provider::{
-    HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, WireProtocol,
+    HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, RedirectPolicy, WireProtocol,
     ACCEPTED_PROVIDER_LABELS,
 };
 pub use wire::{build_chat_request, completion_from_response, extract_completion_text};

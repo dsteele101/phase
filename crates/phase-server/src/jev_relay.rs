@@ -1,6 +1,11 @@
 //! `POST /jev/systemone`: a relay from the browser to TypeSafe's Jev
 //! SystemOne API, which refuses browser CORS.
 //!
+//! The official lobby hostnames are served by the Cloudflare Worker in
+//! `lobby-worker`, not by this server, so the Worker carries a behavioral twin of
+//! this route (`lobby-worker/src/jev-relay.ts`). A change to the envelope, the
+//! invariants below, or the answers must be made in both.
+//!
 //! The browser sends a CORS *simple request* — `POST` with
 //! `Content-Type: text/plain;charset=UTF-8` and no `Authorization` or other
 //! custom header — so no preflight is issued and the server's existing CORS

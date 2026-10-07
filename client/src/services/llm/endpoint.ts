@@ -1,5 +1,5 @@
-import { DEFAULT_MULTIPLAYER_SERVER_URL, serverHttpOrigin } from "../../config/multiplayerServer";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
+import { defaultJevRelayOrigin } from "./relayOrigin";
 import { endpointOf, type LlmEndpointConfig, type LlmProfile } from "./types";
 
 /**
@@ -17,9 +17,6 @@ export function resolvedEndpointOf(profile: LlmProfile): LlmEndpointConfig {
   if (endpoint.provider !== "Jev" || endpoint.baseUrl?.trim()) return endpoint;
   return {
     ...endpoint,
-    baseUrl:
-      serverHttpOrigin(
-        useMultiplayerStore.getState().hostingServer ?? DEFAULT_MULTIPLAYER_SERVER_URL,
-      ) ?? null,
+    baseUrl: defaultJevRelayOrigin(useMultiplayerStore.getState().hostingServer) ?? null,
   };
 }
