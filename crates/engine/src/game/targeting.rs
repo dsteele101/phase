@@ -3012,9 +3012,10 @@ fn hexproof_filter_matches(
     }
 }
 
-/// CR 109.5 + CR 702.18a / CR 702.11b: Determine whether `source_controller` is
+/// CR 109.5 + CR 702.18a / CR 702.11b / CR 102.3: Determine whether `source_controller` is
 /// prohibited from targeting by a `ProhibitionScope` defined on a static ability.
 fn is_prohibited_from_targeting(
+    state: &GameState,
     who: &crate::types::statics::ProhibitionScope,
     static_controller: PlayerId,
     source_controller: PlayerId,
@@ -3022,13 +3023,13 @@ fn is_prohibited_from_targeting(
     match who {
         crate::types::statics::ProhibitionScope::AllPlayers => true,
         crate::types::statics::ProhibitionScope::Opponents => {
-            source_controller != static_controller
+            super::players::is_opponent(state, static_controller, source_controller)
         }
         crate::types::statics::ProhibitionScope::Controller => {
             source_controller == static_controller
         }
         crate::types::statics::ProhibitionScope::EnchantedCreatureController => {
-            source_controller != static_controller
+            super::players::is_opponent(state, static_controller, source_controller)
         }
     }
 }
@@ -3060,16 +3061,16 @@ fn can_target(
     //     per-object (and now per-source-controller) and stays inside the loop.
     let ignores_hexproof = source_ignores_hexproof
         || crate::game::static_abilities::target_ignores_hexproof(state, obj.id, source_controller);
-    // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
+    // CR 702.11b + CR 102.3: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
-        && obj.controller != source_controller
+        && super::players::is_opponent(state, obj.controller, source_controller)
     {
         return false;
     }
-    // CR 702.11d: "Hexproof from [quality]" prevents targeting by opponents' sources
+    // CR 702.11d + CR 102.3: "Hexproof from [quality]" prevents targeting by opponents' sources
     // with the matching quality. CR 702.11e: IgnoreHexproof bypasses this.
-    if !ignores_hexproof && obj.controller != source_controller {
+    if !ignores_hexproof && super::players::is_opponent(state, obj.controller, source_controller) {
         for kw in &obj.keywords {
             if let Keyword::HexproofFrom(ref filter) = kw {
                 if hexproof_filter_matches(filter, source_id, state) {
@@ -3087,7 +3088,29 @@ fn can_target(
     // 1. Direct on `obj` (self-referential or granted):
     for def in super::functioning_abilities::active_static_definitions(state, obj) {
         if let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode {
-            if is_prohibited_from_targeting(who, obj.controller, source_controller) {
+            let applies = match def.affected {
+                None | Some(TargetFilter::SelfRef) => true,
+                Some(ref filter) => {
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        obj.id,
+                        filter,
+                        &crate::game::filter::FilterContext::from_source(state, obj.id),
+                    ) && super::static_abilities::static_condition_matches_context(
+                        state,
+                        obj.id,
+                        obj.controller,
+                        def,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(obj.id),
+                            ..Default::default()
+                        },
+                    )
+                }
+            };
+            if applies
+                && is_prohibited_from_targeting(state, who, obj.controller, source_controller)
+            {
                 return false;
             }
         }
@@ -3117,6 +3140,7 @@ fn can_target(
                         },
                     ) {
                         if is_prohibited_from_targeting(
+                            state,
                             who,
                             source_obj.controller,
                             source_controller,
@@ -4402,6 +4426,7 @@ mod tests {
                     .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
             )),
         );
+        aura.card_types.core_types.push(CoreType::Enchantment);
 
         let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
         let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
@@ -4413,6 +4438,87 @@ mod tests {
         assert!(
             !targets_p1.contains(&TargetRef::Object(c1)),
             "CR 109.5: P1 is an opponent of the Aura's controller and MUST be prohibited from targeting"
+        );
+
+        // Naturalize check: Shielding Plax itself is an enchantment and CAN be targeted by P1
+        let enchantment_filter = TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+            crate::types::ability::TypeFilter::Enchantment,
+        ));
+        let enchantment_targets_p1 =
+            find_legal_targets(&state, &enchantment_filter, PlayerId(1), ObjectId(99));
+        assert!(
+            enchantment_targets_p1.contains(&TargetRef::Object(aura_id)),
+            "Opponent P1 CAN target the Aura itself (e.g. with Naturalize); Shielding Plax protects only the enchanted creature"
+        );
+    }
+
+    /// CR 102.3: In a game between teams, teammates are not opponents.
+    /// A CantBeTargeted { who: ProhibitionScope::Opponents } static on an Aura allows
+    /// the controller's teammate to target the enchanted creature.
+    #[test]
+    fn cant_be_targeted_opponents_static_permits_teammate_in_2hg() {
+        use crate::types::format::FormatConfig;
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+
+        // Creature controlled by P0
+        let c0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&c0)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Aura controlled by P0 attached to c0
+        let aura_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Shielding Plax".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = state.objects.get_mut(&aura_id).unwrap();
+        aura.attached_to = Some(crate::game::game_object::AttachTarget::Object(c0));
+        aura.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::Opponents,
+                },
+            )
+            .affected(crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
+            )),
+        );
+
+        // P0 (controller) CAN target c0
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        assert!(targets_p0.contains(&TargetRef::Object(c0)));
+
+        // P1 (P0's teammate in 2HG) CAN target c0 (CR 102.3)
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+        assert!(
+            targets_p1.contains(&TargetRef::Object(c0)),
+            "CR 102.3: Teammate P1 is NOT an opponent and CAN target c0"
+        );
+
+        // P2 and P3 (opponents on opposing team) CANNOT target c0
+        let targets_p2 = find_legal_targets(&state, &creature_filter(), PlayerId(2), ObjectId(99));
+        assert!(
+            !targets_p2.contains(&TargetRef::Object(c0)),
+            "P2 is an opponent and cannot target c0"
+        );
+        let targets_p3 = find_legal_targets(&state, &creature_filter(), PlayerId(3), ObjectId(99));
+        assert!(
+            !targets_p3.contains(&TargetRef::Object(c0)),
+            "P3 is an opponent and cannot target c0"
         );
     }
 

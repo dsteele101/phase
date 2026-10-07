@@ -498,3 +498,50 @@ fn equipment_attachment_single_trigger_and_same_host_noop() {
         "Bear 2 must be tapped by the attached trigger upon moving equipment"
     );
 }
+
+#[test]
+fn opponent_can_target_shielding_plax_with_naturalize() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest"]);
+
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let plax = scenario
+        .add_spell_to_hand(P0, "Shielding Plax", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(&["Enchant"], SHIELDING_PLAX)
+        .id();
+
+    let naturalize = scenario
+        .add_spell_to_hand(P1, "Naturalize", false)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Destroy target artifact or enchantment.")
+        .id();
+
+    let mut runner = scenario.build();
+
+    // P0 enchants Bear with Shielding Plax
+    runner.cast(plax).target_object(bear).resolve();
+
+    // Give priority to P1 (opponent)
+    runner.state_mut().active_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.state_mut().priority_player = P1;
+
+    // Shielding Plax protects the enchanted creature, NOT the Aura itself.
+    // P1 (opponent) casts Naturalize targeting Shielding Plax.
+    runner.cast(naturalize).target_object(plax).resolve();
+
+    // Shielding Plax is destroyed (put into graveyard)
+    assert!(
+        runner.state().players[0].graveyard.contains(&plax),
+        "Shielding Plax should be destroyed by Naturalize and put into P0's graveyard"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&plax),
+        "Shielding Plax should no longer be on the battlefield"
+    );
+}
