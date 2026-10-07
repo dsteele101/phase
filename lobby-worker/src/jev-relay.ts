@@ -205,21 +205,24 @@ export async function handleJevRelay(
     return timedOut ? refuse(504, TIMEOUT_BODY) : refuse(502, UNREACHABLE_BODY);
   }
 
+  const body = slotBoundBody(upstream.body, release, Math.max(0, timeoutMs - (Date.now() - started)));
   try {
     // Status and log line only: the key and the upstream body never reach a log.
     console.log({ event: "jev_relay", status: upstream.status, latencyMs: Date.now() - started });
 
     // Only `Content-Type` is copied from the upstream.
-    const response = new Response(
-      slotBoundBody(upstream.body, release, Math.max(0, timeoutMs - (Date.now() - started))),
-      { status: upstream.status, headers: { ...CORS_HEADERS, "Cache-Control": "no-store" } },
-    );
+    const response = new Response(body, {
+      status: upstream.status,
+      headers: { ...CORS_HEADERS, "Cache-Control": "no-store" },
+    });
     const contentType = upstream.headers.get("Content-Type");
     if (contentType) response.headers.set("Content-Type", contentType);
     return response;
   } catch (error) {
-    // No body reached the runtime, so nothing else will release the slot.
+    // No body reached the runtime, so nothing else will release the slot or stop
+    // the wrapper's deadline timer: cancelling does both and closes the upstream.
     release();
+    void body?.cancel().catch(() => {});
     throw error;
   }
 }

@@ -4,8 +4,11 @@ import "../../../test/helpers/persistedStorage";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The real production service, with only its two asynchronous boundaries held
-// open by the test: the set catalog (a cold fetch) and the draft engine lease.
+// The real production service. The set catalog (a cold fetch) is the boundary
+// the test holds open; the engine lease is a pass-through stand-in that records
+// the endpoint it is asked to build for. Credential resolution happens inside the
+// lease callback, after the catalog await, so the round holds its profile copy
+// across a real asynchronous gap.
 const gates = vi.hoisted(() => ({
   catalog: null as null | { promise: Promise<unknown>; resolve: (value: unknown) => void },
   endpoints: [] as string[],

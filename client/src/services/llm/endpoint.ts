@@ -22,7 +22,9 @@ import { endpointOf, type LlmEndpointConfig, type LlmProfile } from "./types";
  * key to another. So the current key is used only when the current profile is
  * the same endpoint as the held copy — same provider, same raw endpoint — and
  * otherwise the request goes out with no key, which the engine refuses to
- * build. A profile the store no longer holds has no key either.
+ * build. A derived-relay profile the store no longer holds has no key either.
+ * (A held profile with an explicit endpoint keeps sending its own key to its own
+ * endpoint, which is where that key was entered for.)
  */
 export function resolvedEndpointOf(profile: LlmProfile): LlmEndpointConfig {
   const endpoint = endpointOf(profile);
