@@ -6920,6 +6920,31 @@ fn matches_combat_relation(
                 candidate_blocks_subject || subject_blocks_candidate
             })
         }
+        // CR 509.1g: Candidate is currently blocked by subject in live combat
+        // (subject is blocking candidate).
+        CombatRelation::BlockedBySubjectLive => {
+            let Some(subject_id) = combat_relation_subject_id(subject, source) else {
+                return false;
+            };
+            state.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .blocker_to_attacker
+                    .get(&subject_id)
+                    .is_some_and(|attackers| attackers.contains(&object_id))
+            })
+        }
+        // CR 509.1g: Candidate is currently blocking subject in live combat.
+        CombatRelation::BlockingSubjectLive => {
+            let Some(subject_id) = combat_relation_subject_id(subject, source) else {
+                return false;
+            };
+            state.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .blocker_to_attacker
+                    .get(&object_id)
+                    .is_some_and(|attackers| attackers.contains(&subject_id))
+            })
+        }
         // CR 509.1g + CR 400.7: answered from the block-history ledgers, which
         // CR 506.4 does not prune, by the exact subject and candidate
         // incarnations.
@@ -8429,7 +8454,9 @@ fn zone_change_record_matches_property(
         FilterProp::CombatRelation { relation, subject } => match relation {
             // CR 506.4: the live map is pruned when either creature leaves
             // combat, so there is nothing for a departed record to match.
-            CombatRelation::BlockingOrBlockedBy => false,
+            CombatRelation::BlockingOrBlockedBy
+            | CombatRelation::BlockedBySubjectLive
+            | CombatRelation::BlockingSubjectLive => false,
             // CR 509.1g + CR 608.2i: answered from the same block-history
             // ledgers as the live leg, through GameState::creature_blocked_attacker.
             // CR 400.7: the record's exact departing incarnation is its own

@@ -8847,9 +8847,13 @@ fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> 
     {
         return None;
     }
-    let subject = nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+    // CR 615.1a: In passive phrasing, the damage source is introduced by "by <subject>"
+    // following the damage verb "dealt" — either immediately ("dealt by <subject>")
+    // or separated by recipient/duration clauses ("dealt to <recipient> [this turn] by <subject>").
+    let (_, (_, after_dealt)) = nom_primitives::split_once_on(norm_lower, "dealt").ok()?;
+    let subject = nom_primitives::scan_at_word_boundaries(after_dealt, |input| {
         preceded(
-            tag::<_, _, OracleError<'_>>("dealt by "),
+            tag::<_, _, OracleError<'_>>("by "),
             take_damage_source_subject_clause,
         )
         .parse(input)
@@ -29120,7 +29124,8 @@ mod snapshot_tests {
 mod opposition_agent_parser_tests {
     use super::*;
     use crate::types::ability::{
-        CastingPermission, ManaSpendPermission, PermissionGrantee, RestrictionExpiry, ShieldKind,
+        CastingPermission, CombatRelation, CombatRelationSubject, ManaSpendPermission,
+        PermissionGrantee, RestrictionExpiry, ShieldKind,
     };
     use crate::types::card_type::CoreType;
     use crate::types::statics::{CastFrequency, ProhibitionScope, StaticMode};
@@ -29565,6 +29570,52 @@ mod opposition_agent_parser_tests {
         assert_eq!(
             ls, None,
             "CR 615.1a: unsupported qualifiers must fail closed rather than dropping restrictions"
+        );
+    }
+
+    #[test]
+    fn wall_of_vapor_and_armored_transport_damage_source_scope() {
+        // CR 615.1a + CR 509.1g: Wall of Vapor prevents damage from creatures it's blocking.
+        // The damage_source_filter must be scoped via BlockedBySubjectLive, so it does not
+        // prevent damage from spells or unblocked creatures.
+        let wov = parse_replacement_line(
+            "Prevent all damage that would be dealt to this creature by creatures it's blocking.",
+            "Wall of Vapor",
+        )
+        .expect("Wall of Vapor prevention replacement must parse");
+        assert_eq!(wov.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            wov.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        assert_eq!(
+            wov.damage_source_filter,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockedBySubjectLive,
+                    subject: CombatRelationSubject::Source,
+                }]
+            )))
+        );
+
+        // CR 615.1a + CR 509.1g: Armored Transport prevents combat damage from creatures blocking it.
+        let at = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to this creature by creatures blocking it.",
+            "Armored Transport",
+        )
+        .expect("Armored Transport prevention replacement must parse");
+        assert_eq!(at.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(at.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            at.damage_source_filter,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockingSubjectLive,
+                    subject: CombatRelationSubject::Source,
+                }]
+            )))
         );
     }
 

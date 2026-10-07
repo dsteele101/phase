@@ -6401,6 +6401,11 @@ pub enum AttackerBlockStatus {
 pub enum CombatRelation {
     /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it.
     BlockingOrBlockedBy,
+    /// CR 509.1g: Candidate is currently blocked by the subject in live combat
+    /// (the subject is blocking the candidate).
+    BlockedBySubjectLive,
+    /// CR 509.1g: Candidate is currently blocking the subject in live combat.
+    BlockingSubjectLive,
     /// CR 509.1g + CR 400.7: Candidate is an attacking creature the subject was
     /// recorded as blocking, within `scope`. Unlike `BlockingOrBlockedBy`, which
     /// reads live `combat.blocker_to_attacker` and empties when CR 506.4 removes
