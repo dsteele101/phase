@@ -92,6 +92,27 @@ describe("a Jev key stays bound to the relay it was entered for", () => {
     expect(useLlmStore.getState().profiles[0].apiKey).toBe("");
   });
 
+  it("never sends a stale copy's key to a server chosen while the copy was held", () => {
+    // A draft round or probe holds its profile across awaits.
+    const id = jevWithKey();
+    const held = useLlmStore.getState().profiles.find((profile) => profile.id === id)!;
+    expect(held.apiKey).toBe("jev-key");
+
+    useMultiplayerStore.getState().setHostingServer("wss://b.example/ws");
+
+    const resolved = resolvedEndpointOf(held);
+    expect(resolved.baseUrl).toBe("https://b.example");
+    expect(resolved.apiKey).toBe("");
+  });
+
+  it("gives a removed profile's stale copy no key", () => {
+    const id = jevWithKey();
+    const held = useLlmStore.getState().profiles.find((profile) => profile.id === id)!;
+    useLlmStore.getState().removeProfile(id);
+
+    expect(resolvedEndpointOf(held).apiKey).toBe("");
+  });
+
   it("lets a key entered after the switch belong to the new server", () => {
     const id = jevWithKey();
     useMultiplayerStore.getState().setHostingServer("wss://b.example/ws");

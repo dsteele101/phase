@@ -380,14 +380,16 @@ pub struct HttpRequestSpec {
 /// A request's redirect policy, spelled exactly as `fetch`'s `RequestRedirect`
 /// so the transport passes it through unchanged.
 ///
-/// A credential that travels in a header the browser strips on a cross-origin
-/// hop (`Authorization`) survives a followed redirect; one in the BODY does not:
-/// the fetch spec replays a 307/308 body verbatim to whatever origin `Location`
-/// names. A request whose body carries the key must therefore refuse to follow.
+/// Fetch strips exactly one credential-bearing header on a cross-origin redirect:
+/// `Authorization`. A key in any other header (`x-api-key`, `x-goog-api-key`) or
+/// in the BODY is replayed to whatever origin `Location` names (the spec keeps a
+/// 307/308 body verbatim). A request whose credential is anywhere but
+/// `Authorization` must therefore refuse to follow a redirect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RedirectPolicy {
-    /// Follow redirects (fetch's default). Credentials ride only in headers.
+    /// Follow redirects (fetch's default). Only for a request whose sole
+    /// credential is the `Authorization` header, which fetch strips cross-origin.
     Follow,
     /// Fail the request on any redirect; nothing is re-sent anywhere.
     Error,

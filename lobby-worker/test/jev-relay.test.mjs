@@ -9,6 +9,7 @@ import {
   handleJevRelay,
   JEV_DEFAULT_UPSTREAM,
   JEV_MAX_BODY_BYTES,
+  JEV_MAX_IN_FLIGHT,
   resolveJevUpstream,
 } from "../src/jev-relay.ts";
 
@@ -276,4 +277,72 @@ test("the upstream override is honored only when it cannot expose the key", () =
   for (const unsafe of ["http://stub.example/x", "ftp://stub.example", "not a url", "https://user:pw@stub.example/x"]) {
     assert.equal(resolveJevUpstream({ TYPESAFE_API_URL: unsafe }), JEV_DEFAULT_UPSTREAM, unsafe);
   }
+});
+
+// ── Abuse bounds ───────────────────────────────────────────────────────────
+
+test("a per-IP limit refuses before the body is read or upstream is called", async () => {
+  const upstream = stubUpstream();
+  const keys = [];
+  const env = {
+    JEV_LIMIT: {
+      async limit(options) {
+        keys.push(options.key);
+        return { success: false };
+      },
+    },
+  };
+  const response = await handleJevRelay(
+    simplePost(URL_, envelope(), { "CF-Connecting-IP": "203.0.113.9" }),
+    env,
+  );
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "*");
+  assert.deepEqual(keys, ["jev:203.0.113.9"]);
+  assert.equal(upstream.length, 0);
+});
+
+test("an admitted request goes through the limiter, and a failing limiter fails open", async () => {
+  const upstream = stubUpstream();
+  const admitting = { JEV_LIMIT: { limit: async () => ({ success: true }) } };
+  assert.equal((await handleJevRelay(simplePost(URL_, envelope()), admitting)).status, 200);
+
+  const broken = {
+    JEV_LIMIT: {
+      limit: async () => {
+        throw new Error("limiter down");
+      },
+    },
+  };
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await handleJevRelay(simplePost(URL_, envelope()), broken)).status, 200);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(upstream.length, 2);
+});
+
+test("calls beyond the in-flight cap are answered 503 and the cap recovers", async () => {
+  const releases = [];
+  globalThis.fetch = () =>
+    new Promise((resolveUpstream) => {
+      releases.push(() => resolveUpstream(new Response("{}", { status: 200 })));
+    });
+  const held = Array.from({ length: JEV_MAX_IN_FLIGHT }, () =>
+    handleJevRelay(simplePost(URL_, envelope()), {}),
+  );
+  // Let every held request reach its upstream call.
+  while (releases.length < JEV_MAX_IN_FLIGHT) await new Promise((r) => setImmediate(r));
+
+  const refused = await handleJevRelay(simplePost(URL_, envelope()), {});
+  assert.equal(refused.status, 503);
+  assert.equal(await refused.text(), "Jev relay busy");
+
+  releases.forEach((release) => release());
+  assert.ok((await Promise.all(held)).every((response) => response.status === 200));
+
+  stubUpstream();
+  assert.equal((await handleJevRelay(simplePost(URL_, envelope()), {})).status, 200);
 });

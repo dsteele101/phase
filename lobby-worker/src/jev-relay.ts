@@ -30,6 +30,12 @@
 import { readBoundedText } from "./directory";
 
 export interface JevRelayEnv {
+  /**
+   * Per-IP throttle. Optional like the directory limiters: a deployment without
+   * the binding still serves, and the gate fails OPEN, since the relay holds no
+   * secret of ours and the caller's own key is what pays for each call.
+   */
+  JEV_LIMIT?: RateLimit;
   /** Overrides the upstream. `https://`, or `http://` on a loopback host (tests). */
   TYPESAFE_API_URL?: string;
 }
@@ -43,8 +49,19 @@ export const JEV_MAX_BODY_BYTES = 512 * 1024;
 /** Total time allowed for one upstream call. */
 export const JEV_UPSTREAM_TIMEOUT_MS = 20_000;
 
+/**
+ * Upstream calls allowed in flight at once in one isolate; more are answered 503,
+ * as `phase-server`'s relay does. A per-isolate bound, so it caps what this
+ * route can take from the Worker's concurrency, not the fleet's total.
+ */
+export const JEV_MAX_IN_FLIGHT = 64;
+
+let inFlight = 0;
+
 const BAD_REQUEST_BODY = "invalid Jev relay request";
 const TOO_LARGE_BODY = "Jev relay request body too large";
+const BUSY_BODY = "Jev relay busy";
+const RATE_LIMITED_BODY = "Jev relay rate limited";
 const TIMEOUT_BODY = "Jev upstream timed out";
 const UNREACHABLE_BODY = "Jev upstream unreachable";
 
@@ -121,6 +138,18 @@ export async function handleJevRelay(
     return refuse(405, BAD_REQUEST_BODY, { Allow: "POST, OPTIONS" });
   }
 
+  // Before the body is read, so a flood costs a counter lookup and nothing more.
+  if (env.JEV_LIMIT) {
+    const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+    try {
+      const { success } = await env.JEV_LIMIT.limit({ key: `jev:${ip}` });
+      if (!success) return refuse(429, RATE_LIMITED_BODY);
+    } catch {
+      // A failing limiter must not take the feature down with it.
+      console.error({ event: "jev_rate_limit_failed" });
+    }
+  }
+
   const declared = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > JEV_MAX_BODY_BYTES) {
     return refuse(413, TOO_LARGE_BODY);
@@ -144,6 +173,8 @@ export async function handleJevRelay(
     return refuse(400, BAD_REQUEST_BODY);
   }
 
+  if (inFlight >= JEV_MAX_IN_FLIGHT) return refuse(503, BUSY_BODY);
+  inFlight += 1;
   const started = Date.now();
   let upstream: Response;
   try {
@@ -160,6 +191,8 @@ export async function handleJevRelay(
     const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
     console.log({ event: "jev_relay", outcome: timedOut ? "timeout" : "unreachable", latencyMs: Date.now() - started });
     return timedOut ? refuse(504, TIMEOUT_BODY) : refuse(502, UNREACHABLE_BODY);
+  } finally {
+    inFlight -= 1;
   }
 
   // Status and log line only: the key and the upstream body never reach a log.

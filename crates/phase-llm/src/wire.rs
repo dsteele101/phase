@@ -94,6 +94,8 @@ pub fn build_chat_request(
         }
         WireProtocol::AnthropicMessages => {
             headers.push(HttpHeader::new("x-api-key", api_key));
+            // `x-api-key` is not stripped from a cross-origin redirect.
+            redirect = RedirectPolicy::Error;
             headers.push(HttpHeader::new("anthropic-version", ANTHROPIC_VERSION));
             // Anthropic blocks browser-origin calls unless the caller opts in.
             // Every consumer here IS a browser (web build and Tauri webview
@@ -133,6 +135,8 @@ pub fn build_chat_request(
         }
         WireProtocol::GeminiGenerateContent => {
             headers.push(HttpHeader::new("x-goog-api-key", api_key));
+            // Likewise not stripped from a cross-origin redirect.
+            redirect = RedirectPolicy::Error;
             let mut generation_config = json!({ "maxOutputTokens": max_tokens });
             if let Some(temperature) = config.temperature {
                 generation_config["temperature"] = json!(temperature);
@@ -420,19 +424,26 @@ mod tests {
     }
 
     #[test]
-    fn header_credential_providers_keep_fetchs_default_redirect_policy() {
-        for provider in [
-            LlmProvider::OpenAi,
-            LlmProvider::Anthropic,
-            LlmProvider::Gemini,
-            LlmProvider::DeepSeek,
-        ] {
+    fn only_a_bearer_authorization_credential_may_follow_a_redirect() {
+        // `Authorization` is the one credential header fetch strips cross-origin.
+        for provider in [LlmProvider::OpenAi, LlmProvider::DeepSeek] {
             let spec = build_chat_request(&config(provider), &prompt()).unwrap();
             assert_eq!(spec.redirect, RedirectPolicy::Follow, "{provider:?}");
             assert_eq!(
                 serde_json::to_value(&spec).unwrap()["redirect"],
                 json!("follow")
             );
+        }
+        // A key in `x-api-key`, `x-goog-api-key` or the body would be replayed.
+        for provider in [
+            LlmProvider::Anthropic,
+            LlmProvider::Gemini,
+            LlmProvider::Jev,
+        ] {
+            let mut config = config(provider);
+            config.base_url = Some("https://relay.example".to_string());
+            let spec = build_chat_request(&config, &prompt()).unwrap();
+            assert_eq!(spec.redirect, RedirectPolicy::Error, "{provider:?}");
         }
     }
 
