@@ -3164,7 +3164,7 @@ pub(super) fn match_attached(
         && trigger
             .valid_target
             .as_ref()
-            .map(|filter| target_ref_matches_filter(&target, filter, state, source_context))
+            .map(|filter| target_ref_matches_filter(target, filter, state, source_context))
             .unwrap_or(true)
 }
 

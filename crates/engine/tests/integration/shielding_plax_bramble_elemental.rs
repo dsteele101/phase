@@ -29,6 +29,8 @@ const COMPOUND_AURA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and
 
 const ENORMOUS_ENERGY_BLADE: &str = "Equipped creature gets +4/+0.\nWhenever this Equipment becomes attached to a creature, tap that creature.\nEquip {0}";
 
+const GRAFTED_WARGEAR: &str = "Equipped creature gets +3/+2.\nWhenever Grafted Wargear becomes unattached from a permanent, sacrifice that permanent.\nEquip {0}";
+
 fn saproling_count(runner: &GameRunner, player: PlayerId) -> usize {
     let state = runner.state();
     state
@@ -543,5 +545,104 @@ fn opponent_can_target_shielding_plax_with_naturalize() {
     assert!(
         !runner.state().battlefield.contains(&plax),
         "Shielding Plax should no longer be on the battlefield"
+    );
+}
+
+/// CR 608.2k + CR 701.3d + CR 701.21a: When Grafted Wargear becomes unattached from a permanent,
+/// "sacrifice that permanent" refers to the permanent it became unattached from (the former host),
+/// NOT the Equipment itself.
+#[test]
+fn grafted_wargear_unattached_sacrifices_former_host_not_equipment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bear1 = scenario.add_creature(P0, "Grizzly Bears 1", 2, 2).id();
+    let bear2 = scenario.add_creature(P0, "Grizzly Bears 2", 2, 2).id();
+
+    let wargear = scenario
+        .add_artifact_from_oracle(P0, "Grafted Wargear", GRAFTED_WARGEAR)
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text_with_keywords(&["Equip"], GRAFTED_WARGEAR)
+        .id();
+
+    let mut runner = scenario.build();
+
+    let equip_idx = runner.state().objects[&wargear]
+        .abilities
+        .iter()
+        .position(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.contains("Equip"))
+        })
+        .expect("Grafted Wargear must carry an Equip activated ability");
+
+    // 1. Equip to Bear 1:
+    runner
+        .activate(wargear, equip_idx)
+        .target_object(bear1)
+        .resolve();
+
+    assert_eq!(
+        runner.state().objects[&wargear].attached_to,
+        Some(AttachTarget::Object(bear1)),
+        "Grafted Wargear must be attached to Bear 1"
+    );
+    assert_eq!(
+        runner.state().objects[&bear1].power,
+        Some(5),
+        "Bear 1 gets +3/+2 (power 5)"
+    );
+    assert_eq!(
+        runner.state().objects[&bear1].toughness,
+        Some(4),
+        "Bear 1 gets +3/+2 (toughness 4)"
+    );
+
+    // 2. Move Equip to Bear 2:
+    // Wargear becomes unattached from Bear 1 and attached to Bear 2.
+    // The unattached trigger fires: "sacrifice that permanent" (CR 701.3d, CR 608.2k).
+    // The former host (Bear 1) must be sacrificed (CR 701.21a), while Grafted Wargear
+    // remains on the battlefield attached to Bear 2!
+    runner
+        .activate(wargear, equip_idx)
+        .target_object(bear2)
+        .resolve();
+
+    // Bear 1 was sacrificed: in graveyard, not on battlefield
+    assert!(
+        runner.state().players[0].graveyard.contains(&bear1),
+        "Bear 1 (former host) must be sacrificed and in graveyard"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&bear1),
+        "Bear 1 must no longer be on battlefield"
+    );
+
+    // Grafted Wargear remains on battlefield and is attached to Bear 2
+    assert!(
+        runner.state().battlefield.contains(&wargear),
+        "Grafted Wargear must remain on the battlefield, NOT be sacrificed"
+    );
+    assert_eq!(
+        runner.state().objects[&wargear].attached_to,
+        Some(AttachTarget::Object(bear2)),
+        "Grafted Wargear must be attached to Bear 2"
+    );
+
+    // Bear 2 is alive on battlefield and gets +3/+2
+    assert!(
+        runner.state().battlefield.contains(&bear2),
+        "Bear 2 must remain on the battlefield"
+    );
+    assert_eq!(
+        runner.state().objects[&bear2].power,
+        Some(5),
+        "Bear 2 gets +3/+2 (power 5)"
+    );
+    assert_eq!(
+        runner.state().objects[&bear2].toughness,
+        Some(4),
+        "Bear 2 gets +3/+2 (toughness 4)"
     );
 }

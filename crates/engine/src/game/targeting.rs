@@ -2069,9 +2069,14 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
-        GameEvent::Attached { attachment_id, .. } | GameEvent::Unattached { attachment_id, .. } => {
-            Some(*attachment_id)
-        }
+        GameEvent::Attached { attachment_id, .. } => Some(*attachment_id),
+        // CR 608.2k + CR 701.3d: for an Unattached trigger, "that permanent"
+        // (CR 701.21a sacrifice) resolves to the permanent from which the attachment
+        // became unattached (its former host).
+        GameEvent::Unattached {
+            old_target: TargetRef::Object(object_id),
+            ..
+        } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         // CR 701.17c: "that card" / "a milled card" is the milled card, and an
         // effect can find it in the zone it moved to from the library — "as long
@@ -3138,15 +3143,13 @@ fn can_target(
                             target_id: Some(obj.id),
                             ..Default::default()
                         },
+                    ) && is_prohibited_from_targeting(
+                        state,
+                        who,
+                        source_obj.controller,
+                        source_controller,
                     ) {
-                        if is_prohibited_from_targeting(
-                            state,
-                            who,
-                            source_obj.controller,
-                            source_controller,
-                        ) {
-                            return false;
-                        }
+                        return false;
                     }
                 }
             }
