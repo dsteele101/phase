@@ -646,3 +646,438 @@ fn grafted_wargear_unattached_sacrifices_former_host_not_equipment() {
         "Bear 2 gets +3/+2 (toughness 4)"
     );
 }
+
+/// CR 603.2e + CR 201.5: An Aura attaching to a player must not trigger creatures
+/// with "Whenever an Aura becomes attached to this creature" (Bramble Elemental, Brood Keeper).
+/// An object-source SelfRef requires an object host and never matches a player host.
+#[test]
+fn curse_attaching_to_player_does_not_trigger_bramble_elemental() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest"]);
+
+    let bramble = scenario
+        .add_creature_from_oracle(P0, "Bramble Elemental", 4, 4, BRAMBLE_ELEMENTAL)
+        .id();
+
+    let curse = scenario
+        .add_spell_to_hand(P0, "Curse of Opulence", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura", "Curse"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant player\nWhenever enchanted player is attacked, create a Gold token. Each opponent attacking that player does the same.",
+        )
+        .id();
+
+    let plax = scenario
+        .add_spell_to_hand(P0, "Shielding Plax", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(&["Enchant"], SHIELDING_PLAX)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Cast Curse of Opulence targeting P1 (enchant player)
+    runner.cast(curse).target_player(P1).resolve();
+
+    // Verify Curse is attached to P1
+    assert_eq!(
+        runner.state().objects[&curse].attached_to,
+        Some(AttachTarget::Player(P1)),
+        "Curse of Opulence must be attached to P1"
+    );
+
+    // CR 603.2e + CR 201.5: Bramble Elemental must NOT trigger when an Aura attaches to a player
+    assert_eq!(
+        saproling_count(&runner, P0),
+        0,
+        "Curse attaching to a player must not trigger Bramble Elemental"
+    );
+
+    // Positive control: Cast Shielding Plax targeting Bramble Elemental
+    runner.cast(plax).target_object(bramble).resolve();
+
+    // Shielding Plax attaching to Bramble Elemental triggers it and creates exactly 2 Saprolings
+    assert_eq!(
+        saproling_count(&runner, P0),
+        2,
+        "Shielding Plax attaching to Bramble Elemental must trigger and create 2 Saprolings"
+    );
+}
+
+/// CR 303.4f + CR 701.3a + CR 603.2e: When Copy Enchantment enters copying an Aura
+/// with a sole legal host, it must auto-attach to that host, emit GameEvent::Attached,
+/// and trigger "Whenever an Aura becomes attached to this creature".
+#[test]
+fn copy_enchantment_aura_sole_host_emits_attached_and_triggers_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bramble = scenario
+        .add_creature_from_oracle(P0, "Bramble Elemental", 4, 4, BRAMBLE_ELEMENTAL)
+        .id();
+
+    // Opponent controls a creature with an "Enchant creature you control" Aura
+    let opp_bear = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let opp_aura = {
+        let mut b = scenario.add_enchantment_from_oracle(
+            P1,
+            "Friendly Aura",
+            "Enchant creature you control\nEnchanted creature gets +1/+1.",
+        );
+        b.with_subtypes(vec!["Aura"]);
+        b.from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature you control\nEnchanted creature gets +1/+1.",
+        );
+        b.id()
+    };
+
+    let copy_ench = scenario
+        .add_spell_to_hand(P0, "Copy Enchantment", false)
+        .as_enchantment()
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    // Attach opp_aura to opp_bear
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&opp_aura)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(opp_bear));
+
+    // P0 casts Copy Enchantment, choosing to copy opp_aura.
+    // For P0, "Enchant creature you control" only matches Bramble Elemental (the sole creature P0 controls).
+    // Copy Enchantment auto-attaches to Bramble Elemental and emits GameEvent::Attached.
+    let outcome = runner
+        .cast(copy_ench)
+        .replacement_choice(0)
+        .copy_target(opp_aura)
+        .resolve();
+
+    assert_eq!(
+        runner.state().objects[&copy_ench].attached_to,
+        Some(AttachTarget::Object(bramble)),
+        "Copy Enchantment must auto-attach to Bramble Elemental as the sole legal host"
+    );
+
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            engine::types::events::GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Object(target_id)
+            } if attachment_id == &copy_ench && target_id == &bramble
+        )),
+        "GameEvent::Attached must be emitted when Copy Enchantment auto-attaches"
+    );
+
+    assert_eq!(
+        saproling_count(&runner, P0),
+        2,
+        "Bramble Elemental must create 2 Saprolings when copied Aura becomes attached"
+    );
+}
+
+/// CR 303.4f + CR 701.3a + CR 603.2e: When Copy Enchantment enters copying an Aura
+/// with multiple legal hosts, the game must prompt for a host choice (WaitingFor::ReturnAsAuraTarget),
+/// and upon submission, emit GameEvent::Attached and trigger the creature.
+#[test]
+fn copy_enchantment_aura_multi_host_prompt_and_choice_emits_attached() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bramble = scenario
+        .add_creature_from_oracle(P0, "Bramble Elemental", 4, 4, BRAMBLE_ELEMENTAL)
+        .id();
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let opp_bear = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let opp_aura = {
+        let mut b = scenario.add_enchantment_from_oracle(
+            P1,
+            "General Aura",
+            "Enchant creature\nEnchanted creature gets +1/+1.",
+        );
+        b.with_subtypes(vec!["Aura"]);
+        b.from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature\nEnchanted creature gets +1/+1.",
+        );
+        b.id()
+    };
+
+    let copy_ench = scenario
+        .add_spell_to_hand(P0, "Copy Enchantment", false)
+        .as_enchantment()
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&opp_aura)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(opp_bear));
+
+    // P0 casts Copy Enchantment copying opp_aura.
+    // Both Bramble Elemental and Grizzly Bears (and opp_bear) are legal hosts for "Enchant creature".
+    let commit = runner
+        .cast(copy_ench)
+        .replacement_choice(0)
+        .copy_target(opp_aura);
+    let _ = commit.try_resolve();
+
+    let WaitingFor::ReturnAsAuraTarget {
+        returned_id,
+        legal_targets,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Expected WaitingFor::ReturnAsAuraTarget, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+
+    assert!(legal_targets.contains(&TargetRef::Object(bramble)));
+    assert!(legal_targets.contains(&TargetRef::Object(bear)));
+
+    // Choose Bramble Elemental as the host
+    let res = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bramble)),
+        })
+        .expect("submit aura host choice");
+
+    assert!(
+        res.events.iter().any(|e| matches!(
+            e,
+            engine::types::events::GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Object(target_id)
+            } if attachment_id == &returned_id && target_id == &bramble
+        )),
+        "GameEvent::Attached must be emitted when host choice is submitted"
+    );
+
+    // Drive priority until stack is empty so Bramble Elemental's triggered ability resolves
+    while !runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+
+    assert_eq!(
+        runner.state().objects[&returned_id].attached_to,
+        Some(AttachTarget::Object(bramble)),
+        "Copy Enchantment must be attached to Bramble Elemental"
+    );
+
+    assert_eq!(
+        saproling_count(&runner, P0),
+        2,
+        "Bramble Elemental must create 2 Saprolings when host is chosen and Attached is emitted"
+    );
+}
+
+/// CR 701.3b: "Attaching an Aura, Equipment, or Fortification in the battlefield to the
+/// object or player it's already attached to does nothing." No events are emitted and returns false.
+#[test]
+fn entering_aura_same_host_does_nothing_cr_701_3b() {
+    let mut scenario = GameScenario::new();
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let aura = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Aura",
+            "Enchant creature\nEnchanted creature gets +1/+1.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let curse = scenario
+        .add_enchantment_from_oracle(P0, "Curse", "Enchant player")
+        .with_subtypes(vec!["Aura", "Curse"])
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Object(bear));
+    state.objects.get_mut(&curse).unwrap().attached_to = Some(AttachTarget::Player(P1));
+
+    // 1. Same object host:
+    let mut events = Vec::new();
+    let attached =
+        engine::game::effects::attach::attach_to_with_events(state, aura, bear, &mut events);
+    assert!(
+        !attached,
+        "Attaching to same object host must return false (does nothing)"
+    );
+    assert!(
+        events.is_empty(),
+        "CR 701.3b: Attaching to same object host must emit zero events"
+    );
+
+    // 2. Same player host:
+    let mut player_events = Vec::new();
+    let player_attached = engine::game::effects::attach::attach_to_player_with_events(
+        state,
+        curse,
+        P1,
+        &mut player_events,
+    );
+    assert!(
+        !player_attached,
+        "Attaching to same player host must return false (does nothing)"
+    );
+    assert!(
+        player_events.is_empty(),
+        "CR 701.3b: Attaching to same player host must emit zero events"
+    );
+}
+
+/// CR 701.3a + CR 701.3b: Attaching an Aura to an illegal host does nothing.
+/// No events are emitted and returns false.
+#[test]
+fn entering_aura_rejected_host_control() {
+    let mut scenario = GameScenario::new();
+    let artifact = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.")
+        .id();
+    let aura = {
+        let mut b = scenario.add_enchantment_from_oracle(
+            P0,
+            "Aura",
+            "Enchant creature\nEnchanted creature gets +1/+1.",
+        );
+        b.with_subtypes(vec!["Aura"]);
+        b.from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature\nEnchanted creature gets +1/+1.",
+        );
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+
+    // 1. "Enchant creature" attempted on non-creature artifact:
+    let mut events = Vec::new();
+    let attached =
+        engine::game::effects::attach::attach_to_with_events(state, aura, artifact, &mut events);
+    assert!(
+        !attached,
+        "Attaching 'Enchant creature' Aura to an artifact must return false"
+    );
+    assert!(
+        events.is_empty(),
+        "Illegal object attachment must emit zero events"
+    );
+
+    // 2. "Enchant creature" attempted on a player:
+    let mut player_events = Vec::new();
+    let player_attached = engine::game::effects::attach::attach_to_player_with_events(
+        state,
+        aura,
+        P1,
+        &mut player_events,
+    );
+    assert!(
+        !player_attached,
+        "Attaching 'Enchant creature' Aura to a player must return false"
+    );
+    assert!(
+        player_events.is_empty(),
+        "Illegal player attachment must emit zero events"
+    );
+
+    // 3. CR 301.5c: Attaching an Aura to itself must return false
+    let mut self_events = Vec::new();
+    let self_attached =
+        engine::game::effects::attach::attach_to_with_events(state, aura, aura, &mut self_events);
+    assert!(
+        !self_attached,
+        "CR 301.5c: Attaching an Aura to itself must return false"
+    );
+    assert!(
+        self_events.is_empty(),
+        "Self attachment must emit zero events"
+    );
+}
+
+/// CR 303.4g + CR 701.3b: When Copy Enchantment enters copying an Aura but has no legal host,
+/// it does not attach and emits zero Attached events.
+#[test]
+fn copy_enchantment_aura_no_legal_host_does_not_attach() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Opponent controls a creature with an "Enchant creature you control" Aura
+    let opp_bear = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let opp_aura = {
+        let mut b = scenario.add_enchantment_from_oracle(
+            P1,
+            "Friendly Aura",
+            "Enchant creature you control\nEnchanted creature gets +1/+1.",
+        );
+        b.with_subtypes(vec!["Aura"]);
+        b.from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature you control\nEnchanted creature gets +1/+1.",
+        );
+        b.id()
+    };
+
+    // P0 controls NO creatures at all.
+    let copy_ench = scenario
+        .add_spell_to_hand(P0, "Copy Enchantment", false)
+        .as_enchantment()
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(
+            "You may have this enchantment enter as a copy of any enchantment on the battlefield.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&opp_aura)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(opp_bear));
+
+    // P0 casts Copy Enchantment copying opp_aura ("Enchant creature you control").
+    // P0 has NO creatures, so there are 0 legal hosts (CR 303.4g).
+    let outcome = runner
+        .cast(copy_ench)
+        .replacement_choice(0)
+        .copy_target(opp_aura)
+        .resolve();
+
+    // CR 303.4g: Aura does not attach to anything
+    assert_eq!(
+        runner.state().objects[&copy_ench].attached_to,
+        None,
+        "Copy Enchantment must not attach when there is no legal host"
+    );
+
+    // No Attached event is emitted
+    assert!(
+        !outcome
+            .events()
+            .iter()
+            .any(|e| matches!(e, engine::types::events::GameEvent::Attached { .. })),
+        "No Attached event must be emitted when no host is legal"
+    );
+}

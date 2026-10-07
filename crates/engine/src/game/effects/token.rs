@@ -1852,7 +1852,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
             .expect("resolved copy-token creation must have a live journal cause");
     }
 
-    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts, events) {
         // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
         // returned for every entrant, card-backed included.
         crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
