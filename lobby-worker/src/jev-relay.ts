@@ -175,6 +175,17 @@ export async function handleJevRelay(
 
   if (inFlight >= JEV_MAX_IN_FLIGHT) return refuse(503, BUSY_BODY);
   inFlight += 1;
+  // The slot is held until the upstream call is OVER, which for a streamed answer
+  // is when its body ends, errors or is cancelled, not when its headers arrive.
+  // Released exactly once, on every path.
+  let held = true;
+  const release = () => {
+    if (held) {
+      held = false;
+      inFlight -= 1;
+    }
+  };
+  const timeoutMs = options.timeoutMs ?? JEV_UPSTREAM_TIMEOUT_MS;
   const started = Date.now();
   let upstream: Response;
   try {
@@ -185,25 +196,80 @@ export async function handleJevRelay(
       // A followed redirect would carry the bearer key to a URL the upstream
       // chose; the 3xx is returned (without `Location`) instead.
       redirect: "manual",
-      signal: AbortSignal.timeout(options.timeoutMs ?? JEV_UPSTREAM_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
+    release();
     const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
     console.log({ event: "jev_relay", outcome: timedOut ? "timeout" : "unreachable", latencyMs: Date.now() - started });
     return timedOut ? refuse(504, TIMEOUT_BODY) : refuse(502, UNREACHABLE_BODY);
-  } finally {
-    inFlight -= 1;
   }
 
-  // Status and log line only: the key and the upstream body never reach a log.
-  console.log({ event: "jev_relay", status: upstream.status, latencyMs: Date.now() - started });
+  try {
+    // Status and log line only: the key and the upstream body never reach a log.
+    console.log({ event: "jev_relay", status: upstream.status, latencyMs: Date.now() - started });
 
-  // Only `Content-Type` is copied from the upstream.
-  const response = new Response(upstream.body, {
-    status: upstream.status,
-    headers: { ...CORS_HEADERS, "Cache-Control": "no-store" },
+    // Only `Content-Type` is copied from the upstream.
+    const response = new Response(
+      slotBoundBody(upstream.body, release, Math.max(0, timeoutMs - (Date.now() - started))),
+      { status: upstream.status, headers: { ...CORS_HEADERS, "Cache-Control": "no-store" } },
+    );
+    const contentType = upstream.headers.get("Content-Type");
+    if (contentType) response.headers.set("Content-Type", contentType);
+    return response;
+  } catch (error) {
+    // No body reached the runtime, so nothing else will release the slot.
+    release();
+    throw error;
+  }
+}
+
+/**
+ * `body`, passed through unchanged, that calls `release` exactly once when it
+ * ends, errors or is cancelled, or when `deadlineMs` runs out (the answer's total
+ * time is bounded, so a stalled stream cannot pin a slot). A body-less answer
+ * releases at once.
+ */
+function slotBoundBody(
+  body: ReadableStream<Uint8Array> | null,
+  release: () => void,
+  deadlineMs: number,
+): ReadableStream<Uint8Array> | null {
+  if (body === null) {
+    release();
+    return null;
+  }
+  const reader = body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const finish = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    release();
+  };
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      timer = setTimeout(() => {
+        finish();
+        controller.error(new Error("Jev upstream body timed out"));
+        reader.cancel().catch(() => {});
+      }, deadlineMs);
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          finish();
+          controller.close();
+        } else {
+          controller.enqueue(value);
+        }
+      } catch (error) {
+        finish();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      finish();
+      return reader.cancel(reason);
+    },
   });
-  const contentType = upstream.headers.get("Content-Type");
-  if (contentType) response.headers.set("Content-Type", contentType);
-  return response;
 }

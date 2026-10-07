@@ -161,6 +161,14 @@ pub fn build_chat_request(
     })
 }
 
+/// A provider's raw answer to one request, exactly as the transport received it.
+#[derive(Debug, Clone, Copy)]
+pub struct LlmReply<'a> {
+    pub provider: LlmProvider,
+    pub status: u16,
+    pub body: &'a str,
+}
+
 /// Pull the assistant's text out of a response, given its HTTP status.
 ///
 /// This is the status-aware entry point every caller should use. A non-2xx
@@ -173,6 +181,7 @@ pub fn completion_from_response(
     provider: LlmProvider,
     status: u16,
     body: &str,
+    issued: &[String],
 ) -> LlmResult<String> {
     if !(200..300).contains(&status) {
         let detail = serde_json::from_str::<Value>(body)
@@ -188,7 +197,7 @@ pub fn completion_from_response(
             detail: format!("HTTP {status}: {detail}"),
         });
     }
-    extract_completion_text(provider, body)
+    extract_completion_text(provider, body, issued)
 }
 
 /// Pull the assistant's text out of a raw response body.
@@ -196,7 +205,11 @@ pub fn completion_from_response(
 /// A provider error envelope becomes [`LlmError::Provider`] rather than a parse
 /// failure, so the UI can show what the vendor actually said (bad key, unknown
 /// model, rate limit) instead of a generic "the AI failed".
-pub fn extract_completion_text(provider: LlmProvider, body: &str) -> LlmResult<String> {
+pub fn extract_completion_text(
+    provider: LlmProvider,
+    body: &str,
+    issued: &[String],
+) -> LlmResult<String> {
     let value: Value = serde_json::from_str(body).map_err(|error| LlmError::MalformedResponse {
         detail: format!("response was not JSON: {error}"),
     })?;
@@ -209,7 +222,7 @@ pub fn extract_completion_text(provider: LlmProvider, body: &str) -> LlmResult<S
         WireProtocol::OpenAiChat => openai_text(&value),
         WireProtocol::AnthropicMessages => anthropic_text(&value),
         WireProtocol::GeminiGenerateContent => gemini_text(&value),
-        WireProtocol::SystemOneRelay => return system_one_completion(&value),
+        WireProtocol::SystemOneRelay => return system_one_completion(&value, issued),
     };
 
     match text {
@@ -260,12 +273,9 @@ fn system_one_request(model: &str, frame: &DecisionFrame) -> LlmResult<Value> {
             ),
         });
     }
-    let width = (count - 1).to_string().len();
-    let criteria: Map<String, Value> = frame
-        .options
-        .iter()
-        .enumerate()
-        .map(|(index, label)| (format!("{index:0width$}: {label}"), Value::Null))
+    let criteria: Map<String, Value> = system_one_option_keys(&frame.options)
+        .into_iter()
+        .map(|key| (key, Value::Null))
         .collect();
     Ok(json!({
         "model": model,
@@ -280,9 +290,18 @@ fn system_one_request(model: &str, frame: &DecisionFrame) -> LlmResult<Value> {
     }))
 }
 
-/// The option number a Choice key names: the digits before its first colon.
-fn system_one_option_index(key: &str) -> Option<usize> {
-    key.split_once(':')?.0.parse().ok()
+/// The criterion name System One is given for each option, in option order.
+///
+/// The single authority for the key format: the request is built from it and the
+/// answer is checked against it, so a key the model returns can only mean an
+/// option if it is, character for character, one this engine issued.
+pub fn system_one_option_keys(options: &[String]) -> Vec<String> {
+    let width = options.len().saturating_sub(1).to_string().len();
+    options
+        .iter()
+        .enumerate()
+        .map(|(index, label)| format!("{index:0width$}: {label}"))
+        .collect()
 }
 
 /// Turn a System One answer into the reply the shared decoder reads:
@@ -292,34 +311,47 @@ fn system_one_option_index(key: &str) -> Option<usize> {
 /// descending probability (ties keep engine order). A single decision takes the
 /// head; a multi-card draft step takes as many as it needs, so Jev's relative
 /// ranking of the pack decides the whole step and not only its first card.
-fn system_one_completion(body: &Value) -> LlmResult<String> {
+///
+/// `issued` is the decision's option lines. Every key the answer names — the
+/// `choice` and each entry of `probabilities` — must be exactly one of the keys
+/// [`system_one_option_keys`] built from them. A key with a valid number but a
+/// label that was never issued is a malformed answer, not option N: the number
+/// alone would turn text this engine never offered into a legal selection.
+fn system_one_completion(body: &Value, issued: &[String]) -> LlmResult<String> {
+    let keys: std::collections::HashMap<String, usize> = system_one_option_keys(issued)
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect();
+    let unissued = || LlmError::MalformedResponse {
+        detail: "the System One answer names a criterion this engine did not issue".to_string(),
+    };
     let answer = body
         .get("answers")
         .and_then(|answers| answers.get(SYSTEM_ONE_QUESTION_ID))
         .ok_or_else(|| LlmError::MalformedResponse {
             detail: "the System One reply has no answer to the question asked".to_string(),
         })?;
-    let top = answer
+    let top = *answer
         .get("choice")
         .and_then(Value::as_str)
-        .and_then(system_one_option_index)
-        .ok_or_else(|| LlmError::MalformedResponse {
-            detail: "the System One answer names no option this engine issued".to_string(),
-        })?;
+        .and_then(|key| keys.get(key))
+        .ok_or_else(unissued)?;
 
-    let mut ranked: Vec<(usize, f64)> = answer
-        .get("probabilities")
-        .and_then(Value::as_object)
-        .map(|probabilities| {
-            probabilities
-                .iter()
-                .filter_map(|(key, probability)| {
-                    Some((system_one_option_index(key)?, probability.as_f64()?))
-                })
-                .filter(|(index, _)| *index != top)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut ranked: Vec<(usize, f64)> = Vec::new();
+    if let Some(probabilities) = answer.get("probabilities").and_then(Value::as_object) {
+        for (key, probability) in probabilities {
+            let index = *keys.get(key.as_str()).ok_or_else(unissued)?;
+            let probability = probability
+                .as_f64()
+                .ok_or_else(|| LlmError::MalformedResponse {
+                    detail: "the System One answer carries a non-numeric probability".to_string(),
+                })?;
+            if index != top {
+                ranked.push((index, probability));
+            }
+        }
+    }
     // Stable on engine order, so equal probabilities rank deterministically.
     ranked.sort_by(|(a_index, a), (b_index, b)| b.total_cmp(a).then(a_index.cmp(b_index)));
 
@@ -548,12 +580,12 @@ mod tests {
     fn openai_completions_decode_from_string_and_part_array_content() {
         let string_form = r#"{"choices":[{"message":{"content":"pick 2"}}]}"#;
         assert_eq!(
-            extract_completion_text(LlmProvider::OpenAi, string_form).unwrap(),
+            extract_completion_text(LlmProvider::OpenAi, string_form, &[]).unwrap(),
             "pick 2"
         );
         let array_form = r#"{"choices":[{"message":{"content":[{"type":"text","text":"pick "},{"type":"text","text":"2"}]}}]}"#;
         assert_eq!(
-            extract_completion_text(LlmProvider::DeepSeek, array_form).unwrap(),
+            extract_completion_text(LlmProvider::DeepSeek, array_form, &[]).unwrap(),
             "pick 2"
         );
     }
@@ -563,7 +595,7 @@ mod tests {
         let body =
             r#"{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"answer"}]}"#;
         assert_eq!(
-            extract_completion_text(LlmProvider::Anthropic, body).unwrap(),
+            extract_completion_text(LlmProvider::Anthropic, body, &[]).unwrap(),
             "answer"
         );
     }
@@ -572,7 +604,7 @@ mod tests {
     fn gemini_parts_concatenate() {
         let body = r#"{"candidates":[{"content":{"parts":[{"text":"a"},{"text":"b"}]}}]}"#;
         assert_eq!(
-            extract_completion_text(LlmProvider::Gemini, body).unwrap(),
+            extract_completion_text(LlmProvider::Gemini, body, &[]).unwrap(),
             "ab"
         );
     }
@@ -583,7 +615,7 @@ mod tests {
     fn a_non_2xx_response_is_refused_even_when_its_body_looks_like_a_completion() {
         let looks_fine = r#"{"choices":[{"message":{"content":"{\"choice\": 0}"}}]}"#;
         for status in [400, 401, 403, 404, 429, 500, 502, 503] {
-            let result = completion_from_response(LlmProvider::OpenAi, status, looks_fine);
+            let result = completion_from_response(LlmProvider::OpenAi, status, looks_fine, &[]);
             assert!(
                 matches!(result, Err(LlmError::Provider { .. })),
                 "HTTP {status} must not yield a completion"
@@ -594,7 +626,7 @@ mod tests {
     #[test]
     fn a_non_2xx_response_keeps_the_vendors_diagnostic() {
         let body = r#"{"error":{"message":"Incorrect API key provided"}}"#;
-        let error = completion_from_response(LlmProvider::OpenAi, 401, body).unwrap_err();
+        let error = completion_from_response(LlmProvider::OpenAi, 401, body, &[]).unwrap_err();
         let LlmError::Provider { detail } = error else {
             panic!("expected a provider error");
         };
@@ -604,8 +636,9 @@ mod tests {
 
     #[test]
     fn a_non_2xx_response_with_an_unparsable_body_still_reports_its_status() {
-        let error = completion_from_response(LlmProvider::OpenAi, 502, "<html>Bad Gateway</html>")
-            .unwrap_err();
+        let error =
+            completion_from_response(LlmProvider::OpenAi, 502, "<html>Bad Gateway</html>", &[])
+                .unwrap_err();
         let LlmError::Provider { detail } = error else {
             panic!("expected a provider error");
         };
@@ -618,14 +651,14 @@ mod tests {
     fn a_2xx_response_decodes_normally_and_still_honours_an_error_envelope() {
         let ok = r#"{"choices":[{"message":{"content":"pick 1"}}]}"#;
         assert_eq!(
-            completion_from_response(LlmProvider::OpenAi, 200, ok).unwrap(),
+            completion_from_response(LlmProvider::OpenAi, 200, ok, &[]).unwrap(),
             "pick 1"
         );
         // Some providers return 200 with an error envelope; that is still a
         // failure.
         let soft_error = r#"{"error":{"message":"rate limited"}}"#;
         assert!(matches!(
-            completion_from_response(LlmProvider::OpenAi, 200, soft_error),
+            completion_from_response(LlmProvider::OpenAi, 200, soft_error, &[]),
             Err(LlmError::Provider { .. })
         ));
     }
@@ -635,7 +668,7 @@ mod tests {
         let body =
             r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}"#;
         assert_eq!(
-            extract_completion_text(LlmProvider::OpenAi, body),
+            extract_completion_text(LlmProvider::OpenAi, body, &[]),
             Err(LlmError::Provider {
                 detail: "Incorrect API key provided".to_string()
             })
@@ -647,12 +680,13 @@ mod tests {
         assert_eq!(
             extract_completion_text(
                 LlmProvider::OpenAi,
-                r#"{"choices":[{"message":{"content":""}}]}"#
+                r#"{"choices":[{"message":{"content":""}}]}"#,
+                &[]
             ),
             Err(LlmError::EmptyCompletion)
         );
         assert!(matches!(
-            extract_completion_text(LlmProvider::OpenAi, "not json"),
+            extract_completion_text(LlmProvider::OpenAi, "not json", &[]),
             Err(LlmError::MalformedResponse { .. })
         ));
     }
@@ -837,7 +871,8 @@ mod tests {
             }),
             0.8,
         );
-        let text = completion_from_response(LlmProvider::Jev, 200, &body).unwrap();
+        let text = completion_from_response(LlmProvider::Jev, 200, &body, &prompt().frame.options)
+            .unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["choice"], json!([1, 2, 0]));
         assert_eq!(value["reason"], json!("Jev, confidence 0.80"));
@@ -857,7 +892,8 @@ mod tests {
             json!({ "0: a": 0.25, "1: b": 0.25, "2: c": 0.25, "3: d": 0.25 }),
             0.1,
         );
-        let text = completion_from_response(LlmProvider::Jev, 200, &body).unwrap();
+        let issued: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let text = completion_from_response(LlmProvider::Jev, 200, &body, &issued).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["choice"], json!([2, 0, 1, 3]));
     }
@@ -872,7 +908,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    completion_from_response(LlmProvider::Jev, 200, &body),
+                    completion_from_response(LlmProvider::Jev, 200, &body, &prompt().frame.options),
                     Err(LlmError::MalformedResponse { .. })
                 ),
                 "{body}"
@@ -883,14 +919,95 @@ mod tests {
     #[test]
     fn a_jev_failure_status_is_refused_even_with_a_decodable_body() {
         let body = jev_answer("0: a", json!({ "0: a": 1.0 }), 1.0);
+        let issued = ["a".to_string(), "b".to_string()];
         for status in [401, 422, 429, 502, 504, 529] {
             assert!(
                 matches!(
-                    completion_from_response(LlmProvider::Jev, status, &body),
+                    completion_from_response(LlmProvider::Jev, status, &body, &issued),
                     Err(LlmError::Provider { .. })
                 ),
                 "HTTP {status}"
             );
         }
+    }
+
+    /// The number alone must never be the selection: a reply whose key starts
+    /// with an issued index but carries text this engine never offered names an
+    /// unissued criterion, so it is refused rather than read as that option.
+    #[test]
+    fn a_jev_key_with_a_valid_number_but_an_unissued_label_is_refused() {
+        let issued = prompt().frame.options;
+        let right = json!({
+            "0: Pass Priority": 0.1,
+            "1: Lightning Bolt — cast": 0.6,
+            "2: Shock — cast": 0.3,
+        });
+        let wrong_choice = jev_answer("1: Cast something else entirely", right.clone(), 0.9);
+        let wrong_probability = jev_answer(
+            "1: Lightning Bolt — cast",
+            json!({
+                "0: Pass Priority": 0.1,
+                "1: Lightning Bolt — cast": 0.6,
+                "2: Concede the game": 0.3,
+            }),
+            0.9,
+        );
+        let invented_extra = jev_answer(
+            "1: Lightning Bolt — cast",
+            json!({
+                "1: Lightning Bolt — cast": 0.6,
+                "7: Something never offered": 0.4,
+            }),
+            0.9,
+        );
+        // Right label, wrong padding or index: still not an issued key.
+        let padded = jev_answer("01: Lightning Bolt — cast", right.clone(), 0.9);
+        let swapped = jev_answer("2: Lightning Bolt — cast", right.clone(), 0.9);
+        for body in [
+            wrong_choice,
+            wrong_probability,
+            invented_extra,
+            padded,
+            swapped,
+        ] {
+            assert!(
+                matches!(
+                    completion_from_response(LlmProvider::Jev, 200, &body, &issued),
+                    Err(LlmError::MalformedResponse { .. })
+                ),
+                "{body}"
+            );
+        }
+        // The control: the same answer with the issued keys is accepted.
+        let control = jev_answer("1: Lightning Bolt — cast", right, 0.9);
+        assert!(completion_from_response(LlmProvider::Jev, 200, &control, &issued).is_ok());
+    }
+
+    #[test]
+    fn a_jev_answer_is_checked_against_the_keys_the_request_issued() {
+        let prompt = prompt();
+        let request = jev_request()["request"].clone();
+        let issued_keys: Vec<&String> = request["questions"]["pick"]["criteria"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(
+            issued_keys.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
+            system_one_option_keys(&prompt.frame.options)
+        );
+    }
+
+    #[test]
+    fn a_jev_answer_with_a_non_numeric_probability_is_refused() {
+        let body = jev_answer(
+            "0: Pass Priority",
+            json!({ "0: Pass Priority": "high" }),
+            0.5,
+        );
+        assert!(matches!(
+            completion_from_response(LlmProvider::Jev, 200, &body, &prompt().frame.options),
+            Err(LlmError::MalformedResponse { .. })
+        ));
     }
 }

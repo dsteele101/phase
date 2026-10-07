@@ -51,7 +51,8 @@ pub fn connection_probe_prompt() -> LlmPrompt {
 /// body carries one); a provider error envelope on an otherwise-2xx response;
 /// an empty completion; and a reply the engine cannot bind to a legal option.
 pub fn validate_probe_response(provider: LlmProvider, status: u16, body: &str) -> LlmResult<()> {
-    let completion = completion_from_response(provider, status, body)?;
+    let issued = connection_probe_prompt().frame.options;
+    let completion = completion_from_response(provider, status, body, &issued)?;
     let option_count = match provider.wire() {
         WireProtocol::SystemOneRelay => SYSTEM_ONE_PROBE_OPTION_COUNT,
         WireProtocol::OpenAiChat

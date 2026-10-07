@@ -22,6 +22,7 @@ use crate::prompt::{
     RESPONSE_CONTRACT, UNTRUSTED_DATA_DECLARATION,
 };
 use crate::render::draft::{card_line, format_context, pool_context, progress_context, SetNames};
+use crate::wire::{completion_from_response, LlmReply};
 
 /// Everything a transport needs to run one LLM pick round trip for one seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +230,33 @@ pub fn select_picks(
             .collect(),
         reasoning: choice.reasoning,
     })
+}
+
+/// Bind a provider's raw reply to the cards it picks.
+///
+/// The one response-consuming authority for a draft pick: the reply is read
+/// against the option lines this pack issues (rendered exactly as the request
+/// rendered them, from the same `db` and `difficulty`), so a System One answer
+/// can only name criteria the engine offered.
+pub fn select_picks_from_response(
+    seat: u8,
+    pack: &[DraftCardInstance],
+    required: usize,
+    expected_fingerprint: &str,
+    render: (Option<&CardDatabase>, AiDifficulty),
+    reply: LlmReply<'_>,
+) -> LlmResult<LlmPickSelection> {
+    if pick_fingerprint(seat, pack) != expected_fingerprint {
+        return Err(LlmError::StaleDecision);
+    }
+    let (db, difficulty) = render;
+    let completion = completion_from_response(
+        reply.provider,
+        reply.status,
+        reply.body,
+        &option_lines(pack, db, difficulty),
+    )?;
+    select_picks(seat, pack, required, expected_fingerprint, &completion)
 }
 
 /// Convenience constructor for the code -> name map a caller passes in.

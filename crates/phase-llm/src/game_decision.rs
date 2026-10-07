@@ -24,6 +24,7 @@ use crate::prompt::{
 };
 use crate::render::action::{describe_action, describe_waiting_for, primary_object_name};
 use crate::render::game::{render_board, GameRenderOptions};
+use crate::wire::{completion_from_response, LlmReply};
 
 /// Everything a transport needs to run one LLM decision round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +173,31 @@ pub fn build_game_decision_prompt(
     })
 }
 
+/// Bind a provider's raw reply to an engine action.
+///
+/// The one response-consuming authority for a game decision. The decision is
+/// re-checked against the fingerprint first, then the reply is read against the
+/// option lines this decision issues, so a System One answer can only name
+/// criteria the engine actually offered, and only then does the selected index
+/// reach [`select_action`].
+pub fn select_action_from_response(
+    state: &GameState,
+    contract: &AiDecisionContract,
+    expected_fingerprint: &str,
+    reply: LlmReply<'_>,
+) -> LlmResult<LlmActionSelection> {
+    if decision_fingerprint(state, contract) != expected_fingerprint {
+        return Err(LlmError::StaleDecision);
+    }
+    let completion = completion_from_response(
+        reply.provider,
+        reply.status,
+        reply.body,
+        &option_lines(state, contract),
+    )?;
+    select_action(state, contract, expected_fingerprint, &completion)
+}
+
 /// The action an LLM reply selects, plus the model's stated reason.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmActionSelection {
@@ -211,6 +237,7 @@ mod tests {
     use super::*;
     use crate::format_guidance::GENERIC_STRATEGY;
     use crate::prompt::{UNTRUSTED_DATA_BEGIN, UNTRUSTED_DATA_END};
+    use crate::wire::LlmReply;
     use engine::ai_support::{ActionMetadata, CandidateAction, TacticalClass};
     use engine::game::create_object;
     use engine::types::custom_format::old_school_93_94;
@@ -300,6 +327,119 @@ mod tests {
         for chat_only in [UNTRUSTED_DATA_BEGIN, "Reply with ONLY a JSON object"] {
             assert!(!frame.brief.contains(chat_only));
             assert!(!frame.instruction.contains(chat_only));
+        }
+    }
+
+    fn jev_endpoint() -> crate::provider::LlmEndpointConfig {
+        crate::provider::LlmEndpointConfig {
+            provider: crate::provider::LlmProvider::Jev,
+            base_url: Some("https://relay.test".to_string()),
+            api_key: "k".to_string(),
+            model: "jev-latest".to_string(),
+            max_output_tokens: None,
+            temperature: None,
+        }
+    }
+
+    /// The criterion names the Jev request actually carries for this decision.
+    fn issued_jev_keys(request: &GameDecisionRequest) -> Vec<String> {
+        let spec = crate::wire::build_chat_request(&jev_endpoint(), &request.prompt).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&spec.body).unwrap();
+        body["request"]["questions"]["pick"]["criteria"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn jev_reply(choice: &str, probabilities: serde_json::Value) -> String {
+        serde_json::json!({
+            "answers": { "pick": {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": probabilities,
+                "confidence": 0.9,
+            }},
+        })
+        .to_string()
+    }
+
+    fn reply(body: &str) -> LlmReply<'_> {
+        LlmReply {
+            provider: crate::provider::LlmProvider::Jev,
+            status: 200,
+            body,
+        }
+    }
+
+    /// The response-to-action path: a Jev answer binds to an action only through
+    /// criteria this decision issued.
+    #[test]
+    fn a_jev_reply_selects_only_through_issued_criteria() {
+        let state = GameState::default();
+        let contract = two_option_contract();
+        let request =
+            build_game_decision_prompt(&state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let keys = issued_jev_keys(&request);
+        assert_eq!(keys.len(), 2);
+
+        let good = jev_reply(
+            &keys[1],
+            serde_json::json!({ &keys[0]: 0.2, &keys[1]: 0.8 }),
+        );
+        let selection =
+            select_action_from_response(&state, &contract, &request.fingerprint, reply(&good))
+                .unwrap();
+        assert_eq!(selection.action, contract.candidates[1].action);
+
+        // A valid number with a label this decision never offered is refused,
+        // whether it is the stated choice or a probability entry.
+        let wrong_choice = jev_reply(
+            "1: Concede the game",
+            serde_json::json!({ &keys[0]: 0.2, "1: Concede the game": 0.8 }),
+        );
+        let wrong_probability = jev_reply(
+            &keys[1],
+            serde_json::json!({ &keys[0]: 0.2, &keys[1]: 0.7, "0: Invented": 0.1 }),
+        );
+        for body in [wrong_choice, wrong_probability] {
+            assert!(
+                matches!(
+                    select_action_from_response(
+                        &state,
+                        &contract,
+                        &request.fingerprint,
+                        reply(&body)
+                    ),
+                    Err(LlmError::MalformedResponse { .. })
+                ),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_jev_reply_to_a_decision_that_moved_on_is_stale_not_malformed() {
+        let state = GameState::default();
+        let contract = two_option_contract();
+        let request =
+            build_game_decision_prompt(&state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let keys = issued_jev_keys(&request);
+        let body = jev_reply(&keys[0], serde_json::json!({ &keys[0]: 1.0 }));
+
+        let moved_on = contract_with_revision(&contract, 43);
+        assert_eq!(
+            select_action_from_response(&state, &moved_on, &request.fingerprint, reply(&body))
+                .unwrap_err(),
+            LlmError::StaleDecision
+        );
+    }
+
+    fn contract_with_revision(contract: &AiDecisionContract, revision: u64) -> AiDecisionContract {
+        AiDecisionContract {
+            state_revision: revision,
+            ..contract.clone()
         }
     }
 

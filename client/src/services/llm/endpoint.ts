@@ -13,19 +13,28 @@ import { endpointOf, type LlmEndpointConfig, type LlmProfile } from "./types";
  * saved; the engine decides what each endpoint means and refuses one it cannot
  * use.
  *
- * A derived relay is resolved against the key the store holds NOW, not the one
- * on the profile copy the caller carries. Callers (a draft round, a probe) hold
- * their copy across awaits, and the store drops a key the moment its relay
- * origin changes (`llmStore`), so a copy taken under server A must not carry A's
- * key to server B. A profile the store no longer holds has no key at all.
+ * A derived relay is resolved against ONE matching snapshot of the profile.
+ * Callers (a draft round, a probe) hold their copy across awaits, and the store
+ * both drops a key when its relay origin changes (`llmStore`) and lets the
+ * player retarget the profile and enter a replacement key meanwhile. Mixing the
+ * held copy's provider and blank endpoint (which derive the OLD relay) with the
+ * current profile's key (entered for a NEW endpoint) would deliver one server's
+ * key to another. So the current key is used only when the current profile is
+ * the same endpoint as the held copy — same provider, same raw endpoint — and
+ * otherwise the request goes out with no key, which the engine refuses to
+ * build. A profile the store no longer holds has no key either.
  */
 export function resolvedEndpointOf(profile: LlmProfile): LlmEndpointConfig {
   const endpoint = endpointOf(profile);
   if (endpoint.provider !== "Jev" || endpoint.baseUrl?.trim()) return endpoint;
   const current = useLlmStore.getState().profiles.find((candidate) => candidate.id === profile.id);
+  const sameEndpoint =
+    current !== undefined
+    && current.provider === profile.provider
+    && (current.baseUrl ?? "").trim() === (profile.baseUrl ?? "").trim();
   return {
     ...endpoint,
-    apiKey: current?.apiKey ?? "",
+    apiKey: sameEndpoint ? current.apiKey : "",
     baseUrl: defaultJevRelayOrigin(useMultiplayerStore.getState().hostingServer) ?? null,
   };
 }
