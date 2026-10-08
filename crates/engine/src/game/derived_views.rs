@@ -16,10 +16,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::analysis::resource::ResourceAxis;
-use crate::game::ability_utils::flatten_targets_in_chain;
+use crate::game::ability_utils::declared_targets_in_chain;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource};
-use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
+use crate::game::stack::{
+    effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
+    stack_revealed_card_names, StackDisplayGroup,
+};
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
     RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -35,6 +38,7 @@ use crate::types::game_state::{
     SyntheticTriggerProvenance, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
@@ -604,32 +608,20 @@ pub struct DungeonRoomView {
     pub rooms: Vec<DungeonRoomNodeView>,
 }
 
-/// The printed dungeon card, as the client looks it up on Scryfall.
-///
-/// Identity plumbing, not a rule — deliberately unannotated.
-///
-/// Both ids ride along because the five dungeons are not indexed uniformly by
-/// the client's Scryfall sidecars — Undercity is a `double_faced_token` that
-/// only `scryfall-token-images.json` carries. See `dungeon::DungeonCardRef`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DungeonCardView {
-    pub oracle_id: String,
-    pub scryfall_id: String,
-    pub face_name: String,
-}
+/// Re-exported from `dungeon`, the canonical home of the wire shapes: the
+/// venture-marker panel (`DungeonRoomView`) and the dungeon-choice preview
+/// (`dungeon::DungeonPreview`) describe the same cards and rooms, so the types
+/// live once, beside the static tables, rather than once per surface.
+pub use crate::game::dungeon::{DungeonCardView, DungeonRoomNodeView};
 
-/// CR 309.4: One room as the client draws it — its preview, its outgoing
-/// edges, and its position on the printed card face.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DungeonRoomNodeView {
-    #[serde(flatten)]
-    pub room: crate::game::dungeon::RoomPreview,
-    /// CR 309.5a: the rooms the venture marker may move to from here. Empty
-    /// for the bottommost room (CR 309.5).
-    pub next_rooms: Vec<u8>,
-    /// Where this room is drawn on the card. Permille of the image — see
-    /// `RoomMarkerPoint`, which documents why it is not a fraction.
-    pub marker: crate::game::dungeon::RoomMarkerPoint,
+/// CR 400.1 as modified by the format's shared-zone axis: which seat's
+/// container stores each shared pile. A zone absent here is per-player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedPilesView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<PlayerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graveyard: Option<PlayerId>,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -642,6 +634,10 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// The authorized viewer's Scry identity, retained when the bounded
+    /// interaction projection omits its opportunities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scry_prompt_id: Option<InteractionId>,
     /// Viewer-visible object ids in each player's shared exile pile. This is
     /// projected after face-down visibility filtering so the client can anchor
     /// rejection feedback without reimplementing private-information rules.
@@ -652,6 +648,10 @@ pub struct DerivedViews {
     /// intentionally narrow so a debug browser can select a card by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debug_library_cards: Vec<DebugLibraryCardView>,
+    /// Present only for a format that shares a library or graveyard; names the
+    /// seat whose `Player` container stores each shared pile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_piles: Option<SharedPilesView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -678,6 +678,9 @@ pub struct DerivedViews {
     /// next one belongs too.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+    /// CR 400.7 + CR 607.2a: the cards currently exiled with each battlefield permanent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub linked_exile_ids: BTreeMap<ObjectId, Vec<ObjectId>>,
 
     /// CR 509.1b + CR 611.2c: creatures with a live, temporary
     /// `CantBeBlocked` grant. The optional value is the granting source only
@@ -776,6 +779,19 @@ pub struct DerivedViews {
     /// paid cast facts, and public trigger context. Empty when the stack is empty.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stack_entry_details: HashMap<ObjectId, StackEntryDisplay>,
+
+    /// CR 701.20a: the cards each stack entry keeps revealed ("If revealing a
+    /// card causes a triggered ability to trigger, the card remains revealed
+    /// until that triggered ability leaves the stack"), by name, keyed by the
+    /// public stack entry id. Built from the authoritative lease map, so it
+    /// disappears when the lease ends.
+    ///
+    /// CR 401.2: deliberately unindexed. A leased card that sits in a library
+    /// stays a hidden object in the projected state, because naming that
+    /// object would disclose its library position; this map is the only place
+    /// its public identity appears, with no object id attached.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_revealed_cards: BTreeMap<ObjectId, Vec<String>>,
 
     /// CR 702.40a: the public number of copies the current Storm trigger will
     /// create, or that a newly cast Storm spell would create when no Storm
@@ -993,6 +1009,8 @@ pub struct ClientGameStateRef<'a> {
     pub state: &'a GameState,
     pub derived: DerivedViews,
     display_visible_object_ids: Option<BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 }
 
 impl Serialize for ClientGameStateRef<'_> {
@@ -1006,8 +1024,13 @@ impl Serialize for ClientGameStateRef<'_> {
             derived: &'a DerivedViews,
         }
 
-        let state = client_state_wire_value(self.state, self.display_visible_object_ids.as_ref())
-            .map_err(serde::ser::Error::custom)?;
+        let state = client_state_wire_value(
+            self.state,
+            self.display_visible_object_ids.as_ref(),
+            self.viewer,
+            self.already_filtered,
+        )
+        .map_err(serde::ser::Error::custom)?;
         ClientGameStateEnvelope {
             state: &state,
             derived: &self.derived,
@@ -1023,12 +1046,33 @@ impl Serialize for ClientGameStateRef<'_> {
 fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
+    viewer: Option<PlayerId>,
+    already_filtered: bool,
 ) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    // CR 601.2h + CR 608.2c: direct client snapshots must pass through the
+    // same identity/knowledge redaction as the filtered-viewer path. An
+    // unscoped wire has no authenticated actor, so it must keep the canonical
+    // base and never materialize a staged shadow; wrap_filtered has already
+    // performed the viewer projection.
+    let payment_projected = match (viewer, already_filtered) {
+        (Some(viewer), false) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+        (Some(_), true) => state.clone(),
+        (None, false) => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        (None, true) => state.clone(),
+    };
+    let projected_state =
+        crate::game::visibility::project_paid_cast_cleanup_authority(&payment_projected);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
     };
+
+    // This JSON-only marker records provenance for persistence ingress. It is
+    // intentionally not a `GameState` field: client projections remain
+    // transportable, but a projection must never be accepted as a trusted
+    // restore authority. A positive marker avoids inferring provenance from
+    // mutable redaction lists or from private execution carriers.
+    root.insert("wire_projection".to_string(), serde_json::Value::Bool(true));
 
     if let Some(display_visible_object_ids) = display_visible_object_ids {
         if let Some(objects) = root
@@ -1110,23 +1154,24 @@ impl<'a> ClientGameStateRef<'a> {
     /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
     /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
-        let filtered_state =
-            viewer.map(|viewer| crate::game::visibility::filter_state_for_viewer(state, viewer));
-        let display_visible_object_ids = filtered_state.as_ref().map(|filtered| {
-            filtered
+        let filtered_state = match viewer {
+            Some(viewer) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+            None => crate::game::visibility::filter_state_for_unseated_viewer(state),
+        };
+        let display_visible_object_ids = Some(
+            filtered_state
                 .objects
                 .iter()
                 .filter_map(|(id, object)| object.display_visible_to_viewer.then_some(*id))
-                .collect()
-        });
-        let mut derived = derive_views(state, viewer);
-        if let Some(filtered) = filtered_state.as_ref() {
-            derived.visible_exile_object_ids = visible_exile_object_ids(filtered);
-        }
+                .collect(),
+        );
+        let derived = derive_filtered_views(state, &filtered_state, viewer);
         Self {
             state,
             derived,
             display_visible_object_ids,
+            viewer,
+            already_filtered: false,
         }
     }
 
@@ -1142,6 +1187,8 @@ impl<'a> ClientGameStateRef<'a> {
             state: filtered_state,
             derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
             display_visible_object_ids: None,
+            viewer,
+            already_filtered: true,
         }
     }
 }
@@ -1177,15 +1224,9 @@ pub struct ClientGameState {
 /// cast — activated-ability mana payment keeps its full-cost display, and
 /// convoke/improvise/delve pay via board taps tracked by their own staged UI.
 ///
-/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
-/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
-/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
-/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
-/// This is deliberately consistent with the pin-eligibility gate
-/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
-/// reject such a pin — both layers agree on the stricter behavior, and the
-/// common cases (generic + plain colored costs) are exact. Threading the real
-/// permission bundle through both sites is the follow-up to lift this.
+/// Uses the current spell's typed mana-spend permission when matching pinned
+/// units to colored or colorless requirements. This projection subtracts only
+/// pinned mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
     use crate::types::game_state::WaitingFor;
     use crate::types::mana::{ManaPool, PaymentContext};
@@ -1227,43 +1268,14 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
         &selected,
         &cost,
         ctx.as_ref(),
-        false,
+        crate::game::casting::player_mana_spend_permission_for_payment(
+            state,
+            viewer,
+            Some(pending.object_id),
+            ctx.as_ref(),
+        ),
         None,
     ))
-}
-
-/// Project the printed dungeon card's Scryfall identity.
-fn dungeon_card_view(dungeon: crate::game::dungeon::DungeonId) -> DungeonCardView {
-    let card = crate::game::dungeon::card_ref(dungeon);
-    DungeonCardView {
-        oracle_id: card.oracle_id.to_string(),
-        scryfall_id: card.scryfall_id.to_string(),
-        face_name: card.face_name.to_string(),
-    }
-}
-
-/// CR 309.4 + CR 309.5a: Project the whole dungeon graph — every room, its
-/// outgoing edges, and where it is drawn on the card.
-///
-/// The client needs all of it at once: it places the marker on the current room
-/// and marks the rooms reachable from it (CR 309.5a), and neither is derivable
-/// from the current room alone.
-fn dungeon_room_nodes(dungeon: crate::game::dungeon::DungeonId) -> Vec<DungeonRoomNodeView> {
-    let markers = crate::game::dungeon::marker_points(dungeon);
-    (0..crate::game::dungeon::room_count(dungeon))
-        .filter_map(|index| {
-            // `dungeon_marker_points_cover_every_room` pins these lists to the
-            // same length, so a miss is unreachable. Skipping rather than
-            // indexing keeps a future table edit from panicking the whole state
-            // projection on a purely cosmetic field.
-            let marker = *markers.get(index as usize)?;
-            Some(DungeonRoomNodeView {
-                room: crate::game::dungeon::room_preview(dungeon, index),
-                next_rooms: crate::game::dungeon::next_rooms(dungeon, index).to_vec(),
-                marker,
-            })
-        })
-        .collect()
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1287,8 +1299,8 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                         .to_string(),
                     room: crate::game::dungeon::room_preview(dungeon, progress.current_room),
                     room_count: crate::game::dungeon::room_count(dungeon),
-                    card: dungeon_card_view(dungeon),
-                    rooms: dungeon_room_nodes(dungeon),
+                    card: crate::game::dungeon::card_view(dungeon),
+                    rooms: crate::game::dungeon::room_nodes(dungeon),
                 },
             ))
         })
@@ -1542,8 +1554,11 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        scry_prompt_id: viewer
+            .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
+        shared_piles: shared_piles(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
@@ -1557,6 +1572,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         views.stack_display_groups = stack_display_groups(state);
         views.stack_entry_details = stack_entry_details(state);
     }
+    views.stack_revealed_cards = stack_revealed_card_names(state);
 
     // CR 303.4 + CR 702.5: Walk the battlefield once and bucket Player-host
     // attachments by their host PlayerId. Object-host attachments are skipped
@@ -1581,6 +1597,12 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .collect();
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        let linked: Vec<ObjectId> = crate::game::exile_links::live_links_for_source(state, obj_id)
+            .map(|link| link.exiled_id)
+            .collect();
+        if !linked.is_empty() {
+            views.linked_exile_ids.insert(obj_id, linked);
         }
         if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
             views.temporary_cant_be_blocked.insert(obj_id, source_id);
@@ -2169,12 +2191,23 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.scry_prompt_id = viewer.and_then(|viewer| {
+        crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
+    });
     views.debug_library_cards = debug_library_cards(authoritative_state, viewer);
     views.visible_exile_object_ids = visible_exile_object_ids(filtered_state);
     // CR 509.1g: blocking relationships are public information. Preserve this
     // display projection even when a viewer-safe state intentionally omits raw
     // combat records unrelated to rendering.
     views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
+    // CR 701.20a: the viewer copy carries no lease map (it is a position
+    // channel), so the public presentation is rebuilt from rules state, and
+    // the stack grouping keeps entries with different reveals apart.
+    views.stack_revealed_cards = stack_revealed_card_names(authoritative_state);
+    if !filtered_state.stack.is_empty() {
+        views.stack_display_groups =
+            stack_display_groups_revealing(filtered_state, &views.stack_revealed_cards);
+    }
     views
 }
 
@@ -2235,6 +2268,14 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
         .collect()
 }
 
+fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
+    let view = SharedPilesView {
+        library: state.shared_zone_holder(Zone::Library),
+        graveyard: state.shared_zone_holder(Zone::Graveyard),
+    };
+    (view.library.is_some() || view.graveyard.is_some()).then_some(view)
+}
+
 fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<DebugLibraryCardView> {
     let Some(viewer) = viewer else {
         return Vec::new();
@@ -2247,7 +2288,7 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
         .iter()
         .find(|player| player.id == viewer)
         .into_iter()
-        .flat_map(|player| player.library.iter())
+        .flat_map(|player| state.library_of(player.id).iter())
         .filter_map(|object_id| {
             state
                 .objects
@@ -2930,7 +2971,7 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
         StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
         _ => effective_stack_ability(state, entry)
             .ability
-            .map(flatten_targets_in_chain)
+            .map(declared_targets_in_chain)
             .unwrap_or_default(),
     };
     targets
@@ -3365,6 +3406,75 @@ mod tests {
         // Selects the dungeon half of `Undercity // The Initiative`.
         assert_eq!(room.card.face_name, "Undercity");
         assert_eq!(room.rooms.len(), 9);
+    }
+
+    /// The experimental 19-room dungeon projects the same shape the map panel
+    /// reads: card identity for the art hook, the whole room graph, and one
+    /// marker per room. Pinned separately from the generic marker-table tests
+    /// because the badge renders `room_count` ("room 8 of 19") and the popover
+    /// indexes `rooms` by the marker's room — a short or misordered graph here
+    /// misplaces the marker with no other failure.
+    #[test]
+    fn dungeon_rooms_projects_baldurs_gate_wilderness_with_all_19_rooms() {
+        use crate::game::dungeon::{DungeonId, DungeonProgress};
+
+        let mut state = GameState::new_two_player(42);
+        state.dungeon_progress.insert(
+            PlayerId(0),
+            DungeonProgress {
+                current_dungeon: Some(DungeonId::BaldursGateWilderness),
+                current_room: 7,
+                ..Default::default()
+            },
+        );
+
+        let views = derive_views(&state, None);
+        let room = views
+            .dungeon_rooms
+            .get(&PlayerId(0))
+            .expect("venturing player is projected");
+
+        assert_eq!(room.dungeon, DungeonId::BaldursGateWilderness);
+        assert_eq!(room.dungeon_name, "Baldur's Gate Wilderness");
+        assert_eq!(room.room.index, 7);
+        assert_eq!(room.room.name, "Grymforge");
+        assert_eq!(
+            room.room.text,
+            "For each opponent, goad up to one target creature that player controls."
+        );
+        assert_eq!(room.room_count, 19);
+
+        // `layout: "normal"`, so the card table carries it by oracle id (the
+        // Undercity token-table fallback is not this dungeon's path).
+        assert_eq!(room.card.oracle_id, "06b9590d-01bf-4fae-9837-352c9e04267a");
+        assert_eq!(
+            room.card.scryfall_id,
+            "a9d56324-8293-4500-a9ad-fed351ccf966"
+        );
+        assert_eq!(room.card.face_name, "Baldur's Gate Wilderness");
+
+        assert_eq!(
+            room.rooms.len(),
+            19,
+            "the whole graph ships, not just the current room"
+        );
+        // CR 309.5a: Grymforge (index 7) leads to Last Light Inn and
+        // Reithwin Tollhouse.
+        let current = &room.rooms[7];
+        assert_eq!(current.room.name, "Grymforge");
+        assert_eq!(current.next_rooms, vec![9, 10]);
+        // The card's bottom row holds three terminal rooms (CR 309.5).
+        for bottommost in [16, 17, 18] {
+            assert!(
+                room.rooms[bottommost].next_rooms.is_empty(),
+                "room {bottommost} is terminal on the printed card"
+            );
+        }
+        assert_eq!(room.rooms[18].room.name, "Temple of Bhaal");
+        // Every room carries a marker inside the card face.
+        for node in &room.rooms {
+            assert!(node.marker.x_permille <= 1000 && node.marker.y_permille <= 1000);
+        }
     }
 
     /// CR 309.7: a completed dungeon leaves a `current_dungeon: None` entry
@@ -4052,6 +4162,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -4065,6 +4176,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -4125,35 +4237,39 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&target).unwrap(),
         );
-        let tce_id = state.add_transient_continuous_effect_with_bindings(
-            source,
-            PlayerId(0),
-            Duration::ForAsLongAs {
-                condition: StaticCondition::IsTapped {
-                    scope: ObjectScope::Target,
+        let tce_id = state
+            .add_transient_continuous_effect_with_bindings(
+                source,
+                PlayerId(0),
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::IsTapped {
+                        scope: ObjectScope::Target,
+                    },
                 },
-            },
-            TargetFilter::SpecificObject { id: source },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-            }],
-            None,
-            crate::types::game_state::TransientContinuousEffectBindings {
-                affected_recipient: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&source],
+                TargetFilter::SpecificObject { id: source },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+                crate::types::game_state::TransientContinuousEffectBindings {
+                    affected_recipient: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&source],
+                        ),
                     ),
-                ),
-                duration_subject: Some(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(
-                        &state.objects[&target],
+                    duration_subject: Some(
+                        crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            &state.objects[&target],
+                        ),
                     ),
-                ),
-            },
-        );
+                    granting_object: None,
+                },
+            )
+            .expect("the fixture's duration begins");
 
         assert_eq!(
             derive_views(&state, None).copied_permanents,
@@ -4226,19 +4342,22 @@ mod tests {
         let values = crate::game::printed_cards::intrinsic_copiable_values(
             state.objects.get(&host).unwrap(),
         );
-        let independent_copy_effect_id = state.add_transient_continuous_effect(
-            host,
-            PlayerId(0),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id: host },
-            vec![ContinuousModification::CopyValues {
-                values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-            }],
-            None,
-        );
+        let independent_copy_effect_id = state
+            .add_transient_continuous_effect(
+                host,
+                PlayerId(0),
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: host },
+                vec![ContinuousModification::CopyValues {
+                    values: Box::new(values),
+                    display_source: DisplaySource::Card,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                }],
+                None,
+            )
+            .expect("the fixture's duration begins");
         assert_ne!(
             Some(independent_copy_effect_id),
             merge_effect_id,
@@ -4278,6 +4397,7 @@ mod tests {
                 display_source: DisplaySource::Card,
                 printed_ref: None,
                 token_image_ref: None,
+                token_art: None,
             }],
             None,
         );
@@ -5357,7 +5477,7 @@ mod tests {
                 source_id: trigger_source,
                 ability: Box::new(ability),
                 condition: None,
-                trigger_event: Some(trigger_event),
+                trigger_event: Some(trigger_event.clone()),
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
@@ -5383,6 +5503,29 @@ mod tests {
             "trigger context must not bypass multiplayer hidden-card filtering"
         );
         assert!(label.contains("Hidden Card"));
+
+        // CR 400.2 + CR 402.3: each serialized event carrier and its derived
+        // display must honor the same hidden-object decision for seated and
+        // unseated observers.
+        state
+            .stack_trigger_event_batches
+            .insert(ObjectId(900), vec![trigger_event.clone()]);
+        state.resolving_stack_entry = state.stack.front().cloned();
+        state.current_trigger_event = Some(trigger_event.clone());
+        state.current_trigger_events.push(trigger_event);
+        for viewer in [None, Some(PlayerId(0))] {
+            let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer))
+                .expect("serialize client envelope");
+            assert!(
+                !wire.to_string().contains("Secret Card"),
+                "client envelope must not reveal the library card to {viewer:?}"
+            );
+            let wire_label = wire["derived"]["stack_entry_details"]["900"]["trigger_context"][0]
+                ["label"]
+                .as_str()
+                .expect("serialized trigger context label");
+            assert!(wire_label.contains("Hidden Card"));
+        }
     }
 
     /// Wire-format round-trip: the JSON produced from `ClientGameStateRef`
@@ -6518,6 +6661,7 @@ mod tests {
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
                 room_door: None,
+                granting_object: None,
             }]
             .into();
         }
@@ -8056,6 +8200,7 @@ mod tests {
             is_activated: false,
             ability_index: None,
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
         };
 
@@ -8990,6 +9135,110 @@ mod tests {
             }),
             "the declared set holds a Land and would classify Permanent; the narrowed offer the \
              client actually renders holds only the creature"
+        );
+    }
+
+    fn shared_piles_wire(state: &GameState, viewer: Option<PlayerId>) -> serde_json::Value {
+        let filtered = match viewer {
+            Some(viewer) => crate::game::visibility::filter_state_for_viewer(state, viewer),
+            None => state.clone(),
+        };
+        let wire =
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(state, &filtered, viewer))
+                .expect("serialize client state");
+        wire["derived"].clone()
+    }
+
+    #[test]
+    fn shared_piles_names_the_holder_for_a_shared_zone_format() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        let both = Some(SharedPilesView {
+            library: Some(PlayerId(0)),
+            graveyard: Some(PlayerId(0)),
+        });
+        assert_eq!(derive_views(&state, None).shared_piles, both);
+        let json = serde_json::to_value(derive_views(&state, None)).unwrap();
+        assert_eq!(
+            json["shared_piles"],
+            serde_json::json!({"library": 0, "graveyard": 0})
+        );
+
+        // The descriptor and the storage accessor agree on the holder.
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Seat One Card".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(1)).push_back(card);
+        assert!(state.players[0].library.contains(&card));
+        assert!(state.players[1].library.is_empty());
+    }
+
+    #[test]
+    fn shared_piles_is_absent_for_per_player_formats() {
+        let standard = GameState::new(FormatConfig::standard(), 2, 42);
+        assert_eq!(derive_views(&standard, None).shared_piles, None);
+        let json = serde_json::to_value(derive_views(&standard, None)).unwrap();
+        assert!(json.get("shared_piles").is_none());
+        let commander = GameState::new(FormatConfig::commander(), 2, 42);
+        assert_eq!(derive_views(&commander, None).shared_piles, None);
+        // Reach-guard: the same function answers `Some` for the shared format.
+        assert!(
+            derive_views(&GameState::new(FormatConfig::dandan(), 2, 42), None)
+                .shared_piles
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn shared_piles_survives_every_viewer_projection() {
+        let state = GameState::new(FormatConfig::dandan(), 2, 42);
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            assert_eq!(
+                shared_piles_wire(&state, viewer)["shared_piles"],
+                serde_json::json!({"library": 0, "graveyard": 0}),
+                "viewer {viewer:?}"
+            );
+        }
+        let local = serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(1))))
+            .expect("serialize local client state");
+        assert_eq!(
+            local["derived"]["shared_piles"],
+            serde_json::json!({"library": 0, "graveyard": 0})
+        );
+    }
+
+    #[test]
+    fn shared_piles_holder_is_the_lowest_seat_not_the_first_in_turn_order() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        state.seat_order = vec![PlayerId(1), PlayerId(0)];
+        assert_eq!(
+            derive_views(&state, None).shared_piles.unwrap().library,
+            Some(PlayerId(0))
+        );
+    }
+
+    #[test]
+    fn debug_library_projection_reads_the_shared_pile_for_the_non_holder_seat() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 42);
+        state.debug_mode = true;
+        state.debug_permitted.insert(PlayerId(1));
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shared Pile Card".to_string(),
+            Zone::Library,
+        );
+        let views = derive_views(&state, Some(PlayerId(1)));
+        assert_eq!(
+            views.debug_library_cards,
+            vec![DebugLibraryCardView {
+                object_id: card,
+                name: "Shared Pile Card".to_string(),
+            }]
         );
     }
 }
