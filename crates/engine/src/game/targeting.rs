@@ -1039,6 +1039,14 @@ pub fn resolved_targets(
     // event / combat state, even when parent chain propagation populated
     // `ability.targets` with unrelated chosen targets (DefendingPlayer, etc.).
     if is_pure_event_context_filter(target_filter) {
+        if matches!(target_filter, TargetFilter::TriggeringSource) {
+            if let Some(trig_obj) = ability.triggering_object {
+                return vec![TargetRef::Object(trig_obj.object_id)];
+            }
+            if let Some(host_ref) = ability.triggering_host {
+                return vec![TargetRef::Object(host_ref.object_id)];
+            }
+        }
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
             return vec![target];
@@ -1585,6 +1593,18 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             Some(TargetRef::Player(player))
         }
         TargetFilter::TriggeringSource => {
+            // CR 509.3c + CR 608.2c: Prefer the pinned triggering object from the resolving ability
+            // when present (e.g. the watched attacker in a BecomesBlocked trigger).
+            if let Some(resolving_entry) = state.resolving_stack_entry.as_ref() {
+                if let Some(ability) = resolving_entry.ability() {
+                    if let Some(trig_obj) = ability.triggering_object {
+                        return Some(TargetRef::Object(trig_obj.object_id));
+                    }
+                    if let Some(host_ref) = ability.triggering_host {
+                        return Some(TargetRef::Object(host_ref.object_id));
+                    }
+                }
+            }
             if let Some(event) = event {
                 if let Some(obj_id) = extract_source_from_event(event) {
                     return Some(TargetRef::Object(obj_id));

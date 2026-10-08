@@ -13,9 +13,9 @@ use crate::game::quantity::{
 };
 use crate::game::targeting;
 use crate::types::ability::{
-    AbilityKind, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
-    ChosenAttribute, CombatRelation, CombatRelationDirection, CombatRelationSubject, ControllerRef,
-    CountScope, FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr,
+    AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue, ChosenAttribute,
+    CombatRelation, CombatRelationDirection, CombatRelationSubject, ControllerRef, CountScope,
+    FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr,
     QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef,
     TypeFilter, TypedFilter,
 };
@@ -25,7 +25,8 @@ use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
     AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeCombatStatus,
+    ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -1399,7 +1400,7 @@ impl<'a> FilterContext<'a> {
             trigger_source: ability.trigger_source.as_ref(),
             recipient_id: None,
             scoped_iteration_player: None,
-            triggering_object: None,
+            triggering_object: ability.triggering_object,
             granting_object: ability.context.granting_object,
         }
     }
@@ -1417,7 +1418,7 @@ impl<'a> FilterContext<'a> {
             trigger_source: ability.trigger_source.as_ref(),
             recipient_id: Some(recipient_id),
             scoped_iteration_player: None,
-            triggering_object: None,
+            triggering_object: ability.triggering_object,
             granting_object: ability.context.granting_object,
         }
     }
@@ -1438,7 +1439,7 @@ impl<'a> FilterContext<'a> {
             trigger_source: ability.trigger_source.as_ref(),
             recipient_id: None,
             scoped_iteration_player: None,
-            triggering_object: None,
+            triggering_object: ability.triggering_object,
             granting_object: ability.context.granting_object,
         }
     }
@@ -6847,8 +6848,16 @@ fn combat_relation_subject_id(
     match subject {
         CombatRelationSubject::Source => Some(source.id),
         CombatRelationSubject::ParentTarget => source.ability.and_then(first_object_target),
-        CombatRelationSubject::TriggeringObject => {
-            source.triggering_object.map(|t| t.object_id).or_else(|| {
+        CombatRelationSubject::TriggeringObject => source
+            .triggering_object
+            .map(|t| t.object_id)
+            .or_else(|| {
+                source
+                    .ability
+                    .and_then(|a| a.triggering_object)
+                    .map(|t| t.object_id)
+            })
+            .or_else(|| {
                 source
                     .ability
                     .and_then(|a| {
@@ -6862,18 +6871,23 @@ fn combat_relation_subject_id(
                         TargetRef::Object(id) => Some(id),
                         _ => None,
                     })
-            })
-        }
-        CombatRelationSubject::AttachedTo => match source.attached_to {
-            Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
-            _ => {
-                targeting::resolve_event_context_target(state, &TargetFilter::AttachedTo, source.id)
-                    .and_then(|t| match t {
-                        TargetRef::Object(id) => Some(id),
-                        _ => None,
-                    })
-            }
-        },
+            }),
+        CombatRelationSubject::AttachedTo => source
+            .ability
+            .and_then(|a| a.triggering_host)
+            .map(|h| h.object_id)
+            .or_else(|| match source.attached_to {
+                Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
+                _ => targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::AttachedTo,
+                    source.id,
+                )
+                .and_then(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                }),
+            }),
     }
 }
 
@@ -6892,10 +6906,11 @@ fn combat_relation_subject_ref(
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
 ) -> Option<ObjectIncarnationRef> {
-    let live = |id: ObjectId| {
+    let exact_battlefield_live = |id: ObjectId| {
         state
             .objects
             .get(&id)
+            .filter(|obj| obj.zone == Zone::Battlefield)
             .map(ObjectIncarnationRef::from_object)
     };
     match subject {
@@ -6910,7 +6925,7 @@ fn combat_relation_subject_ref(
                     .filter(|ability| ability.source_id == source.id)
                     .and_then(|ability| ability.source_ref(state))
             })
-            .or_else(|| live(source.id)),
+            .or_else(|| exact_battlefield_live(source.id)),
         CombatRelationSubject::ParentTarget => {
             let ability = source.ability?;
             let id = first_object_target(ability)?;
@@ -6920,13 +6935,28 @@ fn combat_relation_subject_ref(
                 .chain(&ability.selected_target_incarnations)
                 .find(|pin| pin.object_id == id)
                 .copied()
-                .or_else(|| live(id))
+                .or_else(|| exact_battlefield_live(id))
         }
         CombatRelationSubject::TriggeringObject => {
-            if let Some(trig) = source.triggering_object {
+            let trig = source
+                .triggering_object
+                .or_else(|| source.ability.and_then(|a| a.triggering_object));
+            if let Some(trig) = trig {
                 trig.incarnation
                     .map(|inc| ObjectIncarnationRef::of(trig.object_id, inc))
-                    .or_else(|| live(trig.object_id))
+                    .or_else(|| exact_battlefield_live(trig.object_id))
+                    .or_else(|| {
+                        state
+                            .zone_changes_this_turn
+                            .iter()
+                            .rev()
+                            .find(|r| {
+                                r.object_id == trig.object_id
+                                    && r.from_zone == Some(Zone::Battlefield)
+                            })
+                            .and_then(|r| r.trigger_source_context())
+                            .map(|c| c.identity.reference)
+                    })
             } else if let Some(ability) = source.ability {
                 let target = targeting::resolve_event_context_target(
                     state,
@@ -6934,13 +6964,13 @@ fn combat_relation_subject_ref(
                     ability.source_id,
                 );
                 match target {
-                    Some(TargetRef::Object(id)) => live(id).or_else(|| {
-                        // CR 113.7a / CR 608.2h: LKI fallback for triggering object that departed
+                    Some(TargetRef::Object(id)) => exact_battlefield_live(id).or_else(|| {
+                        // CR 113.7a / CR 608.2h: LKI fallback for triggering object that departed battlefield
                         state
                             .zone_changes_this_turn
                             .iter()
                             .rev()
-                            .find(|r| r.object_id == id)
+                            .find(|r| r.object_id == id && r.from_zone == Some(Zone::Battlefield))
                             .and_then(|r| r.trigger_source_context())
                             .map(|c| c.identity.reference)
                     }),
@@ -6951,30 +6981,34 @@ fn combat_relation_subject_ref(
             }
         }
         CombatRelationSubject::AttachedTo => {
-            let attached_id = match source.attached_to {
-                Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
-                _ => targeting::resolve_event_context_target(
-                    state,
-                    &TargetFilter::AttachedTo,
-                    source.id,
-                )
-                .and_then(|t| match t {
-                    TargetRef::Object(id) => Some(id),
-                    _ => None,
-                }),
-            };
-            attached_id.and_then(|id| {
-                live(id).or_else(|| {
-                    // CR 113.7a / CR 608.2h: LKI fallback for attached host that departed
-                    state
-                        .zone_changes_this_turn
-                        .iter()
-                        .rev()
-                        .find(|r| r.object_id == id && r.from_zone == Some(Zone::Battlefield))
-                        .and_then(|r| r.trigger_source_context())
-                        .map(|c| c.identity.reference)
+            if let Some(host) = source.ability.and_then(|a| a.triggering_host) {
+                Some(host)
+            } else {
+                let attached_id = match source.attached_to {
+                    Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
+                    _ => targeting::resolve_event_context_target(
+                        state,
+                        &TargetFilter::AttachedTo,
+                        source.id,
+                    )
+                    .and_then(|t| match t {
+                        TargetRef::Object(id) => Some(id),
+                        _ => None,
+                    }),
+                };
+                attached_id.and_then(|id| {
+                    exact_battlefield_live(id).or_else(|| {
+                        // CR 113.7a / CR 608.2h: LKI fallback for attached host that departed battlefield
+                        state
+                            .zone_changes_this_turn
+                            .iter()
+                            .rev()
+                            .find(|r| r.object_id == id && r.from_zone == Some(Zone::Battlefield))
+                            .and_then(|r| r.trigger_source_context())
+                            .map(|c| c.identity.reference)
+                    })
                 })
-            })
+            }
         }
     }
 }
@@ -7026,6 +7060,25 @@ fn matches_historical_combat_relation(
     }
 }
 
+fn pre_departure_combat_status<'a>(
+    state: &'a GameState,
+    object_id: ObjectId,
+    source: &SourceContext<'a>,
+) -> Option<&'a ZoneChangeCombatStatus> {
+    if let Some(ts) = source.trigger_source.filter(|ts| {
+        ts.identity.reference.object_id == object_id
+            && ts.identity.expected_zone == Zone::Battlefield
+    }) {
+        return Some(&ts.combat_status);
+    }
+    state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|r| r.object_id == object_id && r.from_zone == Some(Zone::Battlefield))
+        .map(|r| &r.combat_status)
+}
+
 fn matches_combat_relation(
     state: &GameState,
     object_id: ObjectId,
@@ -7043,33 +7096,57 @@ fn matches_combat_relation(
                         return true;
                     }
                 }
-            }
 
-            // CR 608.2b + CR 608.2h + CR 113.7a: If the source of an activated ability
-            // has left the zone it was in, its last known information is used during resolution
-            // target legality check. This does NOT apply to triggered abilities, where
-            // live combat relations are pruned when leaving combat (CR 506.4) and historical
-            // relations must be used instead.
-            let is_activated_ability = source
-                .ability
-                .is_some_and(|a| a.kind == AbilityKind::Activated && a.trigger_source.is_none())
-                && source.trigger_source.is_none();
-            if is_activated_ability {
-                if let Some(subject_ref) = combat_relation_subject_ref(state, subject, source) {
-                    let subject_is_live_in_combat = subject_id.is_some_and(|id| {
-                        state.combat.as_ref().is_some_and(|combat| {
-                            combat.blocker_to_attacker.contains_key(&id)
-                                || combat.blocker_to_attacker.values().any(|v| v.contains(&id))
-                        })
-                    });
-                    if !subject_is_live_in_combat {
-                        return matches_historical_combat_relation(
-                            state,
-                            candidate,
-                            subject_ref,
-                            direction,
-                            crate::types::ability::CombatHistoryScope::ThisCombat,
-                        );
+                // CR 113.7a + CR 608.2h: If the subject (or candidate) has left the expected
+                // zone (Zone::Battlefield), its last known information is used during resolution.
+                // However, per CR 506.4 + CR 608.2b, if the object remains on the battlefield but
+                // was removed from combat, it is no longer an attacking/blocking creature and
+                // LKI does NOT apply.
+                let subject_still_on_battlefield = state
+                    .objects
+                    .get(&subject_id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield);
+
+                if !subject_still_on_battlefield {
+                    if let Some(status) = pre_departure_combat_status(state, subject_id, source) {
+                        let candidate_blocks_subject =
+                            status.blocked_by_creatures.contains(&object_id);
+                        let subject_blocks_candidate =
+                            status.blocking_creatures.contains(&object_id);
+                        let matches = match direction {
+                            CombatRelationDirection::Blocking => candidate_blocks_subject,
+                            CombatRelationDirection::BlockedBy => subject_blocks_candidate,
+                            CombatRelationDirection::Either => {
+                                candidate_blocks_subject || subject_blocks_candidate
+                            }
+                        };
+                        if matches {
+                            return true;
+                        }
+                    }
+                }
+
+                let candidate_still_on_battlefield = state
+                    .objects
+                    .get(&object_id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield);
+
+                if !candidate_still_on_battlefield {
+                    if let Some(status) = pre_departure_combat_status(state, object_id, source) {
+                        let candidate_blocks_subject =
+                            status.blocking_creatures.contains(&subject_id);
+                        let subject_blocks_candidate =
+                            status.blocked_by_creatures.contains(&subject_id);
+                        let matches = match direction {
+                            CombatRelationDirection::Blocking => candidate_blocks_subject,
+                            CombatRelationDirection::BlockedBy => subject_blocks_candidate,
+                            CombatRelationDirection::Either => {
+                                candidate_blocks_subject || subject_blocks_candidate
+                            }
+                        };
+                        if matches {
+                            return true;
+                        }
                     }
                 }
             }
@@ -8583,9 +8660,24 @@ fn zone_change_record_matches_property(
         // relation, and this predicate reads live `combat.blocker_to_attacker`.
         FilterProp::BlockingSource => false,
         FilterProp::CombatRelation { relation, subject } => match relation {
-            // CR 506.4: the live map is pruned when either creature leaves
-            // combat, so there is nothing for a departed record to match.
-            CombatRelation::Live(_) => false,
+            // CR 509.1g + CR 603.10a: Leaves-the-battlefield / dies look-back matches
+            // against the exact pre-departure combat status snapshotted in the record.
+            CombatRelation::Live(direction) => {
+                let Some(subject_id) = combat_relation_subject_id(state, *subject, source) else {
+                    return false;
+                };
+                let candidate_blocks_subject =
+                    record.combat_status.blocking_creatures.contains(&subject_id);
+                let subject_blocks_candidate =
+                    record.combat_status.blocked_by_creatures.contains(&subject_id);
+                match direction {
+                    CombatRelationDirection::Blocking => candidate_blocks_subject,
+                    CombatRelationDirection::BlockedBy => subject_blocks_candidate,
+                    CombatRelationDirection::Either => {
+                        candidate_blocks_subject || subject_blocks_candidate
+                    }
+                }
+            }
             // CR 509.1g + CR 608.2i: answered from the block-history
             // ledgers through matches_historical_combat_relation.
             // CR 400.7: the record's exact departing incarnation is its own
@@ -17900,6 +17992,8 @@ mod tests {
                 attacking_alone: true,
                 blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
+                blocking_creatures: Vec::new(),
+                blocked_by_creatures: Vec::new(),
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -17911,6 +18005,8 @@ mod tests {
                 attacking_alone: false,
                 blocking_alone: true,
                 defending_player: None,
+                blocking_creatures: Vec::new(),
+                blocked_by_creatures: Vec::new(),
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -17982,6 +18078,8 @@ mod tests {
                 attacking_alone: false,
                 blocking_alone: false,
                 defending_player: Some(PlayerId(0)),
+                blocking_creatures: Vec::new(),
+                blocked_by_creatures: Vec::new(),
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
         };

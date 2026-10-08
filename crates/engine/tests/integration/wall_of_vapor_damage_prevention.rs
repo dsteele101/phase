@@ -443,3 +443,443 @@ fn trailblazers_torch_deals_damage_to_blocking_creatures() {
         "Blocker must be destroyed by 2 damage from Trailblazer's Torch trigger"
     );
 }
+
+#[test]
+fn abu_jafar_dies_trigger_destroys_combat_relation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let abu = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Abu Ja'far",
+            0,
+            1,
+            "When this creature dies, destroy all creatures blocking or blocked by it. They can't be regenerated.",
+        )
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Abu Ja'far blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(abu, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Combat damage step: Attacker deals 2 damage to Abu Ja'far. Abu Ja'far dies.
+    // Abu Ja'far dies trigger fires and goes to the stack.
+    runner.pass_both_players();
+
+    assert_eq!(
+        runner.state().objects.get(&abu).unwrap().zone,
+        Zone::Graveyard,
+        "Abu Ja'far must be in graveyard from lethal combat damage"
+    );
+
+    // Resolve dies trigger from stack
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 603.10a + CR 608.2h: Abu Ja'far's LKI combat status identifies attacker as blocked creature,
+    // destroying it.
+    assert_eq!(
+        runner.state().objects.get(&attacker).unwrap().zone,
+        Zone::Graveyard,
+        "Attacker must be destroyed by Abu Ja'far's dies trigger"
+    );
+}
+
+#[test]
+fn ib_halfheart_sacrifice_then_damage_destroys_blocker_of_sacrificed_goblin() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ib = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Ib Halfheart, Goblin Tactician",
+            3,
+            2,
+            "Whenever another Goblin you control becomes blocked, sacrifice it. If you do, it deals 4 damage to each creature blocking it.",
+        )
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let goblin = scenario
+        .add_creature(P0, "Goblin Raider", 2, 2)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let blocker = scenario.add_creature(P1, "Wall of Wood", 0, 3).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(goblin, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Goblin
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, goblin)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Drain stack: BecomesBlocked trigger resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Goblin was sacrificed
+    assert_eq!(
+        runner.state().objects.get(&goblin).unwrap().zone,
+        Zone::Graveyard,
+        "Goblin must be sacrificed"
+    );
+    // Ib Halfheart is still on the battlefield
+    assert_eq!(
+        runner.state().objects.get(&ib).unwrap().zone,
+        Zone::Battlefield,
+        "Ib Halfheart must remain on battlefield"
+    );
+    // CR 509.3c + CR 113.7a: Sacrificed Goblin dealt 4 damage to Blocker via LKI, killing it
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker must be destroyed by 4 damage from sacrificed Goblin"
+    );
+}
+
+#[test]
+fn knight_of_dusk_fizzles_if_target_removed_from_combat_while_on_battlefield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(9_998), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_999), false, vec![]),
+        ],
+    );
+
+    let knight = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Knight of Dusk",
+            2,
+            2,
+            "{B}{B}: Destroy target creature blocking this creature.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(knight, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Knight of Dusk
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, knight)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Add mana for P0 in DeclareBlockers step
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Black,
+            ObjectId(9_998),
+            false,
+            vec![],
+        ));
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Black,
+            ObjectId(9_999),
+            false,
+            vec![],
+        ));
+
+    // P0 activates Knight of Dusk targeting blocker (ability index 0)
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: knight,
+            ability_index: 0,
+        })
+        .expect("ActivateAbility should succeed");
+
+    if matches!(
+        runner.state().waiting_for,
+        engine::types::game_state::WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(blocker)),
+            })
+            .expect("ChooseTarget should succeed");
+    }
+
+    if matches!(
+        runner.state().waiting_for,
+        engine::types::game_state::WaitingFor::ManaPayment { .. }
+    ) {
+        runner.act(GameAction::PassPriority).expect("Pay mana");
+    }
+
+    // Ability is on the stack. Now remove blocker from combat while it remains on the battlefield (CR 506.4).
+    engine::game::effects::remove_from_combat::remove_object_from_combat(
+        runner.state_mut(),
+        blocker,
+    );
+
+    // Blocker is still on battlefield
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blocker remains on battlefield after being removed from combat"
+    );
+
+    // Pass priority to resolve ability
+    runner.pass_both_players();
+
+    // CR 506.4 + CR 608.2b: Target is still on battlefield but no longer blocking this creature;
+    // LKI does NOT apply, target revalidation fails, ability fizzles.
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blocker must NOT be destroyed because it was removed from combat"
+    );
+}
+
+#[test]
+fn trailblazers_torch_trigger_maintains_host_even_if_equipment_moves_before_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let attacker_a = scenario.add_creature(P0, "Attacker A", 2, 2).id();
+    let other_creature_b = scenario.add_creature(P0, "Other B", 2, 2).id();
+    let torch = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Trailblazer's Torch",
+            "Whenever equipped creature becomes blocked, it deals 2 damage to each creature blocking it.",
+        )
+        .with_subtypes(vec!["Equipment"])
+        .id();
+
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    // Attach Torch to Attacker A
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&torch)
+        .unwrap()
+        .attached_to = Some(engine::game::game_object::AttachTarget::Object(attacker_a));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker_a)
+        .unwrap()
+        .attachments
+        .push(torch);
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), torch);
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker_a, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Attacker A
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker_a)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Trigger is on the stack. Before it resolves, move Torch to Other B (e.g. Magnetic Theft).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker_a)
+        .unwrap()
+        .attachments
+        .retain(|&id| id != torch);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&other_creature_b)
+        .unwrap()
+        .attachments
+        .push(torch);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&torch)
+        .unwrap()
+        .attached_to = Some(engine::game::game_object::AttachTarget::Object(
+        other_creature_b,
+    ));
+
+    // Resolve trigger from stack
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 301.5a + Finding 4: The ability's host was bound to Attacker A when the trigger was created.
+    // Moving the Equipment does not change the referent at resolution. Blocker takes 2 damage and dies.
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker must be destroyed by Trailblazer's Torch trigger even if Torch was moved before resolution"
+    );
+}
+
+#[test]
+fn baneclaw_marauder_does_not_trigger_if_blocker_removed_from_combat_before_death() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let marauder = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Baneclaw Marauder",
+            3,
+            4,
+            "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let bolt = scenario.add_bolt_to_hand(P0);
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(marauder, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Marauder
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, marauder)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // BecomesBlocked trigger resolves: Blocker gets -1/-1 (is now 1/1)
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blocker survived -1/-1 as a 1/1"
+    );
+
+    // Remove blocker from combat while on the battlefield (CR 506.4)
+    engine::game::effects::remove_from_combat::remove_object_from_combat(
+        runner.state_mut(),
+        blocker,
+    );
+
+    // Initial life of P1 is 20
+    assert_eq!(runner.state().players[P1.0 as usize].life, 20);
+
+    // Cast Lightning Bolt at instant speed targeting blocker.
+    runner.cast(bolt).target_object(blocker).resolve();
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker died from Lightning Bolt damage"
+    );
+
+    // CR 603.10a / Finding 5: At the exact moment of zone departure, blocker was NOT blocking Marauder.
+    // Therefore, Marauder's dies trigger must NOT fire. P1's life remains 20.
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        20,
+        "P1 must not lose life because the dying creature was no longer blocking Marauder"
+    );
+}
+
+#[test]
+fn departure_fallback_requires_from_battlefield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let creature_in_hand = scenario
+        .add_creature_to_hand(P0, "Hand Creature", 2, 2)
+        .id();
+    let _marauder = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Baneclaw Marauder",
+            3,
+            4,
+            "Whenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Discard creature directly from Hand to Graveyard (from_zone is Hand, not Battlefield)
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        creature_in_hand,
+        Zone::Graveyard,
+        &mut events,
+    );
+
+    // Check that zone change record exists with from_zone == Hand
+    let last_change = runner.state().zone_changes_this_turn.last().unwrap();
+    assert_eq!(last_change.object_id, creature_in_hand);
+    assert_eq!(last_change.from_zone, Some(Zone::Hand));
+
+    // Life remains 20 (no triggers fired or matched)
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert_eq!(runner.state().players[P1.0 as usize].life, 20);
+}

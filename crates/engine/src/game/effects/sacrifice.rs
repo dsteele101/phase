@@ -328,13 +328,33 @@ pub fn resolve(
         // carried by event context or attached host, not a target the controller chose,
         // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
         // without falling back to `source_id` for unresolved ParentTarget.
-        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-            .into_iter()
-            .filter_map(|t| match t {
-                TargetRef::Object(id) => Some(id),
-                TargetRef::Player(_) => None,
-            })
-            .collect()
+        if matches!(filter, TargetFilter::TriggeringSource) {
+            if let Some(trig_obj) = ability.triggering_object {
+                vec![trig_obj.object_id]
+            } else if let Some(host_ref) = ability.triggering_host {
+                vec![host_ref.object_id]
+            } else {
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    filter,
+                    ability.source_id,
+                )
+                .into_iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect()
+            }
+        } else {
+            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+                .into_iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect()
+        }
     } else {
         // CR 400.7 + CR 603.7c: `effect_object_targets` indexes ParentTargetSlot
         // by DECLARED position, so a pin-filtered slice would renumber every

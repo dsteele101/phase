@@ -1498,10 +1498,16 @@ fn single_damage_source(
         // "That creature/permanent deals damage..." inside a triggered ability
         // binds the damage source to the triggering event object.
         Some(DamageSource::TriggeringSource) => Some(
-            state
-                .current_trigger_event
-                .as_ref()
-                .and_then(crate::game::targeting::extract_source_from_event)
+            ability
+                .triggering_object
+                .map(|t| t.object_id)
+                .or_else(|| ability.triggering_host.map(|h| h.object_id))
+                .or_else(|| {
+                    state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(crate::game::targeting::extract_source_from_event)
+                })
                 .and_then(|id| DamageContext::from_source(state, id))
                 .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         ),
@@ -1940,10 +1946,16 @@ pub fn resolve_all(
         Some(DamageSource::Target) => {
             target_source_ctx.expect("Target damage source resolved before the recipient set")
         }
-        Some(DamageSource::TriggeringSource) => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_source_from_event)
+        Some(DamageSource::TriggeringSource) => ability
+            .triggering_object
+            .map(|t| t.object_id)
+            .or_else(|| ability.triggering_host.map(|h| h.object_id))
+            .or_else(|| {
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_source_from_event)
+            })
             .and_then(|id| DamageContext::from_source(state, id))
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         None => DamageContext::from_source(state, ability.source_id)

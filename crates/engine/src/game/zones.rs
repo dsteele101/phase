@@ -2241,6 +2241,20 @@ pub(crate) fn capture_combat_status(
         attacking_alone: crate::game::combat::attacking_alone(state, object_id),
         blocking_alone: crate::game::combat::blocking_alone(state, object_id),
         defending_player: attacker.map(|attacker| attacker.defending_player),
+        // CR 509.1g + CR 603.10a: Snapshot the exact attackers this creature was
+        // blocking immediately prior to leaving combat.
+        blocking_creatures: combat
+            .blocker_to_attacker
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+        // CR 509.1h + CR 603.10a: Snapshot the exact blockers assigned to this
+        // creature immediately prior to leaving combat.
+        blocked_by_creatures: combat
+            .blocker_assignments
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 

@@ -744,7 +744,7 @@ impl TriggerSourceContext {
         self.lki.attachments.clone_from(&record.attachments);
         self.linked_exile_snapshot
             .clone_from(&record.linked_exile_snapshot);
-        self.combat_status = record.combat_status;
+        self.combat_status.clone_from(&record.combat_status);
         self.cast_from_zone = record.cast_from_zone;
         self.played_from_zone = record.played_from_zone;
     }
@@ -1836,7 +1836,7 @@ pub(crate) fn terminal_battlefield_departure_row(
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneChangeCombatStatus {
     #[serde(default)]
     pub attacking: bool,
@@ -1857,6 +1857,12 @@ pub struct ZoneChangeCombatStatus {
     pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
+    /// CR 509.1g: Attackers this creature was blocking immediately prior to leaving combat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_creatures: Vec<ObjectId>,
+    /// CR 509.1h: Blockers assigned to this creature immediately prior to leaving combat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by_creatures: Vec<ObjectId>,
 }
 
 /// CR 508.1a: Snapshot of a creature's public characteristics when it was

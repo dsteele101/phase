@@ -18,7 +18,8 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, TriggeringObjectRef,
+    LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -33326,6 +33327,15 @@ pub struct ResolvedAbility {
     /// deliberately separate from the parsed grammatical selector on `Effect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_block_attacker: Option<ObjectIncarnationRef>,
+    /// CR 301.5a + CR 608.2c: Exact host permanent an Aura/Equipment trigger was attached to
+    /// when the trigger fired. Bound at stack construction so a later re-attachment before
+    /// resolution does not redirect or empty the filter population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_host: Option<ObjectIncarnationRef>,
+    /// CR 509.3c + CR 608.2c: Exact triggering object (such as the watched attacker that
+    /// became blocked) bound when the trigger fired / was placed on the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_object: Option<TriggeringObjectRef>,
     /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
     /// `targets`, captured when a delayed triggered ability snapshotted its
     /// `ParentTarget` referent at creation. A delayed ability that refers to a
@@ -33767,6 +33777,8 @@ impl PartialEq for ResolvedAbility {
             trigger_source: a_trigger_source,
             trigger_definition_ref: a_trigger_definition_ref,
             force_block_attacker: a_force_block_attacker,
+            triggering_host: a_triggering_host,
+            triggering_object: a_triggering_object,
             target_incarnations: a_target_incarnations,
             selected_target_incarnations: a_selected_target_incarnations,
             activation_cost_reduction: a_activation_cost_reduction,
@@ -33838,6 +33850,8 @@ impl PartialEq for ResolvedAbility {
             trigger_source: b_trigger_source,
             trigger_definition_ref: b_trigger_definition_ref,
             force_block_attacker: b_force_block_attacker,
+            triggering_host: b_triggering_host,
+            triggering_object: b_triggering_object,
             target_incarnations: b_target_incarnations,
             selected_target_incarnations: b_selected_target_incarnations,
             activation_cost_reduction: b_activation_cost_reduction,
@@ -33909,6 +33923,8 @@ impl PartialEq for ResolvedAbility {
             && a_trigger_source == b_trigger_source
             && a_trigger_definition_ref == b_trigger_definition_ref
             && a_force_block_attacker == b_force_block_attacker
+            && a_triggering_host == b_triggering_host
+            && a_triggering_object == b_triggering_object
             && a_target_incarnations == b_target_incarnations
             && a_selected_target_incarnations == b_selected_target_incarnations
             && a_activation_cost_reduction == b_activation_cost_reduction
@@ -34315,6 +34331,8 @@ impl ResolvedAbility {
             trigger_source: None,
             trigger_definition_ref: None,
             force_block_attacker: None,
+            triggering_host: None,
+            triggering_object: None,
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             activation_cost_reduction: None,
@@ -34571,6 +34589,33 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 301.5a + CR 608.2c: Recursively binds the exact host permanent an Aura/Equipment
+    /// trigger was attached to when the trigger fired.
+    pub fn bind_triggering_host_recursive(&mut self, host: Option<ObjectIncarnationRef>) {
+        self.triggering_host = host;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_host_recursive(host);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_host_recursive(host);
+        }
+    }
+
+    /// CR 509.3c + CR 608.2c: Recursively binds the exact triggering object (such as the
+    /// watched attacker that became blocked) bound when the trigger fired.
+    pub fn bind_triggering_object_recursive(
+        &mut self,
+        triggering_object: Option<TriggeringObjectRef>,
+    ) {
+        self.triggering_object = triggering_object;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_object_recursive(triggering_object);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_object_recursive(triggering_object);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
@@ -34581,6 +34626,8 @@ impl ResolvedAbility {
         self.trigger_source = None;
         self.trigger_definition_ref = None;
         self.force_block_attacker = None;
+        self.triggering_host = None;
+        self.triggering_object = None;
         // CR 104.4b: the pin names an advancing incarnation of the triggering
         // spell (CR 400.7), so it is cleared alongside the other per-instance
         // identity fields above for the same loop-equality reason.

@@ -63,12 +63,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatHistoryScope, CombatRelation,
-    CombatRelationDirection, CombatRelationSubject, Comparator, ControllerRef, CountScope,
-    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
-    EffectScope, FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet,
-    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationDirection,
+    CombatRelationSubject, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
+    DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect, EffectScope,
+    FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
+    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
     SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
@@ -2629,29 +2629,6 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 CombatRelationSubject::Source,
                 CombatRelationSubject::TriggeringObject,
             );
-        }
-    }
-
-    // CR 603.10a: Leaves-the-battlefield / dies triggers (e.g. Baneclaw Marauder)
-    // look back in time to the state immediately before the zone change.
-    // In that pre-death state, combat relations are captured by the combat history ledger
-    // for ThisCombat. Convert Live combat relations on qualifying filters to Historical
-    // { direction, scope: ThisCombat } so zone-change record matching evaluates against
-    // the pre-death combat ledger.
-    let is_ltb = def.mode == TriggerMode::ChangesZone
-        && (def.origin == Some(Zone::Battlefield) || def.destination == Some(Zone::Graveyard));
-    if is_ltb {
-        if let Some(valid_card) = def.valid_card.as_mut() {
-            convert_combat_relation_live_to_historical_for_ltb(valid_card);
-        }
-        for clause in &mut def.zone_change_clauses {
-            if matches!(clause.origin, OriginConstraint::Equals(Zone::Battlefield))
-                || clause.destination == Some(Zone::Graveyard)
-            {
-                if let Some(valid_card) = clause.valid_card.as_mut() {
-                    convert_combat_relation_live_to_historical_for_ltb(valid_card);
-                }
-            }
         }
     }
 
@@ -5729,42 +5706,6 @@ fn retarget_each_other_to_attached_host_in_ability(def: &mut AbilityDefinition) 
     }
     if let Some(els) = def.else_ability.as_deref_mut() {
         retarget_each_other_to_attached_host_in_ability(els);
-    }
-}
-
-/// CR 603.10a: Leaves-the-battlefield / dies triggers look back in time to
-/// the game state immediately before the zone change. In that pre-death state,
-/// combat relations are captured by the combat history ledger for ThisCombat.
-/// Convert `CombatRelation::Live` on qualifying filters to `CombatRelation::Historical`
-/// with scope `CombatHistoryScope::ThisCombat`.
-fn convert_combat_relation_live_to_historical_for_ltb(filter: &mut TargetFilter) {
-    match filter {
-        TargetFilter::Typed(typed) => {
-            for prop in &mut typed.properties {
-                if let FilterProp::CombatRelation {
-                    relation: CombatRelation::Live(direction),
-                    subject,
-                } = prop
-                {
-                    *prop = FilterProp::CombatRelation {
-                        relation: CombatRelation::Historical {
-                            direction: *direction,
-                            scope: CombatHistoryScope::ThisCombat,
-                        },
-                        subject: *subject,
-                    };
-                }
-            }
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            for sub in filters {
-                convert_combat_relation_live_to_historical_for_ltb(sub);
-            }
-        }
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            convert_combat_relation_live_to_historical_for_ltb(filter);
-        }
-        _ => {}
     }
 }
 
@@ -21055,8 +20996,7 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         if !tail.trim().is_empty() {
             return None;
         }
-        let mut valid_card = subject.clone();
-        convert_combat_relation_live_to_historical_for_ltb(&mut valid_card);
+        let valid_card = subject.clone();
         return Some(ZoneChangeClause {
             origin: OriginConstraint::Equals(Zone::Battlefield),
             destination: Some(Zone::Graveyard),
@@ -21079,13 +21019,10 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         if !tail.trim().is_empty() {
             return None;
         }
-        let mut valid_card = match possessive {
+        let valid_card = match possessive {
             Some(ctrl) => add_controller(subject.clone(), ctrl),
             None => subject.clone(),
         };
-        if matches!(origin, OriginConstraint::Equals(Zone::Battlefield)) {
-            convert_combat_relation_live_to_historical_for_ltb(&mut valid_card);
-        }
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
