@@ -22753,8 +22753,8 @@ impl Effect {
             // spell ability, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
-            // CR 614.11: "you would draw" scopes via the shield's
-            // source-player default, so the carrier itself names no target. A
+            // The resolver scopes "you would draw" with source_controller and
+            // valid_player: You, so the carrier itself names no target. A
             // "target" in its substitute (Words of War) is surfaced by
             // `triggers::extract_target_filter_from_effect`'s delegation to the
             // substitute head (CR 115.1c).
