@@ -330,9 +330,25 @@ pub fn resolve(
         // without falling back to `source_id` for unresolved ParentTarget.
         if matches!(filter, TargetFilter::TriggeringSource) {
             if let Some(trig_obj) = ability.triggering_object {
-                vec![trig_obj.object_id]
+                // CR 400.7: If the object left and returned, it is a new object and must not be sacrificed.
+                if state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
+                    obj.zone == Zone::Battlefield
+                        && trig_obj
+                            .incarnation
+                            .is_none_or(|inc| obj.incarnation == inc)
+                }) {
+                    vec![trig_obj.object_id]
+                } else {
+                    vec![]
+                }
             } else if let Some(host_ref) = ability.triggering_host {
-                vec![host_ref.object_id]
+                if state.objects.get(&host_ref.object_id).is_some_and(|obj| {
+                    obj.zone == Zone::Battlefield && host_ref.incarnation == obj.incarnation
+                }) {
+                    vec![host_ref.object_id]
+                } else {
+                    vec![]
+                }
             } else {
                 crate::game::targeting::resolve_event_context_target(
                     state,

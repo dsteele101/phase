@@ -883,3 +883,476 @@ fn departure_fallback_requires_from_battlefield() {
     assert_eq!(runner.state().players[P0.0 as usize].life, 20);
     assert_eq!(runner.state().players[P1.0 as usize].life, 20);
 }
+
+#[test]
+fn dwindle_blocking_destroys_enchanted_creature_and_leaves_attacker_alive() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let dwindle = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Dwindle",
+            "Enchant creature\nEnchanted creature gets -6/-0.\nWhen enchanted creature blocks, destroy it. (The attacking creature remains blocked.)",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Attach Dwindle to blocker
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&dwindle)
+        .unwrap()
+        .attached_to = Some(engine::game::game_object::AttachTarget::Object(blocker));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&blocker)
+        .unwrap()
+        .attachments
+        .push(dwindle);
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), dwindle);
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Drain stack: Dwindle's trigger resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Blocker is destroyed by Dwindle
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Enchanted blocker must be destroyed by Dwindle trigger"
+    );
+    // Attacker remains alive on battlefield
+    assert_eq!(
+        runner.state().objects.get(&attacker).unwrap().zone,
+        Zone::Battlefield,
+        "Attacking creature must survive"
+    );
+}
+
+#[test]
+fn ashmouth_hound_attacking_deals_damage_to_counterpart_blocker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let hound = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Ashmouth Hound",
+            2,
+            1,
+            "Whenever this creature blocks or becomes blocked by a creature, this creature deals 1 damage to that creature.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Gunk Beetle", 1, 1).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(hound, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Hound
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, hound)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Drain stack: Ashmouth Hound trigger resolves and deals 1 damage to blocker
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Blocker dies to 1 damage before combat damage step
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker must die from 1 damage dealt by Ashmouth Hound trigger"
+    );
+    // Hound took no damage and survives
+    assert_eq!(
+        runner.state().objects.get(&hound).unwrap().zone,
+        Zone::Battlefield,
+        "Ashmouth Hound survives on battlefield"
+    );
+    assert_eq!(
+        runner.state().objects.get(&hound).unwrap().damage_marked,
+        0,
+        "Hound took no damage"
+    );
+}
+
+#[test]
+fn ashmouth_hound_blocking_deals_damage_to_counterpart_attacker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let attacker = scenario.add_creature(P0, "Gunk Beetle", 1, 1).id();
+    let hound = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Ashmouth Hound",
+            2,
+            1,
+            "Whenever this creature blocks or becomes blocked by a creature, this creature deals 1 damage to that creature.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Hound blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(hound, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Drain stack: Ashmouth Hound trigger resolves and deals 1 damage to attacker
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Attacker dies to 1 damage before combat damage step
+    assert_eq!(
+        runner.state().objects.get(&attacker).unwrap().zone,
+        Zone::Graveyard,
+        "Attacker must die from 1 damage dealt by Ashmouth Hound trigger"
+    );
+    // Hound survives with 0 damage marked
+    assert_eq!(
+        runner.state().objects.get(&hound).unwrap().zone,
+        Zone::Battlefield,
+        "Ashmouth Hound survives on battlefield"
+    );
+    assert_eq!(
+        runner.state().objects.get(&hound).unwrap().damage_marked,
+        0,
+        "Hound took no damage"
+    );
+}
+
+#[test]
+fn abu_jafar_same_id_return_subject_still_destroys_attacker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let abu = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Abu Ja'far",
+            0,
+            1,
+            "When this creature dies, destroy all creatures blocking or blocked by it. They can't be regenerated.",
+        )
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Abu Ja'far blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(abu, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Combat damage step: Attacker deals 2 damage to Abu Ja'far. Abu Ja'far dies.
+    // Abu Ja'far dies trigger fires and goes to the stack.
+    runner.pass_both_players();
+
+    assert_eq!(
+        runner.state().objects.get(&abu).unwrap().zone,
+        Zone::Graveyard,
+        "Abu Ja'far must be in graveyard from lethal combat damage"
+    );
+
+    // Abu Ja'far returns to the battlefield before dies trigger resolves (e.g. reanimation effect)
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), abu, Zone::Battlefield, &mut events);
+
+    assert_eq!(
+        runner.state().objects.get(&abu).unwrap().zone,
+        Zone::Battlefield,
+        "Abu Ja'far returned to battlefield"
+    );
+
+    // Resolve dies trigger from stack
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 603.10a + CR 608.2h: Abu Ja'far's LKI combat status identifies attacker as blocked creature,
+    // destroying it even though Abu Ja'far returned with a new incarnation.
+    assert_eq!(
+        runner.state().objects.get(&attacker).unwrap().zone,
+        Zone::Graveyard,
+        "Attacker must be destroyed by Abu Ja'far's dies trigger"
+    );
+}
+
+#[test]
+fn abu_jafar_same_id_return_counterpart_survives() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let abu = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Abu Ja'far",
+            0,
+            1,
+            "When this creature dies, destroy all creatures blocking or blocked by it. They can't be regenerated.",
+        )
+        .id();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Abu Ja'far blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(abu, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Combat damage step: Attacker deals 2 damage to Abu Ja'far. Abu Ja'far dies.
+    // Abu Ja'far dies trigger fires and goes to the stack.
+    runner.pass_both_players();
+
+    assert_eq!(
+        runner.state().objects.get(&abu).unwrap().zone,
+        Zone::Graveyard,
+        "Abu Ja'far must be in graveyard from lethal combat damage"
+    );
+
+    // Attacker is blinked (moved to exile and back to battlefield with a new incarnation)
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), attacker, Zone::Exile, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), attacker, Zone::Battlefield, &mut events);
+
+    assert_eq!(
+        runner.state().objects.get(&attacker).unwrap().zone,
+        Zone::Battlefield,
+        "Attacker is on battlefield with a new incarnation"
+    );
+
+    // Resolve dies trigger from stack
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 400.7: Returning attacker has a new incarnation and is not the object that was blocked by Abu Ja'far.
+    // It must survive.
+    assert_eq!(
+        runner.state().objects.get(&attacker).unwrap().zone,
+        Zone::Battlefield,
+        "New attacker incarnation must survive Abu Ja'far dies trigger"
+    );
+}
+
+#[test]
+fn ib_halfheart_pre_resolution_blink_prevents_sacrifice_and_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ib = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Ib Halfheart, Goblin Tactician",
+            3,
+            2,
+            "Whenever another Goblin you control becomes blocked, sacrifice it. If you do, it deals 4 damage to each creature blocking it.",
+        )
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let goblin = scenario
+        .add_creature(P0, "Goblin Raider", 2, 2)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let blocker = scenario.add_creature(P1, "Wall of Wood", 0, 3).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(goblin, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Goblin
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, goblin)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Trigger is now on stack. Blink the Goblin before resolution (Exile then Battlefield).
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), goblin, Zone::Exile, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), goblin, Zone::Battlefield, &mut events);
+
+    // Drain stack: BecomesBlocked trigger resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 400.7: Goblin returned with a new incarnation, so it was NOT sacrificed.
+    assert_eq!(
+        runner.state().objects.get(&goblin).unwrap().zone,
+        Zone::Battlefield,
+        "Blinked Goblin must remain on battlefield (not sacrificed)"
+    );
+    // Ib Halfheart is still on the battlefield
+    assert_eq!(
+        runner.state().objects.get(&ib).unwrap().zone,
+        Zone::Battlefield,
+        "Ib Halfheart must remain on battlefield"
+    );
+    // Since Goblin was not sacrificed, sub-ability does not fire and Blocker took 0 damage.
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blocker survives on battlefield"
+    );
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().damage_marked,
+        0,
+        "Blocker took 0 damage"
+    );
+}
+
+#[test]
+fn battle_scarred_goblin_removal_then_death_before_resolution_deals_no_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let goblin = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Battle-Scarred Goblin",
+            2,
+            2,
+            "Whenever this creature becomes blocked, it deals 1 damage to each creature blocking it.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(goblin, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Goblin
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, goblin)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Trigger is on the stack.
+    // Remove Goblin from combat while still on the battlefield (CR 506.4)
+    engine::game::effects::remove_from_combat::remove_object_from_combat(
+        runner.state_mut(),
+        goblin,
+    );
+
+    // Destroy Goblin (move to graveyard) before trigger resolves
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), goblin, Zone::Graveyard, &mut events);
+
+    assert_eq!(
+        runner.state().objects.get(&goblin).unwrap().zone,
+        Zone::Graveyard,
+        "Goblin is in graveyard"
+    );
+
+    // Drain stack: BecomesBlocked trigger resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 608.2h / Finding 3: Actual departure record shows Goblin had no blockers when it left the battlefield.
+    // Zero damage is dealt to blocker.
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blocker survives on battlefield"
+    );
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().damage_marked,
+        0,
+        "Blocker took 0 damage"
+    );
+}

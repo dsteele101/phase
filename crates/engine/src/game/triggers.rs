@@ -3033,9 +3033,12 @@ fn collect_matching_triggers_inner(
                     pending_ability
                         .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
                 }
-                if let Some(trig_obj) =
-                    triggering_object_from_trigger_event(state, Some(&trigger_event))
-                {
+                if let Some(trig_obj) = triggering_object_from_trigger_event(
+                    state,
+                    Some(&trig_def.mode),
+                    Some(obj_id),
+                    Some(&trigger_event),
+                ) {
                     pending_ability.bind_triggering_object_recursive(Some(trig_obj));
                 }
                 pending.push(MatchedTrigger {
@@ -8392,24 +8395,55 @@ pub(super) fn triggering_host_from_source(
         .map(ObjectIncarnationRef::from_object)
 }
 
-/// CR 509.3c + CR 608.2c: Resolves the oriented triggering object (such as the watched attacker
-/// that became blocked in a `BecomesBlocked` trigger) when the trigger fired or is placed on the stack.
+/// CR 509.3c + CR 509.3d + CR 608.2c: Resolves the oriented triggering object (such as the watched attacker
+/// that became blocked in a `BecomesBlocked` trigger, or the watched blocker in a `Blocks` trigger)
+/// when the trigger fired or is placed on the stack.
 pub(super) fn triggering_object_from_trigger_event(
     state: &GameState,
+    mode: Option<&TriggerMode>,
+    source_id: Option<ObjectId>,
     trigger_event: Option<&GameEvent>,
 ) -> Option<TriggeringObjectRef> {
     let event = trigger_event?;
     match event {
-        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, .. }
-        | GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(TriggeringObjectRef {
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *attacker,
+            };
+            Some(TriggeringObjectRef {
+                object_id: subject,
+                incarnation: state.objects.get(&subject).map(|o| o.incarnation),
+            })
+        }
+        GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(TriggeringObjectRef {
             object_id: *attacker,
             incarnation: state.objects.get(attacker).map(|o| o.incarnation),
         }),
         GameEvent::BlockersDeclared { assignments } => {
-            let (_blocker, attacker) = assignments.first()?;
+            let (blocker, attacker) = assignments.first()?;
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BecomesBlocked) => *attacker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *blocker,
+            };
             Some(TriggeringObjectRef {
-                object_id: *attacker,
-                incarnation: state.objects.get(attacker).map(|o| o.incarnation),
+                object_id: subject,
+                incarnation: state.objects.get(&subject).map(|o| o.incarnation),
             })
         }
         GameEvent::ZoneChanged {
@@ -8717,7 +8751,12 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         ability.bind_triggering_host_recursive(host);
     }
     if ability.triggering_object.is_none() {
-        let trig_obj = triggering_object_from_trigger_event(state, trigger_event.as_ref());
+        let trig_obj = triggering_object_from_trigger_event(
+            state,
+            None,
+            Some(source_id),
+            trigger_event.as_ref(),
+        );
         ability.bind_triggering_object_recursive(trig_obj);
     }
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());

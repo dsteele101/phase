@@ -23,6 +23,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::zones::Zone;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
@@ -1500,8 +1501,21 @@ fn single_damage_source(
         Some(DamageSource::TriggeringSource) => Some(
             ability
                 .triggering_object
-                .map(|t| t.object_id)
-                .or_else(|| ability.triggering_host.map(|h| h.object_id))
+                .and_then(|t| {
+                    let valid = state.objects.get(&t.object_id).is_none_or(|obj| {
+                        obj.zone != Zone::Battlefield
+                            || t.incarnation.is_none_or(|inc| obj.incarnation == inc)
+                    });
+                    valid.then_some(t.object_id)
+                })
+                .or_else(|| {
+                    ability.triggering_host.and_then(|h| {
+                        let valid = state.objects.get(&h.object_id).is_none_or(|obj| {
+                            obj.zone != Zone::Battlefield || h.incarnation == obj.incarnation
+                        });
+                        valid.then_some(h.object_id)
+                    })
+                })
                 .or_else(|| {
                     state
                         .current_trigger_event
@@ -1948,8 +1962,21 @@ pub fn resolve_all(
         }
         Some(DamageSource::TriggeringSource) => ability
             .triggering_object
-            .map(|t| t.object_id)
-            .or_else(|| ability.triggering_host.map(|h| h.object_id))
+            .and_then(|t| {
+                let valid = state.objects.get(&t.object_id).is_none_or(|obj| {
+                    obj.zone != Zone::Battlefield
+                        || t.incarnation.is_none_or(|inc| obj.incarnation == inc)
+                });
+                valid.then_some(t.object_id)
+            })
+            .or_else(|| {
+                ability.triggering_host.and_then(|h| {
+                    let valid = state.objects.get(&h.object_id).is_none_or(|obj| {
+                        obj.zone != Zone::Battlefield || h.incarnation == obj.incarnation
+                    });
+                    valid.then_some(h.object_id)
+                })
+            })
             .or_else(|| {
                 state
                     .current_trigger_event

@@ -6840,57 +6840,6 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
     })
 }
 
-fn combat_relation_subject_id(
-    state: &GameState,
-    subject: CombatRelationSubject,
-    source: &SourceContext<'_>,
-) -> Option<ObjectId> {
-    match subject {
-        CombatRelationSubject::Source => Some(source.id),
-        CombatRelationSubject::ParentTarget => source.ability.and_then(first_object_target),
-        CombatRelationSubject::TriggeringObject => source
-            .triggering_object
-            .map(|t| t.object_id)
-            .or_else(|| {
-                source
-                    .ability
-                    .and_then(|a| a.triggering_object)
-                    .map(|t| t.object_id)
-            })
-            .or_else(|| {
-                source
-                    .ability
-                    .and_then(|a| {
-                        targeting::resolve_event_context_target(
-                            state,
-                            &TargetFilter::TriggeringSource,
-                            a.source_id,
-                        )
-                    })
-                    .and_then(|t| match t {
-                        TargetRef::Object(id) => Some(id),
-                        _ => None,
-                    })
-            }),
-        CombatRelationSubject::AttachedTo => source
-            .ability
-            .and_then(|a| a.triggering_host)
-            .map(|h| h.object_id)
-            .or_else(|| match source.attached_to {
-                Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
-                _ => targeting::resolve_event_context_target(
-                    state,
-                    &TargetFilter::AttachedTo,
-                    source.id,
-                )
-                .and_then(|t| match t {
-                    TargetRef::Object(id) => Some(id),
-                    _ => None,
-                }),
-            }),
-    }
-}
-
 /// CR 400.7 + CR 608.2h: The exact incarnation `subject` names. A triggered
 /// source is named by the identity its trigger captured — for a
 /// leaves-the-battlefield trigger, the incarnation that left (CR 603.10a). An
@@ -7062,21 +7011,61 @@ fn matches_historical_combat_relation(
 
 fn pre_departure_combat_status<'a>(
     state: &'a GameState,
-    object_id: ObjectId,
+    subject: ObjectIncarnationRef,
     source: &SourceContext<'a>,
 ) -> Option<&'a ZoneChangeCombatStatus> {
+    // CR 608.2h: If a rule or ability requires information about an object that is no longer in that zone,
+    // the information about the object as it most recently existed in that zone is used.
+    // Query actual departure records from zone_changes_this_turn first (selecting the exact incarnation departure).
+    let departure_record = state.zone_changes_this_turn.iter().rev().find(|r| {
+        r.object_id == subject.object_id
+            && r.from_zone == Some(Zone::Battlefield)
+            && r.trigger_source_context()
+                .is_none_or(|ctx| ctx.identity.reference.incarnation == subject.incarnation)
+    });
+    if let Some(r) = departure_record {
+        return Some(&r.combat_status);
+    }
+
+    // Fall back to the source's own latched trigger_source snapshot (e.g. for death-event triggers).
     if let Some(ts) = source.trigger_source.filter(|ts| {
-        ts.identity.reference.object_id == object_id
+        ts.identity.reference.object_id == subject.object_id
             && ts.identity.expected_zone == Zone::Battlefield
+            && ts.identity.reference.incarnation == subject.incarnation
     }) {
         return Some(&ts.combat_status);
     }
-    state
-        .zone_changes_this_turn
-        .iter()
-        .rev()
-        .find(|r| r.object_id == object_id && r.from_zone == Some(Zone::Battlefield))
-        .map(|r| &r.combat_status)
+    None
+}
+
+fn is_ltb_source(source: &SourceContext<'_>) -> bool {
+    use crate::types::triggers::TriggerMode;
+    let trig_source = source
+        .trigger_source
+        .or_else(|| source.ability.and_then(|a| a.trigger_source.as_ref()));
+    if let Some(ts) = trig_source {
+        if let Some(trig_ref) = source
+            .ability
+            .and_then(|a| a.trigger_definition_ref.as_ref())
+        {
+            return ts.trigger_entries.iter().any(|entry| {
+                entry.occurrence == trig_ref.occurrence
+                    && entry.definition.mode == TriggerMode::ChangesZone
+                    && (entry.definition.origin == Some(Zone::Battlefield)
+                        || entry.definition.destination == Some(Zone::Graveyard))
+            });
+        }
+        if !ts.trigger_entries.is_empty()
+            && ts.trigger_entries.iter().all(|entry| {
+                entry.definition.mode == TriggerMode::ChangesZone
+                    && (entry.definition.origin == Some(Zone::Battlefield)
+                        || entry.definition.destination == Some(Zone::Graveyard))
+            })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn matches_combat_relation(
@@ -7089,67 +7078,84 @@ fn matches_combat_relation(
 ) -> bool {
     match relation {
         CombatRelation::Live(direction) => {
-            let subject_id = combat_relation_subject_id(state, subject, source);
-            if let Some(subject_id) = subject_id {
-                if let Some(combat) = state.combat.as_ref() {
-                    if is_in_live_combat_relation(combat, object_id, subject_id, direction) {
+            let Some(subject_ref) = combat_relation_subject_ref(state, subject, source) else {
+                return false;
+            };
+
+            if let Some(combat) = state.combat.as_ref() {
+                if is_in_live_combat_relation(combat, object_id, subject_ref.object_id, direction) {
+                    return true;
+                }
+            }
+
+            // CR 113.7a + CR 608.2h: If the subject (or candidate) has left the expected
+            // zone (Zone::Battlefield), its last known information is used during resolution.
+            // Only active during ability resolution (CR 608.2h) for non-LTB abilities (since
+            // leaves-the-battlefield / dies triggers look back via Historical).
+            let is_resolving = state.resolving_stack_entry.is_some();
+            let is_ltb_trigger = is_ltb_source(source);
+            if !is_resolving || is_ltb_trigger {
+                return false;
+            }
+
+            // CR 400.7: Check whether the exact incarnation of the subject is still on the battlefield.
+            let subject_still_on_battlefield = state
+                .objects
+                .get(&subject_ref.object_id)
+                .is_some_and(|obj| {
+                    obj.zone == Zone::Battlefield && obj.incarnation == subject_ref.incarnation
+                });
+
+            let candidate_matches = |r: &ObjectIncarnationRef| {
+                r.object_id == candidate.object_id && r.incarnation == candidate.incarnation
+            };
+
+            if !subject_still_on_battlefield {
+                if let Some(status) = pre_departure_combat_status(state, subject_ref, source) {
+                    let candidate_blocks_subject =
+                        status.blocked_by_creatures.iter().any(candidate_matches);
+                    let subject_blocks_candidate =
+                        status.blocking_creatures.iter().any(candidate_matches);
+                    let matches = match direction {
+                        CombatRelationDirection::Blocking => candidate_blocks_subject,
+                        CombatRelationDirection::BlockedBy => subject_blocks_candidate,
+                        CombatRelationDirection::Either => {
+                            candidate_blocks_subject || subject_blocks_candidate
+                        }
+                    };
+                    if matches {
                         return true;
                     }
                 }
+            }
 
-                // CR 113.7a + CR 608.2h: If the subject (or candidate) has left the expected
-                // zone (Zone::Battlefield), its last known information is used during resolution.
-                // However, per CR 506.4 + CR 608.2b, if the object remains on the battlefield but
-                // was removed from combat, it is no longer an attacking/blocking creature and
-                // LKI does NOT apply.
-                let subject_still_on_battlefield = state
-                    .objects
-                    .get(&subject_id)
-                    .is_some_and(|obj| obj.zone == Zone::Battlefield);
+            let candidate_still_on_battlefield = state.objects.get(&object_id).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield && obj.incarnation == candidate.incarnation
+            });
 
-                if !subject_still_on_battlefield {
-                    if let Some(status) = pre_departure_combat_status(state, subject_id, source) {
-                        let candidate_blocks_subject =
-                            status.blocked_by_creatures.contains(&object_id);
-                        let subject_blocks_candidate =
-                            status.blocking_creatures.contains(&object_id);
-                        let matches = match direction {
-                            CombatRelationDirection::Blocking => candidate_blocks_subject,
-                            CombatRelationDirection::BlockedBy => subject_blocks_candidate,
-                            CombatRelationDirection::Either => {
-                                candidate_blocks_subject || subject_blocks_candidate
-                            }
-                        };
-                        if matches {
-                            return true;
+            let subject_matches = |r: &ObjectIncarnationRef| {
+                r.object_id == subject_ref.object_id && r.incarnation == subject_ref.incarnation
+            };
+
+            if !candidate_still_on_battlefield {
+                if let Some(status) = pre_departure_combat_status(state, candidate, source) {
+                    let candidate_blocks_subject =
+                        status.blocking_creatures.iter().any(subject_matches);
+                    let subject_blocks_candidate =
+                        status.blocked_by_creatures.iter().any(subject_matches);
+                    let matches = match direction {
+                        CombatRelationDirection::Blocking => candidate_blocks_subject,
+                        CombatRelationDirection::BlockedBy => subject_blocks_candidate,
+                        CombatRelationDirection::Either => {
+                            candidate_blocks_subject || subject_blocks_candidate
                         }
-                    }
-                }
-
-                let candidate_still_on_battlefield = state
-                    .objects
-                    .get(&object_id)
-                    .is_some_and(|obj| obj.zone == Zone::Battlefield);
-
-                if !candidate_still_on_battlefield {
-                    if let Some(status) = pre_departure_combat_status(state, object_id, source) {
-                        let candidate_blocks_subject =
-                            status.blocking_creatures.contains(&subject_id);
-                        let subject_blocks_candidate =
-                            status.blocked_by_creatures.contains(&subject_id);
-                        let matches = match direction {
-                            CombatRelationDirection::Blocking => candidate_blocks_subject,
-                            CombatRelationDirection::BlockedBy => subject_blocks_candidate,
-                            CombatRelationDirection::Either => {
-                                candidate_blocks_subject || subject_blocks_candidate
-                            }
-                        };
-                        if matches {
-                            return true;
-                        }
+                    };
+                    if matches {
+                        return true;
                     }
                 }
             }
+
             false
         }
         CombatRelation::Historical { direction, scope } => {
@@ -8660,16 +8666,24 @@ fn zone_change_record_matches_property(
         // relation, and this predicate reads live `combat.blocker_to_attacker`.
         FilterProp::BlockingSource => false,
         FilterProp::CombatRelation { relation, subject } => match relation {
-            // CR 509.1g + CR 603.10a: Leaves-the-battlefield / dies look-back matches
-            // against the exact pre-departure combat status snapshotted in the record.
+            // CR 509.1g + CR 603.10a: For a trigger look-back evaluating a zone-change event
+            // (e.g. Baneclaw Marauder's "Whenever a creature blocking this creature dies"),
+            // match against the exact pre-departure combat status in the record.
+            // For non-trigger look-back queries (CR 506.4), the live combat relation fails closed.
             CombatRelation::Live(direction) => {
-                let Some(subject_id) = combat_relation_subject_id(state, *subject, source) else {
+                let Some(_ts) = source.trigger_source else {
                     return false;
                 };
+                let Some(subject_ref) = combat_relation_subject_ref(state, *subject, source) else {
+                    return false;
+                };
+                let candidate_matches = |r: &ObjectIncarnationRef| {
+                    r.object_id == subject_ref.object_id && r.incarnation == subject_ref.incarnation
+                };
                 let candidate_blocks_subject =
-                    record.combat_status.blocking_creatures.contains(&subject_id);
+                    record.combat_status.blocking_creatures.iter().any(candidate_matches);
                 let subject_blocks_candidate =
-                    record.combat_status.blocked_by_creatures.contains(&subject_id);
+                    record.combat_status.blocked_by_creatures.iter().any(candidate_matches);
                 match direction {
                     CombatRelationDirection::Blocking => candidate_blocks_subject,
                     CombatRelationDirection::BlockedBy => subject_blocks_candidate,

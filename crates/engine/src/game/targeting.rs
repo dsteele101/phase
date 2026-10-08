@@ -1040,11 +1040,42 @@ pub fn resolved_targets(
     // `ability.targets` with unrelated chosen targets (DefendingPlayer, etc.).
     if is_pure_event_context_filter(target_filter) {
         if matches!(target_filter, TargetFilter::TriggeringSource) {
+            let effective_event = state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|e| match &e.kind {
+                    StackEntryKind::TriggeredAbility { trigger_event, .. } => {
+                        trigger_event.as_ref()
+                    }
+                    _ => None,
+                })
+                .or(state.current_trigger_event.as_ref());
+
+            if let Some(ev) = effective_event {
+                if let Some(counterpart_id) = blocked_counterpart_from_event(ev, ability.source_id)
+                {
+                    return vec![TargetRef::Object(counterpart_id)];
+                }
+            }
+
             if let Some(trig_obj) = ability.triggering_object {
-                return vec![TargetRef::Object(trig_obj.object_id)];
+                let valid = state.objects.get(&trig_obj.object_id).is_none_or(|obj| {
+                    obj.zone != Zone::Battlefield
+                        || trig_obj
+                            .incarnation
+                            .is_none_or(|inc| obj.incarnation == inc)
+                });
+                if valid {
+                    return vec![TargetRef::Object(trig_obj.object_id)];
+                }
             }
             if let Some(host_ref) = ability.triggering_host {
-                return vec![TargetRef::Object(host_ref.object_id)];
+                let valid = state.objects.get(&host_ref.object_id).is_none_or(|obj| {
+                    obj.zone != Zone::Battlefield || host_ref.incarnation == obj.incarnation
+                });
+                if valid {
+                    return vec![TargetRef::Object(host_ref.object_id)];
+                }
             }
         }
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
@@ -1593,19 +1624,52 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             Some(TargetRef::Player(player))
         }
         TargetFilter::TriggeringSource => {
+            let effective_event = event
+                .or_else(|| {
+                    state
+                        .resolving_stack_entry
+                        .as_ref()
+                        .and_then(|e| match &e.kind {
+                            StackEntryKind::TriggeredAbility { trigger_event, .. } => {
+                                trigger_event.as_ref()
+                            }
+                            _ => None,
+                        })
+                })
+                .or(state.current_trigger_event.as_ref());
+
+            if let Some(ev) = effective_event {
+                if let Some(counterpart_id) = blocked_counterpart_from_event(ev, source_id) {
+                    return Some(TargetRef::Object(counterpart_id));
+                }
+            }
+
             // CR 509.3c + CR 608.2c: Prefer the pinned triggering object from the resolving ability
             // when present (e.g. the watched attacker in a BecomesBlocked trigger).
             if let Some(resolving_entry) = state.resolving_stack_entry.as_ref() {
                 if let Some(ability) = resolving_entry.ability() {
                     if let Some(trig_obj) = ability.triggering_object {
-                        return Some(TargetRef::Object(trig_obj.object_id));
+                        let valid = state.objects.get(&trig_obj.object_id).is_none_or(|obj| {
+                            obj.zone != Zone::Battlefield
+                                || trig_obj
+                                    .incarnation
+                                    .is_none_or(|inc| obj.incarnation == inc)
+                        });
+                        if valid {
+                            return Some(TargetRef::Object(trig_obj.object_id));
+                        }
                     }
                     if let Some(host_ref) = ability.triggering_host {
-                        return Some(TargetRef::Object(host_ref.object_id));
+                        let valid = state.objects.get(&host_ref.object_id).is_none_or(|obj| {
+                            obj.zone != Zone::Battlefield || host_ref.incarnation == obj.incarnation
+                        });
+                        if valid {
+                            return Some(TargetRef::Object(host_ref.object_id));
+                        }
                     }
                 }
             }
-            if let Some(event) = event {
+            if let Some(event) = effective_event {
                 if let Some(obj_id) = extract_source_from_event(event) {
                     return Some(TargetRef::Object(obj_id));
                 }
@@ -1977,6 +2041,49 @@ fn blocked_attacker_from_event(
     let mut attackers = assignments.iter().map(|(_, attacker)| *attacker);
     let first = attackers.next()?;
     attackers.all(|attacker| attacker == first).then_some(first)
+}
+
+/// CR 509.3c + CR 509.3d + CR 608.2c: Resolves the counterpart object from a combat block event
+/// when the ability source itself was one of the combatants.
+/// E.g. Ashmouth Hound: "Whenever this creature blocks or becomes blocked by a creature, this
+/// creature deals 1 damage to that creature."
+/// If source was the attacker, returns the blocker. If source was the blocker, returns the attacker.
+pub(crate) fn blocked_counterpart_from_event(
+    event: &crate::types::events::GameEvent,
+    source_id: ObjectId,
+) -> Option<ObjectId> {
+    match event {
+        crate::types::events::GameEvent::AttackerBecameBlockedByFilteredBlocker {
+            attacker,
+            blocker,
+        } => {
+            if *attacker == source_id {
+                Some(*blocker)
+            } else if *blocker == source_id {
+                Some(*attacker)
+            } else {
+                None
+            }
+        }
+        crate::types::events::GameEvent::BlockersDeclared { assignments } => {
+            let as_blocker = assignments
+                .iter()
+                .find(|(b, _)| *b == source_id)
+                .map(|(_, a)| *a);
+            if as_blocker.is_some() {
+                return as_blocker;
+            }
+            let as_attacker = assignments
+                .iter()
+                .find(|(_, a)| *a == source_id)
+                .map(|(b, _)| *b);
+            if as_attacker.is_some() {
+                return as_attacker;
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Resolve a player reference carried in an effect target slot.

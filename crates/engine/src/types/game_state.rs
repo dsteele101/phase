@@ -1857,12 +1857,12 @@ pub struct ZoneChangeCombatStatus {
     pub blocking_alone: bool,
     #[serde(default)]
     pub defending_player: Option<PlayerId>,
-    /// CR 509.1g: Attackers this creature was blocking immediately prior to leaving combat.
+    /// CR 509.1g + CR 400.7: Attackers this creature was blocking immediately prior to leaving combat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocking_creatures: Vec<ObjectId>,
-    /// CR 509.1h: Blockers assigned to this creature immediately prior to leaving combat.
+    pub blocking_creatures: Vec<ObjectIncarnationRef>,
+    /// CR 509.1h + CR 400.7: Blockers assigned to this creature immediately prior to leaving combat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocked_by_creatures: Vec<ObjectId>,
+    pub blocked_by_creatures: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 508.1a: Snapshot of a creature's public characteristics when it was
