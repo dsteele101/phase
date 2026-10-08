@@ -6397,25 +6397,79 @@ pub enum AttackerBlockStatus {
 }
 
 /// Combat relationship required by `FilterProp::CombatRelation`.
+/// CR 509.1g/509.1h: Direction of a combat relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatRelationDirection {
+    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by the subject.
+    Either,
+    /// CR 509.1g: Candidate is blocking the subject.
+    Blocking,
+    /// CR 509.1g: Candidate is blocked by the subject.
+    BlockedBy,
+}
+
+/// Combat relationship required by `FilterProp::CombatRelation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum CombatRelation {
-    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it.
-    BlockingOrBlockedBy,
-    /// CR 509.1g: Candidate is currently blocked by the subject in live combat
-    /// (the subject is blocking the candidate).
-    BlockedBySubjectLive,
-    /// CR 509.1g: Candidate is currently blocking the subject in live combat.
-    BlockingSubjectLive,
-    /// CR 509.1g + CR 400.7: Candidate is an attacking creature the subject was
-    /// recorded as blocking, within `scope`. Unlike `BlockingOrBlockedBy`, which
-    /// reads live `combat.blocker_to_attacker` and empties when CR 506.4 removes
-    /// either creature from combat, this reads the block-history ledgers
-    /// (`CombatState::creature_blocked_attackers_this_combat` /
-    /// `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
-    /// not prune. Each record pins both creatures' exact incarnations, so a
-    /// creature that left and returned matches none of its predecessor's
-    /// records.
-    BlockedBySubject { scope: CombatHistoryScope },
+    /// CR 509.1g: Candidate bears the specified live combat relationship to `subject`.
+    Live(CombatRelationDirection),
+    /// CR 509.1g + CR 400.7 / CR 603.10a: Candidate bore the specified combat relationship
+    /// to `subject` within `scope`, preserved in history ledgers or pre-death context.
+    Historical {
+        direction: CombatRelationDirection,
+        scope: CombatHistoryScope,
+    },
+}
+
+impl<'de> Deserialize<'de> for CombatRelation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CombatRelationRepr {
+            LegacyUnit(String),
+            Standard(CombatRelationWire),
+        }
+
+        #[derive(Deserialize)]
+        enum CombatRelationWire {
+            Live(CombatRelationDirection),
+            Historical {
+                direction: CombatRelationDirection,
+                scope: CombatHistoryScope,
+            },
+        }
+
+        match CombatRelationRepr::deserialize(deserializer)? {
+            CombatRelationRepr::Standard(CombatRelationWire::Live(dir)) => {
+                Ok(CombatRelation::Live(dir))
+            }
+            CombatRelationRepr::Standard(CombatRelationWire::Historical { direction, scope }) => {
+                Ok(CombatRelation::Historical { direction, scope })
+            }
+            CombatRelationRepr::LegacyUnit(s) => match s.as_str() {
+                "BlockingOrBlockedBy" => Ok(CombatRelation::Live(CombatRelationDirection::Either)),
+                "BlockedBySubjectLive" => {
+                    Ok(CombatRelation::Live(CombatRelationDirection::BlockedBy))
+                }
+                "BlockingSubjectLive" => {
+                    Ok(CombatRelation::Live(CombatRelationDirection::Blocking))
+                }
+                other => Err(serde::de::Error::unknown_variant(
+                    other,
+                    &[
+                        "Live",
+                        "Historical",
+                        "BlockingOrBlockedBy",
+                        "BlockedBySubjectLive",
+                        "BlockingSubjectLive",
+                    ],
+                )),
+            },
+        }
+    }
 }
 
 /// Context object for a combat relationship filter.
@@ -6425,6 +6479,10 @@ pub enum CombatRelationSubject {
     Source,
     /// The first selected object target of the resolving spell or ability.
     ParentTarget,
+    /// CR 608.2c: The object that triggered the ability.
+    TriggeringObject,
+    /// CR 301.5 + CR 303.4: The creature the source is attached to.
+    AttachedTo,
 }
 
 /// Individual filter properties that can be combined in a Typed filter.
@@ -39350,7 +39408,7 @@ mod tests {
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::ParentTarget,
             },
             FilterProp::BlockStatus {

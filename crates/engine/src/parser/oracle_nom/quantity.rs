@@ -28,11 +28,12 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CombatRelation,
-    CombatRelationSubject, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
-    DamageKindFilter, DevotionColors, FilterProp, LetterQuery, NameStickerSet, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat,
-    QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
-    ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    CombatRelationDirection, CombatRelationSubject, Comparator, ControllerRef, CountBinding,
+    CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, LetterQuery,
+    NameStickerSet, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PropertyAggregate, PtStat, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+    SubtypeExclusion, TargetFilter, ThisWayCause, TrackedAnaphorSource, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -6826,7 +6827,7 @@ fn parse_for_each_blocked_by_source_type(input: &str) -> OracleResult<'_, Quanti
                 type_filters: vec![tf],
                 controller: None,
                 properties: vec![FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubjectLive,
+                    relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
                     subject: CombatRelationSubject::Source,
                 }],
             }),

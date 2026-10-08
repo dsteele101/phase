@@ -10,11 +10,11 @@ use nom::Parser;
 
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CardTypeSetSource, ChoiceType, CombatRelation,
-    CombatRelationSubject, Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter,
+    CombatRelationDirection, CombatRelationSubject, Comparator, ControllerRef, CountScope,
+    DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty, ObjectScope, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -6197,7 +6197,7 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 tag("creature"),
             ),
             |_| FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::ParentTarget,
             },
         ),
@@ -6208,7 +6208,7 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 alt((tag("~"), tag("this creature"), tag("it"))),
             ),
             |_| FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::Source,
             },
         ),
@@ -6226,7 +6226,7 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 tag(" this creature\u{2019}s blocking"),
             )),
             |_| FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubjectLive,
+                relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
                 subject: CombatRelationSubject::Source,
             },
         ),
@@ -6241,7 +6241,18 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 tag(" target creature\u{2019}s blocking"),
             )),
             |_| FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubjectLive,
+                relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
+                subject: CombatRelationSubject::ParentTarget,
+            },
+        ),
+        // CR 509.1g: " blocking that creature", " blocking target creature"
+        map(
+            preceded(
+                tag(" blocking "),
+                alt((tag("that creature"), tag("target creature"))),
+            ),
+            |_| FilterProp::CombatRelation {
+                relation: CombatRelation::Live(CombatRelationDirection::Blocking),
                 subject: CombatRelationSubject::ParentTarget,
             },
         ),
@@ -6252,7 +6263,7 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 alt((tag("it"), tag("~"), tag("this creature"))),
             ),
             |_| FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingSubjectLive,
+                relation: CombatRelation::Live(CombatRelationDirection::Blocking),
                 subject: CombatRelationSubject::Source,
             },
         ),
@@ -11610,7 +11621,7 @@ mod tests {
             filter,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::Live(CombatRelationDirection::Either),
                     subject: CombatRelationSubject::ParentTarget,
                 }
             ]))

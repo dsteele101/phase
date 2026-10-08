@@ -8850,7 +8850,10 @@ fn parse_damage_source_filter_passive(norm_lower: &str) -> Option<TargetFilter> 
     // CR 615.1a: In passive phrasing, the damage source is introduced by "by <subject>"
     // following the damage verb "dealt" — either immediately ("dealt by <subject>")
     // or separated by recipient/duration clauses ("dealt to <recipient> [this turn] by <subject>").
-    let (_, (_, after_dealt)) = nom_primitives::split_once_on(norm_lower, "dealt").ok()?;
+    // Bound the passive scan to the sentence carrying the "dealt" clause so a trailing "by"
+    // clause in a later sentence cannot become the source restriction for this shield.
+    let sentence = sentence_carrying_anchor(norm_lower, "dealt").unwrap_or(norm_lower);
+    let (_, (_, after_dealt)) = nom_primitives::split_once_on(sentence, "dealt").ok()?;
     let subject = nom_primitives::scan_at_word_boundaries(after_dealt, |input| {
         preceded(
             tag::<_, _, OracleError<'_>>("by "),
@@ -29124,8 +29127,8 @@ mod snapshot_tests {
 mod opposition_agent_parser_tests {
     use super::*;
     use crate::types::ability::{
-        CastingPermission, CombatRelation, CombatRelationSubject, ManaSpendPermission,
-        PermissionGrantee, RestrictionExpiry, ShieldKind,
+        CastingPermission, CombatRelation, CombatRelationDirection, CombatRelationSubject,
+        ManaSpendPermission, PermissionGrantee, RestrictionExpiry, ShieldKind,
     };
     use crate::types::card_type::CoreType;
     use crate::types::statics::{CastFrequency, ProhibitionScope, StaticMode};
@@ -29576,7 +29579,7 @@ mod opposition_agent_parser_tests {
     #[test]
     fn wall_of_vapor_and_armored_transport_damage_source_scope() {
         // CR 615.1a + CR 509.1g: Wall of Vapor prevents damage from creatures it's blocking.
-        // The damage_source_filter must be scoped via BlockedBySubjectLive, so it does not
+        // The damage_source_filter must be scoped via CombatRelation::Live(BlockedBy), so it does not
         // prevent damage from spells or unblocked creatures.
         let wov = parse_replacement_line(
             "Prevent all damage that would be dealt to this creature by creatures it's blocking.",
@@ -29594,7 +29597,7 @@ mod opposition_agent_parser_tests {
             wov.damage_source_filter,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubjectLive,
+                    relation: CombatRelation::Live(CombatRelationDirection::BlockedBy),
                     subject: CombatRelationSubject::Source,
                 }]
             )))
@@ -29612,10 +29615,22 @@ mod opposition_agent_parser_tests {
             at.damage_source_filter,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingSubjectLive,
+                    relation: CombatRelation::Live(CombatRelationDirection::Blocking),
                     subject: CombatRelationSubject::Source,
                 }]
             )))
+        );
+
+        // CR 615.1a: Passive source scan must be bounded to its own sentence and not cross into later sentences.
+        let _multi_sentence = parse_replacement_line(
+            "Prevent all damage that would be dealt to this creature. Prevent all damage that would be dealt to another creature you control by red creatures.",
+            "Test Card",
+        );
+        // The first sentence has no "by <source>" clause and must not inherit "by red creatures" from the second sentence.
+        assert_eq!(
+            parse_damage_source_filter_passive("prevent all damage that would be dealt to this creature. prevent all damage that would be dealt to another creature you control by red creatures."),
+            None,
+            "passive source scan for first sentence must not cross sentence boundary into later 'by' clause"
         );
     }
 

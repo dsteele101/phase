@@ -63,12 +63,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation, CombatRelationSubject,
-    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
-    DamageAmountThreshold, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatHistoryScope, CombatRelation,
+    CombatRelationDirection, CombatRelationSubject, Comparator, ControllerRef, CountScope,
+    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
+    EffectScope, FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet,
+    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
     SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
@@ -2606,6 +2606,52 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     if matches!(def.valid_card, Some(TargetFilter::AttachedTo)) {
         if let Some(execute) = def.execute.as_deref_mut() {
             retarget_each_other_to_attached_host_in_ability(execute);
+            // CR 301.5a: On an Aura/Equipment self-trigger whose subject is the attached host,
+            // "creatures blocking it" refers to creatures blocking the attached host.
+            rebind_combat_relation_subject_in_ability(
+                execute,
+                CombatRelationSubject::Source,
+                CombatRelationSubject::AttachedTo,
+            );
+        }
+    }
+
+    // CR 509.1h + CR 603.2: In a BecomesBlocked trigger watching another creature
+    // (e.g. Ib Halfheart: "Whenever another Goblin you control becomes blocked, ... it deals
+    // 4 damage to each creature blocking it"), "it" in the combat relation filter denotes
+    // the triggering creature that became blocked, not the source.
+    if def.mode == TriggerMode::BecomesBlocked
+        && !matches!(def.valid_card, None | Some(TargetFilter::SelfRef))
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rebind_combat_relation_subject_in_ability(
+                execute,
+                CombatRelationSubject::Source,
+                CombatRelationSubject::TriggeringObject,
+            );
+        }
+    }
+
+    // CR 603.10a: Leaves-the-battlefield / dies triggers (e.g. Baneclaw Marauder)
+    // look back in time to the state immediately before the zone change.
+    // In that pre-death state, combat relations are captured by the combat history ledger
+    // for ThisCombat. Convert Live combat relations on qualifying filters to Historical
+    // { direction, scope: ThisCombat } so zone-change record matching evaluates against
+    // the pre-death combat ledger.
+    let is_ltb = def.mode == TriggerMode::ChangesZone
+        && (def.origin == Some(Zone::Battlefield) || def.destination == Some(Zone::Graveyard));
+    if is_ltb {
+        if let Some(valid_card) = def.valid_card.as_mut() {
+            convert_combat_relation_live_to_historical_for_ltb(valid_card);
+        }
+        for clause in &mut def.zone_change_clauses {
+            if matches!(clause.origin, OriginConstraint::Equals(Zone::Battlefield))
+                || clause.destination == Some(Zone::Graveyard)
+            {
+                if let Some(valid_card) = clause.valid_card.as_mut() {
+                    convert_combat_relation_live_to_historical_for_ltb(valid_card);
+                }
+            }
         }
     }
 
@@ -5683,6 +5729,141 @@ fn retarget_each_other_to_attached_host_in_ability(def: &mut AbilityDefinition) 
     }
     if let Some(els) = def.else_ability.as_deref_mut() {
         retarget_each_other_to_attached_host_in_ability(els);
+    }
+}
+
+/// CR 603.10a: Leaves-the-battlefield / dies triggers look back in time to
+/// the game state immediately before the zone change. In that pre-death state,
+/// combat relations are captured by the combat history ledger for ThisCombat.
+/// Convert `CombatRelation::Live` on qualifying filters to `CombatRelation::Historical`
+/// with scope `CombatHistoryScope::ThisCombat`.
+fn convert_combat_relation_live_to_historical_for_ltb(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                if let FilterProp::CombatRelation {
+                    relation: CombatRelation::Live(direction),
+                    subject,
+                } = prop
+                {
+                    *prop = FilterProp::CombatRelation {
+                        relation: CombatRelation::Historical {
+                            direction: *direction,
+                            scope: CombatHistoryScope::ThisCombat,
+                        },
+                        subject: *subject,
+                    };
+                }
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for sub in filters {
+                convert_combat_relation_live_to_historical_for_ltb(sub);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            convert_combat_relation_live_to_historical_for_ltb(filter);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_combat_relation_subject_in_filter(
+    filter: &mut TargetFilter,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            for prop in &mut typed.properties {
+                rebind_combat_relation_subject_in_prop(prop, from, to);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for sub in filters {
+                rebind_combat_relation_subject_in_filter(sub, from, to);
+            }
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rebind_combat_relation_subject_in_filter(filter, from, to);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_combat_relation_subject_in_prop(
+    prop: &mut FilterProp,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    match prop {
+        FilterProp::CombatRelation { subject, .. } if *subject == from => {
+            *subject = to;
+        }
+        FilterProp::CanEnchant { target }
+        | FilterProp::DifferentNameFrom { filter: target }
+        | FilterProp::DistinctFrom { reference: target }
+        | FilterProp::TargetsOnly { filter: target }
+        | FilterProp::Targets { filter: target } => {
+            rebind_combat_relation_subject_in_filter(target, from, to);
+        }
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => rebind_combat_relation_subject_in_filter(reference, from, to),
+        FilterProp::AnyOf { props } => {
+            for p in props {
+                rebind_combat_relation_subject_in_prop(p, from, to);
+            }
+        }
+        FilterProp::Not { prop: p } => rebind_combat_relation_subject_in_prop(p, from, to),
+        _ => {}
+    }
+}
+
+fn rebind_combat_relation_subject_in_effect(
+    effect: &mut Effect,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        rebind_combat_relation_subject_in_filter(filter, from, to);
+    });
+
+    match effect {
+        Effect::PutCounterAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::DoublePTAll { target, .. } => {
+            rebind_combat_relation_subject_in_filter(target, from, to);
+        }
+        _ => {}
+    }
+}
+
+/// CR 301.5a / CR 509.1h: Rebind the subject of combat relation filters throughout an ability.
+fn rebind_combat_relation_subject_in_ability(
+    ability: &mut AbilityDefinition,
+    from: CombatRelationSubject,
+    to: CombatRelationSubject,
+) {
+    for mode in &mut ability.mode_abilities {
+        rebind_combat_relation_subject_in_ability(mode, from, to);
+    }
+    if let Some(target) = ability.optional_player.as_mut() {
+        rebind_combat_relation_subject_in_filter(target, from, to);
+    }
+    rebind_combat_relation_subject_in_effect(&mut ability.effect, from, to);
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        rebind_combat_relation_subject_in_ability(sub, from, to);
+    }
+    if let Some(els) = ability.else_ability.as_deref_mut() {
+        rebind_combat_relation_subject_in_ability(els, from, to);
     }
 }
 
@@ -16909,7 +17090,7 @@ fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCo
     let filter = add_property(
         filter,
         FilterProp::CombatRelation {
-            relation: CombatRelation::BlockingOrBlockedBy,
+            relation: CombatRelation::Live(CombatRelationDirection::Either),
             subject: CombatRelationSubject::Source,
         },
     );
@@ -20874,11 +21055,13 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         if !tail.trim().is_empty() {
             return None;
         }
+        let mut valid_card = subject.clone();
+        convert_combat_relation_live_to_historical_for_ltb(&mut valid_card);
         return Some(ZoneChangeClause {
             origin: OriginConstraint::Equals(Zone::Battlefield),
             destination: Some(Zone::Graveyard),
             destination_constraint: DestinationConstraint::Any,
-            valid_card: Some(subject.clone()),
+            valid_card: Some(valid_card),
         });
     }
 
@@ -20896,15 +21079,18 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         if !tail.trim().is_empty() {
             return None;
         }
-        let valid_card = match possessive {
-            Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
-            None => Some(subject.clone()),
+        let mut valid_card = match possessive {
+            Some(ctrl) => add_controller(subject.clone(), ctrl),
+            None => subject.clone(),
         };
+        if matches!(origin, OriginConstraint::Equals(Zone::Battlefield)) {
+            convert_combat_relation_live_to_historical_for_ltb(&mut valid_card);
+        }
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
             destination_constraint: DestinationConstraint::Any,
-            valid_card,
+            valid_card: Some(valid_card),
         });
     }
 

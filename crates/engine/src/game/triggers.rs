@@ -12762,6 +12762,10 @@ fn combat_relation_subject_binding_diverges(
         // both legs — the same authority `ObjectScope::Source` is adjudicated
         // non-divergent under.
         CombatRelationSubject::Source => false,
+        // CR 603.2 + CR 608.2c: the triggering object is carried by event context on both legs.
+        CombatRelationSubject::TriggeringObject => false,
+        // CR 301.5 + CR 303.4: the source's attached host is carried by `TriggerSourceContext` on both legs.
+        CombatRelationSubject::AttachedTo => false,
     }
 }
 
@@ -25621,6 +25625,18 @@ pub mod tests {
                 &crate::types::ability::CombatRelationSubject::Source
             ),
             "CR 400.7: the source is carried by the `TriggerSourceContext`"
+        );
+        assert!(
+            !combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::TriggeringObject
+            ),
+            "CR 603.2: triggering object is carried by event context on both legs"
+        );
+        assert!(
+            !combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::AttachedTo
+            ),
+            "CR 301.5: attached host is carried by TriggerSourceContext"
         );
         for scope in [
             crate::types::ability::PtValueScope::Current,

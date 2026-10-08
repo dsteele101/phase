@@ -11,11 +11,13 @@ use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
     resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
 };
+use crate::game::targeting;
 use crate::types::ability::{
-    AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue, ChosenAttribute,
-    CombatRelation, CombatRelationSubject, ControllerRef, CountScope, FilterProp, Parity,
-    ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityKind, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
+    ChosenAttribute, CombatRelation, CombatRelationDirection, CombatRelationSubject, ControllerRef,
+    CountScope, FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -6838,12 +6840,40 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
 }
 
 fn combat_relation_subject_id(
+    state: &GameState,
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
 ) -> Option<ObjectId> {
     match subject {
         CombatRelationSubject::Source => Some(source.id),
         CombatRelationSubject::ParentTarget => source.ability.and_then(first_object_target),
+        CombatRelationSubject::TriggeringObject => {
+            source.triggering_object.map(|t| t.object_id).or_else(|| {
+                source
+                    .ability
+                    .and_then(|a| {
+                        targeting::resolve_event_context_target(
+                            state,
+                            &TargetFilter::TriggeringSource,
+                            a.source_id,
+                        )
+                    })
+                    .and_then(|t| match t {
+                        TargetRef::Object(id) => Some(id),
+                        _ => None,
+                    })
+            })
+        }
+        CombatRelationSubject::AttachedTo => match source.attached_to {
+            Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
+            _ => {
+                targeting::resolve_event_context_target(state, &TargetFilter::AttachedTo, source.id)
+                    .and_then(|t| match t {
+                        TargetRef::Object(id) => Some(id),
+                        _ => None,
+                    })
+            }
+        },
     }
 }
 
@@ -6892,6 +6922,107 @@ fn combat_relation_subject_ref(
                 .copied()
                 .or_else(|| live(id))
         }
+        CombatRelationSubject::TriggeringObject => {
+            if let Some(trig) = source.triggering_object {
+                trig.incarnation
+                    .map(|inc| ObjectIncarnationRef::of(trig.object_id, inc))
+                    .or_else(|| live(trig.object_id))
+            } else if let Some(ability) = source.ability {
+                let target = targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::TriggeringSource,
+                    ability.source_id,
+                );
+                match target {
+                    Some(TargetRef::Object(id)) => live(id).or_else(|| {
+                        // CR 113.7a / CR 608.2h: LKI fallback for triggering object that departed
+                        state
+                            .zone_changes_this_turn
+                            .iter()
+                            .rev()
+                            .find(|r| r.object_id == id)
+                            .and_then(|r| r.trigger_source_context())
+                            .map(|c| c.identity.reference)
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        CombatRelationSubject::AttachedTo => {
+            let attached_id = match source.attached_to {
+                Some(crate::game::game_object::AttachTarget::Object(id)) => Some(id),
+                _ => targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::AttachedTo,
+                    source.id,
+                )
+                .and_then(|t| match t {
+                    TargetRef::Object(id) => Some(id),
+                    _ => None,
+                }),
+            };
+            attached_id.and_then(|id| {
+                live(id).or_else(|| {
+                    // CR 113.7a / CR 608.2h: LKI fallback for attached host that departed
+                    state
+                        .zone_changes_this_turn
+                        .iter()
+                        .rev()
+                        .find(|r| r.object_id == id && r.from_zone == Some(Zone::Battlefield))
+                        .and_then(|r| r.trigger_source_context())
+                        .map(|c| c.identity.reference)
+                })
+            })
+        }
+    }
+}
+
+/// CR 509.1g: Live combat relation between candidate and subject.
+fn is_in_live_combat_relation(
+    combat: &combat::CombatState,
+    candidate_id: ObjectId,
+    subject_id: ObjectId,
+    direction: CombatRelationDirection,
+) -> bool {
+    let candidate_blocks_subject = || {
+        combat
+            .blocker_to_attacker
+            .get(&candidate_id)
+            .is_some_and(|attackers| attackers.contains(&subject_id))
+    };
+    let subject_blocks_candidate = || {
+        combat
+            .blocker_to_attacker
+            .get(&subject_id)
+            .is_some_and(|attackers| attackers.contains(&candidate_id))
+    };
+    match direction {
+        CombatRelationDirection::Blocking => candidate_blocks_subject(),
+        CombatRelationDirection::BlockedBy => subject_blocks_candidate(),
+        CombatRelationDirection::Either => candidate_blocks_subject() || subject_blocks_candidate(),
+    }
+}
+
+/// CR 509.1g + CR 400.7: Historical combat relation evaluated from block-history ledgers.
+fn matches_historical_combat_relation(
+    state: &GameState,
+    candidate: ObjectIncarnationRef,
+    subject_ref: ObjectIncarnationRef,
+    direction: CombatRelationDirection,
+    scope: crate::types::ability::CombatHistoryScope,
+) -> bool {
+    let candidate_blocked_subject =
+        || state.creature_blocked_attacker(candidate, subject_ref, scope);
+    let subject_blocked_candidate =
+        || state.creature_blocked_attacker(subject_ref, candidate, scope);
+    match direction {
+        CombatRelationDirection::Blocking => candidate_blocked_subject(),
+        CombatRelationDirection::BlockedBy => subject_blocked_candidate(),
+        CombatRelationDirection::Either => {
+            candidate_blocked_subject() || subject_blocked_candidate()
+        }
     }
 }
 
@@ -6904,53 +7035,51 @@ fn matches_combat_relation(
     source: &SourceContext<'_>,
 ) -> bool {
     match relation {
-        CombatRelation::BlockingOrBlockedBy => {
-            let Some(subject_id) = combat_relation_subject_id(subject, source) else {
+        CombatRelation::Live(direction) => {
+            let subject_id = combat_relation_subject_id(state, subject, source);
+            if let Some(subject_id) = subject_id {
+                if let Some(combat) = state.combat.as_ref() {
+                    if is_in_live_combat_relation(combat, object_id, subject_id, direction) {
+                        return true;
+                    }
+                }
+            }
+
+            // CR 608.2b + CR 608.2h + CR 113.7a: If the source of an activated ability
+            // has left the zone it was in, its last known information is used during resolution
+            // target legality check. This does NOT apply to triggered abilities, where
+            // live combat relations are pruned when leaving combat (CR 506.4) and historical
+            // relations must be used instead.
+            let is_activated_ability = source
+                .ability
+                .is_some_and(|a| a.kind == AbilityKind::Activated && a.trigger_source.is_none())
+                && source.trigger_source.is_none();
+            if is_activated_ability {
+                if let Some(subject_ref) = combat_relation_subject_ref(state, subject, source) {
+                    let subject_is_live_in_combat = subject_id.is_some_and(|id| {
+                        state.combat.as_ref().is_some_and(|combat| {
+                            combat.blocker_to_attacker.contains_key(&id)
+                                || combat.blocker_to_attacker.values().any(|v| v.contains(&id))
+                        })
+                    });
+                    if !subject_is_live_in_combat {
+                        return matches_historical_combat_relation(
+                            state,
+                            candidate,
+                            subject_ref,
+                            direction,
+                            crate::types::ability::CombatHistoryScope::ThisCombat,
+                        );
+                    }
+                }
+            }
+            false
+        }
+        CombatRelation::Historical { direction, scope } => {
+            let Some(subject_ref) = combat_relation_subject_ref(state, subject, source) else {
                 return false;
             };
-            state.combat.as_ref().is_some_and(|combat| {
-                let candidate_blocks_subject = combat
-                    .blocker_to_attacker
-                    .get(&object_id)
-                    .is_some_and(|attackers| attackers.contains(&subject_id));
-                let subject_blocks_candidate = combat
-                    .blocker_to_attacker
-                    .get(&subject_id)
-                    .is_some_and(|attackers| attackers.contains(&object_id));
-                candidate_blocks_subject || subject_blocks_candidate
-            })
-        }
-        // CR 509.1g: Candidate is currently blocked by subject in live combat
-        // (subject is blocking candidate).
-        CombatRelation::BlockedBySubjectLive => {
-            let Some(subject_id) = combat_relation_subject_id(subject, source) else {
-                return false;
-            };
-            state.combat.as_ref().is_some_and(|combat| {
-                combat
-                    .blocker_to_attacker
-                    .get(&subject_id)
-                    .is_some_and(|attackers| attackers.contains(&object_id))
-            })
-        }
-        // CR 509.1g: Candidate is currently blocking subject in live combat.
-        CombatRelation::BlockingSubjectLive => {
-            let Some(subject_id) = combat_relation_subject_id(subject, source) else {
-                return false;
-            };
-            state.combat.as_ref().is_some_and(|combat| {
-                combat
-                    .blocker_to_attacker
-                    .get(&object_id)
-                    .is_some_and(|attackers| attackers.contains(&subject_id))
-            })
-        }
-        // CR 509.1g + CR 400.7: answered from the block-history ledgers, which
-        // CR 506.4 does not prune, by the exact subject and candidate
-        // incarnations.
-        CombatRelation::BlockedBySubject { scope } => {
-            combat_relation_subject_ref(state, subject, source)
-                .is_some_and(|blocker| state.creature_blocked_attacker(blocker, candidate, scope))
+            matches_historical_combat_relation(state, candidate, subject_ref, direction, scope)
         }
     }
 }
@@ -7235,10 +7364,12 @@ fn matches_filter_prop(
         // was assigned to block. ExtraBlockers can allow one blocker to block
         // multiple attackers, so read the reverse map's full assignment list.
         FilterProp::BlockingSource => state.combat.as_ref().is_some_and(|combat| {
-            combat
-                .blocker_to_attacker
-                .get(&object_id)
-                .is_some_and(|attackers| attackers.contains(&source.id))
+            is_in_live_combat_relation(
+                combat,
+                object_id,
+                source.id,
+                CombatRelationDirection::Blocking,
+            )
         }),
         FilterProp::CombatRelation { relation, subject } => matches_combat_relation(
             state,
@@ -8454,22 +8585,26 @@ fn zone_change_record_matches_property(
         FilterProp::CombatRelation { relation, subject } => match relation {
             // CR 506.4: the live map is pruned when either creature leaves
             // combat, so there is nothing for a departed record to match.
-            CombatRelation::BlockingOrBlockedBy
-            | CombatRelation::BlockedBySubjectLive
-            | CombatRelation::BlockingSubjectLive => false,
-            // CR 509.1g + CR 608.2i: answered from the same block-history
-            // ledgers as the live leg, through GameState::creature_blocked_attacker.
+            CombatRelation::Live(_) => false,
+            // CR 509.1g + CR 608.2i: answered from the block-history
+            // ledgers through matches_historical_combat_relation.
             // CR 400.7: the record's exact departing incarnation is its own
             // pre-change authority; a record without one fails closed.
-            CombatRelation::BlockedBySubject { scope } => {
+            CombatRelation::Historical { direction, scope } => {
                 let Some(candidate) = record
                     .trigger_source_context()
                     .map(|context| context.identity.reference)
                 else {
                     return false;
                 };
-                combat_relation_subject_ref(state, *subject, source).is_some_and(|blocker| {
-                    state.creature_blocked_attacker(blocker, candidate, *scope)
+                combat_relation_subject_ref(state, *subject, source).is_some_and(|subject_ref| {
+                    matches_historical_combat_relation(
+                        state,
+                        candidate,
+                        subject_ref,
+                        *direction,
+                        *scope,
+                    )
                 })
             }
         },
@@ -12785,7 +12920,7 @@ mod tests {
         let ctx = FilterContext::from_ability(&ability);
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::Live(CombatRelationDirection::Either),
                 subject: CombatRelationSubject::ParentTarget,
             },
         ]));
@@ -12836,7 +12971,8 @@ mod tests {
 
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::Historical {
+                    direction: CombatRelationDirection::BlockedBy,
                     scope: CombatHistoryScope::ThisTurn,
                 },
                 subject: CombatRelationSubject::ParentTarget,
@@ -12945,7 +13081,8 @@ mod tests {
         let ctx = FilterContext::from_source_with_controller(blocker, PlayerId(1));
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::Historical {
+                    direction: CombatRelationDirection::BlockedBy,
                     scope: CombatHistoryScope::ThisTurn,
                 },
                 subject: CombatRelationSubject::Source,
@@ -12984,7 +13121,8 @@ mod tests {
         );
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::Historical {
+                    direction: CombatRelationDirection::BlockedBy,
                     scope: CombatHistoryScope::ThisTurn,
                 },
                 subject: CombatRelationSubject::Source,
