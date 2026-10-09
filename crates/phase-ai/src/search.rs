@@ -92,7 +92,7 @@ fn first_serum_powder_in_hand(
 /// turn (e.g. 10 counters → 10 pings). None of the registered duel-suite
 /// decks contain such cards; if one is added, revisit this cap or replace
 /// it with structural "source-state-unchanged" detection.
-const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
+pub(crate) const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 
 /// CR 117.1 + Whitemane Lion loop mitigation (issue #563): AI safety cap on
 /// the number of times the same card can be CAST in a single turn by the AI.
@@ -645,6 +645,23 @@ fn fast_priority_action(
         .into_iter()
         .filter(|action| root_action_is_allowed(state, ai_player, action))
         .collect();
+    // A certified game-winning burn line outranks every shortcut and every
+    // one-candidate-at-a-time score below: take its next step.
+    if config.play_lookahead {
+        let issued: Vec<_> = actions
+            .iter()
+            .filter(|action| priority_action_is_allowed_by_loop_guards(state, ai_player, action))
+            .cloned()
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        if let Some(action) =
+            crate::reach::lethal_priority_action(state, ai_player, &issued, &admission)
+        {
+            return Some(action);
+        }
+    }
     let action = low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
         large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
     });
@@ -684,6 +701,15 @@ fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameA
         // No exact authority is fail-open; the engine preview never authorizes
         // a rejection from a reconstructed actor/owner pair.
         .unwrap_or(true)
+}
+
+/// The full admission rule for an engine-issued root priority action: the
+/// targeted-exchange gate plus the AI loop guards. Shared with the lethal-reach
+/// search so a line priced in a simulated state never relies on an action the
+/// real decision boundary would refuse.
+fn root_action_is_admitted(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
+    root_action_is_allowed(state, ai_player, action)
+        && priority_action_is_allowed_by_loop_guards(state, ai_player, action)
 }
 
 fn large_board_main_phase_has_no_development_sources(
@@ -3346,6 +3372,18 @@ fn score_candidates_core(
             deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
         {
             return vec![(action, 1.0)];
+        }
+        // The mode, X, and target of a spell in a certified lethal line are the
+        // ones that keep it lethal — not whatever scores best in isolation.
+        if config.play_lookahead {
+            let admission = |state: &GameState, action: &GameAction| {
+                root_action_is_admitted(state, ai_player, action)
+            };
+            if let Some(action) =
+                crate::reach::lethal_prompt_action(state, ai_player, &actions, &admission)
+            {
+                return vec![(action, 1.0)];
+            }
         }
     }
 
