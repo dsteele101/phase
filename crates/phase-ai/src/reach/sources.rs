@@ -11,13 +11,15 @@ use std::collections::HashSet;
 use std::iter::successors;
 
 use engine::game::ability_utils::modal_spell_mode_ability_refs;
-use engine::game::casting::effective_spell_cost;
+use engine::game::casting::{effective_spell_cost, spell_objects_available_to_cast};
 use engine::game::effects::matches_player_scope;
 use engine::game::filter::player_matches_target_filter_in_state;
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::mana_abilities::is_mana_ability;
-use engine::game::quantity::try_resolve_quantity_in_source_context;
+use engine::game::quantity::{
+    resolve_quantity_with_targets, try_resolve_quantity_in_source_context,
+};
 use engine::game::static_abilities::player_protection_from;
 use engine::game::targeting::player_is_legal_target;
 use engine::game::{extract_mana_leg, max_x_value};
@@ -205,11 +207,13 @@ pub(super) fn mana_capacity(state: &GameState, ai_player: PlayerId) -> u32 {
 
 /// An upper bound on the life the AI could take from `opponent` this turn,
 /// ignoring mana colours and timing: every priced source, plus everything else
-/// the AI holds — cards in hand, the activated abilities of its permanents,
-/// the pending work of every spell and ability it has on the stack (CR 405.1),
-/// and `pending` (an object mid-cast). Gates the reducer simulations, so it may
-/// overcount but must never undercount: pending stack work whose amount the
-/// estimate cannot read leaves the ceiling unbounded.
+/// the AI holds — every spell it has a route to cast from any zone (hand,
+/// command zone, and graveyard or exile permissions such as flashback,
+/// CR 702.34a), the activated abilities of its permanents, the pending work of
+/// every spell and ability it has on the stack (CR 405.1), and `pending` (an
+/// object mid-cast). Gates the reducer simulations, so it may overcount but
+/// must never undercount: pending stack work this pricing cannot read exactly
+/// leaves the ceiling unbounded.
 pub(super) fn potential_ceiling(
     state: &GameState,
     ai_player: PlayerId,
@@ -266,7 +270,9 @@ pub(super) fn potential_ceiling(
         }
     }
 
-    let hand = state.players[ai_player.0 as usize].hand.iter().copied();
+    // The engine's cast-object inventory, read without the current timing
+    // check: a sorcery castable by flashback once the stack settles counts.
+    let castable = spell_objects_available_to_cast(state, ai_player).into_iter();
     let battlefield = state.battlefield.iter().copied().filter(|object_id| {
         state
             .objects
@@ -274,7 +280,7 @@ pub(super) fn potential_ceiling(
             .is_some_and(|object| object.controller == ai_player)
     });
     let mut seen: HashSet<ObjectId> = HashSet::new();
-    for object_id in hand
+    for object_id in castable
         .chain(battlefield)
         .chain(spells_on_stack.iter().copied())
         .chain(pending)
@@ -623,11 +629,26 @@ struct ChainLoss {
     coverage: Coverage,
 }
 
+/// Where the amounts of one chain instruction are read from.
+#[derive(Clone, Copy)]
+enum AmountContext<'a> {
+    /// A printed definition priced before it is cast or activated: a bare X is
+    /// worth one point per mana announced for it (CR 107.3a), and anything else
+    /// must be readable from the source's present context.
+    Printed,
+    /// Work already on the stack (CR 405.1). Its X was announced and locked as
+    /// it was cast or activated (CR 107.3a) and is read back through the
+    /// engine's resolved-ability authority; any other context-bound amount is
+    /// left unread.
+    Pending(&'a ResolvedAbility),
+}
+
 /// One instruction of an effect chain, as the pricing walk reads it — shared
 /// by a card's printed definition and a stack entry's resolved ability.
 struct ChainNode<'a> {
     effect: &'a Effect,
     player_scope: Option<&'a PlayerFilter>,
+    context: AmountContext<'a>,
 }
 
 /// Life each side loses when `ability` (and its unconditional sub-ability
@@ -643,6 +664,7 @@ fn ability_loss(
         successors(Some(ability), |node| node.sub_ability.as_deref()).map(|node| ChainNode {
             effect: &node.effect,
             player_scope: node.player_scope.as_ref(),
+            context: AmountContext::Printed,
         });
     chain_loss(state, ai_player, opponent, source.id, nodes).loss
 }
@@ -659,6 +681,7 @@ fn resolved_loss(
         successors(Some(ability), |node| node.sub_ability.as_deref()).map(|node| ChainNode {
             effect: &node.effect,
             player_scope: node.player_scope.as_ref(),
+            context: AmountContext::Pending(node),
         });
     chain_loss(state, ai_player, opponent, ability.source_id, nodes)
 }
@@ -668,8 +691,10 @@ fn resolved_loss(
 ///
 /// One targeted amount is counted — the largest — since a single target slot
 /// is all the line driver aims at the opponent; non-targeted recipients
-/// ("each player", "each opponent") add on top. An amount that reaches a player
-/// but cannot be read from the present state marks the chain `Partial`.
+/// ("each player", "each opponent") add on top. Work that reaches a player but
+/// that this pricing cannot read exactly — an unreadable amount, damage dealt
+/// by an object other than the source, or any other life-changing or
+/// spell-adding instruction — marks the chain `Partial`.
 fn chain_loss<'a>(
     state: &GameState,
     ai_player: PlayerId,
@@ -696,12 +721,10 @@ fn chain_loss<'a>(
     let mut targeted = Linear::default();
     let mut loss = LifeLoss::default();
     let mut coverage = Coverage::Complete;
-    let mut read = |amount: &QuantityExpr| {
-        let read = linear_amount(state, ai_player, source_id, amount);
-        if read.is_none() {
-            coverage = Coverage::Partial;
-        }
-        read
+    let mut unpriced = || coverage = Coverage::Partial;
+    let read = |amount: &QuantityExpr, context: AmountContext<'_>| match context {
+        AmountContext::Printed => linear_amount(state, ai_player, source_id, amount),
+        AmountContext::Pending(node) => pending_amount(state, ai_player, source_id, amount, node),
     };
     let scoped = |loss: &mut LifeLoss, scope: &PlayerFilter, amount: Linear, is_damage: bool| {
         if matches_player_scope(state, opponent, scope, ai_player, source_id)
@@ -724,11 +747,24 @@ fn chain_loss<'a>(
                 target,
                 damage_source: None,
                 ..
-            } if damage_lands() && targetable(target) => {
-                if let Some(amount) = read(amount) {
-                    targeted = targeted.max(amount);
-                }
-            }
+            } if damage_lands() && targetable(target) => match read(amount, node.context) {
+                Some(amount) => targeted = targeted.max(amount),
+                None => unpriced(),
+            },
+            // CR 120.7: another object is the source of this damage (Soul's
+            // Fire: "target creature you control deals damage …"), so its
+            // amount and its source's characteristics are not this walk's to
+            // read.
+            Effect::DealDamage {
+                target,
+                damage_source: Some(_),
+                ..
+            } if targetable(target) => unpriced(),
+            Effect::DamageAll {
+                player_filter: Some(_),
+                damage_source: Some(_),
+                ..
+            } => unpriced(),
             Effect::DamageEachPlayer {
                 amount,
                 player_filter,
@@ -738,40 +774,96 @@ fn chain_loss<'a>(
                 player_filter: Some(player_filter),
                 damage_source: None,
                 ..
-            } => {
-                if let Some(amount) = read(amount) {
-                    scoped(&mut loss, player_filter, amount, true);
-                }
-            }
+            } => match read(amount, node.context) {
+                Some(amount) => scoped(&mut loss, player_filter, amount, true),
+                None => unpriced(),
+            },
             // CR 119.3: life loss — not damage, so protection and infect do
             // not stop it.
             Effect::LoseLife {
                 amount,
                 target: Some(target),
-            } if targetable(target) => {
-                if let Some(amount) = read(amount) {
-                    targeted = targeted.max(amount);
-                }
-            }
+            } if targetable(target) => match read(amount, node.context) {
+                Some(amount) => targeted = targeted.max(amount),
+                None => unpriced(),
+            },
             Effect::LoseLife {
                 amount,
                 target: None,
-            } => {
-                if let Some(amount) = read(amount) {
-                    match node.player_scope {
-                        // "Each opponent loses N life" iterates its player
-                        // scope, each player losing in turn.
-                        Some(scope) => scoped(&mut loss, scope, amount, false),
-                        // Without a scope or target, the controller loses it.
-                        None => loss.controller = loss.controller.plus(amount),
-                    }
-                }
-            }
+            } => match read(amount, node.context) {
+                Some(amount) => match node.player_scope {
+                    // "Each opponent loses N life" iterates its player
+                    // scope, each player losing in turn.
+                    Some(scope) => scoped(&mut loss, scope, amount, false),
+                    // Without a scope or target, the controller loses it.
+                    None => loss.controller = loss.controller.plus(amount),
+                },
+                None => unpriced(),
+            },
+            effect if changes_life_unpriced(effect) => unpriced(),
             _ => {}
         }
     }
     loss.opponent = loss.opponent.plus(targeted);
     ChainLoss { loss, coverage }
+}
+
+/// Read an amount of work already on the stack. CR 107.3a: its X was announced
+/// and locked when it was cast or activated, so a bare X reads that value back
+/// through the engine's resolved-ability authority (`chosen_x`); anything else
+/// must be readable from the source's present context, as for printed work.
+fn pending_amount(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    amount: &QuantityExpr,
+    node: &ResolvedAbility,
+) -> Option<Linear> {
+    if amount.contains_x() {
+        let bare_x = matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { .. }
+            }
+        );
+        return (bare_x && node.chosen_x.is_some()).then(|| Linear {
+            fixed: resolve_quantity_with_targets(state, amount, node).max(0) as u32,
+            per_x: 0,
+        });
+    }
+    try_resolve_quantity_in_source_context(state, amount, ai_player, source_id).map(|value| {
+        Linear {
+            fixed: value.max(0) as u32,
+            per_x: 0,
+        }
+    })
+}
+
+/// Instructions that can change a player's life total — or put more spells on
+/// the stack that might — through a route the pricing walk does not model:
+/// per-source damage (CR 120.1), already-replaced damage, life totals set,
+/// exchanged or redistributed (CR 119.5, CR 701.12), a player losing outright
+/// (CR 104.3e), and copies or casts of further spells (CR 707.10, CR 601.2).
+/// Pending work containing any of them is not priced.
+fn changes_life_unpriced(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::RedistributeLifeTotals
+            | Effect::LoseTheGame { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+    )
 }
 
 /// Resolve a damage or life-loss amount: a bare `X` prices per announced point

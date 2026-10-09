@@ -17,6 +17,10 @@ const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const LAVA_SPIKE: &str = "Lava Spike deals 3 damage to target player or planeswalker.";
 const BLAZE: &str = "Blaze deals X damage to any target.";
+const SOULS_FIRE: &str =
+    "Target creature you control deals damage equal to its power to any target.";
+const BUMP_IN_THE_NIGHT: &str = "Target opponent loses 3 life.\n\
+    Flashback {5}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 const GUTTERSNIPE: &str =
     "Whenever you cast an instant or sorcery spell, this creature deals 2 damage to each opponent.";
 const BOROS_CHARM: &str = "Choose one —\n\
@@ -112,6 +116,34 @@ fn cast_at_opponent(runner: &mut GameRunner, spell: ObjectId) {
             target: Some(TargetRef::Player(P1)),
         })
         .expect("the opponent is a legal target");
+}
+
+fn blaze(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Blaze", false, BLAZE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        })
+        .id()
+}
+
+/// Answer the AI's own cast prompts through the reducer: announce `x` and aim
+/// each target slot at the next of `targets`, until the spell is on the stack.
+fn finish_cast(runner: &mut GameRunner, x: u32, targets: &[TargetRef]) {
+    let mut targets = targets.iter();
+    for _ in 0..8 {
+        let answer = match runner.state().waiting_for {
+            WaitingFor::ChooseXValue { .. } => GameAction::ChooseX { value: x },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(targets.next().expect("a target per slot").clone()),
+            },
+            _ => return,
+        };
+        runner
+            .act(answer)
+            .expect("the cast prompt accepts the answer");
+    }
 }
 
 fn line(state: &GameState) -> Option<Vec<LineStep>> {
@@ -251,13 +283,7 @@ fn mutual_destruction_is_not_lethal() {
 fn x_burn_spell_absorbs_the_leftover_mana() {
     let mut scenario = scenario(5, 6);
     let bolt = lightning_bolt(&mut scenario);
-    let blaze = scenario
-        .add_spell_to_hand_from_oracle(P0, "Blaze", false, BLAZE)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::X, ManaCostShard::Red],
-            generic: 0,
-        })
-        .id();
+    let blaze = blaze(&mut scenario);
     let mut runner = scenario.build();
 
     let steps = line(runner.state()).expect("Bolt (3) + Blaze for X=3 is lethal");
@@ -478,6 +504,145 @@ fn pending_trigger_on_the_stack_counts_toward_lethal() {
 #[test]
 fn pending_trigger_does_not_invent_lethal() {
     let mut runner = bolt_and_guttersnipe_trigger_on_stack(11);
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_none());
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// CR 107.3a: the X of a spell already on the stack was announced and is
+/// locked. Blaze cast for X=2 at the opponent (5) leaves one Mountain, which
+/// casts Lava Spike for the last 3 once Blaze resolves — the ceiling must read
+/// the announced 2, not size X to the one Mountain still untapped.
+#[test]
+fn pending_x_spell_counts_its_announced_x() {
+    let mut scenario = scenario(4, 5);
+    let blaze = blaze(&mut scenario);
+    let spike = lava_spike(&mut scenario);
+    let mut runner = scenario.build();
+    let cast = cast_spell(blaze, runner.state());
+    runner.act(cast).expect("Blaze is castable");
+    finish_cast(&mut runner, 2, &[TargetRef::Player(P1)]);
+
+    let state = runner.state().clone();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(
+        state
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == blaze)
+            .and_then(|entry| entry.ability())
+            .and_then(|ability| ability.chosen_x),
+        Some(2),
+        "Blaze is on the stack with X=2 locked"
+    );
+    assert_eq!(crate::zone_eval::available_mana(&state, P0), 1);
+
+    let admitted = admitted_actions(&state);
+    assert!(
+        !admitted.contains(&cast_spell(spike, &state)),
+        "Lava Spike waits for an empty stack (CR 117.1a)"
+    );
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("Blaze's locked 2 plus Lava Spike's 3 is lethal");
+    assert_eq!(casts(&line.steps), vec![spike]);
+    assert_eq!(
+        lethal_priority_action(&state, P0, &admitted, &production_admission),
+        Some(GameAction::PassPriority),
+        "the line lets Blaze resolve before casting the sorcery"
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// CR 120.7: Soul's Fire on the stack has the targeted creature as its damage
+/// source, which this pricing does not read — so the ceiling must not drop it.
+/// A 4-power creature's Soul's Fire at the opponent (7) plus Lightning Bolt is
+/// lethal.
+#[test]
+fn pending_source_override_damage_is_not_dropped() {
+    let mut scenario = scenario(4, 7);
+    let giant = scenario.add_creature(P0, "Hill Giant", 4, 4).id();
+    let fire = scenario
+        .add_spell_to_hand_from_oracle(P0, "Soul's Fire", true, SOULS_FIRE)
+        .with_mana_cost(red(2, 1))
+        .id();
+    lightning_bolt(&mut scenario);
+    let mut runner = scenario.build();
+    let cast = cast_spell(fire, runner.state());
+    runner.act(cast).expect("Soul's Fire is castable");
+    finish_cast(
+        &mut runner,
+        0,
+        &[TargetRef::Object(giant), TargetRef::Player(P1)],
+    );
+
+    let state = runner.state().clone();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(state.stack.iter().any(|entry| entry.source_id == fire));
+    // Discriminating guard: the pending override damage leaves the ceiling
+    // unbounded rather than reading as 0 (which would cap it at Bolt's 3).
+    assert_eq!(
+        super::sources::potential_ceiling(&state, P0, P1, &[], None),
+        u32::MAX
+    );
+    let admitted = admitted_actions(&state);
+    assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_some());
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Lightning Bolt aimed at the opponent on the stack, Bump in the Night in the
+/// graveyard, and six untapped Mountains for its flashback cost.
+fn bolt_on_stack_with_flashback_bump(opponent_life: i32) -> (GameRunner, ObjectId) {
+    let mut scenario = scenario(7, opponent_life);
+    let bump = scenario
+        .add_spell_to_graveyard(P0, "Bump in the Night", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .from_oracle_text(BUMP_IN_THE_NIGHT)
+        .id();
+    let bolt = lightning_bolt(&mut scenario);
+    let mut runner = scenario.build();
+    cast_at_opponent(&mut runner, bolt);
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(crate::zone_eval::available_mana(runner.state(), P0), 6);
+    (runner, bump)
+}
+
+/// CR 702.34a: a sorcery castable by flashback counts toward reach while the
+/// stack still holds the line's first spell — it becomes castable once Bolt
+/// resolves, and its 3 life loss finishes the opponent at 6.
+#[test]
+fn flashback_burn_counts_once_the_stack_settles() {
+    let (mut runner, bump) = bolt_on_stack_with_flashback_bump(6);
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert!(
+        !admitted.contains(&cast_spell(bump, &state)),
+        "a sorcery is not castable while Bolt is on the stack"
+    );
+
+    // Reach guard: once the stack settles, flashback issues the cast.
+    let mut settled = GameRunner::from_state(state.clone());
+    settled.advance_until_stack_empty();
+    assert_eq!(settled.life(P1), 3);
+    assert!(admitted_actions(settled.state()).contains(&cast_spell(bump, settled.state())));
+
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("Bolt's 3 plus flashback Bump's 3 is lethal");
+    assert_eq!(casts(&line.steps), vec![bump]);
+    assert_eq!(
+        lethal_priority_action(&state, P0, &admitted, &production_admission),
+        Some(GameAction::PassPriority)
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Bolt's 3 and Bump's 3 are 6, short of 7.
+#[test]
+fn flashback_burn_does_not_invent_lethal() {
+    let (mut runner, _) = bolt_on_stack_with_flashback_bump(7);
     let state = runner.state().clone();
     let admitted = admitted_actions(&state);
     assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_none());
