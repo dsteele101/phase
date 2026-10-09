@@ -707,7 +707,11 @@ fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameA
 /// targeted-exchange gate plus the AI loop guards. Shared with the lethal-reach
 /// search so a line priced in a simulated state never relies on an action the
 /// real decision boundary would refuse.
-fn root_action_is_admitted(state: &GameState, ai_player: PlayerId, action: &GameAction) -> bool {
+pub(crate) fn root_action_is_admitted(
+    state: &GameState,
+    ai_player: PlayerId,
+    action: &GameAction,
+) -> bool {
     root_action_is_allowed(state, ai_player, action)
         && priority_action_is_allowed_by_loop_guards(state, ai_player, action)
 }

@@ -130,7 +130,7 @@ pub(crate) fn lethal_prompt_action(
             if apply_as_current_for_simulation(&mut sim, answer.clone()).is_err() {
                 return false;
             }
-            match driver::drive(sim, ai_player, opponent, &[]) {
+            match driver::drive(sim, ai_player, opponent, &[], admission) {
                 DriveOutcome::Won => true,
                 DriveOutcome::Settled(settled) => {
                     let issued = admitted_priority_actions(&settled, admission);
@@ -155,7 +155,7 @@ pub(crate) fn find_lethal_line(
 
     let current = sources::reach_sources(state, ai_player, opponent, issued);
     if state.stack.is_empty() {
-        return certify_cheapest(state, state, ai_player, opponent, &current);
+        return certify_cheapest(state, state, ai_player, opponent, &current, admission);
     }
 
     // CR 117.4: with objects on the stack, the line is priced from the state
@@ -167,17 +167,26 @@ pub(crate) fn find_lethal_line(
     if ceiling < life_of(state, opponent) {
         return None;
     }
-    match driver::drive(state.clone(), ai_player, opponent, &[]) {
+    match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
         DriveOutcome::Won => Some(LethalLine { steps: Vec::new() }),
         DriveOutcome::Settled(settled) => {
             let settled_issued = admitted_priority_actions(&settled, admission);
             let settled_sources =
                 sources::reach_sources(&settled, ai_player, opponent, &settled_issued);
-            certify_cheapest(state, &settled, ai_player, opponent, &settled_sources)
+            certify_cheapest(
+                state,
+                &settled,
+                ai_player,
+                opponent,
+                &settled_sources,
+                admission,
+            )
         }
         // Something on the stack needs a decision the driver will not make on
         // anyone's behalf; price only what can be done right now.
-        DriveOutcome::Stuck => certify_cheapest(state, state, ai_player, opponent, &current),
+        DriveOutcome::Stuck => {
+            certify_cheapest(state, state, ai_player, opponent, &current, admission)
+        }
     }
 }
 
@@ -190,6 +199,7 @@ fn certify_cheapest(
     ai_player: PlayerId,
     opponent: PlayerId,
     sources: &[ReachSource],
+    admission: ActionAdmission<'_>,
 ) -> Option<LethalLine> {
     let opponent_life = life_of(priced, opponent);
     // Damage alone has to be able to get there before mana is worth pricing.
@@ -222,7 +232,7 @@ fn certify_cheapest(
             break;
         }
         if matches!(
-            driver::drive(origin.clone(), ai_player, opponent, &steps),
+            driver::drive(origin.clone(), ai_player, opponent, &steps, admission),
             DriveOutcome::Won
         ) {
             return Some(LethalLine { steps });

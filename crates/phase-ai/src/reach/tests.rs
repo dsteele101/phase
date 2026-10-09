@@ -2,7 +2,7 @@ use engine::ai_support::flat_priority_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -16,7 +16,9 @@ const SEAL_OF_FIRE: &str = "Sacrifice this enchantment: It deals 2 damage to any
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const LAVA_SPIKE: &str = "Lava Spike deals 3 damage to target player or planeswalker.";
-const FIREBALL: &str = "Fireball deals X damage to any target.";
+const BLAZE: &str = "Blaze deals X damage to any target.";
+const GUTTERSNIPE: &str =
+    "Whenever you cast an instant or sorcery spell, this creature deals 2 damage to each opponent.";
 const BOROS_CHARM: &str = "Choose one —\n\
     • Boros Charm deals 4 damage to target player or planeswalker.\n\
     • Permanents you control gain indestructible until end of turn.\n\
@@ -69,6 +71,47 @@ fn lightning_bolt(scenario: &mut GameScenario) -> ObjectId {
         .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
         .with_mana_cost(red(0, 1))
         .id()
+}
+
+fn lava_spike(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Lava Spike", false, LAVA_SPIKE)
+        .with_mana_cost(red(0, 1))
+        .id()
+}
+
+/// The admission rule the real decision boundary applies (targeted-exchange
+/// gate plus the AI loop guards).
+fn production_admission(state: &GameState, action: &GameAction) -> bool {
+    crate::search::root_action_is_admitted(state, P0, action)
+}
+
+fn admitted_actions(state: &GameState) -> Vec<GameAction> {
+    flat_priority_actions(state)
+        .into_iter()
+        .filter(|action| production_admission(state, action))
+        .collect()
+}
+
+fn cast_spell(spell: ObjectId, state: &GameState) -> GameAction {
+    GameAction::CastSpell {
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        targets: Vec::new(),
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+    }
+}
+
+/// Cast `spell` through the reducer with the opponent as its target, leaving
+/// it (and anything it triggers) on the stack.
+fn cast_at_opponent(runner: &mut GameRunner, spell: ObjectId) {
+    let cast = cast_spell(spell, runner.state());
+    runner.act(cast).expect("the spell is castable");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("the opponent is a legal target");
 }
 
 fn line(state: &GameState) -> Option<Vec<LineStep>> {
@@ -208,8 +251,8 @@ fn mutual_destruction_is_not_lethal() {
 fn x_burn_spell_absorbs_the_leftover_mana() {
     let mut scenario = scenario(5, 6);
     let bolt = lightning_bolt(&mut scenario);
-    let fireball = scenario
-        .add_spell_to_hand_from_oracle(P0, "Fireball", false, FIREBALL)
+    let blaze = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blaze", false, BLAZE)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::X, ManaCostShard::Red],
             generic: 0,
@@ -217,8 +260,8 @@ fn x_burn_spell_absorbs_the_leftover_mana() {
         .id();
     let mut runner = scenario.build();
 
-    let steps = line(runner.state()).expect("Bolt (3) + Fireball for X=3 is lethal");
-    assert_eq!(casts(&steps), vec![bolt, fireball]);
+    let steps = line(runner.state()).expect("Bolt (3) + Blaze for X=3 is lethal");
+    assert_eq!(casts(&steps), vec![bolt, blaze]);
     assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
 }
 
@@ -279,12 +322,8 @@ fn line_member_targets_the_opponent_over_a_creature() {
 #[test]
 fn sorcery_burn_pair_is_played_out_to_a_win() {
     let mut scenario = scenario(2, 6);
-    scenario
-        .add_spell_to_hand_from_oracle(P0, "Lava Spike", false, LAVA_SPIKE)
-        .with_mana_cost(red(0, 1));
-    scenario
-        .add_spell_to_hand_from_oracle(P0, "Lava Spike", false, LAVA_SPIKE)
-        .with_mana_cost(red(0, 1));
+    lava_spike(&mut scenario);
+    lava_spike(&mut scenario);
     scenario.add_creature(P1, "Goblin Guide", 2, 2);
     let mut runner = scenario.build();
 
@@ -332,6 +371,117 @@ fn repeatable_activation_is_counted_per_activation() {
         GameAction::ActivateAbility { source_id, .. } if source_id == rod
     )));
     assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// The line obeys the same admission rule as the real decision boundary at
+/// every step it simulates: after two Lava Spikes this turn the third cast is
+/// admitted and the fourth is refused (the search's same-card cast cap), so two
+/// more Spikes against an opponent at 6 are not a lethal line.
+#[test]
+fn line_respects_the_same_card_cast_cap_at_every_step() {
+    let mut scenario = scenario(4, 12);
+    let spikes: Vec<ObjectId> = (0..4).map(|_| lava_spike(&mut scenario)).collect();
+    let mut runner = scenario.build();
+    for &spike in &spikes[..2] {
+        cast_at_opponent(&mut runner, spike);
+        runner.advance_until_stack_empty();
+    }
+    assert_eq!(
+        runner.life(P1),
+        6,
+        "two Spikes resolved through the reducer"
+    );
+
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert!(
+        admitted.contains(&cast_spell(spikes[2], &state))
+            && admitted.contains(&cast_spell(spikes[3], &state)),
+        "both remaining Spikes are admitted now: only two have been cast"
+    );
+    // Reach guard: without the admission rule, the two remaining Spikes would
+    // certify — the certificate depends on the fourth cast.
+    let permissive = flat_priority_actions(&state);
+    assert!(find_lethal_line(&state, P0, &permissive, &|_, _| true).is_some());
+    assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_none());
+    assert_eq!(
+        lethal_priority_action(&state, P0, &admitted, &production_admission),
+        None
+    );
+
+    // The reducer agrees: the third cast is admitted, the fourth is not.
+    let mut third = GameRunner::from_state(state.clone());
+    cast_at_opponent(&mut third, spikes[2]);
+    third.advance_until_stack_empty();
+    assert!(flat_priority_actions(third.state()).contains(&cast_spell(spikes[3], third.state())));
+    assert!(!production_admission(
+        third.state(),
+        &cast_spell(spikes[3], third.state())
+    ));
+
+    // And the chooser, playing the turn out, cannot burn the opponent out.
+    let mut played = GameRunner::from_state(state);
+    assert!(!ai_wins_this_turn(&mut played, AiDifficulty::Medium));
+}
+
+/// A Lightning Bolt cast with Guttersnipe in play, both still on the stack:
+/// the Bolt and the Guttersnipe trigger above it are pending, and a second
+/// Bolt is in hand with one Mountain to cast it.
+fn bolt_and_guttersnipe_trigger_on_stack(opponent_life: i32) -> GameRunner {
+    let mut scenario = scenario(2, opponent_life);
+    // Summoning sick, so the line is about burn alone: Guttersnipe can't add
+    // combat damage this turn (CR 508.1a).
+    let guttersnipe = scenario
+        .add_creature_from_oracle(P0, "Guttersnipe", 2, 2, GUTTERSNIPE)
+        .with_mana_cost(red(2, 1))
+        .with_summoning_sickness()
+        .id();
+    let first = lightning_bolt(&mut scenario);
+    lightning_bolt(&mut scenario);
+    let mut runner = scenario.build();
+    cast_at_opponent(&mut runner, first);
+
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the AI holds priority with its Bolt on the stack"
+    );
+    assert!(
+        state
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == guttersnipe
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+        "Guttersnipe's cast trigger is on the stack: {:?}",
+        state.stack
+    );
+    runner
+}
+
+/// Pending stack work counts toward reach even when no card the AI holds
+/// defines it: Guttersnipe's trigger (2) + the Bolt it rides on (3) + the
+/// second Bolt (3) is 8 against 7 — before its own new trigger.
+#[test]
+fn pending_trigger_on_the_stack_counts_toward_lethal() {
+    let mut runner = bolt_and_guttersnipe_trigger_on_stack(7);
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert!(
+        find_lethal_line(&state, P0, &admitted, &production_admission).is_some(),
+        "the stack-aware line must not be pruned before it settles"
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Everything available — both Bolts and both Guttersnipe triggers — is 10,
+/// short of 11.
+#[test]
+fn pending_trigger_does_not_invent_lethal() {
+    let mut runner = bolt_and_guttersnipe_trigger_on_stack(11);
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_none());
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
 }
 
 /// `VeryEasy` does not plan multi-action plays.

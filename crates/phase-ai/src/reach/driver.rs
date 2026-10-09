@@ -6,6 +6,11 @@
 //! mode the line committed to — and passes priority for the opponent. Anything
 //! else (an opponent's choice, an optional trigger, a payment prompt) stops the
 //! drive: a line the driver cannot finish on its own is not certified.
+//!
+//! Every AI priority domain the drive reads is filtered through the caller's
+//! [`ActionAdmission`] against the simulated state it is read in, so a step
+//! the real decision boundary would refuse at that point (the per-card cast
+//! cap after earlier steps, say) is never certified.
 
 use engine::ai_support::flat_priority_actions;
 use engine::game::engine::apply_as_current_for_simulation;
@@ -14,7 +19,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
-use super::{issued_counterpart, LineStep};
+use super::{issued_counterpart, ActionAdmission, LineStep};
 
 /// Hard bound on reducer applies per drive. A line of a dozen spells with
 /// their prompts and the passes that resolve them stays well inside it.
@@ -32,12 +37,14 @@ pub(super) enum DriveOutcome {
 }
 
 /// Play `steps` from `sim`, resolving the stack between them as needed, and
-/// report how the game stands afterwards.
+/// report how the game stands afterwards. A step is played only when the
+/// admitted, engine-issued priority domain of the simulated state offers it.
 pub(super) fn drive(
     mut sim: GameState,
     ai_player: PlayerId,
     opponent: PlayerId,
     steps: &[LineStep],
+    admission: ActionAdmission<'_>,
 ) -> DriveOutcome {
     let mut next = 0;
     let mut mode = None;
@@ -53,7 +60,11 @@ pub(super) fn drive(
             }
             WaitingFor::Priority { player } if *player == ai_player => match steps.get(next) {
                 Some(step) => {
-                    match issued_counterpart(&flat_priority_actions(&sim), &step.action) {
+                    let admitted: Vec<GameAction> = flat_priority_actions(&sim)
+                        .into_iter()
+                        .filter(|action| admission(&sim, action))
+                        .collect();
+                    match issued_counterpart(&admitted, &step.action) {
                         Some(issued) => {
                             next += 1;
                             mode = step.mode;

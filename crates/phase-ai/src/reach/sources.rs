@@ -23,11 +23,11 @@ use engine::game::targeting::player_is_legal_target;
 use engine::game::{extract_mana_leg, max_x_value};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CostCategory, Effect, PlayerFilter, QuantityExpr,
-    QuantityRef, TargetFilter,
+    QuantityRef, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -206,8 +206,10 @@ pub(super) fn mana_capacity(state: &GameState, ai_player: PlayerId) -> u32 {
 /// An upper bound on the life the AI could take from `opponent` this turn,
 /// ignoring mana colours and timing: every priced source, plus everything else
 /// the AI holds — cards in hand, the activated abilities of its permanents,
-/// the objects it has on the stack, and `pending` (an object mid-cast). Gates
-/// the reducer simulations, so it may overcount but must never undercount.
+/// the pending work of every spell and ability it has on the stack (CR 405.1),
+/// and `pending` (an object mid-cast). Gates the reducer simulations, so it may
+/// overcount but must never undercount: pending stack work whose amount the
+/// estimate cannot read leaves the ceiling unbounded.
 pub(super) fn potential_ceiling(
     state: &GameState,
     ai_player: PlayerId,
@@ -234,6 +236,36 @@ pub(super) fn potential_ceiling(
         }
     }
 
+    // Pending work is priced per stack entry, from the entry's own resolved
+    // instructions: a triggered ability (a Guttersnipe trigger) or an
+    // activation already on the stack has no definition on any card the AI
+    // holds. A spell's source object still joins the object walk below — for
+    // the activated abilities it will have once it resolves, and for its
+    // printed spell when the entry carries no resolved instructions yet (a
+    // permanent spell, or a spell still being cast, CR 601.2a).
+    let mut spells_on_stack: HashSet<ObjectId> = HashSet::new();
+    let mut spells_priced_pending: HashSet<ObjectId> = HashSet::new();
+    for entry in state
+        .stack
+        .iter()
+        .filter(|entry| entry.controller == ai_player)
+    {
+        let is_spell = matches!(entry.kind, StackEntryKind::Spell { .. });
+        if is_spell {
+            spells_on_stack.insert(entry.source_id);
+        }
+        if let Some(ability) = entry.ability() {
+            let pending_work = resolved_loss(state, ai_player, opponent, ability);
+            if pending_work.coverage == Coverage::Partial {
+                return u32::MAX;
+            }
+            total = total.plus(pending_work.loss.opponent);
+            if is_spell {
+                spells_priced_pending.insert(entry.source_id);
+            }
+        }
+    }
+
     let hand = state.players[ai_player.0 as usize].hand.iter().copied();
     let battlefield = state.battlefield.iter().copied().filter(|object_id| {
         state
@@ -241,20 +273,19 @@ pub(super) fn potential_ceiling(
             .get(object_id)
             .is_some_and(|object| object.controller == ai_player)
     });
-    let stack = state
-        .stack
-        .iter()
-        .filter(|entry| entry.controller == ai_player)
-        .map(|entry| entry.source_id);
     let mut seen: HashSet<ObjectId> = HashSet::new();
-    for object_id in hand.chain(battlefield).chain(stack).chain(pending) {
+    for object_id in hand
+        .chain(battlefield)
+        .chain(spells_on_stack.iter().copied())
+        .chain(pending)
+    {
         if !seen.insert(object_id) {
             continue;
         }
         let Some(object) = state.objects.get(&object_id) else {
             continue;
         };
-        if !cast.contains(&object_id) {
+        if !cast.contains(&object_id) && !spells_priced_pending.contains(&object_id) {
             if let Some(spell) = spell_reach(state, ai_player, opponent, object) {
                 total = total.plus(spell.loss.opponent);
             }
@@ -579,12 +610,28 @@ fn is_instant_speed(state: &GameState, object: &GameObject) -> bool {
         || object_has_effective_keyword_kind(state, object.id, KeywordKind::Flash)
 }
 
+/// Whether every life-affecting amount in a priced chain could be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    Complete,
+    Partial,
+}
+
+/// A chain's life loss and whether every life-affecting amount in it was read.
+struct ChainLoss {
+    loss: LifeLoss,
+    coverage: Coverage,
+}
+
+/// One instruction of an effect chain, as the pricing walk reads it — shared
+/// by a card's printed definition and a stack entry's resolved ability.
+struct ChainNode<'a> {
+    effect: &'a Effect,
+    player_scope: Option<&'a PlayerFilter>,
+}
+
 /// Life each side loses when `ability` (and its unconditional sub-ability
 /// chain) resolves with `opponent` chosen for its player target.
-///
-/// One targeted amount is counted — the largest — since a single target slot
-/// is all the line driver aims at the opponent; non-targeted recipients
-/// ("each player", "each opponent") add on top.
 fn ability_loss(
     state: &GameState,
     ai_player: PlayerId,
@@ -592,12 +639,50 @@ fn ability_loss(
     source: &GameObject,
     ability: &AbilityDefinition,
 ) -> LifeLoss {
+    let nodes =
+        successors(Some(ability), |node| node.sub_ability.as_deref()).map(|node| ChainNode {
+            effect: &node.effect,
+            player_scope: node.player_scope.as_ref(),
+        });
+    chain_loss(state, ai_player, opponent, source.id, nodes).loss
+}
+
+/// Life each side loses when a spell or ability already on the stack resolves
+/// (CR 608.2), read from its resolved instructions.
+fn resolved_loss(
+    state: &GameState,
+    ai_player: PlayerId,
+    opponent: PlayerId,
+    ability: &ResolvedAbility,
+) -> ChainLoss {
+    let nodes =
+        successors(Some(ability), |node| node.sub_ability.as_deref()).map(|node| ChainNode {
+            effect: &node.effect,
+            player_scope: node.player_scope.as_ref(),
+        });
+    chain_loss(state, ai_player, opponent, ability.source_id, nodes)
+}
+
+/// Life each side loses when a chain of instructions from `source_id`
+/// resolves with `opponent` chosen for its player target.
+///
+/// One targeted amount is counted — the largest — since a single target slot
+/// is all the line driver aims at the opponent; non-targeted recipients
+/// ("each player", "each opponent") add on top. An amount that reaches a player
+/// but cannot be read from the present state marks the chain `Partial`.
+fn chain_loss<'a>(
+    state: &GameState,
+    ai_player: PlayerId,
+    opponent: PlayerId,
+    source_id: ObjectId,
+    nodes: impl Iterator<Item = ChainNode<'a>>,
+) -> ChainLoss {
     // CR 702.16e: protection prevents damage from a source with the stated
     // quality. CR 120.3b + CR 702.90b: damage from an infect source gives
     // poison counters instead of costing life.
     let damage_lands = || {
-        !player_protection_from(state, opponent, Some(source.id))
-            && !object_has_effective_keyword_kind(state, source.id, KeywordKind::Infect)
+        !player_protection_from(state, opponent, Some(source_id))
+            && !object_has_effective_keyword_kind(state, source_id, KeywordKind::Infect)
     };
     let targetable = |filter: &TargetFilter| {
         player_matches_target_filter_in_state(
@@ -605,24 +690,32 @@ fn ability_loss(
             filter,
             opponent,
             Some(ai_player),
-            Some(source.id),
-        ) && player_is_legal_target(state, opponent, source.id, ai_player)
+            Some(source_id),
+        ) && player_is_legal_target(state, opponent, source_id, ai_player)
     };
     let mut targeted = Linear::default();
     let mut loss = LifeLoss::default();
+    let mut coverage = Coverage::Complete;
+    let mut read = |amount: &QuantityExpr| {
+        let read = linear_amount(state, ai_player, source_id, amount);
+        if read.is_none() {
+            coverage = Coverage::Partial;
+        }
+        read
+    };
     let scoped = |loss: &mut LifeLoss, scope: &PlayerFilter, amount: Linear, is_damage: bool| {
-        if matches_player_scope(state, opponent, scope, ai_player, source.id)
+        if matches_player_scope(state, opponent, scope, ai_player, source_id)
             && (!is_damage || damage_lands())
         {
             loss.opponent = loss.opponent.plus(amount);
         }
-        if matches_player_scope(state, ai_player, scope, ai_player, source.id) {
+        if matches_player_scope(state, ai_player, scope, ai_player, source_id) {
             loss.controller = loss.controller.plus(amount);
         }
     };
 
-    for node in successors(Some(ability), |node| node.sub_ability.as_deref()) {
-        match &*node.effect {
+    for node in nodes {
+        match node.effect {
             // CR 120.3a: damage dealt to a player costs that player that much
             // life. A `damage_source` override makes some other object the
             // source (CR 120.3), whose characteristics are not priced here.
@@ -632,7 +725,7 @@ fn ability_loss(
                 damage_source: None,
                 ..
             } if damage_lands() && targetable(target) => {
-                if let Some(amount) = linear_amount(state, ai_player, source.id, amount) {
+                if let Some(amount) = read(amount) {
                     targeted = targeted.max(amount);
                 }
             }
@@ -646,7 +739,7 @@ fn ability_loss(
                 damage_source: None,
                 ..
             } => {
-                if let Some(amount) = linear_amount(state, ai_player, source.id, amount) {
+                if let Some(amount) = read(amount) {
                     scoped(&mut loss, player_filter, amount, true);
                 }
             }
@@ -656,7 +749,7 @@ fn ability_loss(
                 amount,
                 target: Some(target),
             } if targetable(target) => {
-                if let Some(amount) = linear_amount(state, ai_player, source.id, amount) {
+                if let Some(amount) = read(amount) {
                     targeted = targeted.max(amount);
                 }
             }
@@ -664,8 +757,8 @@ fn ability_loss(
                 amount,
                 target: None,
             } => {
-                if let Some(amount) = linear_amount(state, ai_player, source.id, amount) {
-                    match &node.player_scope {
+                if let Some(amount) = read(amount) {
+                    match node.player_scope {
                         // "Each opponent loses N life" iterates its player
                         // scope, each player losing in turn.
                         Some(scope) => scoped(&mut loss, scope, amount, false),
@@ -678,7 +771,7 @@ fn ability_loss(
         }
     }
     loss.opponent = loss.opponent.plus(targeted);
-    loss
+    ChainLoss { loss, coverage }
 }
 
 /// Resolve a damage or life-loss amount: a bare `X` prices per announced point
