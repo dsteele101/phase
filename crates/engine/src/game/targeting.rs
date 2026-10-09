@@ -1040,6 +1040,55 @@ pub fn resolved_targets(
     // `ability.targets` with unrelated chosen targets (DefendingPlayer, etc.).
     if is_pure_event_context_filter(target_filter) {
         if matches!(target_filter, TargetFilter::TriggeringSource) {
+            // CR 400.7 + CR 509.3c/d + CR 608.2c: Check captured identities first.
+            // 1. Watched external object (e.g. Ib Halfheart: "Whenever another Goblin... sacrifice it")
+            if let Some(trig_obj) = ability.triggering_object {
+                if trig_obj.object_id != ability.source_id {
+                    let valid = state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
+                        obj.zone == Zone::Battlefield
+                            && trig_obj
+                                .incarnation
+                                .is_none_or(|inc| obj.incarnation == inc)
+                    });
+                    if valid {
+                        return vec![TargetRef::Object(trig_obj.object_id)];
+                    } else {
+                        return vec![];
+                    }
+                }
+            }
+            // 2. Attached host (e.g. Dwindle: "When enchanted creature blocks, destroy it")
+            if let Some(host_ref) = ability.triggering_host {
+                if host_ref.is_current(state) {
+                    return vec![TargetRef::Object(host_ref.object_id)];
+                } else {
+                    return vec![];
+                }
+            }
+            // 3. Counterpart combatant (e.g. Ashmouth Hound: "deals 1 damage to that creature")
+            if let Some(counterpart_pin) = ability.triggering_counterpart {
+                if counterpart_pin.is_current(state) {
+                    return vec![TargetRef::Object(counterpart_pin.object_id)];
+                } else {
+                    return vec![];
+                }
+            }
+            // 4. Watched self-object (when no counterpart applies)
+            if let Some(trig_obj) = ability.triggering_object {
+                let valid = state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
+                    obj.zone == Zone::Battlefield
+                        && trig_obj
+                            .incarnation
+                            .is_none_or(|inc| obj.incarnation == inc)
+                });
+                if valid {
+                    return vec![TargetRef::Object(trig_obj.object_id)];
+                } else {
+                    return vec![];
+                }
+            }
+
+            // Fall back to raw event only when no captured identity exists.
             let effective_event = state
                 .resolving_stack_entry
                 .as_ref()
@@ -1054,27 +1103,15 @@ pub fn resolved_targets(
             if let Some(ev) = effective_event {
                 if let Some(counterpart_id) = blocked_counterpart_from_event(ev, ability.source_id)
                 {
-                    return vec![TargetRef::Object(counterpart_id)];
-                }
-            }
-
-            if let Some(trig_obj) = ability.triggering_object {
-                let valid = state.objects.get(&trig_obj.object_id).is_none_or(|obj| {
-                    obj.zone != Zone::Battlefield
-                        || trig_obj
-                            .incarnation
-                            .is_none_or(|inc| obj.incarnation == inc)
-                });
-                if valid {
-                    return vec![TargetRef::Object(trig_obj.object_id)];
-                }
-            }
-            if let Some(host_ref) = ability.triggering_host {
-                let valid = state.objects.get(&host_ref.object_id).is_none_or(|obj| {
-                    obj.zone != Zone::Battlefield || host_ref.incarnation == obj.incarnation
-                });
-                if valid {
-                    return vec![TargetRef::Object(host_ref.object_id)];
+                    if state
+                        .objects
+                        .get(&counterpart_id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                    {
+                        return vec![TargetRef::Object(counterpart_id)];
+                    } else {
+                        return vec![];
+                    }
                 }
             }
         }
@@ -1638,37 +1675,73 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 })
                 .or(state.current_trigger_event.as_ref());
 
-            if let Some(ev) = effective_event {
-                if let Some(counterpart_id) = blocked_counterpart_from_event(ev, source_id) {
-                    return Some(TargetRef::Object(counterpart_id));
-                }
-            }
-
-            // CR 509.3c + CR 608.2c: Prefer the pinned triggering object from the resolving ability
-            // when present (e.g. the watched attacker in a BecomesBlocked trigger).
+            // CR 509.3c + CR 608.2c + CR 400.7: Check captured identities from the resolving ability first.
+            // A stale captured recipient must TERMINATE the lookup rather than fall back to raw event IDs.
             if let Some(resolving_entry) = state.resolving_stack_entry.as_ref() {
                 if let Some(ability) = resolving_entry.ability() {
+                    // 1. Watched external object (e.g. Ib Halfheart: "Whenever another Goblin... sacrifice it")
                     if let Some(trig_obj) = ability.triggering_object {
-                        let valid = state.objects.get(&trig_obj.object_id).is_none_or(|obj| {
-                            obj.zone != Zone::Battlefield
-                                || trig_obj
+                        if trig_obj.object_id != ability.source_id {
+                            let valid = state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
+                                obj.zone == Zone::Battlefield
+                                    && trig_obj
+                                        .incarnation
+                                        .is_none_or(|inc| obj.incarnation == inc)
+                            });
+                            if valid {
+                                return Some(TargetRef::Object(trig_obj.object_id));
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                    // 2. Attached host (e.g. Dwindle: "When enchanted creature blocks, destroy it")
+                    if let Some(host_ref) = ability.triggering_host {
+                        if host_ref.is_current(state) {
+                            return Some(TargetRef::Object(host_ref.object_id));
+                        } else {
+                            return None;
+                        }
+                    }
+                    // 3. Counterpart combatant (e.g. Ashmouth Hound: "deals 1 damage to that creature")
+                    if let Some(counterpart_pin) = ability.triggering_counterpart {
+                        if counterpart_pin.is_current(state) {
+                            return Some(TargetRef::Object(counterpart_pin.object_id));
+                        } else {
+                            return None;
+                        }
+                    }
+                    // 4. Watched self-object (when no counterpart applies)
+                    if let Some(trig_obj) = ability.triggering_object {
+                        let valid = state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
+                            obj.zone == Zone::Battlefield
+                                && trig_obj
                                     .incarnation
                                     .is_none_or(|inc| obj.incarnation == inc)
                         });
                         if valid {
                             return Some(TargetRef::Object(trig_obj.object_id));
-                        }
-                    }
-                    if let Some(host_ref) = ability.triggering_host {
-                        let valid = state.objects.get(&host_ref.object_id).is_none_or(|obj| {
-                            obj.zone != Zone::Battlefield || host_ref.incarnation == obj.incarnation
-                        });
-                        if valid {
-                            return Some(TargetRef::Object(host_ref.object_id));
+                        } else {
+                            return None;
                         }
                     }
                 }
             }
+
+            if let Some(ev) = effective_event {
+                if let Some(counterpart_id) = blocked_counterpart_from_event(ev, source_id) {
+                    if state
+                        .objects
+                        .get(&counterpart_id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                    {
+                        return Some(TargetRef::Object(counterpart_id));
+                    } else {
+                        return None;
+                    }
+                }
+            }
+
             if let Some(event) = effective_event {
                 if let Some(obj_id) = extract_source_from_event(event) {
                     return Some(TargetRef::Object(obj_id));

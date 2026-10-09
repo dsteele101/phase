@@ -493,6 +493,7 @@ fn rewrite_resolved_ability(
         trigger_source: _,
         triggering_host: _,
         triggering_object: _,
+        triggering_counterpart: _,
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _,

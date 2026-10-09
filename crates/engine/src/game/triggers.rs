@@ -3041,6 +3041,14 @@ fn collect_matching_triggers_inner(
                 ) {
                     pending_ability.bind_triggering_object_recursive(Some(trig_obj));
                 }
+                if let Some(counterpart) = triggering_counterpart_from_trigger_event(
+                    state,
+                    Some(&trig_def.mode),
+                    Some(obj_id),
+                    Some(&trigger_event),
+                ) {
+                    pending_ability.bind_triggering_counterpart_recursive(Some(counterpart));
+                }
                 pending.push(MatchedTrigger {
                     trig_idx,
                     definition_ref: definition_ref.clone(),
@@ -8465,6 +8473,63 @@ pub(super) fn triggering_object_from_trigger_event(
     }
 }
 
+/// CR 509.3c + CR 509.3d + CR 400.7: Exact counterpart combatant (such as the blocker
+/// of an attacking creature, or the attacker of a blocking creature) captured
+/// when the trigger fired or is placed on the stack.
+pub(super) fn triggering_counterpart_from_trigger_event(
+    state: &GameState,
+    mode: Option<&TriggerMode>,
+    source_id: Option<ObjectId>,
+    trigger_event: Option<&GameEvent>,
+) -> Option<ObjectIncarnationRef> {
+    let event = trigger_event?;
+    let counterpart_id = match event {
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *attacker,
+            };
+            if subject == *attacker {
+                *blocker
+            } else {
+                *attacker
+            }
+        }
+        GameEvent::BlockersDeclared { assignments } => {
+            let (blocker, attacker) = assignments.first()?;
+            let subject = match mode {
+                Some(TriggerMode::Blocks) => *blocker,
+                Some(TriggerMode::BecomesBlocked) => *attacker,
+                Some(TriggerMode::BlocksOrBecomesBlocked) => {
+                    if source_id == Some(*blocker) {
+                        *blocker
+                    } else {
+                        *attacker
+                    }
+                }
+                _ => *blocker,
+            };
+            if subject == *blocker {
+                *attacker
+            } else {
+                *blocker
+            }
+        }
+        _ => return None,
+    };
+    state
+        .objects
+        .get(&counterpart_id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
 /// CR 603.3 + CR 603.3c + CR 603.3d: Push a pending trigger to the stack with
 /// its event batch keyed by entry id. Returns the new entry's `ObjectId` so
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
@@ -8758,6 +8823,15 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
             trigger_event.as_ref(),
         );
         ability.bind_triggering_object_recursive(trig_obj);
+    }
+    if ability.triggering_counterpart.is_none() {
+        let counterpart = triggering_counterpart_from_trigger_event(
+            state,
+            None,
+            Some(source_id),
+            trigger_event.as_ref(),
+        );
+        ability.bind_triggering_counterpart_recursive(counterpart);
     }
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(

@@ -250,6 +250,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         force_block_attacker: _,   // exact force-block referent, no dynamic read
         triggering_host: _,        // exact triggered-host authority, no dynamic read
         triggering_object: _,      // exact triggering-object referent, no dynamic read
+        triggering_counterpart: _, // exact counterpart combatant, no dynamic read
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no dynamic read
         illegal_target_slots: _,   // CR 608.2b resolution legality stamp, no dynamic read

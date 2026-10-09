@@ -160,6 +160,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         force_block_attacker: None,
         triggering_host: None,
         triggering_object: None,
+        triggering_counterpart: None,
         target_incarnations: Vec::new(),
         selected_target_incarnations: Vec::new(),
         illegal_target_slots: Vec::new(),

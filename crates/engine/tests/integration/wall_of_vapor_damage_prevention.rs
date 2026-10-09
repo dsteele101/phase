@@ -1356,3 +1356,344 @@ fn battle_scarred_goblin_removal_then_death_before_resolution_deals_no_damage() 
         "Blocker took 0 damage"
     );
 }
+
+#[test]
+fn baneclaw_marauder_simultaneous_combat_death_order_attacker_first() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Attacker added first, so it precedes blocker in battlefield ordering.
+    let marauder = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Baneclaw Marauder",
+            3,
+            4,
+            "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 5, 4).id();
+
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(marauder, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, marauder)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // BecomesBlocked trigger resolves: Blocker gets -1/-1 (is now 4/3).
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Advance to CombatDamage step
+    runner.pass_both_players();
+
+    // In combat damage:
+    // Marauder deals 3 damage to Blocker (lethal, toughness 3).
+    // Blocker deals 4 damage to Marauder (lethal, toughness 4).
+    // CR 704.3: Both die simultaneously to SBAs.
+    // Order in to_die is [marauder, blocker].
+    // Simultaneous combat snapshots ensure blocker's zone change records it was blocking Marauder.
+    assert_eq!(
+        runner.state().objects.get(&marauder).unwrap().zone,
+        Zone::Graveyard,
+        "Marauder died in combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker died in combat"
+    );
+
+    // CR 603.10a: Marauder's dies trigger triggered and is on stack.
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        19,
+        "P1 must lose 1 life when blocker dies simultaneously with Marauder (attacker-first delivery)"
+    );
+}
+
+#[test]
+fn baneclaw_marauder_simultaneous_combat_death_order_blocker_first() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Blocker added first, so it precedes attacker in battlefield ordering.
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 5, 4).id();
+    let marauder = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Baneclaw Marauder",
+            3,
+            4,
+            "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(marauder, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, marauder)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // BecomesBlocked trigger resolves: Blocker gets -1/-1 (is now 4/3).
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Advance to CombatDamage step
+    runner.pass_both_players();
+
+    assert_eq!(
+        runner.state().objects.get(&marauder).unwrap().zone,
+        Zone::Graveyard,
+        "Marauder died in combat"
+    );
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker died in combat"
+    );
+
+    // CR 603.10a: Marauder's dies trigger triggered and is on stack.
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        19,
+        "P1 must lose 1 life when blocker dies simultaneously with Marauder (blocker-first delivery)"
+    );
+}
+
+#[test]
+fn ib_halfheart_pre_resolution_blink_does_not_sacrifice_other_goblin() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ib = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Ib Halfheart, Goblin Tactician",
+            3,
+            2,
+            "Whenever another Goblin you control becomes blocked, sacrifice it. If you do, it deals 4 damage to each creature blocking it.",
+        )
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let goblin_a = scenario
+        .add_creature(P0, "Goblin Raider", 2, 2)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let goblin_b = scenario
+        .add_creature(P0, "Goblin Piker", 2, 1)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let blocker = scenario.add_creature(P1, "Wall of Wood", 0, 3).id();
+
+    let mut runner = scenario.build();
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(goblin_a, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Goblin A
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, goblin_a)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Trigger watching Goblin A is now on stack. Blink Goblin A (new incarnation).
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), goblin_a, Zone::Exile, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), goblin_a, Zone::Battlefield, &mut events);
+
+    // Drain stack: BecomesBlocked trigger resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 400.7 + CR 608.2c: Goblin A was not sacrificed because its incarnation changed.
+    assert_eq!(
+        runner.state().objects.get(&goblin_a).unwrap().zone,
+        Zone::Battlefield,
+        "Blinked Goblin A must remain on battlefield"
+    );
+    // Goblin B must NOT be sacrificed either (TriggeringSource hard no-op, no fallback to other permanents)
+    assert_eq!(
+        runner.state().objects.get(&goblin_b).unwrap().zone,
+        Zone::Battlefield,
+        "Unrelated Goblin B must NOT be sacrificed"
+    );
+    // Ib remains on battlefield
+    assert_eq!(
+        runner.state().objects.get(&ib).unwrap().zone,
+        Zone::Battlefield,
+        "Ib Halfheart remains on battlefield"
+    );
+    // Blocker took 0 damage
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().damage_marked,
+        0,
+        "Blocker took 0 damage"
+    );
+}
+
+#[test]
+fn ashmouth_hound_pre_resolution_blink_counterpart_deals_no_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let hound = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Ashmouth Hound",
+            2,
+            1,
+            "Whenever this creature blocks or becomes blocked by a creature, this creature deals 1 damage to that creature.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Gunk Beetle", 1, 1).id();
+
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(hound, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, hound)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Trigger is on stack with blocker as counterpart. Blink blocker before resolution.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), blocker, Zone::Exile, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), blocker, Zone::Battlefield, &mut events);
+
+    // Drain stack: Hound trigger resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 400.7: Blocker is a new object, not the triggering counterpart. Takes 0 damage.
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blinked blocker remains on battlefield"
+    );
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().damage_marked,
+        0,
+        "Blinked blocker took no damage from Ashmouth Hound trigger"
+    );
+}
+
+#[test]
+fn trailblazers_torch_departed_equipped_creature_deals_damage_via_lki() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    let torch = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Trailblazer's Torch",
+            "Whenever equipped creature becomes blocked, it deals 2 damage to each creature blocking it.",
+        )
+        .with_subtypes(vec!["Equipment"])
+        .id();
+
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+
+    // Attach Torch to attacker
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&torch)
+        .unwrap()
+        .attached_to = Some(engine::game::game_object::AttachTarget::Object(attacker));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .attachments
+        .push(torch);
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), torch);
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Torch trigger is on stack. Destroy attacker before trigger resolves.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), attacker, Zone::Graveyard, &mut events);
+
+    // Drain stack: Torch trigger resolves.
+    // CR 113.7a + CR 608.2h: Departed equipped creature deals 2 damage via LKI.
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker must be destroyed by 2 damage from departed equipped creature via LKI"
+    );
+}

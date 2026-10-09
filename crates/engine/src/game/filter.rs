@@ -7168,36 +7168,6 @@ fn pre_departure_combat_status<'a>(
     None
 }
 
-fn is_ltb_source(source: &SourceContext<'_>) -> bool {
-    use crate::types::triggers::TriggerMode;
-    let trig_source = source
-        .trigger_source
-        .or_else(|| source.ability.and_then(|a| a.trigger_source.as_ref()));
-    if let Some(ts) = trig_source {
-        if let Some(trig_ref) = source
-            .ability
-            .and_then(|a| a.trigger_definition_ref.as_ref())
-        {
-            return ts.trigger_entries.iter().any(|entry| {
-                entry.occurrence == trig_ref.occurrence
-                    && entry.definition.mode == TriggerMode::ChangesZone
-                    && (entry.definition.origin == Some(Zone::Battlefield)
-                        || entry.definition.destination == Some(Zone::Graveyard))
-            });
-        }
-        if !ts.trigger_entries.is_empty()
-            && ts.trigger_entries.iter().all(|entry| {
-                entry.definition.mode == TriggerMode::ChangesZone
-                    && (entry.definition.origin == Some(Zone::Battlefield)
-                        || entry.definition.destination == Some(Zone::Graveyard))
-            })
-        {
-            return true;
-        }
-    }
-    false
-}
-
 fn matches_combat_relation(
     state: &GameState,
     object_id: ObjectId,
@@ -7220,11 +7190,9 @@ fn matches_combat_relation(
 
             // CR 113.7a + CR 608.2h: If the subject (or candidate) has left the expected
             // zone (Zone::Battlefield), its last known information is used during resolution.
-            // Only active during ability resolution (CR 608.2h) for non-LTB abilities (since
-            // leaves-the-battlefield / dies triggers look back via Historical).
+            // Only active during ability resolution (CR 608.2h).
             let is_resolving = state.resolving_stack_entry.is_some();
-            let is_ltb_trigger = is_ltb_source(source);
-            if !is_resolving || is_ltb_trigger {
+            if !is_resolving {
                 return false;
             }
 

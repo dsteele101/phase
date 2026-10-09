@@ -342,10 +342,14 @@ pub fn resolve(
                     vec![]
                 }
             } else if let Some(host_ref) = ability.triggering_host {
-                if state.objects.get(&host_ref.object_id).is_some_and(|obj| {
-                    obj.zone == Zone::Battlefield && host_ref.incarnation == obj.incarnation
-                }) {
+                if host_ref.is_current(state) {
                     vec![host_ref.object_id]
+                } else {
+                    vec![]
+                }
+            } else if let Some(counterpart_pin) = ability.triggering_counterpart {
+                if counterpart_pin.is_current(state) {
+                    vec![counterpart_pin.object_id]
                 } else {
                     vec![]
                 }
@@ -401,6 +405,19 @@ pub fn resolve(
         return Ok(completed_result(0));
     }
 
+    // CR 400.7 + CR 608.2c: An untargeted TriggeringSource anaphor ("sacrifice it")
+    // names a specific triggering object. If that referent departed or is stale,
+    // the instruction has no valid target — resolve as a hard no-op rather than
+    // falling through to the untargeted pool.
+    if matches!(filter, TargetFilter::TriggeringSource) && targeted_objects.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
+
     // CR 701.21a: "To sacrifice a permanent, its controller moves it from the
     // battlefield directly to its owner's graveyard." Sacrifice is
     // unconditionally battlefield-only — this module never inspects `InZone`,
@@ -448,6 +465,7 @@ pub fn resolve(
         TargetFilter::ParentTarget
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::CostPaidObject
+            | TargetFilter::TriggeringSource
     ) {
         targeted_objects.retain(|id| {
             state

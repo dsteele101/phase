@@ -33486,6 +33486,11 @@ pub struct ResolvedAbility {
     /// became blocked) bound when the trigger fired / was placed on the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggering_object: Option<TriggeringObjectRef>,
+    /// CR 509.3c + CR 509.3d + CR 400.7: Exact counterpart combatant (such as the blocker
+    /// of an attacking creature, or the attacker of a blocking creature) bound when a
+    /// combatant trigger fired / was placed on the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_counterpart: Option<ObjectIncarnationRef>,
     /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
     /// `targets`, captured when a delayed triggered ability snapshotted its
     /// `ParentTarget` referent at creation. A delayed ability that refers to a
@@ -33929,6 +33934,7 @@ impl PartialEq for ResolvedAbility {
             force_block_attacker: a_force_block_attacker,
             triggering_host: a_triggering_host,
             triggering_object: a_triggering_object,
+            triggering_counterpart: a_triggering_counterpart,
             target_incarnations: a_target_incarnations,
             selected_target_incarnations: a_selected_target_incarnations,
             activation_cost_reduction: a_activation_cost_reduction,
@@ -34002,6 +34008,7 @@ impl PartialEq for ResolvedAbility {
             force_block_attacker: b_force_block_attacker,
             triggering_host: b_triggering_host,
             triggering_object: b_triggering_object,
+            triggering_counterpart: b_triggering_counterpart,
             target_incarnations: b_target_incarnations,
             selected_target_incarnations: b_selected_target_incarnations,
             activation_cost_reduction: b_activation_cost_reduction,
@@ -34075,6 +34082,7 @@ impl PartialEq for ResolvedAbility {
             && a_force_block_attacker == b_force_block_attacker
             && a_triggering_host == b_triggering_host
             && a_triggering_object == b_triggering_object
+            && a_triggering_counterpart == b_triggering_counterpart
             && a_target_incarnations == b_target_incarnations
             && a_selected_target_incarnations == b_selected_target_incarnations
             && a_activation_cost_reduction == b_activation_cost_reduction
@@ -34483,6 +34491,7 @@ impl ResolvedAbility {
             force_block_attacker: None,
             triggering_host: None,
             triggering_object: None,
+            triggering_counterpart: None,
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             activation_cost_reduction: None,
@@ -34766,6 +34775,21 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 509.3c + CR 509.3d + CR 400.7: Recursively binds the exact counterpart combatant
+    /// (such as the blocker of an attacking creature, or the attacker of a blocking creature).
+    pub fn bind_triggering_counterpart_recursive(
+        &mut self,
+        triggering_counterpart: Option<ObjectIncarnationRef>,
+    ) {
+        self.triggering_counterpart = triggering_counterpart;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_counterpart_recursive(triggering_counterpart);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_counterpart_recursive(triggering_counterpart);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
@@ -34778,6 +34802,7 @@ impl ResolvedAbility {
         self.force_block_attacker = None;
         self.triggering_host = None;
         self.triggering_object = None;
+        self.triggering_counterpart = None;
         // CR 104.4b: the pin names an advancing incarnation of the triggering
         // spell (CR 400.7), so it is cleared alongside the other per-instance
         // identity fields above for the same loop-equality reason.

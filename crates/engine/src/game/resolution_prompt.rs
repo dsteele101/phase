@@ -596,6 +596,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         force_block_attacker: _, // exact force-block referent, no choice
         triggering_host: _, // exact triggering host, no choice
         triggering_object: _, // exact triggering object, no choice
+        triggering_counterpart: _, // exact counterpart combatant, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
         selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice

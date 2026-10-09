@@ -2246,6 +2246,13 @@ pub(crate) fn capture_combat_status(
     state: &GameState,
     object_id: ObjectId,
 ) -> ZoneChangeCombatStatus {
+    // CR 704.3 + CR 603.10a: If a pre-delivery simultaneous snapshot was captured,
+    // use it so sequential deliveries within the same simultaneous batch do not
+    // see earlier-delivered objects pruned from combat.
+    if let Some(snapshot) = state.simultaneous_combat_snapshots.get(&object_id) {
+        return snapshot.clone();
+    }
+
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
     };
