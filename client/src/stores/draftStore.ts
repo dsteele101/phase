@@ -792,6 +792,9 @@ let llmRound: {
  * round, and the pick takes the ordinary engine-bot path.
  */
 function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | null> {
+  // Not remembered while drafting is off, so switching it on mid-step starts
+  // this step's round when the player picks.
+  if (!useLlmStore.getState().draftEnabled) return Promise.resolve(null);
   if (llmRound && llmRound.view === view && llmRound.lifecycle === lifecycleGeneration) {
     return llmRound.round;
   }
@@ -799,7 +802,6 @@ function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | nul
   const isCurrent = (): boolean =>
     lifecycle === lifecycleGeneration && useDraftStore.getState().view === view;
   const round = (async (): Promise<LlmDraftRound | null> => {
-    if (!useLlmStore.getState().draftEnabled) return null;
     const catalog = await loadProviderCatalog();
     if (!isCurrent()) return null;
     const profile = draftProfile(useLlmStore.getState(), catalog);

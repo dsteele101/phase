@@ -432,6 +432,20 @@ describe("LLM picks start when the pack opens", () => {
     expect(useDraftStore.getState().awaitingDrafters).toBe(false);
   });
 
+  it("starts the round at the pick when drafting is switched on after the pack opened", async () => {
+    useLlmStore.getState().setDraftEnabled(false);
+    await openPack();
+    useLlmStore.getState().setDraftEnabled(true);
+    transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
+    wasm.submitPickWithLlmBotPicks.mockReturnValue({
+      view: view([card("a")]), llmOutcomes: [{ seat: 1, used: true }],
+    });
+
+    expect(await useDraftStore.getState().pickCard("a")).toEqual({ status: "acknowledged" });
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(1);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
+  });
+
   it("does not start a round for a pack when LLM drafting is off", async () => {
     useLlmStore.getState().setDraftEnabled(false);
     await openPack();

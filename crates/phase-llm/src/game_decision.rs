@@ -1194,8 +1194,53 @@ mod tests {
             build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
         let user = &request.prompt.user;
         assert!(user.contains("Sol Ring (Artifact): 2 mana, {C}"), "{user}");
-        assert!(user.contains("up to 3 more mana this turn"), "{user}");
+        assert!(user.contains("up to 3 more mana available now"), "{user}");
         assert!(user.contains("Three Drop — Cast Spell"), "{user}");
+    }
+
+    /// When a seat pays mana by hand, the engine offers each mana source's
+    /// activation as an option. An artifact's option reads as that artifact,
+    /// so the model can tell its Sol Ring from its lands.
+    #[test]
+    fn a_mana_artifacts_activation_option_leads_with_its_name() {
+        use crate::test_support::mana_rock_ability;
+        use engine::game::mana_sources::activatable_mana_source_selections;
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::ManaColor;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Red);
+        scenario
+            .add_creature(PlayerId(0), "Sol Ring", 0, 0)
+            .as_artifact()
+            .with_ability_definition(mana_rock_ability(2));
+        let runner = scenario.build();
+        let state = runner.state();
+
+        let mut actions: Vec<GameAction> = activatable_mana_source_selections(state, PlayerId(0))
+            .into_iter()
+            .map(|selection| GameAction::ActivateManaSource { selection })
+            .collect();
+        assert_eq!(
+            actions.len(),
+            2,
+            "the land and the artifact are both sources"
+        );
+        actions.push(GameAction::PassPriority);
+        let lines = option_lines(state, &contract(actions));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Sol Ring — Activate Mana Source")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Mountain — Activate Mana Source")),
+            "{lines:?}"
+        );
     }
 
     #[test]

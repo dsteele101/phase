@@ -74,7 +74,7 @@ pub fn render_board(
     push_battlefield(&mut out, state, viewer, db, options);
     push_hand(&mut out, state, viewer, db, options);
     push_available_mana(&mut out, state, viewer);
-    push_known_opponent_hands(&mut out, state, viewer);
+    push_known_other_hands(&mut out, state, viewer);
     push_graveyards(&mut out, state, viewer);
     push_exile(&mut out, state, viewer);
     push_history(&mut out, history, TurnCycle::of(state), options.history);
@@ -334,7 +334,9 @@ fn push_available_mana(out: &mut String, state: &GameState, viewer: PlayerId) {
             continue;
         };
         let produced: BTreeSet<ManaType> = options.iter().map(|option| option.mana_type).collect();
-        let amount = mana_sources::max_mana_yield(state, *id, viewer).max(1);
+        // The engine's net figure: a source whose activation costs as much
+        // mana as it makes adds nothing, and is not counted as if it did.
+        let amount = mana_sources::max_mana_yield(state, *id, viewer);
         total = total.saturating_add(amount);
         // Core types only: "Artifact" is the fact that matters here, and the
         // full type line is already on the battlefield entry above.
@@ -367,7 +369,7 @@ fn push_available_mana(out: &mut String, state: &GameState, viewer: PlayerId) {
         return;
     }
     out.push_str(&format!(
-        "Untapped mana sources: up to {total} more mana this turn\n"
+        "Untapped mana sources (up to {total} more mana available now):\n"
     ));
     for line in grouped_lines(sources) {
         out.push_str(&format!("  - {line}\n"));
@@ -394,9 +396,10 @@ fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
 /// CR 400.2 + CR 402.3: a hand is a hidden zone; another player's cards are
 /// normally visible only as a count. The viewer-filtered state the board is
 /// rendered from has already redacted every card this seat may not identify
-/// (`hide_card` turns it face down and strips its name), so any opponent hand
-/// card still face up here is one the engine says this seat knows.
-fn push_known_opponent_hands(out: &mut String, state: &GameState, viewer: PlayerId) {
+/// (`hide_card` turns it face down and strips its name), so any card in another
+/// player's hand still face up here is one the engine says this seat knows — a
+/// revealed card, or a teammate's hand where the format shares it.
+fn push_known_other_hands(out: &mut String, state: &GameState, viewer: PlayerId) {
     let mut lines: Vec<String> = Vec::new();
     for player in state.players.iter().filter(|player| player.id != viewer) {
         let known: Vec<String> = player
@@ -732,7 +735,7 @@ mod tests {
             "{board}"
         );
         assert!(board.contains("Forest (Land): 1 mana, {G} ×2"), "{board}");
-        assert!(board.contains("up to 4 more mana this turn"), "{board}");
+        assert!(board.contains("up to 4 more mana available now"), "{board}");
 
         // Another seat is never shown this seat's sources as its own.
         let other = rendered(runner.state(), PlayerId(1));

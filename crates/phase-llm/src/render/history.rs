@@ -57,10 +57,10 @@ const TURN_SUMMARY_BUDGET: usize = 360;
 
 /// How a game's turns group into cycles.
 ///
-/// CR 500.1 + CR 102.1: a turn belongs to one player, and play passes around
-/// the table, so one turn per living seat is the smallest span in which every
-/// player has acted. The engine's `turn_number` counts every turn (extra turns
-/// included), so cycles are fixed-width windows over it. An extra turn or an
+/// CR 102.1 + CR 103.1: a turn belongs to its active player, and turns proceed
+/// around the table in turn order, so one turn per living seat is the smallest
+/// span in which every player has acted. The engine's `turn_number` counts
+/// every turn (extra turns included), so cycles are fixed-width windows over it. An extra turn or an
 /// elimination shifts where later windows fall; that changes only how history
 /// is grouped, never what the position says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +354,9 @@ mod tests {
     #[test]
     fn detail_entries_never_reach_the_prompt() {
         let out = render(&game(6), two_seats(6), BUDGET);
+        // Reach guard: the same turns' essential and context events are here.
+        assert!(out.contains("cast on 6"), "{out}");
+        assert!(out.contains("target on 6"), "{out}");
         assert!(!out.contains("untap on"), "{out}");
     }
 
