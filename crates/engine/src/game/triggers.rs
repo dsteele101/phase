@@ -13,7 +13,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
     TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
-    TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    TriggerGrantProducerKey, TriggeringSemanticRole, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -3049,6 +3049,14 @@ fn collect_matching_triggers_inner(
                 ) {
                     pending_ability.bind_triggering_counterpart_recursive(Some(counterpart));
                 }
+                let role = determine_triggering_role(
+                    state,
+                    Some(&trig_def.mode),
+                    obj_id,
+                    &pending_ability,
+                    Some(trig_def),
+                );
+                pending_ability.bind_triggering_role_recursive(Some(role));
                 pending.push(MatchedTrigger {
                     trig_idx,
                     definition_ref: definition_ref.clone(),
@@ -8403,6 +8411,67 @@ pub(super) fn triggering_host_from_source(
         .map(ObjectIncarnationRef::from_object)
 }
 
+/// CR 608.2c: Determines the semantic role for `TargetFilter::TriggeringSource`
+/// resolution so that watched subjects, attached hosts, and combat counterparts
+/// are chosen by role rather than ambiguous source-id equality.
+pub(super) fn determine_triggering_role(
+    state: &GameState,
+    mode: Option<&TriggerMode>,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    trig_def: Option<&TriggerDefinition>,
+) -> TriggeringSemanticRole {
+    if ability.triggering_host.is_some() {
+        if let Some(def) = trig_def {
+            if def.valid_card.as_ref().is_some_and(|f| {
+                matches!(f, TargetFilter::AttachedTo)
+                    || matches!(f, TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(p, FilterProp::EnchantedBy)))
+            }) {
+                return TriggeringSemanticRole::Host;
+            }
+        }
+        if state
+            .objects
+            .get(&source_id)
+            .is_some_and(|o| o.attached_to.is_some())
+        {
+            return TriggeringSemanticRole::Host;
+        }
+    }
+    if ability.triggering_counterpart.is_some() {
+        let is_combat_mode = mode.is_none_or(|m| {
+            matches!(
+                m,
+                TriggerMode::BlocksOrBecomesBlocked
+                    | TriggerMode::Blocks
+                    | TriggerMode::BecomesBlocked
+            )
+        });
+        if is_combat_mode {
+            let is_offensive_effect = match &ability.effect {
+                Effect::DealDamage { .. }
+                | Effect::Destroy { .. }
+                | Effect::SetTapState {
+                    state: crate::types::ability::TapStateChange::Tap,
+                    ..
+                } => true,
+                Effect::PutCounter { counter_type, .. } => {
+                    matches!(
+                        counter_type,
+                        crate::types::counter::CounterType::Minus1Minus1
+                    )
+                }
+                _ => false,
+            };
+            let has_valid_target = trig_def.is_some_and(|def| def.valid_target.is_some());
+            if is_offensive_effect || has_valid_target {
+                return TriggeringSemanticRole::Counterpart;
+            }
+        }
+    }
+    TriggeringSemanticRole::Subject
+}
+
 /// CR 509.3c + CR 509.3d + CR 608.2c: Resolves the oriented triggering object (such as the watched attacker
 /// that became blocked in a `BecomesBlocked` trigger, or the watched blocker in a `Blocks` trigger)
 /// when the trigger fired or is placed on the stack.
@@ -8429,11 +8498,13 @@ pub(super) fn triggering_object_from_trigger_event(
             Some(TriggeringObjectRef {
                 object_id: subject,
                 incarnation: state.objects.get(&subject).map(|o| o.incarnation),
+                expected_zone: Some(Zone::Battlefield),
             })
         }
         GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(TriggeringObjectRef {
             object_id: *attacker,
             incarnation: state.objects.get(attacker).map(|o| o.incarnation),
+            expected_zone: Some(Zone::Battlefield),
         }),
         GameEvent::BlockersDeclared { assignments } => {
             let (blocker, attacker) = assignments.first()?;
@@ -8452,21 +8523,32 @@ pub(super) fn triggering_object_from_trigger_event(
             Some(TriggeringObjectRef {
                 object_id: subject,
                 incarnation: state.objects.get(&subject).map(|o| o.incarnation),
+                expected_zone: Some(Zone::Battlefield),
             })
         }
         GameEvent::ZoneChanged {
-            object_id, record, ..
+            object_id,
+            record,
+            to,
+            ..
         } => {
-            let incarnation = if record.to_zone == Zone::Battlefield {
-                record.entered_incarnation
+            let (incarnation, expected_zone) = if to.is_public() {
+                (
+                    zone_change_parent_target_pin(event).map(|p| p.incarnation),
+                    Some(*to),
+                )
             } else {
-                record
-                    .trigger_source_context()
-                    .map(|s| s.identity.reference.incarnation)
+                (
+                    record
+                        .trigger_source_context()
+                        .map(|s| s.identity.reference.incarnation),
+                    None,
+                )
             };
             Some(TriggeringObjectRef {
                 object_id: *object_id,
                 incarnation,
+                expected_zone,
             })
         }
         _ => None,
@@ -8832,6 +8914,10 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
             trigger_event.as_ref(),
         );
         ability.bind_triggering_counterpart_recursive(counterpart);
+    }
+    if ability.triggering_role.is_none() {
+        let role = determine_triggering_role(state, None, source_id, &ability, None);
+        ability.bind_triggering_role_recursive(Some(role));
     }
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(

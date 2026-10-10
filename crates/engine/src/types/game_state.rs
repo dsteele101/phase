@@ -1863,6 +1863,9 @@ pub struct ZoneChangeCombatStatus {
     /// CR 509.1h + CR 400.7: Blockers assigned to this creature immediately prior to leaving combat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by_creatures: Vec<ObjectIncarnationRef>,
+    /// CR 400.7: Incarnation of the object when this combat status was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
 }
 
 /// CR 508.1a: Snapshot of a creature's public characteristics when it was

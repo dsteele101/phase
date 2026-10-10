@@ -1697,3 +1697,216 @@ fn trailblazers_torch_departed_equipped_creature_deals_damage_via_lki() {
         "Blocker must be destroyed by 2 damage from departed equipped creature via LKI"
     );
 }
+
+#[test]
+fn simultaneous_combat_sacrifice_preserves_combat_status_both_orders() {
+    for attacker_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let marauder = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Baneclaw Marauder",
+                3,
+                4,
+                "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+            )
+            .id();
+        let blocker = scenario.add_creature(P1, "Grizzly Bears", 5, 4).id();
+
+        let edict = scenario
+            .add_spell_to_hand_from_oracle(
+                if attacker_first { P0 } else { P1 },
+                "Simultaneous Sacrifice",
+                true,
+                "Each player sacrifices a creature of their choice.",
+            )
+            .with_mana_cost(engine::types::mana::ManaCost::Cost {
+                shards: vec![],
+                generic: 0,
+            })
+            .id();
+
+        let mut runner = scenario.build();
+
+        // Advance to DeclareAttackers
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(marauder, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("DeclareAttackers should succeed");
+
+        // Blocker blocks Marauder
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: vec![(blocker, marauder)],
+            })
+            .expect("DeclareBlockers should succeed");
+
+        // Drain stack: BecomesBlocked trigger resolves
+        while !runner.state().stack.is_empty() {
+            runner.pass_both_players();
+        }
+
+        // Set APNAP order: if attacker_first, active_player is P0; if blocker_first, active_player is P1.
+        if !attacker_first {
+            runner.state_mut().active_player = P1;
+            runner.state_mut().priority_player = P1;
+            runner.state_mut().waiting_for =
+                engine::types::game_state::WaitingFor::Priority { player: P1 };
+        }
+
+        // Cast the simultaneous sacrifice edict during combat
+        runner.cast(edict).resolve();
+
+        // Both creatures must be in the graveyard
+        assert_eq!(
+            runner.state().objects.get(&marauder).unwrap().zone,
+            Zone::Graveyard,
+            "Marauder must be sacrificed to graveyard"
+        );
+        assert_eq!(
+            runner.state().objects.get(&blocker).unwrap().zone,
+            Zone::Graveyard,
+            "Blocker must be sacrificed to graveyard"
+        );
+
+        // Resolve Marauder dies trigger from stack
+        while !runner.state().stack.is_empty() {
+            runner.pass_both_players();
+        }
+
+        // CR 101.4 + CR 603.10a: Marauder trigger must trigger in both delivery orders, causing P1 to lose 1 life.
+        assert_eq!(
+            runner.state().players[P1.0 as usize].life,
+            19,
+            "P1 must lose 1 life when blocker dies simultaneously with Marauder (attacker_first = {})",
+            attacker_first
+        );
+    }
+}
+
+#[test]
+fn baneclaw_marauder_regeneration_survivor_sacrifice_later_no_trigger() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let marauder = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Baneclaw Marauder",
+            3,
+            4,
+            "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        )
+        .id();
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let edict = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Diabolic Edict",
+            true,
+            "Target player sacrifices a creature of their choice.",
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Install a regeneration shield on the blocker
+    let shield = engine::types::ability::ReplacementDefinition::new(
+        engine::types::replacements::ReplacementEvent::Destroy,
+    )
+    .valid_card(engine::types::ability::TargetFilter::SelfRef)
+    .description("Regenerate".to_string())
+    .regeneration_shield();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&blocker)
+        .expect("blocker must exist")
+        .replacement_definitions
+        .push(shield);
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(marauder, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks Marauder
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, marauder)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Drain stack: BecomesBlocked trigger resolves (-1/-1 to blocker, is now 1/1)
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Advance to CombatDamage step: Marauder deals 3 lethal damage to blocker.
+    // Blocker's regeneration shield is consumed (CR 701.19a): damage removed, tapped,
+    // and removed from combat (CR 506.4).
+    runner.pass_both_players();
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Battlefield,
+        "Blocker survived combat via regeneration shield"
+    );
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().damage_marked,
+        0,
+        "Regeneration shield removed all damage"
+    );
+    assert!(
+        runner.state().objects.get(&blocker).unwrap().tapped,
+        "Regeneration tapped the creature"
+    );
+
+    // Advance to PostCombatMain phase
+    runner.advance_to_phase(Phase::PostCombatMain);
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "Must be in PostCombatMain"
+    );
+
+    // Now in PostCombatMain, P0 casts Diabolic Edict targeting P1.
+    // P1 must sacrifice their only creature (blocker).
+    runner.cast(edict).target_player(P1).resolve();
+
+    assert_eq!(
+        runner.state().objects.get(&blocker).unwrap().zone,
+        Zone::Graveyard,
+        "Blocker was sacrificed to graveyard"
+    );
+
+    // Drain stack
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // CR 506.4 + CR 603.10a: Blocker was removed from combat when it regenerated.
+    // When it died later in PostCombatMain, it was NOT blocking Marauder.
+    // Marauder dies trigger must NOT fire. P1's life remains 20.
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        20,
+        "P1 must not lose life from Marauder trigger because the blocker was removed from combat upon regenerating"
+    );
+}

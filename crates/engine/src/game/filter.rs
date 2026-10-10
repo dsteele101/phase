@@ -18071,6 +18071,7 @@ mod tests {
                 defending_player: Some(PlayerId(0)),
                 blocking_creatures: Vec::new(),
                 blocked_by_creatures: Vec::new(),
+                ..Default::default()
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -18084,6 +18085,7 @@ mod tests {
                 defending_player: None,
                 blocking_creatures: Vec::new(),
                 blocked_by_creatures: Vec::new(),
+                ..Default::default()
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
         };
@@ -18157,6 +18159,7 @@ mod tests {
                 defending_player: Some(PlayerId(0)),
                 blocking_creatures: Vec::new(),
                 blocked_by_creatures: Vec::new(),
+                ..Default::default()
             },
             ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
         };

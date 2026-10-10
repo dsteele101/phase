@@ -161,6 +161,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         triggering_host: None,
         triggering_object: None,
         triggering_counterpart: None,
+        triggering_role: None,
         target_incarnations: Vec::new(),
         selected_target_incarnations: Vec::new(),
         illegal_target_slots: Vec::new(),

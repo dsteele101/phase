@@ -33435,6 +33435,20 @@ impl AttachTargetBindings {
     }
 }
 
+/// CR 608.2c: Semantic role for anaphoric referents (`TargetFilter::TriggeringSource`)
+/// in triggered abilities. Distinguishes whether the ability addresses the watched subject
+/// (e.g. creature that attacked/blocked/died), the attached host (Aura/Equipment host),
+/// or the combat counterpart (the creature blocking or blocked by this creature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggeringSemanticRole {
+    /// The subject object that performed the triggering action (e.g. attacked, blocked, died, entered).
+    Subject,
+    /// The combat counterpart (e.g. the creature blocking or blocked by this creature).
+    Counterpart,
+    /// The attached host permanent (e.g. enchanted/equipped creature).
+    Host,
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedAbility {
@@ -33491,6 +33505,10 @@ pub struct ResolvedAbility {
     /// combatant trigger fired / was placed on the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggering_counterpart: Option<ObjectIncarnationRef>,
+    /// CR 608.2c: Typed semantic role disambiguating whether `TargetFilter::TriggeringSource`
+    /// refers to the triggering subject, the attached host, or the combat counterpart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_role: Option<TriggeringSemanticRole>,
     /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
     /// `targets`, captured when a delayed triggered ability snapshotted its
     /// `ParentTarget` referent at creation. A delayed ability that refers to a
@@ -33935,6 +33953,7 @@ impl PartialEq for ResolvedAbility {
             triggering_host: a_triggering_host,
             triggering_object: a_triggering_object,
             triggering_counterpart: a_triggering_counterpart,
+            triggering_role: a_triggering_role,
             target_incarnations: a_target_incarnations,
             selected_target_incarnations: a_selected_target_incarnations,
             activation_cost_reduction: a_activation_cost_reduction,
@@ -34009,6 +34028,7 @@ impl PartialEq for ResolvedAbility {
             triggering_host: b_triggering_host,
             triggering_object: b_triggering_object,
             triggering_counterpart: b_triggering_counterpart,
+            triggering_role: b_triggering_role,
             target_incarnations: b_target_incarnations,
             selected_target_incarnations: b_selected_target_incarnations,
             activation_cost_reduction: b_activation_cost_reduction,
@@ -34083,6 +34103,7 @@ impl PartialEq for ResolvedAbility {
             && a_triggering_host == b_triggering_host
             && a_triggering_object == b_triggering_object
             && a_triggering_counterpart == b_triggering_counterpart
+            && a_triggering_role == b_triggering_role
             && a_target_incarnations == b_target_incarnations
             && a_selected_target_incarnations == b_selected_target_incarnations
             && a_activation_cost_reduction == b_activation_cost_reduction
@@ -34492,6 +34513,7 @@ impl ResolvedAbility {
             triggering_host: None,
             triggering_object: None,
             triggering_counterpart: None,
+            triggering_role: None,
             target_incarnations: Vec::new(),
             selected_target_incarnations: Vec::new(),
             activation_cost_reduction: None,
@@ -34790,6 +34812,17 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c: Recursively binds the semantic role for anaphoric referents.
+    pub fn bind_triggering_role_recursive(&mut self, role: Option<TriggeringSemanticRole>) {
+        self.triggering_role = role;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_triggering_role_recursive(role);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_triggering_role_recursive(role);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
@@ -34803,6 +34836,7 @@ impl ResolvedAbility {
         self.triggering_host = None;
         self.triggering_object = None;
         self.triggering_counterpart = None;
+        self.triggering_role = None;
         // CR 104.4b: the pin names an advancing incarnation of the triggering
         // spell (CR 400.7), so it is cleared alongside the other per-instance
         // identity fields above for the same loop-equality reason.

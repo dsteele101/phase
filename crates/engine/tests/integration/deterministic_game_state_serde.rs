@@ -21,7 +21,7 @@ use engine::types::game_state::{
     PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind,
     StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
-    WaitingFor,
+    WaitingFor, ZoneChangeCombatStatus,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -136,6 +136,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_bearer", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::dungeon_progress", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::planar_die_actions_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::simultaneous_combat_snapshots", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::blocker_assignments", map_key_types: &["ObjectId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::blocker_to_attacker", map_key_types: &["ObjectId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/game/combat.rs::CombatState::attacked_defenders_this_combat", map_key_types: &["PlayerId"], group: RoundTripGroup::CombatState, numeric_deserializer: None },
@@ -303,6 +304,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "ring_bearer",
         "dungeon_progress",
         "planar_die_actions_this_turn",
+        "simultaneous_combat_snapshots",
     ] {
         add_spec(
             &mut specs,
@@ -1208,7 +1210,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        56,
+        57,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1825,6 +1827,36 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         ),
     ]);
     state.planar_die_actions_this_turn = HashMap::from([(PlayerId(0), 1), (PlayerId(1), 2)]);
+    state.simultaneous_combat_snapshots = HashMap::from([
+        (
+            ObjectId(1),
+            ZoneChangeCombatStatus {
+                attacking: true,
+                blocking: false,
+                blocked: false,
+                attacking_alone: false,
+                blocking_alone: false,
+                defending_player: Some(PlayerId(1)),
+                blocking_creatures: Vec::new(),
+                blocked_by_creatures: Vec::new(),
+                incarnation: Some(1),
+            },
+        ),
+        (
+            ObjectId(2),
+            ZoneChangeCombatStatus {
+                attacking: false,
+                blocking: true,
+                blocked: false,
+                attacking_alone: false,
+                blocking_alone: false,
+                defending_player: None,
+                blocking_creatures: Vec::new(),
+                blocked_by_creatures: Vec::new(),
+                incarnation: Some(2),
+            },
+        ),
+    ]);
 
     state
 }
@@ -1883,10 +1915,11 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "ring_bearer",
         "dungeon_progress",
         "planar_die_actions_this_turn",
+        "simultaneous_combat_snapshots",
     ];
     assert_eq!(
         direct_fields.len(),
-        43,
+        44,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {

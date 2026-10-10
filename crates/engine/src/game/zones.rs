@@ -2250,7 +2250,11 @@ pub(crate) fn capture_combat_status(
     // use it so sequential deliveries within the same simultaneous batch do not
     // see earlier-delivered objects pruned from combat.
     if let Some(snapshot) = state.simultaneous_combat_snapshots.get(&object_id) {
-        return snapshot.clone();
+        if snapshot.incarnation.is_none()
+            || state.objects.get(&object_id).map(|o| o.incarnation) == snapshot.incarnation
+        {
+            return snapshot.clone();
+        }
     }
 
     let Some(combat) = &state.combat else {
@@ -2260,6 +2264,8 @@ pub(crate) fn capture_combat_status(
         .attackers
         .iter()
         .find(|attacker| attacker.object_id == object_id);
+
+    let incarnation = state.objects.get(&object_id).map(|o| o.incarnation);
 
     ZoneChangeCombatStatus {
         attacking: attacker.is_some(),
@@ -2293,6 +2299,7 @@ pub(crate) fn capture_combat_status(
                     .collect()
             })
             .unwrap_or_default(),
+        incarnation,
     }
 }
 

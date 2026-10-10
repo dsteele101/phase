@@ -120,6 +120,11 @@ pub fn remove_object_from_combat(state: &mut GameState, oid: crate::types::ident
 
     let attacker_removed = crate::game::combat::prune_object_from_combat(state, oid);
 
+    // CR 701.19a + CR 506.4: An object removed from combat is no longer in combat;
+    // purge any simultaneous combat snapshot so subsequent zone changes do not read
+    // stale combat membership.
+    state.simultaneous_combat_snapshots.remove(&oid);
+
     // CR 506.4 + CR 613.1f: a creature removed from combat stops being attacking,
     // so a granted "while attacking" keyword (deathtouch/lifelink via
     // FilterProp::Attacking { defender: None }, Layer 6) must be revoked immediately. Mark dirty only

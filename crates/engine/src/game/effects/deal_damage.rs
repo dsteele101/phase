@@ -409,8 +409,11 @@ impl DamageContext {
                 .keywords
                 .iter()
                 .any(|k| matches!(k, Keyword::Deathtouch)),
+            // allow-raw-authority: structural snapshot read from LKISnapshot on departed object
             has_lifelink: lki.keywords.iter().any(|k| matches!(k, Keyword::Lifelink)),
+            // allow-raw-authority: structural snapshot read from LKISnapshot on departed object
             has_wither: lki.keywords.iter().any(|k| matches!(k, Keyword::Wither)),
+            // allow-raw-authority: structural snapshot read from LKISnapshot on departed object
             has_infect: lki.keywords.iter().any(|k| matches!(k, Keyword::Infect)),
             combat_damage_poison: lki
                 .keywords
