@@ -55,7 +55,7 @@ use engine::game::players;
 use engine::game::static_abilities::player_has_cant_lose_life;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, PendingCast, WaitingFor};
 use engine::types::player::PlayerId;
 
 use driver::DriveOutcome;
@@ -132,7 +132,12 @@ pub(crate) fn lethal_prompt_action(
         |answer: &GameAction| answer_verdict(state, ai_player, opponent, answer, admission);
     match &state.waiting_for {
         WaitingFor::ChooseXValue { player, .. } if *player == ai_player => {
-            x_answer(issued, verdict)
+            let certified = certified_pending_step(state, ai_player, admission)
+                .and_then(|step| step.x)
+                .map(|x| GameAction::ChooseX { value: x });
+            certified
+                .filter(|answer| issued.contains(answer) && verdict(answer) == AnswerVerdict::Wins)
+                .or_else(|| x_answer(issued, verdict))
         }
         _ => prompt_answers(state, ai_player, opponent, issued)
             .into_iter()
@@ -178,6 +183,50 @@ fn answer_verdict(
         }
         DriveOutcome::Stuck => AnswerVerdict::Short,
     }
+}
+
+/// The step of a certified line that started the cast whose prompt is
+/// pending — the line certified from the priority decision the cast was
+/// started at, reconstructed by backing the cast out on a clone (CR 601.2f:
+/// the caster may back out before committing to an X value). The prompt's own
+/// answers judge only how the stack settles from here, and an X that wins only
+/// with the rest of the stack still below it (a smaller X keeps the AI alive
+/// until an older spell resolves, CR 117.4) is invisible to a bounded scan;
+/// the line knows the X it was certified with. `None` when the cast cannot be
+/// backed out or no certified line starts it.
+fn certified_pending_step(
+    state: &GameState,
+    ai_player: PlayerId,
+    admission: ActionAdmission<'_>,
+) -> Option<LineStep> {
+    let pending = pending_cast(state)?;
+    let (object_id, ability_index) = (pending.object_id, pending.activation_ability_index);
+    let mut decision = state.clone();
+    apply_as_current_for_simulation(&mut decision, GameAction::CancelCast).ok()?;
+    // Backing out records the cast as cancelled so the AI does not retry it
+    // in this priority window; the decision the cast was started from had no
+    // such entry, or the cast would not have been admitted.
+    decision.cancelled_casts.retain(|id| *id != object_id);
+    let issued = admitted_priority_actions(&decision, admission);
+    find_lethal_line(&decision, ai_player, &issued, admission)?
+        .steps
+        .into_iter()
+        .find(|step| match (&step.action, ability_index) {
+            (
+                GameAction::CastSpell {
+                    object_id: cast, ..
+                },
+                None,
+            ) => *cast == object_id,
+            (
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: index,
+                },
+                Some(pending_index),
+            ) => *source_id == object_id && *index == pending_index,
+            _ => false,
+        })
 }
 
 /// CR 107.3a: the AI announces X for a spell or ability in its lethal line.
@@ -281,8 +330,9 @@ pub(crate) fn find_lethal_line(
     if !sources::holds_reach(state, ai_player, opponent, &current) {
         return None;
     }
-    match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
-        DriveOutcome::Won => Some(LethalLine { steps: Vec::new() }),
+    let mut attempted = Vec::new();
+    let after_settling = match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
+        DriveOutcome::Won => return Some(LethalLine { steps: Vec::new() }),
         DriveOutcome::Settled(settled) => {
             let settled_issued = admitted_priority_actions(&settled, admission);
             let settled_sources =
@@ -294,21 +344,25 @@ pub(crate) fn find_lethal_line(
                 opponent,
                 &settled_sources,
                 admission,
-                &mut Vec::new(),
+                &mut attempted,
             )
         }
-        // Settling the pending work alone does not win — it takes the AI out
-        // (CR 104.4a), or needs a decision the driver will not make on
-        // anyone's behalf. What the AI can still do from here is its response
-        // (CR 117.3c: it keeps priority after each cast or activation). The
-        // pending work is part of the position those responses are played
-        // from, not something they have to cover on their own, so they are
-        // certified as lines from this state: first those lethal on their own
-        // against the opponent's present life, then — the pending damage not
-        // being priced (CR 608.2h) — every affordable response, the reducer
-        // deciding where each ends. Both draw on one certification budget.
-        DriveOutcome::Drawn | DriveOutcome::Stuck => {
-            let mut attempted = Vec::new();
+        DriveOutcome::Drawn | DriveOutcome::Stuck => None,
+    };
+    // Settling the pending work first does not win: it takes the AI out
+    // (CR 104.4a), needs a decision the driver will not make on anyone's
+    // behalf, or leaves the AI without the reach it held — the resolving
+    // work can destroy the very source a response needed (CR 704.5g). What
+    // the AI can still do from here is respond (CR 117.3c: it keeps priority
+    // after each cast or activation). The pending work is part of the
+    // position those responses are played from, not something they have to
+    // cover on their own, so they are certified as lines from this state:
+    // first those lethal on their own against the opponent's present life,
+    // then — the pending damage not being priced (CR 608.2h) — every
+    // affordable response, the reducer deciding where each ends. Every search
+    // here draws on the one certification budget.
+    after_settling
+        .or_else(|| {
             certify_cheapest(
                 state,
                 state,
@@ -318,18 +372,17 @@ pub(crate) fn find_lethal_line(
                 admission,
                 &mut attempted,
             )
-            .or_else(|| {
-                certify_responses(
-                    state,
-                    ai_player,
-                    opponent,
-                    &current,
-                    admission,
-                    &mut attempted,
-                )
-            })
-        }
-    }
+        })
+        .or_else(|| {
+            certify_responses(
+                state,
+                ai_player,
+                opponent,
+                &current,
+                admission,
+                &mut attempted,
+            )
+        })
 }
 
 /// Propose combinations priced against `priced` (the state whose life totals
@@ -529,14 +582,17 @@ fn prompt_answers(
 /// whose prompt is pending must be able to take life from `opponent`. How much
 /// is the simulation's to read (CR 608.2h).
 fn pending_source_could_finish(state: &GameState, ai_player: PlayerId, opponent: PlayerId) -> bool {
-    let pending = match &state.waiting_for {
+    pending_cast(state)
+        .and_then(|pending| state.objects.get(&pending.object_id))
+        .is_some_and(|object| sources::object_reaches(state, ai_player, opponent, object))
+}
+
+/// The cast or activation whose mode, X, or target prompt is pending.
+fn pending_cast(state: &GameState) -> Option<&PendingCast> {
+    match &state.waiting_for {
         WaitingFor::TargetSelection { pending_cast, .. }
         | WaitingFor::ModeChoice { pending_cast, .. }
-        | WaitingFor::ChooseXValue { pending_cast, .. } => pending_cast,
-        _ => return false,
-    };
-    state
-        .objects
-        .get(&pending.object_id)
-        .is_some_and(|object| sources::object_reaches(state, ai_player, opponent, object))
+        | WaitingFor::ChooseXValue { pending_cast, .. } => Some(pending_cast),
+        _ => None,
+    }
 }

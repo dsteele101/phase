@@ -807,7 +807,7 @@ thread_local! {
 /// worlds, or `None` when any world declines or two worlds disagree — a
 /// certificate that holds only in some plausible worlds is not one the AI can
 /// act on without reading the real hidden zones.
-fn agreed_across_samples(
+pub(crate) fn agreed_across_samples(
     state: &GameState,
     ai_player: PlayerId,
     k: u32,
@@ -822,6 +822,11 @@ fn agreed_across_samples(
             return None;
         }
         let action = decide(&sample)?;
+        // A world whose certificate completed past the ceiling was not
+        // covered in budget either.
+        if deadline.expired() {
+            return None;
+        }
         match &agreed {
             Some(previous) if *previous != action => return None,
             Some(_) => {}

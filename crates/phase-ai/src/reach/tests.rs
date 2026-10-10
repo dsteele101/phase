@@ -1190,3 +1190,207 @@ fn a_response_that_cannot_save_the_ai_is_not_certified() {
     let mut runner = runner;
     assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
 }
+
+// ── The X a line was certified with survives the stack below it (CR 107.3a) ──
+
+const SQUALL_LINE: &str =
+    "Squall Line deals X damage to each creature with flying and each player.";
+
+/// Fourteen Forests and two Mountains, Lightning Bolt and Squall Line in hand,
+/// the AI at 12 against `opponent_life`.
+fn bolt_and_squall(opponent_life: i32) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 12);
+    scenario.with_life(P1, opponent_life);
+    for _ in 0..14 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let bolt = lightning_bolt(&mut scenario);
+    let squall = scenario
+        .add_spell_to_hand_from_oracle(P0, "Squall Line", true, SQUALL_LINE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Green, ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    (scenario.build(), bolt, squall)
+}
+
+/// Bolt cast at the opponent, then Squall Line started above it: the AI's real
+/// ChooseX prompt with its engine-issued answers.
+fn squall_x_prompt(runner: &mut GameRunner, bolt: ObjectId, squall: ObjectId) -> Vec<GameAction> {
+    cast_at_opponent(runner, bolt);
+    let cast = cast_spell(squall, runner.state());
+    runner.act(cast).expect("Squall Line is castable");
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ChooseXValue { player, max: 13, .. } if player == P0),
+        "fifteen lands left after Bolt announce X up to 13: {:?}",
+        state.waiting_for
+    );
+    engine::ai_support::build_decision_context(state)
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect()
+}
+
+/// CR 117.4 + CR 104.3b: Squall Line resolves above Bolt. X=11 leaves the AI
+/// at 1 and the opponent at 3 for Bolt to finish; the maximum, 13, kills the
+/// AI before Bolt resolves, and every X a bounded scan from 0 reaches leaves
+/// the opponent out of Bolt's range. The prompt must announce the certified 11.
+#[test]
+fn x_prompt_announces_the_certified_x_with_the_stack_still_below_it() {
+    let (runner, bolt, squall) = bolt_and_squall(14);
+    let root = line(runner.state()).expect("Bolt + Squall Line for X=11 wins from the root");
+    assert_eq!(casts(&root).len(), 2);
+    let squall_step = root
+        .iter()
+        .find(|step| matches!(step.action, GameAction::CastSpell { object_id, .. } if object_id == squall))
+        .expect("Squall Line is in the line");
+    assert_eq!(squall_step.x, Some(11));
+
+    let mut runner = runner;
+    let issued = squall_x_prompt(&mut runner, bolt, squall);
+    let prompt = runner.state().clone();
+    assert!(issued.contains(&GameAction::ChooseX { value: 11 }));
+    assert_eq!(
+        lethal_prompt_action(&prompt, P0, &issued, &production_admission),
+        Some(GameAction::ChooseX { value: 11 })
+    );
+
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert_eq!(runner.life(P0), 1, "X=11 leaves the AI at 12 − 11");
+}
+
+/// At 15 the opponent needs X=12 beside Bolt, which takes the AI (12) out
+/// first: no line from the root, and the same prompt declines every X.
+#[test]
+fn x_prompt_with_no_certified_x_below_the_stack_declines() {
+    let (runner, bolt, squall) = bolt_and_squall(15);
+    assert!(line(runner.state()).is_none());
+    let mut runner = runner;
+    let issued = squall_x_prompt(&mut runner, bolt, squall);
+    let prompt = runner.state().clone();
+    assert_eq!(
+        lethal_prompt_action(&prompt, P0, &issued, &production_admission),
+        None
+    );
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── A response survives a settlement that destroys its source (CR 704.5g) ──
+
+const FLAMEBREAK: &str = "Flamebreak deals 3 damage to each creature without flying and each player. Creatures dealt damage this way can't be regenerated this turn.";
+
+/// The AI and the opponent at 4, three Mountains, Flamebreak in hand, and an
+/// untapped 0/2 Spear Spewer — with lifelink (as the Lifelink Aura grants it)
+/// when `lifelink` — then Flamebreak cast, so it is pending with the AI
+/// holding priority again (CR 117.3c).
+fn flamebreak_cast_over_spewer(lifelink: bool) -> (GameRunner, ObjectId) {
+    let mut scenario = scenario(3, 4);
+    scenario.with_life(P0, 4);
+    let mut spewer = scenario.add_creature_from_oracle(P0, "Spear Spewer", 0, 2, SPEAR_SPEWER);
+    spewer.with_mana_cost(red(0, 1));
+    if lifelink {
+        spewer.lifelink();
+    }
+    let spewer = spewer.id();
+    let flamebreak = scenario
+        .add_spell_to_hand_from_oracle(P0, "Flamebreak", false, FLAMEBREAK)
+        .with_mana_cost(red(0, 3))
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        line(runner.state()).is_some() == lifelink,
+        "Flamebreak, then Spewer above it, wins from the root only with lifelink"
+    );
+    let cast = cast_spell(flamebreak, runner.state());
+    runner.act(cast).expect("Flamebreak is castable");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(state.stack.len(), 1, "Flamebreak is pending");
+    (runner, spewer)
+}
+
+/// Spewer's 1 damage to each player gains the AI 2 (CR 702.15b), so Flamebreak
+/// then takes it from 5 to 2 and the opponent from 3 to 0. Settling Flamebreak
+/// first instead leaves both players at 1 and destroys the 0/2 Spewer
+/// (CR 704.5g), so the settled position holds no reach at all — the response
+/// has to be certified from the pending position.
+#[test]
+fn a_response_whose_source_the_settlement_destroys_is_still_certified() {
+    let (mut runner, spewer) = flamebreak_cast_over_spewer(true);
+
+    let mut settled = GameRunner::from_state(runner.state().clone());
+    settled.advance_until_stack_empty();
+    assert_eq!((settled.life(P0), settled.life(P1)), (1, 1));
+    assert!(
+        !settled.state().battlefield.contains(&spewer),
+        "Flamebreak destroyed the Spewer"
+    );
+
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert_eq!(
+        lethal_priority_action(&state, P0, &admitted, &production_admission),
+        Some(GameAction::ActivateAbility {
+            source_id: spewer,
+            ability_index: 0,
+        })
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert_eq!(runner.life(P0), 2);
+}
+
+/// Without lifelink the response costs the AI the life Flamebreak then takes:
+/// both players reach 0 together (CR 104.4a), so nothing is certified.
+#[test]
+fn a_response_that_cannot_outlast_the_settlement_is_not_certified() {
+    let (mut runner, _) = flamebreak_cast_over_spewer(false);
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_none());
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── A sampled certificate completes inside the shared deadline ──
+
+/// K=2 sampled worlds that both certify the same action. When the final
+/// world's certification completes after the shared deadline, the agreement is
+/// not accepted; the same agreement inside the budget is.
+#[test]
+fn a_sampled_certificate_completed_past_the_deadline_is_rejected() {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    let mut scenario = scenario(1, 5);
+    lightning_bolt(&mut scenario);
+    let state = scenario.build().state().clone();
+
+    let agree = |deadline, final_decision_overruns: bool| {
+        let calls = Cell::new(0);
+        crate::search::agreed_across_samples(&state, P0, 2, deadline, |_| {
+            calls.set(calls.get() + 1);
+            if final_decision_overruns && calls.get() == 2 {
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            Some(GameAction::PassPriority)
+        })
+    };
+
+    assert_eq!(
+        agree(engine::util::Deadline::after(10_000), false),
+        Some(GameAction::PassPriority),
+        "in budget, the agreement is the decision"
+    );
+    assert_eq!(
+        agree(engine::util::Deadline::after(30), true),
+        None,
+        "the final world began in budget and completed past it"
+    );
+}
