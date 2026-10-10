@@ -261,7 +261,15 @@ pub(crate) fn find_lethal_line(
 
     let current = sources::reach_sources(state, ai_player, opponent, issued);
     if state.stack.is_empty() {
-        return certify_cheapest(state, state, ai_player, opponent, &current, admission);
+        return certify_cheapest(
+            state,
+            state,
+            ai_player,
+            opponent,
+            &current,
+            admission,
+            &mut Vec::new(),
+        );
     }
 
     // CR 117.4: with objects on the stack, the line is priced from the state
@@ -275,8 +283,6 @@ pub(crate) fn find_lethal_line(
     }
     match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
         DriveOutcome::Won => Some(LethalLine { steps: Vec::new() }),
-        // CR 104.4a: settling takes the AI out with the opponent.
-        DriveOutcome::Drawn => None,
         DriveOutcome::Settled(settled) => {
             let settled_issued = admitted_priority_actions(&settled, admission);
             let settled_sources =
@@ -288,19 +294,49 @@ pub(crate) fn find_lethal_line(
                 opponent,
                 &settled_sources,
                 admission,
+                &mut Vec::new(),
             )
         }
-        // Something on the stack needs a decision the driver will not make on
-        // anyone's behalf; price only what can be done right now.
-        DriveOutcome::Stuck => {
-            certify_cheapest(state, state, ai_player, opponent, &current, admission)
+        // Settling the pending work alone does not win — it takes the AI out
+        // (CR 104.4a), or needs a decision the driver will not make on
+        // anyone's behalf. What the AI can still do from here is its response
+        // (CR 117.3c: it keeps priority after each cast or activation). The
+        // pending work is part of the position those responses are played
+        // from, not something they have to cover on their own, so they are
+        // certified as lines from this state: first those lethal on their own
+        // against the opponent's present life, then — the pending damage not
+        // being priced (CR 608.2h) — every affordable response, the reducer
+        // deciding where each ends. Both draw on one certification budget.
+        DriveOutcome::Drawn | DriveOutcome::Stuck => {
+            let mut attempted = Vec::new();
+            certify_cheapest(
+                state,
+                state,
+                ai_player,
+                opponent,
+                &current,
+                admission,
+                &mut attempted,
+            )
+            .or_else(|| {
+                certify_responses(
+                    state,
+                    ai_player,
+                    opponent,
+                    &current,
+                    admission,
+                    &mut attempted,
+                )
+            })
         }
     }
 }
 
 /// Propose combinations priced against `priced` (the state whose life totals
 /// and mana the sources were read from) and certify each from `origin` (the
-/// real decision state), cheapest first.
+/// real decision state), cheapest first. `attempted` holds the step sequences
+/// already simulated for this decision; it bounds them to
+/// [`MAX_CERTIFIED_LINES`] across every search that shares it.
 fn certify_cheapest(
     origin: &GameState,
     priced: &GameState,
@@ -308,6 +344,7 @@ fn certify_cheapest(
     opponent: PlayerId,
     sources: &[ReachSource],
     admission: ActionAdmission<'_>,
+    attempted: &mut Vec<Vec<LineStep>>,
 ) -> Option<LethalLine> {
     let opponent_life = life_of(priced, opponent);
     // Damage alone has to be able to get there before mana is worth pricing.
@@ -328,11 +365,60 @@ fn certify_cheapest(
         controller_life: life_of(priced, ai_player),
         mana: sources::mana_capacity(priced, ai_player),
     };
-    // Copies of one repeatable activation make many combinations that play
-    // out identically; certify each distinct step sequence once.
-    let mut attempted: Vec<Vec<LineStep>> = Vec::new();
-    for combination in solver::lethal_combinations(&sources, &budget) {
-        let steps = solver::line_steps(&sources, &combination);
+    certify_combinations(
+        origin,
+        ai_player,
+        opponent,
+        &sources,
+        solver::lethal_combinations(&sources, &budget),
+        admission,
+        attempted,
+    )
+}
+
+/// Certify the AI's responses to work already on the stack: every affordable
+/// combination of `sources`, most damage first, with no requirement that the
+/// responses alone reach the opponent's present life.
+fn certify_responses(
+    origin: &GameState,
+    ai_player: PlayerId,
+    opponent: PlayerId,
+    sources: &[ReachSource],
+    admission: ActionAdmission<'_>,
+    attempted: &mut Vec<Vec<LineStep>>,
+) -> Option<LethalLine> {
+    let priced: Vec<_> = sources
+        .iter()
+        .filter_map(|source| source.priced(origin, ai_player))
+        .collect();
+    let combinations =
+        solver::response_combinations(&priced, sources::mana_capacity(origin, ai_player));
+    certify_combinations(
+        origin,
+        ai_player,
+        opponent,
+        &priced,
+        combinations,
+        admission,
+        attempted,
+    )
+}
+
+/// Play each combination's steps through the reducer from `origin`, in order,
+/// and return the first that wins. Copies of one repeatable activation make
+/// many combinations that play out identically; each distinct step sequence is
+/// certified once.
+fn certify_combinations(
+    origin: &GameState,
+    ai_player: PlayerId,
+    opponent: PlayerId,
+    sources: &[sources::PricedSource],
+    combinations: Vec<solver::Combination>,
+    admission: ActionAdmission<'_>,
+    attempted: &mut Vec<Vec<LineStep>>,
+) -> Option<LethalLine> {
+    for combination in combinations {
+        let steps = solver::line_steps(sources, &combination);
         if attempted.contains(&steps) {
             continue;
         }

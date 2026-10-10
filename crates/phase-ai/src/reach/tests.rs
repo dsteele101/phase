@@ -1119,3 +1119,74 @@ fn determinized_certification_does_not_read_the_real_hidden_hand() {
     );
     assert_eq!(certified_step(&baloth, 3), Some(GameAction::PassPriority));
 }
+
+// ── A certified line's response survives the cast that opens it (CR 117.3c) ──
+
+const SPEAR_SPEWER: &str = "Defender\n{T}: This creature deals 1 damage to each player.";
+
+/// The AI at 4 against an opponent at 5 with two Mountains, Flame Rift in
+/// hand, and an untapped Spear Spewer. Rift alone takes the AI to 0 and the
+/// opponent to 1; Spewer's 1 damage to each player is the 5th point, and its
+/// lifelink (the effect of the Lifelink Aura, applied here as the keyword it
+/// grants) gains the AI 2 life before Rift resolves — so the AI wins at 1.
+/// Without lifelink the same line costs the AI 5 life and wins nothing.
+fn rift_and_spewer(lifelink: bool) -> GameRunner {
+    let mut scenario = scenario(2, 5);
+    scenario.with_life(P0, 4);
+    let mut spewer = scenario.add_creature_from_oracle(P0, "Spear Spewer", 0, 3, SPEAR_SPEWER);
+    spewer.with_mana_cost(red(0, 1));
+    if lifelink {
+        spewer.lifelink();
+    }
+    flame_rift(&mut scenario);
+    scenario.build()
+}
+
+/// Cast Flame Rift through the reducer so it sits on the stack and the AI
+/// holds priority again, as the real cast leaves it (CR 117.3c).
+fn with_rift_cast(mut runner: GameRunner) -> GameRunner {
+    let rift = runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Flame Rift")
+        .expect("Flame Rift is in the scenario")
+        .id;
+    let cast = cast_spell(rift, runner.state());
+    runner.act(cast).expect("Flame Rift is castable");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(state.stack.len(), 1, "Flame Rift is pending");
+    runner
+}
+
+#[test]
+fn the_certified_response_is_found_again_after_its_opening_cast() {
+    let runner = rift_and_spewer(true);
+    // Root: Rift, then Spewer on top of it.
+    let steps = line(runner.state()).expect("Rift + a lifelinked Spewer wins from the root");
+    assert_eq!(steps.len(), 2);
+
+    // The real post-cast priority: the pending Rift alone would lose the AI,
+    // so settling it proves nothing — the response is what wins.
+    let mut runner = with_rift_cast(runner);
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    let next = lethal_priority_action(&state, P0, &admitted, &production_admission);
+    assert!(
+        matches!(next, Some(GameAction::ActivateAbility { .. })),
+        "the certified next step is Spewer's activation, got {next:?}"
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert_eq!(runner.life(P0), 1);
+}
+
+#[test]
+fn a_response_that_cannot_save_the_ai_is_not_certified() {
+    let runner = with_rift_cast(rift_and_spewer(false));
+    let state = runner.state();
+    let admitted = admitted_actions(state);
+    assert!(find_lethal_line(state, P0, &admitted, &production_admission).is_none());
+    let mut runner = runner;
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}

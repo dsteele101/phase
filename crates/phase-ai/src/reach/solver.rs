@@ -123,6 +123,60 @@ pub(super) fn lethal_combinations(sources: &[PricedSource], budget: &Budget) -> 
         .collect()
 }
 
+/// Every affordable combination of `sources`, for responses to work already on
+/// the stack whose damage this pricing does not read (CR 608.2h): nothing here
+/// is filtered on reaching the opponent's life or on the AI surviving, since
+/// the pending work moves both and only the reducer's simulation reads where
+/// they end up. Most damage first, then least mana, fewest cards.
+///
+/// At most one source scales with X, which takes the most the rest of the
+/// combination leaves over (CR 107.3a).
+pub(super) fn response_combinations(sources: &[PricedSource], mana: u32) -> Vec<Combination> {
+    let searched = searched_indices(sources, mana);
+    let mut affordable: Vec<(u32, u32, u32, u32, Combination)> = Vec::new();
+    for mask in 1u32..(1u32 << searched.len()) {
+        let members: Vec<usize> = searched
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(_, &index)| index)
+            .collect();
+        let mut scaling = members
+            .iter()
+            .filter(|&&index| sources[index].loss.opponent.per_x > 0);
+        let x_member = scaling.next();
+        if scaling.next().is_some() {
+            continue;
+        }
+        let mana_value: u32 = members
+            .iter()
+            .map(|&index| sources[index].mana.mana_value())
+            .sum();
+        if mana_value > mana {
+            continue;
+        }
+        let x = x_member.map(|&index| (mana - mana_value) / sources[index].x_shards().max(1));
+        let damage: u32 = members
+            .iter()
+            .map(|&index| sources[index].loss.opponent.at(x.unwrap_or(0)))
+            .sum();
+        affordable.push((
+            damage,
+            mana_value,
+            members.len() as u32,
+            mask,
+            Combination { members, x },
+        ));
+    }
+    affordable.sort_by_key(|(damage, mana_value, count, mask, _)| {
+        (std::cmp::Reverse(*damage), *mana_value, *count, *mask)
+    });
+    affordable
+        .into_iter()
+        .map(|(.., combination)| combination)
+        .collect()
+}
+
 /// The least X at which `damage` reaches `life`, or `None` when no X does.
 fn least_lethal_x(damage: Linear, life: u32) -> Option<u32> {
     match life.checked_sub(damage.fixed) {
