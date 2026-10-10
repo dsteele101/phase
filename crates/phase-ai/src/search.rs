@@ -648,17 +648,7 @@ fn fast_priority_action(
     // A certified game-winning burn line outranks every shortcut and every
     // one-candidate-at-a-time score below: take its next step.
     if config.play_lookahead {
-        let issued: Vec<_> = actions
-            .iter()
-            .filter(|action| priority_action_is_allowed_by_loop_guards(state, ai_player, action))
-            .cloned()
-            .collect();
-        let admission = |state: &GameState, action: &GameAction| {
-            root_action_is_admitted(state, ai_player, action)
-        };
-        if let Some(action) =
-            crate::reach::lethal_priority_action(state, ai_player, &issued, &admission)
-        {
+        if let Some(action) = certified_lethal_priority_action(state, ai_player, config, &actions) {
             return Some(action);
         }
     }
@@ -666,6 +656,127 @@ fn fast_priority_action(
         large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
     });
     action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
+}
+
+/// The next step of a reducer-certified lethal line from this priority
+/// decision, certified inside the information model the search uses.
+///
+/// CR 400.2: with determinization enabled (`K > 0`), the certification never
+/// reads the opponent's real hidden hand or library — it runs on each of the
+/// same K sampled worlds the scoring ensemble uses, and a step is taken only
+/// when every sample certifies it. With `K == 0` (every shipped preset) it runs
+/// on the state itself, as the search does.
+pub(crate) fn certified_lethal_priority_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    actions: &[GameAction],
+) -> Option<GameAction> {
+    // `allowed` is the world's priority domain already under the pre-cast
+    // exchange gate; the loop guards are applied here.
+    let lethal_in = |world: &GameState, allowed: &[GameAction]| {
+        let issued: Vec<_> = allowed
+            .iter()
+            .filter(|action| priority_action_is_allowed_by_loop_guards(world, ai_player, action))
+            .cloned()
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        crate::reach::lethal_priority_action(world, ai_player, &issued, &admission)
+    };
+    let k = config.search.determinization_samples;
+    if k == 0 {
+        return lethal_in(state, actions);
+    }
+    agreed_across_samples(state, ai_player, k, |sample| {
+        let allowed: Vec<_> = engine::ai_support::flat_priority_actions(sample)
+            .into_iter()
+            .filter(|action| root_action_is_allowed(sample, ai_player, action))
+            .collect();
+        lethal_in(sample, &allowed)
+    })
+    // The AI's own zones are identical in every sample, so its step is one
+    // the real state issues too; bind it to the real payload.
+    .and_then(|action| crate::reach::issued_counterpart(actions, &action))
+}
+
+/// The answer to the AI's own cast prompt (mode, X, or target) that keeps a
+/// certified lethal line alive, decided inside the same information model as
+/// [`certified_lethal_priority_action`].
+fn certified_lethal_prompt_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+) -> Option<GameAction> {
+    if !config.play_lookahead
+        || !crate::reach::prompt_could_finish(state, ai_player)
+        || !matches!(
+            engine::ai_support::classify_payment_continuation(state),
+            engine::ai_support::PaymentContinuationState::NotAffiliated
+        )
+    {
+        return None;
+    }
+    let answer_in = |world: &GameState| {
+        let issued: Vec<GameAction> = AiDecisionContract::issue(world, ai_player)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        crate::reach::lethal_prompt_action(world, ai_player, &issued, &admission)
+    };
+    match config.search.determinization_samples {
+        0 => answer_in(state),
+        k => agreed_across_samples(state, ai_player, k, answer_in),
+    }
+}
+
+/// CR 400.2: the action `decide` takes in every one of the `k` determinized
+/// worlds, or `None` when any world declines or two worlds disagree — a
+/// certificate that holds only in some plausible worlds is not one the AI can
+/// act on without reading the real hidden zones.
+fn agreed_across_samples(
+    state: &GameState,
+    ai_player: PlayerId,
+    k: u32,
+    decide: impl Fn(&GameState) -> Option<GameAction>,
+) -> Option<GameAction> {
+    let mut agreed: Option<GameAction> = None;
+    for sample in determinized_samples(state, ai_player, k) {
+        let action = decide(&sample)?;
+        match &agreed {
+            Some(previous) if *previous != action => return None,
+            Some(_) => {}
+            None => agreed = Some(action),
+        }
+    }
+    agreed
+}
+
+/// The `K` determinized opponent-hidden-zone worlds the scoring ensemble
+/// averages over, in sample order. Seeded from the position, so every caller
+/// sees the same K worlds for the same decision.
+fn determinized_samples(
+    state: &GameState,
+    ai_player: PlayerId,
+    k: u32,
+) -> impl Iterator<Item = GameState> + '_ {
+    // Seed: fixed across K for a given (position, game, worker); per-sample split
+    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
+    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
+    // via the per-worker `state.rng` re-seed.
+    let base_seed = crate::planner::quick_state_hash(state)
+        .wrapping_add(state.rng_seed)
+        .wrapping_add(state.rng.clone().next_u64());
+    (0..k).map(move |i| {
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        crate::determinize::determinize_opponents(state, ai_player, &mut rng)
+    })
 }
 
 /// Keep the direct priority shortcuts under the pre-cast exchange gate. The
@@ -2615,6 +2726,12 @@ pub(crate) fn score_candidates_with_session(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
+    // The mode, X, and target of a spell in a certified lethal line are the
+    // ones that keep it lethal — not whatever scores best in isolation. Decided
+    // once for the whole ensemble, inside its information model.
+    if let Some(action) = certified_lethal_prompt_action(state, ai_player, config) {
+        return vec![(action, 1.0)];
+    }
     // Attacker declarations are public-state tactical choices. Running K hidden
     // information samples cannot improve them, but would multiply the bounded
     // multiplayer comparison and make a singleton support drift.
@@ -2640,23 +2757,12 @@ pub(crate) fn score_candidates_with_session(
         }
     };
 
-    // Seed: fixed across K for a given (position, game, worker); per-sample split
-    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
-    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
-    // via the per-worker `state.rng` re-seed.
-    let base_seed = crate::planner::quick_state_hash(state)
-        .wrapping_add(state.rng_seed)
-        .wrapping_add(state.rng.clone().next_u64());
-
     let mut acc: Vec<(GameAction, f64)> = Vec::new();
     let mut positions: std::collections::HashMap<GameActionKey, usize> =
         std::collections::HashMap::new();
     let mut counts: std::collections::HashMap<GameActionKey, usize> =
         std::collections::HashMap::new();
-    for i in 0..k {
-        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
-        let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        let sampled = crate::determinize::determinize_opponents(state, ai_player, &mut rng);
+    for sampled in determinized_samples(state, ai_player, k) {
         let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
@@ -3376,18 +3482,6 @@ fn score_candidates_core(
             deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
         {
             return vec![(action, 1.0)];
-        }
-        // The mode, X, and target of a spell in a certified lethal line are the
-        // ones that keep it lethal — not whatever scores best in isolation.
-        if config.play_lookahead {
-            let admission = |state: &GameState, action: &GameAction| {
-                root_action_is_admitted(state, ai_player, action)
-            };
-            if let Some(action) =
-                crate::reach::lethal_prompt_action(state, ai_player, &actions, &admission)
-            {
-                return vec![(action, 1.0)];
-            }
         }
     }
 

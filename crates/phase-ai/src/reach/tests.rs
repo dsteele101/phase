@@ -512,8 +512,8 @@ fn pending_trigger_does_not_invent_lethal() {
 
 /// CR 107.3a: the X of a spell already on the stack was announced and is
 /// locked. Blaze cast for X=2 at the opponent (5) leaves one Mountain, which
-/// casts Lava Spike for the last 3 once Blaze resolves — the ceiling must read
-/// the announced 2, not size X to the one Mountain still untapped.
+/// casts Lava Spike for the last 3 once Blaze resolves — the settled position
+/// reflects the announced 2, not an X sized to the one Mountain still untapped.
 #[test]
 fn pending_x_spell_counts_its_announced_x() {
     let mut scenario = scenario(4, 5);
@@ -555,7 +555,7 @@ fn pending_x_spell_counts_its_announced_x() {
 }
 
 /// CR 120.7: Soul's Fire on the stack has the targeted creature as its damage
-/// source, which this pricing does not read — so the ceiling must not drop it.
+/// source, which this pricing does not read — so the line must not drop it.
 /// A 4-power creature's Soul's Fire at the opponent (7) plus Lightning Bolt is
 /// lethal.
 #[test]
@@ -579,12 +579,15 @@ fn pending_source_override_damage_is_not_dropped() {
     let state = runner.state().clone();
     assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
     assert!(state.stack.iter().any(|entry| entry.source_id == fire));
-    // Discriminating guard: the pending override damage leaves the ceiling
-    // unbounded rather than reading as 0 (which would cap it at Bolt's 3).
-    assert_eq!(
-        super::sources::potential_ceiling(&state, P0, P1, &[], None),
-        u32::MAX
-    );
+    // Discriminating guard: the pending override damage, whose amount this
+    // pricing does not read, still reaches the opponent.
+    let pending = state
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == fire)
+        .and_then(|entry| entry.ability())
+        .expect("Soul's Fire carries its resolved instructions");
+    assert!(super::sources::resolved_reaches(&state, P0, P1, pending));
     let admitted = admitted_actions(&state);
     assert!(find_lethal_line(&state, P0, &admitted, &production_admission).is_some());
     assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
@@ -654,4 +657,333 @@ fn flashback_burn_does_not_invent_lethal() {
 fn very_easy_does_not_commit_to_lines() {
     let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
     assert!(!config.play_lookahead);
+}
+
+// ── Settlement is the authority over pending work (CR 608.2h) ──
+
+const GEISTFLAME: &str = "Geistflame deals 1 damage to any target.\n\
+    Flashback {3}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const GOBLIN_WAR_STRIKE: &str = "Goblin War Strike deals damage to target player or planeswalker equal to the number of Goblins you control.";
+const KRENKO_MOB_BOSS: &str =
+    "{T}: Create X 1/1 red Goblin creature tokens, where X is the number of Goblins you control.";
+const CULMINATION_OF_STUDIES: &str = "Exile the top X cards of your library. For each land card exiled this way, create a Treasure token. For each blue card exiled this way, draw a card. For each red card exiled this way, Culmination of Studies deals 1 damage to each opponent.";
+const LIGHTNING_HELIX: &str = "Lightning Helix deals 3 damage to any target and you gain 3 life.";
+const EARTHQUAKE: &str =
+    "Earthquake deals X damage to each creature without flying and each player.";
+const HYMN_TO_TOURACH: &str = "Target player discards two cards at random.";
+const OBSTINATE_BALOTH: &str = "When this creature enters, you gain 4 life.\n\
+    If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield instead of putting it into your graveyard.";
+
+fn pending_line_is_found(state: &GameState) -> bool {
+    let admitted = admitted_actions(state);
+    find_lethal_line(state, P0, &admitted, &production_admission).is_some()
+}
+
+/// A normally cast Geistflame aimed at the opponent on the stack, Lightning
+/// Bolt in hand, and five untapped Mountains: once Geistflame resolves into the
+/// graveyard (CR 608.2n) it can be cast again by flashback (CR 702.34a), so
+/// 1 + 3 + 1 is reachable from a position whose pending work reads 1.
+fn geistflame_on_stack_with_bolt(opponent_life: i32) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = scenario(6, opponent_life);
+    let geistflame = scenario
+        .add_spell_to_hand(P0, "Geistflame", true)
+        .with_mana_cost(red(0, 1))
+        .from_oracle_text(GEISTFLAME)
+        .id();
+    let bolt = lightning_bolt(&mut scenario);
+    let mut runner = scenario.build();
+    cast_at_opponent(&mut runner, geistflame);
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(crate::zone_eval::available_mana(runner.state(), P0), 5);
+    (runner, geistflame, bolt)
+}
+
+#[test]
+fn a_resolving_spell_recast_by_flashback_is_not_pruned_before_settlement() {
+    let (mut runner, geistflame, bolt) = geistflame_on_stack_with_bolt(5);
+    let state = runner.state().clone();
+
+    // Reach guard: once the stack settles, flashback issues Geistflame's cast.
+    let mut settled = GameRunner::from_state(state.clone());
+    settled.advance_until_stack_empty();
+    assert_eq!(settled.life(P1), 4);
+    assert!(admitted_actions(settled.state()).contains(&cast_spell(geistflame, settled.state())));
+
+    let admitted = admitted_actions(&state);
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("Geistflame's 1, Bolt's 3 and Geistflame's flashback 1 are lethal");
+    let mut cast = casts(&line.steps);
+    cast.sort();
+    let mut expected = vec![geistflame, bolt];
+    expected.sort();
+    assert_eq!(cast, expected);
+    assert!(lethal_priority_action(&state, P0, &admitted, &production_admission).is_some());
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+#[test]
+fn a_flashback_recast_does_not_invent_lethal() {
+    let (mut runner, ..) = geistflame_on_stack_with_bolt(6);
+    assert!(!pending_line_is_found(runner.state()));
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Goblin War Strike on the stack below a Krenko activation: two Goblins are
+/// on the battlefield as Strike is priced, Krenko makes two more first, and
+/// CR 608.2h has Strike count four as it resolves.
+fn strike_below_krenko(opponent_life: i32) -> GameRunner {
+    let mut scenario = scenario(1, opponent_life);
+    let krenko = scenario
+        .add_creature_from_oracle(P0, "Krenko, Mob Boss", 3, 3, KRENKO_MOB_BOSS)
+        .with_subtypes(vec!["Goblin", "Warrior"])
+        .id();
+    // Summoning sick, so the line is about burn alone (CR 302.6).
+    scenario
+        .add_creature(P0, "Goblin Piker", 2, 1)
+        .with_subtypes(vec!["Goblin", "Warrior"])
+        .with_summoning_sickness();
+    let strike = scenario
+        .add_spell_to_hand_from_oracle(P0, "Goblin War Strike", false, GOBLIN_WAR_STRIKE)
+        .with_mana_cost(red(0, 1))
+        .id();
+    let mut runner = scenario.build();
+    cast_at_opponent(&mut runner, strike);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: krenko,
+            ability_index: 0,
+        })
+        .expect("Krenko's ability is activatable");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(
+        state.stack.len(),
+        2,
+        "Strike and Krenko's ability are pending"
+    );
+    runner
+}
+
+#[test]
+fn a_pending_quantity_is_read_as_it_resolves_not_as_priced() {
+    let mut runner = strike_below_krenko(4);
+    assert!(
+        pending_line_is_found(runner.state()),
+        "the four Goblins Strike counts as it resolves are lethal"
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+#[test]
+fn a_pending_quantity_does_not_invent_lethal() {
+    let mut runner = strike_below_krenko(5);
+    assert!(!pending_line_is_found(runner.state()));
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Culmination of Studies cast for X=3 over three red cards: its damage
+/// instruction runs once per red card exiled (CR 608.2c), three times.
+fn culmination_on_stack_over_three_red_cards(opponent_life: i32) -> GameRunner {
+    let mut scenario = scenario(4, opponent_life);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    for name in ["Red Card A", "Red Card B", "Red Card C"] {
+        scenario
+            .add_spell_to_library_top(P0, name, true)
+            .with_color(vec![ManaColor::Red]);
+    }
+    let culmination = scenario
+        .add_spell_to_hand_from_oracle(P0, "Culmination of Studies", false, CULMINATION_OF_STUDIES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Blue, ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let cast = cast_spell(culmination, runner.state());
+    runner.act(cast).expect("Culmination is castable");
+    finish_cast(&mut runner, 3, &[]);
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert!(state
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == culmination));
+    runner
+}
+
+#[test]
+fn pending_repetition_counts_every_run() {
+    let mut runner = culmination_on_stack_over_three_red_cards(3);
+    assert!(
+        pending_line_is_found(runner.state()),
+        "three red cards exiled deal three damage"
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+#[test]
+fn pending_repetition_does_not_invent_lethal() {
+    let mut runner = culmination_on_stack_over_three_red_cards(4);
+    assert!(!pending_line_is_found(runner.state()));
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── Life gained along the line (CR 119.3) ──
+
+/// Flame Rift and Lightning Helix with the AI at `ai_life` and the opponent at
+/// 7: the sorcery is cast first, so the instant cast on top of it resolves
+/// first (CR 117.4) — Helix's 3 life lands before Rift's 4 damage.
+fn helix_and_rift(ai_life: i32) -> GameRunner {
+    let mut scenario = scenario(3, 7);
+    scenario.with_life(P0, ai_life);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Helix", true, LIGHTNING_HELIX)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::White],
+            generic: 0,
+        });
+    flame_rift(&mut scenario);
+    scenario.build()
+}
+
+#[test]
+fn life_gained_before_symmetric_damage_keeps_the_ai_alive() {
+    let mut runner = helix_and_rift(4);
+    let steps = line(runner.state()).expect("Helix gains 3 before Rift's 4 lands");
+    assert_eq!(casts(&steps).len(), 2);
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+#[test]
+fn life_gained_that_cannot_cover_the_loss_is_not_lethal() {
+    // 1 + 3 gained − 4 taken is 0: a draw at best (CR 104.4a).
+    let mut runner = helix_and_rift(1);
+    assert!(line(runner.state()).is_none());
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── A survivable X (CR 107.3a) ──
+
+fn earthquake(ai_life: i32, opponent_life: i32) -> GameRunner {
+    let mut scenario = scenario(6, opponent_life);
+    scenario.with_life(P0, ai_life);
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Earthquake", false, EARTHQUAKE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        });
+    scenario.build()
+}
+
+/// Six Mountains could pay X=5, which would take both players to 0 or less;
+/// X=2 takes the opponent from 2 to 0 and leaves the AI at 1.
+#[test]
+fn symmetric_x_damage_announces_the_least_lethal_x() {
+    let mut runner = earthquake(3, 2);
+    let steps = line(runner.state()).expect("Earthquake for X=2 is lethal and survivable");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].x, Some(2));
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert_eq!(runner.life(P0), 1);
+}
+
+#[test]
+fn symmetric_x_damage_with_no_survivable_x_is_not_lethal() {
+    let mut runner = earthquake(2, 2);
+    assert!(line(runner.state()).is_none());
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── Certification stays inside the selected information model (CR 400.2) ──
+
+/// Hymn to Tourach aimed at the opponent on the stack, Lava Spike in hand,
+/// and the opponent at 3 holding exactly two cards — `hidden` and a filler —
+/// against a registered decklist of vanilla cards. When the hidden card is
+/// Obstinate Baloth, Hymn's discard puts it onto the battlefield instead
+/// (CR 614.1a) and its controller gains 4 life — out of Spike's reach.
+fn hymn_over_hidden_card(hidden_is_baloth: bool) -> GameState {
+    use engine::game::deck_loading::DeckEntry;
+    use engine::types::card::CardFace;
+    use engine::types::game_state::PlayerDeckPool;
+    use std::sync::Arc;
+
+    let mut scenario = scenario(1, 3);
+    scenario.with_life(P0, 5);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    let hymn = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hymn to Tourach", false, HYMN_TO_TOURACH)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    lava_spike(&mut scenario);
+    if hidden_is_baloth {
+        scenario
+            .add_creature_to_hand_from_oracle(P1, "Obstinate Baloth", 4, 4, OBSTINATE_BALOTH)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 2,
+            });
+    } else {
+        scenario.add_spell_to_hand(P1, "Hidden Vanilla", false);
+    }
+    scenario.add_spell_to_hand(P1, "Opponent Filler", false);
+    let mut runner = scenario.build();
+    cast_at_opponent(&mut runner, hymn);
+    let mut state = runner.state().clone();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    state.deck_pools.push(PlayerDeckPool {
+        player: P1,
+        current_main: Arc::new(vec![DeckEntry {
+            card: CardFace {
+                name: "Grizzly Bears".to_string(),
+                mana_cost: ManaCost::zero(),
+                ..Default::default()
+            },
+            count: 40,
+        }]),
+        ..Default::default()
+    });
+    state
+}
+
+fn certified_step(state: &GameState, samples: u32) -> Option<GameAction> {
+    let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+    config.search.determinization_samples = samples;
+    let actions: Vec<GameAction> = flat_priority_actions(state)
+        .into_iter()
+        .filter(|action| production_admission(state, action))
+        .collect();
+    crate::search::certified_lethal_priority_action(state, P0, &config, &actions)
+}
+
+#[test]
+fn determinized_certification_does_not_read_the_real_hidden_hand() {
+    let baloth = hymn_over_hidden_card(true);
+    let vanilla = hymn_over_hidden_card(false);
+
+    // Reach guard: with perfect information the hidden card decides the line —
+    // a discarded Baloth enters and gains its controller 4 life.
+    let mut settled = GameRunner::from_state(baloth.clone());
+    settled.advance_until_stack_empty();
+    assert_eq!(
+        settled.life(P1),
+        7,
+        "Baloth entered instead of being discarded"
+    );
+    assert_eq!(certified_step(&vanilla, 0), Some(GameAction::PassPriority));
+    assert_eq!(certified_step(&baloth, 0), None);
+
+    // With K samples the opponent's unknown cards are resampled from their
+    // decklist, so the real hidden identity cannot change the decision.
+    assert_eq!(
+        certified_step(&baloth, 3),
+        certified_step(&vanilla, 3),
+        "the K>0 decision reads sampled worlds, not the real hidden hand"
+    );
+    assert_eq!(certified_step(&baloth, 3), Some(GameAction::PassPriority));
 }

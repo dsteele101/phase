@@ -17,9 +17,7 @@ use engine::game::filter::player_matches_target_filter_in_state;
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::mana_abilities::is_mana_ability;
-use engine::game::quantity::{
-    resolve_quantity_with_targets, try_resolve_quantity_in_source_context,
-};
+use engine::game::quantity::try_resolve_quantity_in_source_context;
 use engine::game::static_abilities::player_protection_from;
 use engine::game::targeting::player_is_legal_target;
 use engine::game::{extract_mana_leg, max_x_value};
@@ -29,7 +27,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, StackEntryKind};
+use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -52,7 +50,7 @@ impl Linear {
         self.fixed + self.per_x * x
     }
 
-    fn plus(self, other: Linear) -> Linear {
+    pub(super) fn plus(self, other: Linear) -> Linear {
         Linear {
             fixed: self.fixed + other.fixed,
             per_x: self.per_x + other.per_x,
@@ -74,11 +72,40 @@ impl Linear {
     }
 }
 
-/// Life each side loses when one source resolves.
+/// Life the AI gains when one source resolves (CR 119.3). `Unread` when the
+/// source can give the AI life by a route this pricing does not read — an
+/// unreadable amount, a recipient it does not resolve, lifelink damage
+/// (CR 702.15b) — so the line search must not reject a line on the AI's life
+/// total alone; the reducer decides the order things resolve in and whether
+/// the AI survives each step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gain {
+    Read(Linear),
+    Unread,
+}
+
+impl Default for Gain {
+    fn default() -> Self {
+        Gain::Read(Linear::default())
+    }
+}
+
+impl Gain {
+    pub(super) fn plus(self, other: Gain) -> Gain {
+        match (self, other) {
+            (Gain::Read(left), Gain::Read(right)) => Gain::Read(left.plus(right)),
+            _ => Gain::Unread,
+        }
+    }
+}
+
+/// Life each side loses — and the life the AI gains — when one source
+/// resolves.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct LifeLoss {
     pub(super) opponent: Linear,
     pub(super) controller: Linear,
+    pub(super) controller_gain: Gain,
 }
 
 /// When a source's first step can be started, which orders a line (CR 117.1a):
@@ -205,73 +232,44 @@ pub(super) fn mana_capacity(state: &GameState, ai_player: PlayerId) -> u32 {
         .max(max_x_value(state, ai_player, &bare_x, None))
 }
 
-/// An upper bound on the life the AI could take from `opponent` this turn,
-/// ignoring mana colours and timing: every priced source, plus everything else
-/// the AI holds — every spell it has a route to cast from any zone (hand,
-/// command zone, and graveyard or exile permissions such as flashback,
-/// CR 702.34a), the activated abilities of its permanents, the pending work of
-/// every spell and ability it has on the stack (CR 405.1), and `pending` (an
-/// object mid-cast). Gates the reducer simulations, so it may overcount but
-/// must never undercount: pending stack work this pricing cannot read exactly
-/// leaves the ceiling unbounded.
-pub(super) fn potential_ceiling(
+/// Whether the AI holds anything that could take life from `opponent` once
+/// the stack settles: a priced source, a spell or ability it already has on
+/// the stack (CR 405.1), every spell it has a route to cast from any zone
+/// (hand, command zone, and graveyard or exile permissions such as flashback,
+/// CR 702.34a), and the activated abilities of its permanents.
+///
+/// This is deliberately STRUCTURAL — it asks whether an instruction can reach
+/// the opponent at all, never how much it would take. Before the stack
+/// resolves no amount bounds the settled position: CR 608.2h reads a
+/// quantity only when its effect is applied, so earlier stack work can change
+/// it (a Krenko activation adding the Goblins a pending Goblin War Strike
+/// counts); a resolving spell can reach a zone it is cast from again
+/// (CR 608.2n + CR 702.34a); repetition and alternative branches decide how
+/// many times an instruction runs; and the opponent's own stack work can cost
+/// them life. Only the reducer's settlement reads those, so this gate decides
+/// only whether that settlement is worth simulating.
+pub(super) fn holds_reach(
     state: &GameState,
     ai_player: PlayerId,
     opponent: PlayerId,
     priced: &[ReachSource],
-    pending: Option<ObjectId>,
-) -> u32 {
-    let mut cast: HashSet<ObjectId> = HashSet::new();
-    let mut activated: HashSet<(ObjectId, usize)> = HashSet::new();
-    let mut total = Linear::default();
-    for source in priced {
-        total = total.plus(source.loss.opponent);
-        match source.steps.first().map(|step| &step.action) {
-            Some(GameAction::CastSpell { object_id, .. }) => {
-                cast.insert(*object_id);
-            }
-            Some(GameAction::ActivateAbility {
-                source_id,
-                ability_index,
-            }) => {
-                activated.insert((*source_id, *ability_index));
-            }
-            _ => {}
-        }
+) -> bool {
+    if !priced.is_empty() {
+        return true;
     }
-
-    // Pending work is priced per stack entry, from the entry's own resolved
-    // instructions: a triggered ability (a Guttersnipe trigger) or an
-    // activation already on the stack has no definition on any card the AI
-    // holds. A spell's source object still joins the object walk below — for
-    // the activated abilities it will have once it resolves, and for its
-    // printed spell when the entry carries no resolved instructions yet (a
-    // permanent spell, or a spell still being cast, CR 601.2a).
-    let mut spells_on_stack: HashSet<ObjectId> = HashSet::new();
-    let mut spells_priced_pending: HashSet<ObjectId> = HashSet::new();
-    for entry in state
-        .stack
-        .iter()
-        .filter(|entry| entry.controller == ai_player)
-    {
-        let is_spell = matches!(entry.kind, StackEntryKind::Spell { .. });
-        if is_spell {
-            spells_on_stack.insert(entry.source_id);
-        }
-        if let Some(ability) = entry.ability() {
-            let pending_work = resolved_loss(state, ai_player, opponent, ability);
-            if pending_work.coverage == Coverage::Partial {
-                return u32::MAX;
-            }
-            total = total.plus(pending_work.loss.opponent);
-            if is_spell {
-                spells_priced_pending.insert(entry.source_id);
-            }
-        }
+    let ai_stack = || {
+        state
+            .stack
+            .iter()
+            .filter(move |entry| entry.controller == ai_player)
+    };
+    if ai_stack().any(|entry| {
+        entry
+            .ability()
+            .is_some_and(|ability| resolved_reaches(state, ai_player, opponent, ability))
+    }) {
+        return true;
     }
-
-    // The engine's cast-object inventory, read without the current timing
-    // check: a sorcery castable by flashback once the stack settles counts.
     let castable = spell_objects_available_to_cast(state, ai_player).into_iter();
     let battlefield = state.battlefield.iter().copied().filter(|object_id| {
         state
@@ -279,65 +277,32 @@ pub(super) fn potential_ceiling(
             .get(object_id)
             .is_some_and(|object| object.controller == ai_player)
     });
+    let on_stack = ai_stack().map(|entry| entry.source_id);
     let mut seen: HashSet<ObjectId> = HashSet::new();
-    for object_id in castable
+    castable
         .chain(battlefield)
-        .chain(spells_on_stack.iter().copied())
-        .chain(pending)
-    {
-        if !seen.insert(object_id) {
-            continue;
-        }
-        let Some(object) = state.objects.get(&object_id) else {
-            continue;
-        };
-        if !cast.contains(&object_id) && !spells_priced_pending.contains(&object_id) {
-            if let Some(spell) = spell_reach(state, ai_player, opponent, object) {
-                total = total.plus(spell.loss.opponent);
-            }
-        }
-        for (index, ability) in object.abilities.iter().enumerate() {
-            if ability.kind != AbilityKind::Activated
-                || is_mana_ability(ability)
-                || activated.contains(&(object_id, index))
-            {
-                continue;
-            }
-            let loss = ability_loss(state, ai_player, opponent, object, ability).opponent;
-            let repeats = if is_repeatable(ability) {
-                MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
-            } else {
-                1
-            };
-            total = total.plus(Linear {
-                fixed: loss.fixed * repeats,
-                per_x: loss.per_x * repeats,
-            });
-        }
-    }
-    let mana = if total.per_x == 0 {
-        0
-    } else {
-        mana_capacity(state, ai_player)
-    };
-    total.at(mana)
+        .chain(on_stack)
+        .filter(|object_id| seen.insert(*object_id))
+        .filter_map(|object_id| state.objects.get(&object_id))
+        .any(|object| object_reaches(state, ai_player, opponent, object))
 }
 
-/// Whether anything `object` can do — its spell, a mode of it, or one of its
-/// activated abilities — takes life from `opponent`.
+/// Whether anything `object` can do — its spell, any mode of it, or one of its
+/// activated abilities — can take life from `opponent`, whatever the amount.
 pub(super) fn object_reaches(
     state: &GameState,
     ai_player: PlayerId,
     opponent: PlayerId,
     object: &GameObject,
 ) -> bool {
-    spell_reach(state, ai_player, opponent, object).is_some()
+    let reaches = |ability: &AbilityDefinition| {
+        let mut nodes = Vec::new();
+        definition_tree(ability, &mut nodes);
+        chain_loss(state, ai_player, opponent, object.id, nodes.into_iter()).reaches
+    };
+    modal_spell_mode_ability_refs(object).any(reaches)
         || object.abilities.iter().any(|ability| {
-            ability.kind == AbilityKind::Activated
-                && !is_mana_ability(ability)
-                && !ability_loss(state, ai_player, opponent, object, ability)
-                    .opponent
-                    .is_zero()
+            ability.kind == AbilityKind::Activated && !is_mana_ability(ability) && reaches(ability)
         })
 }
 
@@ -371,6 +336,7 @@ fn cast_source(
             steps: vec![LineStep {
                 action: action.clone(),
                 mode: spell.mode,
+                x: None,
             }],
             loss: spell.loss,
             commitment: ManaCommitment::Cast {
@@ -392,6 +358,7 @@ fn cast_source(
             LineStep {
                 action: action.clone(),
                 mode: None,
+                x: None,
             },
             LineStep {
                 action: GameAction::ActivateAbility {
@@ -399,6 +366,7 @@ fn cast_source(
                     ability_index: follow_up.ability_index,
                 },
                 mode: None,
+                x: None,
             },
         ],
         loss: follow_up.loss,
@@ -458,6 +426,7 @@ fn push_activation_sources(
             steps: vec![LineStep {
                 action: action.clone(),
                 mode: None,
+                x: None,
             }],
             loss,
             commitment: ManaCommitment::Activation(mana.clone()),
@@ -565,9 +534,11 @@ fn permanent_follow_up(
             categories.iter().all(|category| match category {
                 CostCategory::ManaOnly | CostCategory::PaysLoyalty => true,
                 CostCategory::TapsSelf => !is_creature || hasty,
-                CostCategory::SacrificesPermanent => {
-                    ability.cost.as_ref().is_some_and(sacrifices_only_itself)
-                }
+                // CR 701.21a: the permanent itself is the only one sacrificed.
+                CostCategory::SacrificesPermanent => ability
+                    .cost
+                    .as_ref()
+                    .is_some_and(AbilityCost::sacrifices_only_source),
                 _ => false,
             })
         })
@@ -582,20 +553,6 @@ fn permanent_follow_up(
                 .cmp(&(right.loss.opponent.per_x, right.loss.opponent.fixed))
                 .then_with(|| right.mana.mana_value().cmp(&left.mana.mana_value()))
         })
-}
-
-/// CR 701.21a: every sacrifice in the cost is of the source itself.
-fn sacrifices_only_itself(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Sacrifice(sacrifice) => matches!(sacrifice.target, TargetFilter::SelfRef),
-        AbilityCost::Composite { costs } => costs.iter().all(|leg| match leg {
-            AbilityCost::Sacrifice(_) | AbilityCost::Composite { .. } => {
-                sacrifices_only_itself(leg)
-            }
-            _ => true,
-        }),
-        _ => true,
-    }
 }
 
 /// CR 602.2b: the mana an activation commits, from the engine's cost-leg
@@ -616,31 +573,25 @@ fn is_instant_speed(state: &GameState, object: &GameObject) -> bool {
         || object_has_effective_keyword_kind(state, object.id, KeywordKind::Flash)
 }
 
-/// Whether every life-affecting amount in a priced chain could be read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Coverage {
-    Complete,
-    Partial,
-}
-
-/// A chain's life loss and whether every life-affecting amount in it was read.
+/// A chain's life loss and AI life gain, and whether any of its instructions
+/// can take life from the opponent at all — whatever the amount, and even when
+/// the amount could not be read.
 struct ChainLoss {
     loss: LifeLoss,
-    coverage: Coverage,
+    reaches: bool,
 }
 
 /// Where the amounts of one chain instruction are read from.
-#[derive(Clone, Copy)]
-enum AmountContext<'a> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AmountContext {
     /// A printed definition priced before it is cast or activated: a bare X is
     /// worth one point per mana announced for it (CR 107.3a), and anything else
     /// must be readable from the source's present context.
     Printed,
-    /// Work already on the stack (CR 405.1). Its X was announced and locked as
-    /// it was cast or activated (CR 107.3a) and is read back through the
-    /// engine's resolved-ability authority; any other context-bound amount is
-    /// left unread.
-    Pending(&'a ResolvedAbility),
+    /// Work already on the stack (CR 405.1). CR 608.2h: its amounts are read
+    /// only when its effect is applied, after everything above it resolves,
+    /// so none is read here — the walk answers only whether it reaches.
+    Pending,
 }
 
 /// One instruction of an effect chain, as the pricing walk reads it — shared
@@ -648,7 +599,11 @@ enum AmountContext<'a> {
 struct ChainNode<'a> {
     effect: &'a Effect,
     player_scope: Option<&'a PlayerFilter>,
-    context: AmountContext<'a>,
+    context: AmountContext,
+    /// CR 608.2c: the instruction runs a number of times decided as it
+    /// resolves ("for each red card exiled this way"), so one run's amount
+    /// is not what it takes.
+    repeats: bool,
 }
 
 /// Life each side loses when `ability` (and its unconditional sub-ability
@@ -660,41 +615,77 @@ fn ability_loss(
     source: &GameObject,
     ability: &AbilityDefinition,
 ) -> LifeLoss {
-    let nodes =
-        successors(Some(ability), |node| node.sub_ability.as_deref()).map(|node| ChainNode {
-            effect: &node.effect,
-            player_scope: node.player_scope.as_ref(),
-            context: AmountContext::Printed,
-        });
+    let nodes = successors(Some(ability), |node| node.sub_ability.as_deref()).map(definition_node);
     chain_loss(state, ai_player, opponent, source.id, nodes).loss
 }
 
-/// Life each side loses when a spell or ability already on the stack resolves
-/// (CR 608.2), read from its resolved instructions.
-fn resolved_loss(
+fn definition_node(node: &AbilityDefinition) -> ChainNode<'_> {
+    ChainNode {
+        effect: &node.effect,
+        player_scope: node.player_scope.as_ref(),
+        context: AmountContext::Printed,
+        repeats: node.repeat_for.is_some() || node.repeat_until.is_some(),
+    }
+}
+
+/// Every instruction of a printed definition — its sub-ability chain and every
+/// alternative (`else`) branch along it (CR 608.2c), in written order.
+fn definition_tree<'a>(node: &'a AbilityDefinition, out: &mut Vec<ChainNode<'a>>) {
+    out.push(definition_node(node));
+    if let Some(sub) = node.sub_ability.as_deref() {
+        definition_tree(sub, out);
+    }
+    if let Some(other) = node.else_ability.as_deref() {
+        definition_tree(other, out);
+    }
+}
+
+/// Every instruction of a stack entry's resolved ability, including every
+/// alternative branch along its chain (CR 608.2c).
+fn resolved_tree<'a>(node: &'a ResolvedAbility, out: &mut Vec<ChainNode<'a>>) {
+    out.push(ChainNode {
+        effect: &node.effect,
+        player_scope: node.player_scope.as_ref(),
+        context: AmountContext::Pending,
+        repeats: node.repeat_for.is_some() || node.repeat_until.is_some(),
+    });
+    if let Some(sub) = node.sub_ability.as_deref() {
+        resolved_tree(sub, out);
+    }
+    if let Some(other) = node.else_ability.as_deref() {
+        resolved_tree(other, out);
+    }
+}
+
+/// Whether a spell or ability already on the stack can take life from
+/// `opponent` when it resolves (CR 608.2).
+pub(super) fn resolved_reaches(
     state: &GameState,
     ai_player: PlayerId,
     opponent: PlayerId,
     ability: &ResolvedAbility,
-) -> ChainLoss {
-    let nodes =
-        successors(Some(ability), |node| node.sub_ability.as_deref()).map(|node| ChainNode {
-            effect: &node.effect,
-            player_scope: node.player_scope.as_ref(),
-            context: AmountContext::Pending(node),
-        });
-    chain_loss(state, ai_player, opponent, ability.source_id, nodes)
+) -> bool {
+    let mut nodes = Vec::new();
+    resolved_tree(ability, &mut nodes);
+    chain_loss(
+        state,
+        ai_player,
+        opponent,
+        ability.source_id,
+        nodes.into_iter(),
+    )
+    .reaches
 }
 
-/// Life each side loses when a chain of instructions from `source_id`
-/// resolves with `opponent` chosen for its player target.
+/// Life each side loses, and the AI gains, when a chain of instructions from
+/// `source_id` resolves with `opponent` chosen for its player target.
 ///
 /// One targeted amount is counted — the largest — since a single target slot
 /// is all the line driver aims at the opponent; non-targeted recipients
-/// ("each player", "each opponent") add on top. Work that reaches a player but
-/// that this pricing cannot read exactly — an unreadable amount, damage dealt
-/// by an object other than the source, or any other life-changing or
-/// spell-adding instruction — marks the chain `Partial`.
+/// ("each player", "each opponent") add on top. An amount this walk cannot
+/// read — pending work, a repeated instruction, damage dealt by an object
+/// other than the source, a context it cannot resolve — is not counted, but
+/// the instruction still marks the chain as reaching the opponent.
 fn chain_loss<'a>(
     state: &GameState,
     ai_player: PlayerId,
@@ -709,6 +700,8 @@ fn chain_loss<'a>(
         !player_protection_from(state, opponent, Some(source_id))
             && !object_has_effective_keyword_kind(state, source_id, KeywordKind::Infect)
     };
+    // CR 702.15b: damage from a lifelink source gains its controller life.
+    let lifelink = object_has_effective_keyword_kind(state, source_id, KeywordKind::Lifelink);
     let targetable = |filter: &TargetFilter| {
         player_matches_target_filter_in_state(
             state,
@@ -718,24 +711,18 @@ fn chain_loss<'a>(
             Some(source_id),
         ) && player_is_legal_target(state, opponent, source_id, ai_player)
     };
+    let in_scope = |scope: &PlayerFilter, player: PlayerId| {
+        matches_player_scope(state, player, scope, ai_player, source_id)
+    };
+    let read = |amount: &QuantityExpr, node: &ChainNode<'_>| match node.context {
+        AmountContext::Printed if !node.repeats => {
+            linear_amount(state, ai_player, source_id, amount)
+        }
+        AmountContext::Printed | AmountContext::Pending => None,
+    };
     let mut targeted = Linear::default();
     let mut loss = LifeLoss::default();
-    let mut coverage = Coverage::Complete;
-    let mut unpriced = || coverage = Coverage::Partial;
-    let read = |amount: &QuantityExpr, context: AmountContext<'_>| match context {
-        AmountContext::Printed => linear_amount(state, ai_player, source_id, amount),
-        AmountContext::Pending(node) => pending_amount(state, ai_player, source_id, amount, node),
-    };
-    let scoped = |loss: &mut LifeLoss, scope: &PlayerFilter, amount: Linear, is_damage: bool| {
-        if matches_player_scope(state, opponent, scope, ai_player, source_id)
-            && (!is_damage || damage_lands())
-        {
-            loss.opponent = loss.opponent.plus(amount);
-        }
-        if matches_player_scope(state, ai_player, scope, ai_player, source_id) {
-            loss.controller = loss.controller.plus(amount);
-        }
-    };
+    let mut reaches = false;
 
     for node in nodes {
         match node.effect {
@@ -747,10 +734,15 @@ fn chain_loss<'a>(
                 target,
                 damage_source: None,
                 ..
-            } if damage_lands() && targetable(target) => match read(amount, node.context) {
-                Some(amount) => targeted = targeted.max(amount),
-                None => unpriced(),
-            },
+            } if damage_lands() && targetable(target) => {
+                reaches = true;
+                if lifelink {
+                    loss.controller_gain = Gain::Unread;
+                }
+                if let Some(amount) = read(amount, &node) {
+                    targeted = targeted.max(amount);
+                }
+            }
             // CR 120.7: another object is the source of this damage (Soul's
             // Fire: "target creature you control deals damage …"), so its
             // amount and its source's characteristics are not this walk's to
@@ -759,12 +751,18 @@ fn chain_loss<'a>(
                 target,
                 damage_source: Some(_),
                 ..
-            } if targetable(target) => unpriced(),
+            } if targetable(target) => {
+                reaches = true;
+                loss.controller_gain = Gain::Unread;
+            }
             Effect::DamageAll {
                 player_filter: Some(_),
                 damage_source: Some(_),
                 ..
-            } => unpriced(),
+            } => {
+                reaches = true;
+                loss.controller_gain = Gain::Unread;
+            }
             Effect::DamageEachPlayer {
                 amount,
                 player_filter,
@@ -774,69 +772,81 @@ fn chain_loss<'a>(
                 player_filter: Some(player_filter),
                 damage_source: None,
                 ..
-            } => match read(amount, node.context) {
-                Some(amount) => scoped(&mut loss, player_filter, amount, true),
-                None => unpriced(),
-            },
+            } => {
+                let hits_opponent = in_scope(player_filter, opponent) && damage_lands();
+                let hits_controller = in_scope(player_filter, ai_player);
+                reaches |= hits_opponent;
+                if lifelink && (hits_opponent || hits_controller) {
+                    loss.controller_gain = Gain::Unread;
+                }
+                if let Some(amount) = read(amount, &node) {
+                    if hits_opponent {
+                        loss.opponent = loss.opponent.plus(amount);
+                    }
+                    if hits_controller {
+                        loss.controller = loss.controller.plus(amount);
+                    }
+                }
+            }
             // CR 119.3: life loss — not damage, so protection and infect do
             // not stop it.
             Effect::LoseLife {
                 amount,
                 target: Some(target),
-            } if targetable(target) => match read(amount, node.context) {
-                Some(amount) => targeted = targeted.max(amount),
-                None => unpriced(),
-            },
+            } if targetable(target) => {
+                reaches = true;
+                if let Some(amount) = read(amount, &node) {
+                    targeted = targeted.max(amount);
+                }
+            }
             Effect::LoseLife {
                 amount,
                 target: None,
-            } => match read(amount, node.context) {
-                Some(amount) => match node.player_scope {
-                    // "Each opponent loses N life" iterates its player
-                    // scope, each player losing in turn.
-                    Some(scope) => scoped(&mut loss, scope, amount, false),
-                    // Without a scope or target, the controller loses it.
-                    None => loss.controller = loss.controller.plus(amount),
-                },
-                None => unpriced(),
-            },
-            effect if changes_life_unpriced(effect) => unpriced(),
+            } => {
+                // "Each opponent loses N life" iterates its player scope, each
+                // player losing in turn; without a scope or target, the
+                // controller loses it.
+                let (hits_opponent, hits_controller) = match node.player_scope {
+                    Some(scope) => (in_scope(scope, opponent), in_scope(scope, ai_player)),
+                    None => (false, true),
+                };
+                reaches |= hits_opponent;
+                if let Some(amount) = read(amount, &node) {
+                    if hits_opponent {
+                        loss.opponent = loss.opponent.plus(amount);
+                    }
+                    if hits_controller {
+                        loss.controller = loss.controller.plus(amount);
+                    }
+                }
+            }
+            // CR 119.3: life gained. The AI is the recipient when the
+            // instruction names its controller — inside a player scope, the
+            // player it is iterating. A targeted recipient is aimed at the
+            // opponent by the driver; any other recipient is not resolved
+            // here, so the gain is left unread.
+            Effect::GainLife { amount, player } => {
+                let to_ai = match (player, node.player_scope) {
+                    (TargetFilter::Controller, None) => Some(true),
+                    (TargetFilter::Controller, Some(scope)) => Some(in_scope(scope, ai_player)),
+                    _ => None,
+                };
+                let gain = match to_ai {
+                    Some(false) => Gain::default(),
+                    Some(true) => read(amount, &node).map_or(Gain::Unread, Gain::Read),
+                    None => Gain::Unread,
+                };
+                loss.controller_gain = loss.controller_gain.plus(gain);
+            }
+            effect if changes_life_unpriced(effect) => {
+                reaches = true;
+                loss.controller_gain = Gain::Unread;
+            }
             _ => {}
         }
     }
     loss.opponent = loss.opponent.plus(targeted);
-    ChainLoss { loss, coverage }
-}
-
-/// Read an amount of work already on the stack. CR 107.3a: its X was announced
-/// and locked when it was cast or activated, so a bare X reads that value back
-/// through the engine's resolved-ability authority (`chosen_x`); anything else
-/// must be readable from the source's present context, as for printed work.
-fn pending_amount(
-    state: &GameState,
-    ai_player: PlayerId,
-    source_id: ObjectId,
-    amount: &QuantityExpr,
-    node: &ResolvedAbility,
-) -> Option<Linear> {
-    if amount.contains_x() {
-        let bare_x = matches!(
-            amount,
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable { .. }
-            }
-        );
-        return (bare_x && node.chosen_x.is_some()).then(|| Linear {
-            fixed: resolve_quantity_with_targets(state, amount, node).max(0) as u32,
-            per_x: 0,
-        });
-    }
-    try_resolve_quantity_in_source_context(state, amount, ai_player, source_id).map(|value| {
-        Linear {
-            fixed: value.max(0) as u32,
-            per_x: 0,
-        }
-    })
+    ChainLoss { loss, reaches }
 }
 
 /// Instructions that can change a player's life total — or put more spells on

@@ -2,8 +2,8 @@
 //! whether the game ends in the AI's favour.
 //!
 //! The driver answers only the AI's own prompts for the line it is playing —
-//! aim every player target at the opponent, announce the maximum X, pick the
-//! mode the line committed to — and passes priority for the opponent. Anything
+//! aim every player target at the opponent, announce the X and pick the mode
+//! the line committed to — and passes priority for the opponent. Anything
 //! else (an opponent's choice, an optional trigger, a payment prompt) stops the
 //! drive: a line the driver cannot finish on its own is not certified.
 //!
@@ -48,6 +48,7 @@ pub(super) fn drive(
 ) -> DriveOutcome {
     let mut next = 0;
     let mut mode = None;
+    let mut x = None;
     for _ in 0..MAX_DRIVE_ACTIONS {
         let action = match &sim.waiting_for {
             // CR 104.4a: a draw (no winner) is not a win.
@@ -68,6 +69,7 @@ pub(super) fn drive(
                         Some(issued) => {
                             next += 1;
                             mode = step.mode;
+                            x = step.x;
                             issued
                         }
                         // CR 117.1a: a noninstant step waits for the stack to
@@ -102,9 +104,12 @@ pub(super) fn drive(
                 },
                 None => return DriveOutcome::Stuck,
             },
-            // CR 107.3a: damage that scales with X is announced at its maximum.
+            // CR 107.3a: the X the line announces — its maximum when the line
+            // left it open.
             WaitingFor::ChooseXValue { player, max, .. } if *player == ai_player => {
-                GameAction::ChooseX { value: *max }
+                GameAction::ChooseX {
+                    value: x.take().map_or(*max, |x: u32| x.min(*max)),
+                }
             }
             _ => return DriveOutcome::Stuck,
         };

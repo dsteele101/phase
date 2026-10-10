@@ -22,7 +22,10 @@
 //!    cheapest combination whose total meets the opponent's life while the AI
 //!    survives it (CR 104.4a: a simultaneous loss is a draw, not a win).
 //! 3. [`driver`] certifies a proposed line by playing it on a cloned state
-//!    through the engine reducer, assuming the opponent passes priority. The
+//!    through the engine reducer, assuming the opponent passes priority. With
+//!    objects on the stack the line is priced from the position the stack
+//!    settles into, and only the reducer's settlement reads that position —
+//!    no estimate made before the stack resolves prunes it. The
 //!    engine — not this module — decides what each spell actually does
 //!    (prevention, protection, replacement, "can't lose life"), so an estimate
 //!    can only propose a line; only a reducer-won game commits one.
@@ -72,11 +75,13 @@ const MAX_SIMULATED_ANSWERS: usize = 10;
 pub(crate) type ActionAdmission<'a> = &'a dyn Fn(&GameState, &GameAction) -> bool;
 
 /// One engine action of a lethal line, plus the mode it commits to when the
-/// action opens a modal spell (CR 700.2a).
+/// action opens a modal spell (CR 700.2a) and the X it announces when its
+/// cost has one (CR 107.3a).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LineStep {
     pub(crate) action: GameAction,
     pub(crate) mode: Option<usize>,
+    pub(crate) x: Option<u32>,
 }
 
 /// A reducer-certified sequence of actions that wins the game from the state
@@ -141,6 +146,15 @@ pub(crate) fn lethal_prompt_action(
         })
 }
 
+/// The cheap structural gate in front of [`lethal_prompt_action`]: the AI owes
+/// one of its own cast prompts, has a sole opponent it could burn out, and the
+/// object being cast can take life from them.
+pub(crate) fn prompt_could_finish(state: &GameState, ai_player: PlayerId) -> bool {
+    state.waiting_for.acting_player() == Some(ai_player)
+        && sole_opponent(state, ai_player)
+            .is_some_and(|opponent| pending_source_could_finish(state, ai_player, opponent))
+}
+
 /// Search for and certify a game-winning line from an AI priority decision.
 pub(crate) fn find_lethal_line(
     state: &GameState,
@@ -161,10 +175,10 @@ pub(crate) fn find_lethal_line(
     // CR 117.4: with objects on the stack, the line is priced from the state
     // the stack settles into once every player passes — noninstant spells only
     // become castable there (CR 117.1a), and damage already on the stack has
-    // landed. The settle is a reducer simulation, so gate it on an upper bound
-    // that ignores mana and timing entirely.
-    let ceiling = sources::potential_ceiling(state, ai_player, opponent, &current, None);
-    if ceiling < life_of(state, opponent) {
+    // landed. CR 608.2h: what that work does is determined only as it
+    // resolves, so the settle itself is the authority; it is gated only on the
+    // AI holding anything that could take life from the opponent at all.
+    if !sources::holds_reach(state, ai_player, opponent, &current) {
         return None;
     }
     match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
@@ -223,8 +237,8 @@ fn certify_cheapest(
     // Copies of one repeatable activation make many combinations that play
     // out identically; certify each distinct step sequence once.
     let mut attempted: Vec<Vec<LineStep>> = Vec::new();
-    for members in solver::lethal_combinations(&sources, &budget) {
-        let steps = solver::line_steps(&sources, &members);
+    for combination in solver::lethal_combinations(&sources, &budget) {
+        let steps = solver::line_steps(&sources, &combination);
         if attempted.contains(&steps) {
             continue;
         }
@@ -327,19 +341,28 @@ fn prompt_answers(
             .filter(|action| matches!(action, GameAction::SelectModes { .. }))
             .cloned()
             .collect(),
-        // CR 107.3a: an X that scales damage is announced at its maximum.
-        WaitingFor::ChooseXValue { player, max, .. } if *player == ai_player => issued
-            .iter()
-            .filter(|action| matches!(action, GameAction::ChooseX { value } if value == max))
-            .cloned()
-            .collect(),
+        // CR 107.3a: the controller announces X. The maximum is tried first;
+        // when it would also cost the AI the game (damage to each player), the
+        // smallest values follow, since the least X that is still lethal
+        // leaves the AI the most life.
+        WaitingFor::ChooseXValue { player, max, .. } if *player == ai_player => {
+            let mut answers: Vec<(bool, u32, GameAction)> = issued
+                .iter()
+                .filter_map(|action| match action {
+                    GameAction::ChooseX { value } => Some((value != max, *value, action.clone())),
+                    _ => None,
+                })
+                .collect();
+            answers.sort_by_key(|(not_max, value, _)| (*not_max, *value));
+            answers.into_iter().map(|(.., action)| action).collect()
+        }
         _ => Vec::new(),
     }
 }
 
 /// The structural gate in front of the prompt simulation: the spell or ability
-/// whose prompt is pending must be able to take life from `opponent`, and
-/// everything the AI holds together must be able to reach their life total.
+/// whose prompt is pending must be able to take life from `opponent`. How much
+/// is the simulation's to read (CR 608.2h).
 fn pending_source_could_finish(state: &GameState, ai_player: PlayerId, opponent: PlayerId) -> bool {
     let pending = match &state.waiting_for {
         WaitingFor::TargetSelection { pending_cast, .. }
@@ -347,9 +370,8 @@ fn pending_source_could_finish(state: &GameState, ai_player: PlayerId, opponent:
         | WaitingFor::ChooseXValue { pending_cast, .. } => pending_cast,
         _ => return false,
     };
-    state.objects.get(&pending.object_id).is_some_and(|object| {
-        sources::object_reaches(state, ai_player, opponent, object)
-            && sources::potential_ceiling(state, ai_player, opponent, &[], Some(object.id))
-                >= life_of(state, opponent)
-    })
+    state
+        .objects
+        .get(&pending.object_id)
+        .is_some_and(|object| sources::object_reaches(state, ai_player, opponent, object))
 }
