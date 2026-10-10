@@ -28,6 +28,9 @@ const MAX_DRIVE_ACTIONS: usize = 128;
 pub(super) enum DriveOutcome {
     /// The game ended with the AI as the winner.
     Won,
+    /// The game ended in a draw: every remaining player lost at once
+    /// (CR 104.4a). The opponent is out, but so is the AI.
+    Drawn,
     /// Every step was played and the stack emptied with the AI holding
     /// priority; the game goes on from this state.
     Settled(Box<GameState>),
@@ -53,10 +56,10 @@ pub(super) fn drive(
         let action = match &sim.waiting_for {
             // CR 104.4a: a draw (no winner) is not a win.
             WaitingFor::GameOver { winner } => {
-                return if *winner == Some(ai_player) {
-                    DriveOutcome::Won
-                } else {
-                    DriveOutcome::Stuck
+                return match winner {
+                    Some(winner) if *winner == ai_player => DriveOutcome::Won,
+                    None => DriveOutcome::Drawn,
+                    Some(_) => DriveOutcome::Stuck,
                 };
             }
             WaitingFor::Priority { player } if *player == ai_player => match steps.get(next) {

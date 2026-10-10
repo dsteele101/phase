@@ -866,7 +866,11 @@ fn life_gained_that_cannot_cover_the_loss_is_not_lethal() {
 // ── A survivable X (CR 107.3a) ──
 
 fn earthquake(ai_life: i32, opponent_life: i32) -> GameRunner {
-    let mut scenario = scenario(6, opponent_life);
+    earthquake_with_mountains(6, ai_life, opponent_life)
+}
+
+fn earthquake_with_mountains(mountains: usize, ai_life: i32, opponent_life: i32) -> GameRunner {
+    let mut scenario = scenario(mountains, opponent_life);
     scenario.with_life(P0, ai_life);
     scenario
         .add_spell_to_hand_from_oracle(P0, "Earthquake", false, EARTHQUAKE)
@@ -894,6 +898,128 @@ fn symmetric_x_damage_with_no_survivable_x_is_not_lethal() {
     let mut runner = earthquake(2, 2);
     assert!(line(runner.state()).is_none());
     assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Cast the root line's Earthquake through the reducer and return the AI's
+/// real ChooseX prompt with its engine-issued answers.
+fn earthquake_x_prompt(root: &GameState, cast: &GameAction) -> (GameState, Vec<GameAction>) {
+    let mut runner = GameRunner::from_state(root.clone());
+    runner.act(cast.clone()).expect("Earthquake is castable");
+    let state = runner.state().clone();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ChooseXValue { player, max: 14, .. } if player == P0),
+        "fifteen Mountains announce X up to 14: {:?}",
+        state.waiting_for
+    );
+    let issued = engine::ai_support::build_decision_context(&state)
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect();
+    (state, issued)
+}
+
+/// CR 107.3a + CR 104.4a: with fifteen Mountains the X prompt offers 0–14.
+/// X=14 takes both players out; only X=10 or 11 takes the opponent (10) out
+/// and leaves the AI (12) alive — both beyond the first values a bounded scan
+/// reaches. The prompt must announce the X the root certified.
+#[test]
+fn x_prompt_announces_the_certified_x_across_a_wide_range() {
+    let mut runner = earthquake_with_mountains(15, 12, 10);
+    let root = runner.state().clone();
+    let steps = line(&root).expect("Earthquake for X=10 is lethal and survivable");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(
+        steps[0].x,
+        Some(10),
+        "the root certifies the least lethal X"
+    );
+
+    let (prompt, issued) = earthquake_x_prompt(&root, &steps[0].action);
+    let offered: Vec<u32> = issued
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseX { value } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        offered,
+        (0..=14).collect::<Vec<_>>(),
+        "the engine issues the full range"
+    );
+    assert_eq!(
+        lethal_prompt_action(&prompt, P0, &issued, &production_admission),
+        Some(GameAction::ChooseX { value: 10 })
+    );
+
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert_eq!(runner.life(P0), 2, "X=10 leaves the AI at 12 − 10");
+}
+
+/// The same wide range with the AI at 10: every X that takes the opponent out
+/// takes the AI out with them, so no X wins.
+#[test]
+fn x_prompt_with_no_survivable_x_in_a_wide_range_declines() {
+    let mut runner = earthquake_with_mountains(15, 10, 10);
+    let root = runner.state().clone();
+    assert!(line(&root).is_none());
+    let quake = root.players[P0.0 as usize].hand[0];
+    let (prompt, issued) = earthquake_x_prompt(&root, &cast_spell(quake, &root));
+    assert_eq!(
+        lethal_prompt_action(&prompt, P0, &issued, &production_admission),
+        None
+    );
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── One certification per decision, inside the shared budget ──
+
+fn certification_runs() -> u32 {
+    crate::search::CERTIFICATION_RUNS.with(std::cell::Cell::get)
+}
+
+/// With determinization enabled (K=3) and reach the line search rejects
+/// (Bolt for 3 against 5), the decision certifies at its ensemble boundary
+/// only: the first sampled world declines, and no sampled world's scorer
+/// re-runs certification — through the scored/parallel-worker entry and
+/// through `choose_action` alike.
+#[test]
+fn certification_runs_once_per_decision_at_the_ensemble_boundary() {
+    let mut scenario = scenario(1, 5);
+    lightning_bolt(&mut scenario);
+    let state = scenario.build().state().clone();
+    let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+    config.search.determinization_samples = 3;
+    config.search.time_budget_ms = None;
+
+    let before = certification_runs();
+    let scored = crate::search::score_candidates_for_parallel_worker(&state, P0, &config, None);
+    assert!(!scored.is_empty(), "the sampled ensemble still scores");
+    assert_eq!(certification_runs() - before, 1);
+
+    let before = certification_runs();
+    let mut rng = SmallRng::seed_from_u64(7);
+    crate::search::choose_action(&state, P0, &config, &mut rng).expect("the AI acts");
+    assert_eq!(certification_runs() - before, 1);
+}
+
+/// The decision's shared wall-clock ceiling is authoritative over
+/// certification too: with that budget already spent, no sampled world is
+/// certified (outside measurement mode, which runs without a wall clock).
+#[test]
+fn certification_spends_from_the_shared_ensemble_budget() {
+    let mut scenario = scenario(1, 5);
+    lightning_bolt(&mut scenario);
+    let state = scenario.build().state().clone();
+    let mut config = create_config(AiDifficulty::Medium, Platform::Native);
+    config.search.determinization_samples = 3;
+    config.search.time_budget_ms = Some(0);
+    assert!(!config.execution_mode.is_measurement());
+
+    let before = certification_runs();
+    crate::search::score_candidates_for_parallel_worker(&state, P0, &config, None);
+    assert_eq!(certification_runs() - before, 0);
 }
 
 // ── Certification stays inside the selected information model (CR 400.2) ──
@@ -958,7 +1084,13 @@ fn certified_step(state: &GameState, samples: u32) -> Option<GameAction> {
         .into_iter()
         .filter(|action| production_admission(state, action))
         .collect();
-    crate::search::certified_lethal_priority_action(state, P0, &config, &actions)
+    crate::search::certified_lethal_priority_action(
+        state,
+        P0,
+        &config,
+        &actions,
+        engine::util::Deadline::none(),
+    )
 }
 
 #[test]

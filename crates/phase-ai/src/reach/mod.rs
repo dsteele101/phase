@@ -47,6 +47,8 @@ mod sources;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
+
 use engine::ai_support::flat_priority_actions;
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -123,27 +125,117 @@ pub(crate) fn lethal_prompt_action(
     admission: ActionAdmission<'_>,
 ) -> Option<GameAction> {
     let opponent = sole_opponent(state, ai_player)?;
-    let answers = prompt_answers(state, ai_player, opponent, issued);
-    if answers.is_empty() || !pending_source_could_finish(state, ai_player, opponent) {
+    if !pending_source_could_finish(state, ai_player, opponent) {
         return None;
     }
-    answers
-        .into_iter()
-        .take(MAX_SIMULATED_ANSWERS)
-        .find(|answer| {
-            let mut sim = state.clone();
-            if apply_as_current_for_simulation(&mut sim, answer.clone()).is_err() {
-                return false;
+    let verdict =
+        |answer: &GameAction| answer_verdict(state, ai_player, opponent, answer, admission);
+    match &state.waiting_for {
+        WaitingFor::ChooseXValue { player, .. } if *player == ai_player => {
+            x_answer(issued, verdict)
+        }
+        _ => prompt_answers(state, ai_player, opponent, issued)
+            .into_iter()
+            .take(MAX_SIMULATED_ANSWERS)
+            .find(|answer| verdict(answer) == AnswerVerdict::Wins),
+    }
+}
+
+/// What one answer to the AI's own cast prompt leads to, read by the reducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerVerdict {
+    /// The AI wins: at once, or by a certified line from where it settles.
+    Wins,
+    /// The opponent is taken out, but so is the AI (CR 104.4a).
+    Overkill,
+    /// The opponent survives, or the drive stopped on a decision it doesn't make.
+    Short,
+}
+
+/// Apply `answer` to a clone, drive the cast back to the AI's priority with the
+/// stack settled, and judge the result.
+fn answer_verdict(
+    state: &GameState,
+    ai_player: PlayerId,
+    opponent: PlayerId,
+    answer: &GameAction,
+    admission: ActionAdmission<'_>,
+) -> AnswerVerdict {
+    let mut sim = state.clone();
+    if apply_as_current_for_simulation(&mut sim, answer.clone()).is_err() {
+        return AnswerVerdict::Short;
+    }
+    match driver::drive(sim, ai_player, opponent, &[], admission) {
+        DriveOutcome::Won => AnswerVerdict::Wins,
+        DriveOutcome::Drawn => AnswerVerdict::Overkill,
+        DriveOutcome::Settled(settled) => {
+            let issued = admitted_priority_actions(&settled, admission);
+            if find_lethal_line(&settled, ai_player, &issued, admission).is_some() {
+                AnswerVerdict::Wins
+            } else {
+                AnswerVerdict::Short
             }
-            match driver::drive(sim, ai_player, opponent, &[], admission) {
-                DriveOutcome::Won => true,
-                DriveOutcome::Settled(settled) => {
-                    let issued = admitted_priority_actions(&settled, admission);
-                    find_lethal_line(&settled, ai_player, &issued, admission).is_some()
-                }
-                DriveOutcome::Stuck => false,
-            }
+        }
+        DriveOutcome::Stuck => AnswerVerdict::Short,
+    }
+}
+
+/// CR 107.3a: the AI announces X for a spell or ability in its lethal line.
+///
+/// The maximum is judged first. When it takes the opponent out but the AI too
+/// (damage to each player, CR 104.4a), the line the root certified used the
+/// least X that is still lethal, since life paid grows with X along with the
+/// damage — so that X is found by bisecting the whole issued range on "the
+/// opponent is out", however wide the range is. Only then does a bounded
+/// ascending scan cover answers whose effect is not monotone in X (a smaller
+/// X can leave mana for the rest of the line).
+fn x_answer(
+    issued: &[GameAction],
+    verdict: impl Fn(&GameAction) -> AnswerVerdict,
+) -> Option<GameAction> {
+    let mut values: Vec<u32> = issued
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::ChooseX { value } => Some(*value),
+            _ => None,
         })
+        .collect();
+    values.sort_unstable();
+    values.dedup();
+    let &max = values.last()?;
+    let mut judged: HashMap<u32, AnswerVerdict> = HashMap::new();
+    let mut judge = |value: u32| {
+        *judged
+            .entry(value)
+            .or_insert_with(|| verdict(&GameAction::ChooseX { value }))
+    };
+
+    match judge(max) {
+        AnswerVerdict::Wins => return Some(GameAction::ChooseX { value: max }),
+        AnswerVerdict::Overkill => {
+            // Invariant: values[high] takes the opponent out.
+            let (mut low, mut high) = (0, values.len() - 1);
+            while low < high {
+                let mid = (low + high) / 2;
+                match judge(values[mid]) {
+                    AnswerVerdict::Short => low = mid + 1,
+                    AnswerVerdict::Wins | AnswerVerdict::Overkill => high = mid,
+                }
+            }
+            if judge(values[high]) == AnswerVerdict::Wins {
+                return Some(GameAction::ChooseX {
+                    value: values[high],
+                });
+            }
+        }
+        AnswerVerdict::Short => {}
+    }
+    values
+        .into_iter()
+        .filter(|value| *value != max)
+        .take(MAX_SIMULATED_ANSWERS)
+        .find(|&value| judge(value) == AnswerVerdict::Wins)
+        .map(|value| GameAction::ChooseX { value })
 }
 
 /// The cheap structural gate in front of [`lethal_prompt_action`]: the AI owes
@@ -183,6 +275,8 @@ pub(crate) fn find_lethal_line(
     }
     match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
         DriveOutcome::Won => Some(LethalLine { steps: Vec::new() }),
+        // CR 104.4a: settling takes the AI out with the opponent.
+        DriveOutcome::Drawn => None,
         DriveOutcome::Settled(settled) => {
             let settled_issued = admitted_priority_actions(&settled, admission);
             let settled_sources =
@@ -313,8 +407,8 @@ fn pass_to_resolve_stack(state: &GameState, issued: &[GameAction]) -> Option<Gam
         .then_some(GameAction::PassPriority)
 }
 
-/// The issued answers to the AI's own pending cast prompt that a lethal line
-/// could use, in issued order.
+/// The issued target and mode answers to the AI's own pending cast prompt
+/// that a lethal line could use, in issued order. X is [`x_answer`]'s.
 fn prompt_answers(
     state: &GameState,
     ai_player: PlayerId,
@@ -341,21 +435,6 @@ fn prompt_answers(
             .filter(|action| matches!(action, GameAction::SelectModes { .. }))
             .cloned()
             .collect(),
-        // CR 107.3a: the controller announces X. The maximum is tried first;
-        // when it would also cost the AI the game (damage to each player), the
-        // smallest values follow, since the least X that is still lethal
-        // leaves the AI the most life.
-        WaitingFor::ChooseXValue { player, max, .. } if *player == ai_player => {
-            let mut answers: Vec<(bool, u32, GameAction)> = issued
-                .iter()
-                .filter_map(|action| match action {
-                    GameAction::ChooseX { value } => Some((value != max, *value, action.clone())),
-                    _ => None,
-                })
-                .collect();
-            answers.sort_by_key(|(not_max, value, _)| (*not_max, *value));
-            answers.into_iter().map(|(.., action)| action).collect()
-        }
         _ => Vec::new(),
     }
 }
