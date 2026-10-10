@@ -1394,3 +1394,124 @@ fn a_sampled_certificate_completed_past_the_deadline_is_rejected() {
         "the final world began in budget and completed past it"
     );
 }
+
+// ── A certified response survives the cast's own target prompt (CR 117.3c) ──
+
+const CHAR: &str = "Char deals 4 damage to any target and 2 damage to you.";
+
+/// The AI at 2 against an opponent at 5 with three Mountains, Char in hand,
+/// and an untapped 0/2 Spear Spewer — with lifelink (as the Lifelink Aura
+/// grants it) when `lifelink` — then Char cast, so its target prompt is the
+/// AI's real decision.
+fn char_target_prompt_over_spewer(lifelink: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = scenario(3, 5);
+    scenario.with_life(P0, 2);
+    let mut spewer = scenario.add_creature_from_oracle(P0, "Spear Spewer", 0, 2, SPEAR_SPEWER);
+    spewer.with_mana_cost(red(0, 1));
+    if lifelink {
+        spewer.lifelink();
+    }
+    let spewer = spewer.id();
+    let char = scenario
+        .add_spell_to_hand_from_oracle(P0, "Char", true, CHAR)
+        .with_mana_cost(red(2, 1))
+        .id();
+    let mut runner = scenario.build();
+    let root = line(runner.state());
+    assert_eq!(
+        root.is_some(),
+        lifelink,
+        "Char and Spewer win from the root only with lifelink"
+    );
+    if let Some(root) = root {
+        assert_eq!(casts(&root), vec![char]);
+        assert!(root.iter().any(|step| matches!(
+            step.action,
+            GameAction::ActivateAbility { source_id, .. } if source_id == spewer
+        )));
+    }
+    let cast = cast_spell(char, runner.state());
+    runner.act(cast).expect("Char is castable");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::TargetSelection { player, .. } if player == P0),
+        "Char asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    (runner, char, spewer)
+}
+
+fn issued_at_prompt(state: &GameState) -> Vec<GameAction> {
+    engine::ai_support::build_decision_context(state)
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect()
+}
+
+/// Spewer above Char takes the AI from 2 to 3 (CR 702.15b) and the opponent to
+/// 4, then Char takes them to 1 and 0. Settling Char alone first would take
+/// the AI to 0 (CR 104.3b), so the target prompt must be judged from the
+/// priority it returns to, where the Spewer response is still legal.
+#[test]
+fn a_certified_response_survives_the_casts_target_prompt() {
+    let (mut runner, _, spewer) = char_target_prompt_over_spewer(true);
+    let prompt = runner.state().clone();
+    let aim = GameAction::ChooseTarget {
+        target: Some(TargetRef::Player(P1)),
+    };
+    assert_eq!(
+        lethal_prompt_action(
+            &prompt,
+            P0,
+            &issued_at_prompt(&prompt),
+            &production_admission
+        ),
+        Some(aim.clone()),
+        "the target prompt keeps the certified line"
+    );
+
+    let mut settled = GameRunner::from_state(prompt);
+    settled
+        .act(aim.clone())
+        .expect("the opponent is a legal target");
+    settled.advance_until_stack_empty();
+    assert!(
+        matches!(
+            settled.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P1) }
+        ),
+        "settling Char alone loses the AI"
+    );
+
+    runner.act(aim).expect("the opponent is a legal target");
+    let state = runner.state().clone();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+    let admitted = admitted_actions(&state);
+    assert_eq!(
+        lethal_priority_action(&state, P0, &admitted, &production_admission),
+        Some(GameAction::ActivateAbility {
+            source_id: spewer,
+            ability_index: 0,
+        })
+    );
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert_eq!(runner.life(P0), 1);
+}
+
+/// Without lifelink the Spewer only costs the AI a further point: no answer
+/// to Char's prompt keeps the AI alive through it.
+#[test]
+fn a_target_prompt_with_no_surviving_response_declines() {
+    let (mut runner, _, _) = char_target_prompt_over_spewer(false);
+    let prompt = runner.state().clone();
+    assert_eq!(
+        lethal_prompt_action(
+            &prompt,
+            P0,
+            &issued_at_prompt(&prompt),
+            &production_admission
+        ),
+        None
+    );
+    assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}

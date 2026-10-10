@@ -25,28 +25,39 @@ use super::{issued_counterpart, ActionAdmission, LineStep};
 /// their prompts and the passes that resolve them stays well inside it.
 const MAX_DRIVE_ACTIONS: usize = 128;
 
+/// Where a drive that played every step stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DriveStop {
+    /// Once everyone has passed and the stack is empty (CR 117.4).
+    StackSettled,
+    /// At the AI's first priority after the last step, with whatever is on
+    /// the stack still pending (CR 117.3c) — so the AI can still respond.
+    AiPriority,
+}
+
 pub(super) enum DriveOutcome {
     /// The game ended with the AI as the winner.
     Won,
     /// The game ended in a draw: every remaining player lost at once
     /// (CR 104.4a). The opponent is out, but so is the AI.
     Drawn,
-    /// Every step was played and the stack emptied with the AI holding
-    /// priority; the game goes on from this state.
-    Settled(Box<GameState>),
+    /// Every step was played and the AI holds priority where the drive was
+    /// asked to stop; the game goes on from this state.
+    AtPriority(Box<GameState>),
     /// The drive could not continue without a decision it does not make, or a
     /// step was no longer available.
     Stuck,
 }
 
 /// Play `steps` from `sim`, resolving the stack between them as needed, and
-/// report how the game stands afterwards. A step is played only when the
+/// report how the game stands at `stop`. A step is played only when the
 /// admitted, engine-issued priority domain of the simulated state offers it.
 pub(super) fn drive(
     mut sim: GameState,
     ai_player: PlayerId,
     opponent: PlayerId,
     steps: &[LineStep],
+    stop: DriveStop,
     admission: ActionAdmission<'_>,
 ) -> DriveOutcome {
     let mut next = 0;
@@ -81,8 +92,10 @@ pub(super) fn drive(
                         None => return DriveOutcome::Stuck,
                     }
                 }
-                None if !sim.stack.is_empty() => GameAction::PassPriority,
-                None => return DriveOutcome::Settled(Box::new(sim)),
+                None if stop == DriveStop::StackSettled && !sim.stack.is_empty() => {
+                    GameAction::PassPriority
+                }
+                None => return DriveOutcome::AtPriority(Box::new(sim)),
             },
             // The line assumes the opponent passes rather than responds
             // (CR 117.3d).

@@ -58,7 +58,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, PendingCast, WaitingFor};
 use engine::types::player::PlayerId;
 
-use driver::DriveOutcome;
+use driver::{DriveOutcome, DriveStop};
 use sources::ReachSource;
 
 /// Most distinct candidate lines simulated per decision. Combinations are
@@ -149,7 +149,8 @@ pub(crate) fn lethal_prompt_action(
 /// What one answer to the AI's own cast prompt leads to, read by the reducer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnswerVerdict {
-    /// The AI wins: at once, or by a certified line from where it settles.
+    /// The AI wins: at once, or by a certified line from the priority the
+    /// answer returns it to.
     Wins,
     /// The opponent is taken out, but so is the AI (CR 104.4a).
     Overkill,
@@ -157,8 +158,13 @@ enum AnswerVerdict {
     Short,
 }
 
-/// Apply `answer` to a clone, drive the cast back to the AI's priority with the
-/// stack settled, and judge the result.
+/// Apply `answer` to a clone, finish the announcement only as far as the
+/// caster's next priority (CR 117.3c), and judge the result from there.
+///
+/// The cast is still on the stack at that priority, and so are the AI's
+/// responses to it: a certified line may need one played above the cast before
+/// it resolves (CR 117.4), so the position is certified as a priority decision
+/// — settlement first, then the responses — rather than settled outright.
 fn answer_verdict(
     state: &GameState,
     ai_player: PlayerId,
@@ -170,25 +176,44 @@ fn answer_verdict(
     if apply_as_current_for_simulation(&mut sim, answer.clone()).is_err() {
         return AnswerVerdict::Short;
     }
-    match driver::drive(sim, ai_player, opponent, &[], admission) {
-        DriveOutcome::Won => AnswerVerdict::Wins,
+    let at_priority = match driver::drive(
+        sim,
+        ai_player,
+        opponent,
+        &[],
+        DriveStop::AiPriority,
+        admission,
+    ) {
+        DriveOutcome::Won => return AnswerVerdict::Wins,
+        DriveOutcome::Drawn => return AnswerVerdict::Overkill,
+        DriveOutcome::Stuck => return AnswerVerdict::Short,
+        DriveOutcome::AtPriority(at_priority) => at_priority,
+    };
+    let issued = admitted_priority_actions(&at_priority, admission);
+    if find_lethal_line(&at_priority, ai_player, &issued, admission).is_some() {
+        return AnswerVerdict::Wins;
+    }
+    // No line wins from here; whether settling still takes the opponent out
+    // along with the AI is what an X search bisects on.
+    match driver::drive(
+        *at_priority,
+        ai_player,
+        opponent,
+        &[],
+        DriveStop::StackSettled,
+        admission,
+    ) {
         DriveOutcome::Drawn => AnswerVerdict::Overkill,
-        DriveOutcome::Settled(settled) => {
-            let issued = admitted_priority_actions(&settled, admission);
-            if find_lethal_line(&settled, ai_player, &issued, admission).is_some() {
-                AnswerVerdict::Wins
-            } else {
-                AnswerVerdict::Short
-            }
+        DriveOutcome::Won | DriveOutcome::AtPriority(_) | DriveOutcome::Stuck => {
+            AnswerVerdict::Short
         }
-        DriveOutcome::Stuck => AnswerVerdict::Short,
     }
 }
 
 /// The step of a certified line that started the cast whose prompt is
 /// pending — the line certified from the priority decision the cast was
-/// started at, reconstructed by backing the cast out on a clone (CR 601.2f:
-/// the caster may back out before committing to an X value). The prompt's own
+/// started at, reconstructed by backing the cast out on a clone through the
+/// reducer's own `CancelCast` at the X prompt. The prompt's own
 /// answers judge only how the stack settles from here, and an X that wins only
 /// with the rest of the stack still below it (a smaller X keeps the AI alive
 /// until an older spell resolves, CR 117.4) is invisible to a bounded scan;
@@ -331,9 +356,16 @@ pub(crate) fn find_lethal_line(
         return None;
     }
     let mut attempted = Vec::new();
-    let after_settling = match driver::drive(state.clone(), ai_player, opponent, &[], admission) {
+    let after_settling = match driver::drive(
+        state.clone(),
+        ai_player,
+        opponent,
+        &[],
+        DriveStop::StackSettled,
+        admission,
+    ) {
         DriveOutcome::Won => return Some(LethalLine { steps: Vec::new() }),
-        DriveOutcome::Settled(settled) => {
+        DriveOutcome::AtPriority(settled) => {
             let settled_issued = admitted_priority_actions(&settled, admission);
             let settled_sources =
                 sources::reach_sources(&settled, ai_player, opponent, &settled_issued);
@@ -479,7 +511,14 @@ fn certify_combinations(
             break;
         }
         if matches!(
-            driver::drive(origin.clone(), ai_player, opponent, &steps, admission),
+            driver::drive(
+                origin.clone(),
+                ai_player,
+                opponent,
+                &steps,
+                DriveStop::StackSettled,
+                admission
+            ),
             DriveOutcome::Won
         ) {
             return Some(LethalLine { steps });
