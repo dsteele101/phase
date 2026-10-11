@@ -2012,11 +2012,18 @@ pub(crate) fn feasible_mana_capacity(
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> u32 {
-    feasible_mana_methods(state, object_id, controller, payment_context)
-        .iter()
-        .map(|method| method.net_yield)
-        .max()
-        .unwrap_or(0)
+    let mut best = 0;
+    match visit_feasible_mana_abilities(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        |net_yield, _| best = best.max(net_yield),
+    ) {
+        None => 0,
+        Some(0) => u32::from(basic_land_fallback_applies(state, object_id, controller)),
+        Some(_) => best,
+    }
 }
 
 /// One way a permanent could pay mana: the net mana a single activation yields
@@ -2033,106 +2040,131 @@ pub struct FeasibleManaMethod {
 
 /// CR 117.1d + CR 601.2g: Every mana method of this permanent the controller
 /// could currently activate, each with its net yield (CR 605.3b) and penalty.
-/// [`feasible_mana_capacity`] is the maximum net yield over these.
+/// [`feasible_mana_capacity`] is the maximum net yield over these; it shares
+/// the walk but skips the per-method penalty this builds.
 pub(crate) fn feasible_mana_methods(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> Vec<FeasibleManaMethod> {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return Vec::new();
-    };
-    if obj.zone != Zone::Battlefield || obj.controller != controller {
-        return Vec::new();
-    }
-
-    let methods: Vec<FeasibleManaMethod> = obj
-        .abilities
-        .iter()
-        .enumerate()
-        .filter(|(idx, ability)| {
-            // CR 605.1a: Must be an activated mana ability.
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                return false;
-            }
-            // CR 605.3a + CR 117.1d: The engine-authoritative "is the cost
-            // currently payable?" check covers sacrifice supply
-            // (`find_eligible_sacrifice_targets`), discard-hand availability,
-            // life total, tap eligibility, and summoning sickness via the
-            // shared `is_payable_for_mana_ability` + activation simulation.
-            // We delegate to it rather than re-implementing the cost gate.
-            if !mana_abilities::can_activate_mana_ability_now(
-                state, controller, object_id, *idx, ability,
-            ) {
-                return false;
-            }
-            // CR 604: Static activation restrictions ("only during your
-            // upkeep", etc.) must hold — mirrors `is_active_tap_mana_ability`.
-            if !activation_condition_satisfied(state, controller, object_id, *idx, ability) {
-                return false;
-            }
-            // CR 106.6: Restricted mana only counts toward this spell when
-            // the restriction permits it (issue #2011: Eldrazi Temple).
-            match &*ability.effect {
-                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-                    restrictions,
-                    state,
-                    object_id,
-                    payment_context,
-                ),
-                _ => false,
-            }
-        })
-        .filter_map(|(_, ability)| match &*ability.effect {
-            Effect::Mana { produced, .. } => {
-                let resolved =
-                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-                let gross = super::effects::mana::resolve_mana_types_for_ability(
-                    produced, state, &resolved,
-                )
-                .len() as u32;
-                // CR 605.3b: Net the mana paid to activate. Non-mana cost
-                // components (Sacrifice / Discard / PayLife / Exile) have no
-                // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
-                // net equals the gross (e.g., KCI activation cost is one
-                // sacrificed artifact, no mana — full 2 colorless yield).
-                //
-                // Caveat: collapsing mana sub-cost to a single `mana_value`
-                // assumes the sub-cost is paid from the SAME color domain as
-                // the produced mana (filter-land case: pay {1} or any color,
-                // produce {U/W}). For exotic abilities whose mana sub-cost is
-                // a different color than what they produce — e.g. a
-                // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
-                // pessimistic-but-safe in one direction (we never claim
-                // capacity we can't produce) but over-states feasibility in
-                // the other (the {U} sub-cost has to come from another
-                // source, which this scan doesn't model). Such cards are
-                // vanishingly rare in real Magic; if one is added the
-                // sub-cost color domain should be threaded through here
-                // rather than collapsed to `mana_value`.
-                let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
-                    .map_or(0, |cost| cost.mana_value());
-                Some(FeasibleManaMethod {
-                    net_yield: gross.saturating_sub(activation_cost),
-                    penalty: object_mana_ability_penalty(state, object_id, ability),
-                })
-            }
-            _ => None,
-        })
-        .collect();
-
-    // CR 305.1: Subtype-only basic-land fallback (same as `max_mana_yield`).
-    if methods.is_empty()
-        && obj.card_types.core_types.contains(&CoreType::Land)
-        && !activatable_mana_options(state, object_id, controller).is_empty()
-    {
-        return vec![FeasibleManaMethod {
+    let mut methods = Vec::new();
+    let visited = visit_feasible_mana_abilities(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        |net_yield, ability| {
+            methods.push(FeasibleManaMethod {
+                net_yield,
+                penalty: object_mana_ability_penalty(state, object_id, ability),
+            });
+        },
+    );
+    if visited == Some(0) && basic_land_fallback_applies(state, object_id, controller) {
+        methods.push(FeasibleManaMethod {
             net_yield: 1,
             penalty: ManaSourcePenalty::None,
-        }];
+        });
     }
     methods
+}
+
+/// CR 305.1: A land with no explicit mana ability still taps for the mana its
+/// basic land types grant (same fallback as `max_mana_yield`).
+fn basic_land_fallback_applies(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Land))
+        && !activatable_mana_options(state, object_id, controller).is_empty()
+}
+
+/// Walks the mana abilities of `object_id` the controller could currently
+/// activate toward `payment_context`, calling `visit` with each one's net yield.
+/// Returns the number visited, or `None` when the object is not a battlefield
+/// permanent under `controller`. The one authority on which abilities count, so
+/// the capacity and per-method views cannot drift apart.
+fn visit_feasible_mana_abilities(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+    mut visit: impl FnMut(u32, &AbilityDefinition),
+) -> Option<usize> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Battlefield || obj.controller != controller {
+        return None;
+    }
+
+    let mut visited = 0;
+    for (idx, ability) in obj.abilities.iter().enumerate() {
+        // CR 605.1a: Must be an activated mana ability.
+        if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+            continue;
+        }
+        // CR 605.3a + CR 117.1d: The engine-authoritative "is the cost
+        // currently payable?" check covers sacrifice supply
+        // (`find_eligible_sacrifice_targets`), discard-hand availability,
+        // life total, tap eligibility, and summoning sickness via the
+        // shared `is_payable_for_mana_ability` + activation simulation.
+        // We delegate to it rather than re-implementing the cost gate.
+        if !mana_abilities::can_activate_mana_ability_now(
+            state, controller, object_id, idx, ability,
+        ) {
+            continue;
+        }
+        // CR 604: Static activation restrictions ("only during your
+        // upkeep", etc.) must hold — mirrors `is_active_tap_mana_ability`.
+        if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
+            continue;
+        }
+        let Effect::Mana {
+            produced,
+            restrictions,
+            ..
+        } = &*ability.effect
+        else {
+            continue;
+        };
+        // CR 106.6: Restricted mana only counts toward this spell when
+        // the restriction permits it (issue #2011: Eldrazi Temple).
+        if !mana_ability_allowed_for_payment(restrictions, state, object_id, payment_context) {
+            continue;
+        }
+        let resolved =
+            super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+        let gross = super::effects::mana::resolve_mana_types_for_ability(produced, state, &resolved)
+            .len() as u32;
+        // CR 605.3b: Net the mana paid to activate. Non-mana cost
+        // components (Sacrifice / Discard / PayLife / Exile) have no
+        // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
+        // net equals the gross (e.g., KCI activation cost is one
+        // sacrificed artifact, no mana — full 2 colorless yield).
+        //
+        // Caveat: collapsing mana sub-cost to a single `mana_value`
+        // assumes the sub-cost is paid from the SAME color domain as
+        // the produced mana (filter-land case: pay {1} or any color,
+        // produce {U/W}). For exotic abilities whose mana sub-cost is
+        // a different color than what they produce — e.g. a
+        // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
+        // pessimistic-but-safe in one direction (we never claim
+        // capacity we can't produce) but over-states feasibility in
+        // the other (the {U} sub-cost has to come from another
+        // source, which this scan doesn't model). Such cards are
+        // vanishingly rare in real Magic; if one is added the
+        // sub-cost color domain should be threaded through here
+        // rather than collapsed to `mana_value`.
+        let activation_cost =
+            mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
+        visit(gross.saturating_sub(activation_cost), ability);
+        visited += 1;
+    }
+    Some(visited)
 }
 
 /// CR 117.1d + CR 601.2g: True when cost payment can involve a currently

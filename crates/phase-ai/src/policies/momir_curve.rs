@@ -251,16 +251,17 @@ struct XBudget {
     total: u32,
     /// Largest payable X without activating any creature's mana ability.
     free: u32,
-    /// Creatures whose mana raises X past `free`, cheapest board value per
-    /// point of X first.
-    creature_sources: Vec<CreatureManaSource>,
+    /// `cover_cost[n]` is the least board value given up to add `n` points of X
+    /// past `free` (`f64::INFINITY` when out of reach). Priced jointly over
+    /// every creature, each paying by at most one of its methods.
+    cover_cost: Vec<f64>,
 }
 
 /// One creature's contribution to the X budget: each way it can pay, with the
 /// yield and the board value given up kept together. A creature offering
 /// `{T}: Add {G}` and `Sacrifice this: Add {B}{B}` covers a one-point rung by
 /// tapping and a two-point rung only by being sacrificed, so the price depends
-/// on how much X is asked of it.
+/// on how much X is asked of it — and on what the other creatures can cover.
 #[derive(Debug, Clone)]
 struct CreatureManaSource {
     methods: Vec<CreatureManaMethod>,
@@ -273,45 +274,6 @@ struct CreatureManaMethod {
     extra_x: u32,
     /// Board value given up by paying with it.
     cost: f64,
-}
-
-impl CreatureManaSource {
-    /// The most X this creature can add by any method.
-    fn max_extra_x(&self) -> u32 {
-        self.methods
-            .iter()
-            .map(|method| method.extra_x)
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Cheapest board value per point of X over its methods; orders sources.
-    fn best_cost_per_x(&self) -> f64 {
-        self.methods
-            .iter()
-            .map(|method| method.cost / f64::from(method.extra_x))
-            .fold(f64::INFINITY, f64::min)
-    }
-
-    /// The method that pays `needed` points of X at the lowest price, and the X
-    /// it contributes. When no single method covers `needed`, the largest
-    /// contribution wins (cheapest among equals) and the remainder falls to the
-    /// next source.
-    fn method_for(&self, needed: u32) -> Option<CreatureManaMethod> {
-        let cheapest = |a: &&CreatureManaMethod, b: &&CreatureManaMethod| a.cost.total_cmp(&b.cost);
-        self.methods
-            .iter()
-            .filter(|method| method.extra_x >= needed)
-            .min_by(cheapest)
-            .or_else(|| {
-                let largest = self.max_extra_x();
-                self.methods
-                    .iter()
-                    .filter(|method| method.extra_x == largest)
-                    .min_by(cheapest)
-            })
-            .copied()
-    }
 }
 
 impl XBudget {
@@ -351,7 +313,7 @@ impl XBudget {
         if free >= total {
             return Self::all_free(total);
         }
-        let mut creature_sources: Vec<CreatureManaSource> = creatures
+        let creature_sources: Vec<CreatureManaSource> = creatures
             .iter()
             .filter_map(|&creature| {
                 let mut others = creatures.clone();
@@ -397,43 +359,62 @@ impl XBudget {
                 Some(CreatureManaSource { methods })
             })
             .collect();
-        creature_sources.sort_by(|a, b| a.best_cost_per_x().total_cmp(&b.best_cost_per_x()));
+        Self::new(total, free, &creature_sources)
+    }
+
+    /// Prices every X past `free` jointly over `creature_sources`.
+    ///
+    /// A multiple-choice covering knapsack: each creature pays by at most one of
+    /// its methods (a creature cannot both tap and be sacrificed), and the
+    /// methods across creatures must add up to the X asked for. Choosing per
+    /// creature in turn would let one creature's sacrifice-two method cover a
+    /// rung that two cheaper tap-one methods on different creatures reach for
+    /// less. The table is small — creatures × methods × the X past free mana —
+    /// and built once per budget, so each rung is then a lookup.
+    fn new(total: u32, free: u32, creature_sources: &[CreatureManaSource]) -> Self {
+        let span = total.saturating_sub(free) as usize;
+        // `reached[n]`: least cost to add exactly `n` points, with anything past
+        // `span` clamped to `span` (extra mana beyond the largest X is waste,
+        // not a different outcome).
+        let mut reached = vec![f64::INFINITY; span + 1];
+        reached[0] = 0.0;
+        for source in creature_sources {
+            let mut next = reached.clone();
+            for method in &source.methods {
+                for (n, &base) in reached.iter().enumerate() {
+                    let to = (n + method.extra_x as usize).min(span);
+                    next[to] = next[to].min(base + method.cost);
+                }
+            }
+            reached = next;
+        }
+        // Adding more than asked is a valid way to pay, so `n` points are
+        // covered by the cheapest way to add `n` or more.
+        let mut cover_cost = reached;
+        for n in (0..span).rev() {
+            cover_cost[n] = cover_cost[n].min(cover_cost[n + 1]);
+        }
         Self {
             total,
             free,
-            creature_sources,
+            cover_cost,
         }
     }
 
     fn all_free(total: u32) -> Self {
-        Self {
-            total,
-            free: total,
-            creature_sources: Vec::new(),
-        }
+        Self::new(total, total, &[])
     }
 
-    /// Board value given up to pay X, tapping the cheapest creatures first, or
-    /// `None` when X is out of reach.
+    /// Least board value given up to pay X, or `None` when X is out of reach.
     ///
-    /// Cheapest-first is the lower bound on the cost; the engine's auto-tapper
-    /// already reaches for creatures only after every land and rock, so the
-    /// free portion is always paid free.
+    /// The engine's auto-tapper already reaches for creatures only after every
+    /// land and rock, so the free portion is always paid free.
     fn creature_cost(&self, x: u32) -> Option<f64> {
         if x > self.total {
             return None;
         }
-        let mut needed = x.saturating_sub(self.free);
-        let mut cost = 0.0;
-        for source in &self.creature_sources {
-            if needed == 0 {
-                break;
-            }
-            let method = source.method_for(needed)?;
-            cost += method.cost;
-            needed = needed.saturating_sub(method.extra_x);
-        }
-        (needed == 0).then_some(cost)
+        let cost = *self.cover_cost.get(x.saturating_sub(self.free) as usize)?;
+        cost.is_finite().then_some(cost)
     }
 }
 
@@ -985,8 +966,6 @@ mod tests {
     /// sink — otherwise this policy would schedule unrelated activations.
     #[test]
     fn unrelated_command_zone_ability_is_not_a_pool_sink() {
-        use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
-
         let mut state = momir_state(P0, 5);
         let draw = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -1007,11 +986,16 @@ mod tests {
 
     // ── Moving ahead of the schedule ────────────────────────────────────
 
+    use crate::context::AiContext;
+    use crate::policies::context::{PriorsEnv, SearchDepth};
     use crate::policies::momir_pool::tests::{creature_face, install_db};
-    use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
+    use crate::policies::registry::PolicyRegistry;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, QuantityExpr};
     use engine::types::ability::{ManaContribution, ManaProduction};
+    use engine::types::game_state::PendingCast;
     use engine::types::identifiers::CardId;
-    use engine::types::mana::ManaColor;
+    use engine::types::mana::{ManaColor, ManaCostShard};
     use engine::types::zones::Zone;
 
     /// Install a pool whose creatures at mana value `mv` are all `mv/mv`, for
@@ -1038,16 +1022,39 @@ mod tests {
 
     /// A budget of `free` mana plus creatures adding one X each at `costs`.
     fn budget(free: u32, costs: &[f64]) -> XBudget {
-        XBudget {
-            total: free + costs.len() as u32,
+        budget_of(
             free,
-            creature_sources: costs
+            &costs
                 .iter()
-                .map(|&cost| CreatureManaSource {
-                    methods: vec![CreatureManaMethod { extra_x: 1, cost }],
-                })
-                .collect(),
-        }
+                .map(|&cost| vec![(1, cost)])
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// A budget of `free` mana plus creatures each offering the listed
+    /// `(extra_x, cost)` methods.
+    fn budget_of(free: u32, creatures: &[Vec<(u32, f64)>]) -> XBudget {
+        let sources: Vec<CreatureManaSource> = creatures
+            .iter()
+            .map(|methods| CreatureManaSource {
+                methods: methods
+                    .iter()
+                    .map(|&(extra_x, cost)| CreatureManaMethod { extra_x, cost })
+                    .collect(),
+            })
+            .collect();
+        let reach: u32 = sources
+            .iter()
+            .map(|source| {
+                source
+                    .methods
+                    .iter()
+                    .map(|method| method.extra_x)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .sum();
+        XBudget::new(free + reach, free, &sources)
     }
 
     /// A 1/1 dork's combat body, as `evaluate_creature_intrinsic` prices it.
@@ -1146,10 +1153,7 @@ mod tests {
     /// out of reach.
     #[test]
     fn creature_cost_taps_the_cheapest_creatures_first() {
-        let mut budget = budget(3, &[5.0, 1.0]);
-        budget
-            .creature_sources
-            .sort_by(|a, b| a.best_cost_per_x().total_cmp(&b.best_cost_per_x()));
+        let budget = budget(3, &[5.0, 1.0]);
         assert_eq!(budget.creature_cost(3), Some(0.0));
         assert_eq!(budget.creature_cost(4), Some(1.0));
         assert_eq!(budget.creature_cost(5), Some(6.0));
@@ -1236,12 +1240,22 @@ mod tests {
     }
 
     fn alternative_yield_board(power: i32) -> (GameState, ObjectId, ObjectId) {
+        let (state, emblem, creatures) = alternative_yield_creatures_board(&[power]);
+        (state, emblem, creatures[0])
+    }
+
+    /// Three Forests, the Momir emblem, a full curve pool, and one
+    /// tap-one/sacrifice-two creature per entry of `powers`.
+    fn alternative_yield_creatures_board(powers: &[i32]) -> (GameState, ObjectId, Vec<ObjectId>) {
         let mut state = momir_state(P1, 6);
         install_curve_pool(&mut state, 1..=15);
         for _ in 0..3 {
             add_forest(&mut state, P0);
         }
-        let creature = add_tap_one_or_sacrifice_two(&mut state, power);
+        let creature = powers
+            .iter()
+            .map(|&power| add_tap_one_or_sacrifice_two(&mut state, power))
+            .collect();
         let emblem = engine::game::effects::create_emblem::grant_emblem(
             &mut state,
             P0,
@@ -1295,6 +1309,78 @@ mod tests {
         assert_eq!(registry_top_x(&mut state, emblem, 5), 5);
     }
 
+    /// Two creatures that each offer tap-one or sacrifice-two reach the fifth
+    /// point by tapping both — cheaper than sacrificing either, though one
+    /// sacrifice alone would cover the two points asked.
+    #[test]
+    fn multiple_alternative_creatures_are_priced_jointly() {
+        let (state, emblem, creatures) = alternative_yield_creatures_board(&[3, 3]);
+        let (total, cost) = affordable_x(&state, P0, &emblem, 0).expect("{X} leg");
+        assert_eq!(total, 7, "three Forests, and two creatures sacrificed");
+        let budget = XBudget::price(&state, P0, &cost, emblem, total, 0.25);
+        let body = crate::eval::evaluate_creature_intrinsic(&state, creatures[0]);
+        assert_eq!(budget.creature_cost(3), Some(0.0));
+        assert_eq!(budget.creature_cost(4), Some(body * 0.25));
+        assert_eq!(budget.creature_cost(5), Some(body * 0.25 * 2.0));
+        assert_eq!(budget.creature_cost(6), Some(body + body * 0.25));
+        assert_eq!(budget.creature_cost(7), Some(body * 2.0));
+        assert_eq!(budget.creature_cost(8), None);
+    }
+
+    /// PRODUCTION PATH: with two 3/3 tap-one/sacrifice-two creatures the
+    /// registry ranks X=5 (two taps) over X=4, which only a one-creature
+    /// greedy pricing of the fifth point as a sacrifice would prefer.
+    #[test]
+    fn registry_taps_two_alternative_creatures_for_the_higher_rung() {
+        let (mut state, emblem, _) = alternative_yield_creatures_board(&[3, 3]);
+        assert_eq!(registry_top_x(&mut state, emblem, 7), 5);
+    }
+
+    /// CONTROL: the same rungs priced the way a per-creature greedy choice does
+    /// — the fifth point as one sacrifice (7.5) — select X=4, so the
+    /// registry test above fails if the pricing reverts to it.
+    #[test]
+    fn greedy_sacrifice_pricing_of_the_fifth_point_selects_the_lower_rung() {
+        let (state, _, creatures) = alternative_yield_creatures_board(&[3, 3]);
+        let body = crate::eval::evaluate_creature_intrinsic(&state, creatures[0]);
+        let tap = body * 0.25;
+        let pool = momir_pool(&state);
+        let joint = budget_of(3, &[vec![(1, tap), (2, body)], vec![(1, tap), (2, body)]]);
+        let greedy = XBudget {
+            total: 5,
+            free: 3,
+            cover_cost: vec![0.0, tap, body],
+        };
+        assert_eq!(best_x(3, &joint, &pool), 5);
+        assert_eq!(best_x(3, &greedy, &pool), 4);
+    }
+
+    /// A creature pays by one method: two one-point methods on the same
+    /// creature never add two points.
+    #[test]
+    fn a_creature_pays_by_at_most_one_method() {
+        let budget = budget_of(0, &[vec![(1, 1.0), (1, 2.0)]]);
+        assert_eq!(budget.creature_cost(1), Some(1.0));
+        assert_eq!(budget.creature_cost(2), None);
+    }
+
+    /// Methods are weighed across creatures, not only within one: a cheap
+    /// two-point method on one creature and one-point methods on the others
+    /// are mixed for the cheapest cover of each rung.
+    #[test]
+    fn mixed_creatures_cover_each_rung_at_the_cheapest_combination() {
+        let budget = budget_of(
+            0,
+            &[vec![(2, 3.0)], vec![(1, 2.0), (2, 9.0)], vec![(1, 2.5)]],
+        );
+        assert_eq!(budget.creature_cost(1), Some(2.0));
+        assert_eq!(budget.creature_cost(2), Some(3.0));
+        assert_eq!(budget.creature_cost(3), Some(5.0));
+        assert_eq!(budget.creature_cost(4), Some(7.5));
+        assert_eq!(budget.creature_cost(5), Some(14.5));
+        assert_eq!(budget.creature_cost(6), None);
+    }
+
     /// On the draw's third own turn: three Forests and a mana creature of the
     /// given size, the Momir emblem, and a full curve pool.
     fn draw_turn_three_board(dork_power: i32, dork_toughness: i32) -> (GameState, ObjectId) {
@@ -1331,11 +1417,7 @@ mod tests {
         assert_eq!(total, 4, "three Forests and a mana creature");
         let budget = XBudget::price(&state, P0, &cost, emblem, total, 0.25);
         assert_eq!(budget.free, 3);
-        assert_eq!(budget.creature_sources.len(), 1);
-        let methods = &budget.creature_sources[0].methods;
-        assert_eq!(methods.len(), 1);
-        assert_eq!(methods[0].extra_x, 1);
-        assert_eq!(methods[0].cost, ONE_ONE_BODY * 0.25);
+        assert_eq!(budget.cover_cost, vec![0.0, ONE_ONE_BODY * 0.25]);
     }
 
     /// A board with no creatures prices every point of X as free.
@@ -1355,20 +1437,12 @@ mod tests {
         let (total, cost) = affordable_x(&state, P0, &emblem, 0).expect("{X} leg");
         let budget = XBudget::price(&state, P0, &cost, emblem, total, 0.25);
         assert_eq!((budget.total, budget.free), (3, 3));
-        assert!(budget.creature_sources.is_empty());
+        assert_eq!(budget.cover_cost, vec![0.0]);
     }
 
     /// Top-ranked `{X}` answer for P0 at a sink prompt on `state`, through the
     /// real `PolicyRegistry`.
     fn registry_top_x(state: &mut GameState, emblem: ObjectId, max: u32) -> u32 {
-        use crate::context::AiContext;
-        use crate::policies::context::{PriorsEnv, SearchDepth};
-        use crate::policies::registry::PolicyRegistry;
-        use engine::ai_support::AiDecisionContext;
-        use engine::ai_support::{ActionMetadata, CandidateAction, TacticalClass};
-        use engine::types::game_state::PendingCast;
-        use engine::types::mana::ManaCostShard;
-
         let pending = PendingCast::new(
             emblem,
             CardId(0),
