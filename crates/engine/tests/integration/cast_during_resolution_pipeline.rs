@@ -1265,17 +1265,6 @@ fn accept_then_resolve_leaves_no_lingering_permission() {
          stack resolves; leaked = {leaked:?}"
     );
     let _ = hit;
-    let lotus = runner
-        .state()
-        .objects
-        .values()
-        .find(|o| o.name == "Lotus Petal")
-        .map(|o| (o.zone, o.tapped));
-    eprintln!(
-        "G lotus={:?} pool={}",
-        lotus,
-        runner.state().players[0].mana_pool.mana.len()
-    );
 }
 
 // ---------------------------------------------------------------------------

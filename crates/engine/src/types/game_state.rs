@@ -9229,7 +9229,10 @@ impl ManaAbilityResume {
             | ManaAbilityResume::ManaSourceSelection { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
-            ManaAbilityResume::Priority
+            // CR 605.3a: re-enters the outer mana ability, not the cast;
+            // `PendingManaAbility::resumes_pending_cast` follows that chain.
+            ManaAbilityResume::ManaAbilityManaPayment { .. }
+            | ManaAbilityResume::Priority
             | ManaAbilityResume::CompanionToHand { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
@@ -9535,6 +9538,19 @@ impl PendingManaAbility {
             | ManaAbilityResume::EffectPayCost { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => None,
+        })
+    }
+
+    /// CR 601.2g-h + CR 605.3a: whether finishing this activation, or any
+    /// activation suspended beneath it at a payment window, returns to a cast's
+    /// or activation's cost payment (so `GameState::pending_cast` is live).
+    pub(crate) fn resumes_pending_cast(&self) -> bool {
+        self.suspended_chain().any(|pending| {
+            pending.resume.resumes_pending_cast()
+                || pending
+                    .cost_move_resume
+                    .as_ref()
+                    .is_some_and(ManaAbilityResume::resumes_pending_cast)
         })
     }
 
@@ -18146,6 +18162,10 @@ impl WaitingFor {
                 pending_mana_ability: pending,
                 ..
             }
+            | WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability: pending,
+                ..
+            }
             | WaitingFor::PayAmountChoice {
                 pending_mana_ability: Some(pending),
                 ..
@@ -25878,13 +25898,7 @@ impl GameState {
             || self
                 .waiting_for
                 .pending_mana_ability_ref()
-                .is_some_and(|pending| {
-                    pending.resume.resumes_pending_cast()
-                        || pending
-                            .cost_move_resume
-                            .as_ref()
-                            .is_some_and(ManaAbilityResume::resumes_pending_cast)
-                });
+                .is_some_and(PendingManaAbility::resumes_pending_cast);
         if external {
             self.pending_cast.as_deref()
         } else {
