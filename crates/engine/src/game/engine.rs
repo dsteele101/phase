@@ -10556,17 +10556,11 @@ fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
     if state.revealed_cards.is_empty() {
         return false;
     }
-    // `ManaPayment`-family prompts keep their cast on `GameState::pending_cast`;
-    // every other casting prompt embeds it (`WaitingFor::pending_cast_ref`).
-    // A bare `state.pending_cast` outside a casting prompt is not an active
-    // announcement.
-    let active_cast = state.waiting_for.pending_cast_ref().or_else(|| {
-        state
-            .waiting_for
-            .has_pending_cast()
-            .then_some(state.pending_cast.as_deref())
-            .flatten()
-    });
+    // CR 601.2: resolved through the typed carrier authority — inline prompts,
+    // the `ManaPayment` family, `DistributeAmong`, and a nested mana ability
+    // (CR 605.3b) whose `resume` returns to the cast's payment. A bare
+    // `state.pending_cast` outside those carriers is not an active announcement.
+    let active_cast = state.active_cast_announcement();
     let permission_index = match (active_cast, &state.waiting_for) {
         (Some(pending), _) => pending
             .casting_permission_index
