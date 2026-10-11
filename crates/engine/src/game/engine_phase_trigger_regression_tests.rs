@@ -18,7 +18,7 @@ use crate::types::game_state::{AutoPassMode, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
-use crate::types::phase::{PhaseStop, PhaseStopScope};
+use crate::types::phase::{PhaseGroup, PhaseStop, PhaseStopScope, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -232,6 +232,8 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
         valid_block_targets: Default::default(),
         block_requirements: Default::default(),
         blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
     };
     state.phase_stops.insert(
         PlayerId(0),
@@ -327,9 +329,10 @@ fn inserted_begin_combat_gets_priority_window() {
         .extra_phases
         .push(crate::types::game_state::ExtraPhase {
             anchor: Phase::EndCombat,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: crate::types::identifiers::ExtraPhaseId::default(),
         });
 
     let mut events = Vec::new();
@@ -861,7 +864,7 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         "paying {{1}} must place one +1/+1 counter on the lone Shrine"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "the {{1}} must actually be paid on accept"
     );
@@ -2113,6 +2116,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
@@ -2166,6 +2170,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
         trigger_event: None,
         trigger_events: Vec::new(),
         trigger_match_count: None,
+        return_result_occurrence: None,
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
@@ -3181,7 +3186,7 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         source_id,
         branches: vec![branch_gain, branch_lose],
         branch_descriptions: vec!["Gain 3 life.".to_string(), "Lose 3 life.".to_string()],
-        parent_targets: vec![],
+        parent_occurrences: Default::default(),
         context: Default::default(),
         continuation: None,
         replacement_applied: Default::default(),
