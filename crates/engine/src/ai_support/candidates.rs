@@ -6339,7 +6339,7 @@ fn lethal_top_up(state: &GameState, target: &TargetRef) -> Option<u32> {
 /// they still need (CR 704.5g; non-creatures last), each given what it needs
 /// while the budget allows, the leftover added to the last one chosen (or all of
 /// `total` to the first in that order when none fits); and (b) all of `total` on
-/// the first candidate, when it differs from (a). Every vector satisfies
+/// each single candidate in turn, skipping any equal to (a). Every vector satisfies
 /// `ability_utils::validate_distribution`. Legal alternatives only; the tactical
 /// layer (phase-ai `most_lethal_distribution`) picks among them.
 fn resolution_division_distributions(
@@ -6394,12 +6394,20 @@ fn resolution_division_distributions(
         .zip(shares)
         .filter(|(_, share)| *share > 0)
         .collect();
-    let all_on_first = vec![(candidates[0].clone(), total)];
-    if all_on_first == lethal_greedy {
-        vec![lethal_greedy]
-    } else {
-        vec![lethal_greedy, all_on_first]
+    // CR 608.2d: the chooser may divide among ANY number of the candidates, so
+    // the whole amount on exactly one candidate is legal for every candidate —
+    // not only the first. The greedy pass spends its budget on the cheapest
+    // bodies, so without these the single large body that the whole pool would
+    // kill (3 damage on a 3/3 beside a 1/1) is never offered. Linear in the
+    // candidate count.
+    let mut distributions = vec![lethal_greedy];
+    for candidate in candidates {
+        let all_on_one = vec![(candidate.clone(), total)];
+        if !distributions.contains(&all_on_one) {
+            distributions.push(all_on_one);
+        }
     }
+    distributions
 }
 
 /// CR 601.2d: a lethal-first division of `total` among `targets`, returned in
@@ -6710,6 +6718,67 @@ mod tests {
         for distribution in &distributions {
             assert!(
                 crate::game::ability_utils::validate_distribution(distribution, 5, &pair).is_ok()
+            );
+        }
+    }
+
+    /// CR 608.2d: the chooser may put the whole pool on any ONE candidate, so a
+    /// later candidate must be offered the full budget. A 1/1 listed before a
+    /// 3/3 with 3 damage: the lethal-greedy pass spends the pool on the 1/1
+    /// (plus the leftover), and all-on-first duplicates it — only an
+    /// every-recipient candidate reaches the division that kills the 3/3.
+    ///
+    /// REVERT-FAILING: with only greedy + all-on-first the 3/3 never gets 3.
+    #[test]
+    fn resolution_division_offers_full_budget_to_each_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let frail = distribution_creature(&mut state, 0, 1, 1);
+        let tough = distribution_creature(&mut state, 1, 3, 3);
+        let targets = vec![TargetRef::Object(frail), TargetRef::Object(tough)];
+        let pending = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::DealDamage {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                target: crate::types::ability::TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: targets.clone(),
+            unit: crate::types::game_state::DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        let distributions: Vec<Vec<(TargetRef, u32)>> = candidate_actions(&state)
+            .into_iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::DistributeAmong { distribution } => Some(distribution),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            distributions.contains(&vec![(TargetRef::Object(tough), 3)]),
+            "the division killing the 3/3 must be offered, got {distributions:?}"
+        );
+        assert!(
+            distributions.contains(&vec![(TargetRef::Object(frail), 3)]),
+            "the first-candidate division must still be offered, got {distributions:?}"
+        );
+        let mut unique = distributions.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), distributions.len(), "no duplicate candidates");
+        for distribution in &distributions {
+            assert!(
+                crate::game::ability_utils::validate_distribution(distribution, 3, &targets)
+                    .is_ok(),
+                "illegal resolution-time division {distribution:?}"
             );
         }
     }

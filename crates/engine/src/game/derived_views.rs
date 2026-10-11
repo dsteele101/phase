@@ -1027,7 +1027,10 @@ fn client_state_wire_value(
     state: &GameState,
     display_visible_object_ids: Option<&BTreeSet<ObjectId>>,
 ) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    // Resolution-only look-result provenance carried by a paused prompt's
+    // `pending_effect`; direct callers may not have run the viewer filter.
+    crate::game::visibility::redact_waiting_for_iteration_members(&mut projected_state.waiting_for);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
