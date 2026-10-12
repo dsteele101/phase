@@ -1120,7 +1120,7 @@ fn gated_attached_targeting_allows_after_the_condition_ceases() {
     assert!(
         runner.state().objects[&aura]
             .static_definitions
-            .iter()
+            .iter_unchecked()
             .any(|def| matches!(
                 def.mode,
                 StaticMode::CantBeTargeted {
