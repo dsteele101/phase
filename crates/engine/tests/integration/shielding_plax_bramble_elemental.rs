@@ -1002,13 +1002,13 @@ fn entering_aura_rejected_host_control() {
         "Illegal player attachment must emit zero events"
     );
 
-    // 3. CR 301.5c: Attaching an Aura to itself must return false
+    // 3. CR 303.4d: Attaching an Aura to itself must return false
     let mut self_events = Vec::new();
     let self_attached =
         engine::game::effects::attach::attach_to_with_events(state, aura, aura, &mut self_events);
     assert!(
         !self_attached,
-        "CR 301.5c: Attaching an Aura to itself must return false"
+        "CR 303.4d: Attaching an Aura to itself must return false"
     );
     assert!(
         self_events.is_empty(),
