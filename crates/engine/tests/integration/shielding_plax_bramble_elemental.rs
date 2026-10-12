@@ -15,9 +15,11 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::{ProhibitionScope, StaticMode};
+use engine::types::zones::Zone;
 use engine::types::TargetRef;
 
 const BRAMBLE_ELEMENTAL: &str =
@@ -1079,5 +1081,89 @@ fn copy_enchantment_aura_no_legal_host_does_not_attach() {
             .iter()
             .any(|e| matches!(e, engine::types::events::GameEvent::Attached { .. })),
         "No Attached event must be emitted when no host is legal"
+    );
+}
+
+/// CR 611.3a + CR 109.5: synthetic accepted-grammar discriminator, not a
+/// printed-card claim. An attached targeting prohibition follows the Aura
+/// controller's live Island condition through production targeting and bounce.
+#[test]
+fn gated_attached_targeting_allows_after_the_condition_ceases() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let island = scenario.add_basic_land(P0, ManaColor::Blue);
+    let protected = scenario.add_creature(P0, "Condition Host", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Target Reach Control", 2, 2).id();
+    let aura = scenario.add_spell_to_hand(P0, "Conditional Targeting Probe", false)
+        .as_enchantment().with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(&["Enchant"], "Enchant creature\nEnchanted creature can't be the target of spells or abilities your opponents control as long as you control an Island.")
+        .id();
+    let tap = scenario
+        .add_spell_to_hand(P1, "Targeting Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Tap target creature.")
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand(P1, "Condition Removal Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Return target land to its owner's hand.")
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(aura).target_object(protected).resolve();
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(protected))
+    );
+    assert!(
+        runner.state().objects[&aura]
+            .static_definitions
+            .iter()
+            .any(|def| matches!(
+                def.mode,
+                StaticMode::CantBeTargeted {
+                    who: ProhibitionScope::Opponents
+                }
+            ) && def.condition.is_some()),
+        "the actual cast Aura must carry the conditional scoped restriction"
+    );
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .act(GameAction::CastSpell {
+            object_id: tap,
+            card_id: runner.state().objects[&tap].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("must reach production target selection")
+    };
+    assert!(
+        target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(bystander)),
+        "nonempty sibling targets guard the negative"
+    );
+    assert!(!target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(protected)));
+    assert!(runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(protected))
+        })
+        .is_err());
+    runner.act(GameAction::CancelCast).unwrap();
+    runner.cast(bounce).target_object(island).resolve();
+    assert_eq!(runner.state().objects[&island].zone, Zone::Hand);
+    assert!(!runner.state().objects[&protected].tapped);
+    runner.cast(tap).target_object(protected).resolve();
+    assert!(
+        runner.state().objects[&protected].tapped,
+        "the same opponent spell must resolve on the host after the gate ceases"
     );
 }
