@@ -258,8 +258,9 @@ fn leonin_bola_granted_ability_distinct_granters() {
                 matches!(
                     cost,
                     AbilityCost::Unattach {
-                        target: Some(TargetFilter::SpecificObject { id })
-                    } if *id == bola2_id
+                        target: Some(TargetFilter::GrantingObject { bound: Some(granter) })
+                    } if granter.object_id == bola2_id
+                        && granter.incarnation == runner.state().objects[&bola2_id].incarnation
                 )
             }),
             _ => false,

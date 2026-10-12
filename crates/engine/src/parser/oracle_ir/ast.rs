@@ -152,10 +152,27 @@ pub(crate) struct SearchLibraryDetails {
     /// destinations (cultivate-class "put one onto the battlefield tapped and
     /// the other into your hand"). Lowered to `Effect::SearchLibrary.split`.
     pub(crate) split: Option<SearchDestinationSplit>,
-    /// CR 701.23a: Zones the search looks through. Defaults to `[Library]`;
-    /// God-Pharaoh's-Gift-class cards set `[Graveyard, Hand, Library]`. Lowered
-    /// to `Effect::SearchLibrary.source_zones`.
-    pub(crate) source_zones: Vec<Zone>,
+    /// CR 701.23a: The zones the search looks through, as the clause names them.
+    /// Lowered to `Effect::SearchLibrary.source_zones` by
+    /// `parse_search_and_creation_ast`, which fails an `Unrepresentable` list
+    /// closed.
+    pub(crate) source_zones: SearchZoneList,
+}
+
+/// CR 701.23a: How a search clause names the zones it searches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum SearchZoneList {
+    /// No zone list: the ordinary library tutor ("search your library for …").
+    Unlisted,
+    /// Two or more searchable zones, deduplicated in canonical order
+    /// (Graveyard, Hand, Library) — "search your graveyard, hand, and/or
+    /// library for …".
+    Zones(Vec<Zone>),
+    /// A zone list the engine can't represent: a list leg outside the zone
+    /// vocabulary ("library, graveyard, and/or outside the game"), or a zone
+    /// that can't be searched. Searching only the readable zones would drop the
+    /// rest silently, so the clause fails closed.
+    Unrepresentable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -810,6 +827,11 @@ pub(crate) enum ImperativeFamilyAst {
     ExchangeControl {
         target_a: TargetFilter,
         target_b: TargetFilter,
+        /// CR 115.6: "up to N target …" on the one declared slot, from
+        /// `strip_optional_target_prefix`; lowered onto
+        /// `ParsedEffectClause.multi_target` in `lower_imperative_family_ast`,
+        /// never onto `Effect::ExchangeControl`. `None` for mandatory slots.
+        multi_target: Option<MultiTargetSpec>,
     },
     /// CR 701.12a: Exchange a player's life total with the source's power or
     /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
@@ -1243,7 +1265,7 @@ pub(crate) enum TargetedImperativeAst {
         /// the targeting pipeline.
         selection: BounceSelection,
     },
-    /// CR 400.7 + CR 611.2c: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
+    /// CR 400.7: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.
     /// Lowers to `Effect::BounceAll`, not `Effect::Bounce`, so the runtime
     /// resolver iterates every matching permanent instead of prompting for one.
@@ -1373,6 +1395,14 @@ pub(crate) enum TargetedImperativeAst {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum SearchCreationImperativeAst {
+    /// A search the parser recognized but can't represent (CR 701.23a: a zone
+    /// list naming a zone the engine can't search). Lowers to an honest
+    /// `Effect::unimplemented` named `gap` and carrying the printed clause,
+    /// mirroring `PutImperativeAst::Unimplemented`.
+    Unimplemented {
+        gap: &'static str,
+        fragment: String,
+    },
     SearchLibrary {
         filter: TargetFilter,
         count: QuantityExpr,
@@ -1579,9 +1609,14 @@ pub(crate) enum HandRevealImperativeAst {
         target: TargetFilter,
         card_filter: TargetFilter,
     },
-    /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
+    /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
+    /// hand, where X is …", "reveals a card at random from their hand". `target`
+    /// is the hand's owner; `selection` is `Random` exactly when the text says
+    /// "at random".
     RevealPartial {
         count: crate::types::ability::QuantityExpr,
+        target: TargetFilter,
+        selection: crate::types::ability::CardSelectionMode,
     },
     /// CR 701.20a: Back-reference reveal — "reveal it" / "reveal that card" /
     /// "reveal those cards" — reveals a specific card identified by the parent
@@ -2004,9 +2039,10 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// CR 122.1: "Put a X counter, a Y counter[, and a Z counter] on TARGET" —
     /// a list of typed counters placed on one shared target. Lowered to a
     /// `PutCounter` chain where the first entry carries the resolved target
-    /// and each remaining entry uses `TargetFilter::ParentTarget` so the
-    /// target is chosen once and reused. Covers Abigale, Unexpected Fangs,
-    /// Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
+    /// and later source-bound entries preserve `TargetFilter::SelfRef`.
+    /// Other entries use `TargetFilter::ParentTarget` to reuse the chosen or
+    /// anaphoric recipient without extra target slots. Covers Abigale, Unexpected
+    /// Fangs, Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
     /// Dusan, Quicksilver.
     PutCounterList {
         entries: Vec<(CounterType, QuantityExpr)>,
@@ -2384,6 +2420,30 @@ fn apply_sentence_duration_to_coordinated_cast_defs(
     }
 }
 
+/// CR 601.3 + CR 611.2c: whether `effect` is a resolution-created graveyard
+/// cast permission bound to its controller — the shape
+/// `oracle_effect::graveyard_permission_grant` builds (Yawgmoth's Will, The
+/// Great Work, Liliana, Untouched by Death).
+pub(crate) fn is_graveyard_permission_grant(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return false;
+    };
+    let [grant] = static_abilities.as_slice() else {
+        return false;
+    };
+    matches!(
+        grant.modifications.as_slice(),
+        [ContinuousModification::GrantStaticAbility { definition }]
+            if matches!(
+                definition.mode,
+                crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+            )
+    )
+}
+
 /// CR 611.2a: stamp the sentence's duration on one cast grant and reconcile its
 /// mechanism with it. A duration the clause stated for ITSELF always wins.
 fn reconcile_coordinated_cast(
@@ -2391,6 +2451,17 @@ fn reconcile_coordinated_cast(
     node_duration: &mut Option<Duration>,
     duration: &Duration,
 ) {
+    // CR 611.2a: the class-wide graveyard permission is a later conjunct of the
+    // same sentence ("Until end of turn, you may play lands and cast spells from
+    // your graveyard"), so the sentence's window is its window; without it the
+    // grant would last until the end of the game. It has no driver to reconcile.
+    if is_graveyard_permission_grant(effect) {
+        if duration_is_unset_sentinel(node_duration) {
+            *node_duration = Some(duration.clone());
+        }
+        apply_duration_to_effect(effect, duration);
+        return;
+    }
     let Effect::CastFromZone {
         duration: effect_duration,
         driver,
@@ -3538,6 +3609,7 @@ mod duration_distribution_tests_7923 {
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::Any,
+            recipient_scope: EffectScope::Single,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
             prevention_duration,
