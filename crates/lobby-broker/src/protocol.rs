@@ -60,13 +60,21 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 134 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
+/// 135 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
 ///      PhysicalContest` (serialized `ContestState` inside `GameState`),
 ///      `Effect::PhysicalContest`, `GameEvent::PhysicalContestStarted` /
 ///      `PhysicalContestResolved`, `ClientMessage::ContestClick` and
-///      `ServerMessage::ContestProgress`. A v133 peer cannot parse the new
+///      `ServerMessage::ContestProgress`. A v134 peer cannot parse the new
 ///      `WaitingFor`/`Effect`/`GameEvent` tags or either message. Full-game
 ///      peers and P2P move in lockstep; no lobby carrier names it (wire 116).
+///
+/// 134 — `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
+///      omitted when absent) — the stack object a stack-using activation
+///      created (CR 602.2a), which an activation trigger's "copy that ability"
+///      names (CR 707.10). Events ride in `GameState` (`current_trigger_event`,
+///      each triggered ability's stored event), and an older peer drops the
+///      field silently, resolving those copies differently. Full-game peers and
+///      P2P move in lockstep (wire 116); no lobby carrier names it.
 ///
 /// 133 — CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
 ///      gains `enter_with_choices` (the answers riding the entry event),
@@ -1035,7 +1043,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 134;
+pub const PROTOCOL_VERSION: u32 = 135;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2292,12 +2300,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 134);
+        assert_eq!(PROTOCOL_VERSION, 135);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 133);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 134);
     }
 
     #[test]

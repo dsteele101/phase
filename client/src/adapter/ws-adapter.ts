@@ -210,11 +210,18 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 134 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
+ * 135 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
- *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 134` entry
- *      in crates/lobby-broker/src/protocol.rs. A v133 peer cannot parse them.
- *      Wire 116 moves with it.
+ *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 135` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v134 peer cannot parse them.
+ *      Wire 117 moves with it.
+ * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
+ *      stack-using activation created, carried in GameState's trigger events —
+ *      see PROTOCOL_VERSION's own `/// 134` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v133 peer drops it silently and
+ *      resolves an activation trigger's "copy that ability" differently; the
+ *      exact-match version check at connect refuses the pairing. Wire 116
+ *      moves with it.
  * 133 — CR 614.12a pre-entry as-enters choices: NamedChoiceSourceBinding gains
  *      PendingEntry (WaitingFor.NamedChoice.source.binding), and the parked
  *      entry event / PendingReplacement carry the answers and the paused
@@ -842,7 +849,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 134;
+export const PROTOCOL_VERSION = 135;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
