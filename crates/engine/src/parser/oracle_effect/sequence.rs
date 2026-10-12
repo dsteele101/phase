@@ -3266,6 +3266,17 @@ fn starts_up_to_target_combat_clause_lower(s: &str) -> OracleResult<'_, ()> {
 
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
+    // CR 118.14 + CR 609.4b: "<cast grant> and they may spend mana as though it
+    // were mana of any color to cast that spell" (Curse of Hospitality) — the
+    // mana rider joined without a comma is the same conjunct the comma path cuts
+    // (`starts_mana_spend_rider_conjunct`); split it off so the chunk loop folds
+    // it onto the grant.
+    if (super::parse_mana_spend_rider, opt(tag(".")), eof)
+        .parse(s)
+        .is_ok()
+    {
+        return true;
+    }
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
     // clause (Slicer, Hired Muscle: "untap it, goad it, and an opponent of your
     // choice gains control of it"). A player subject + "gains control of"
@@ -9952,7 +9963,7 @@ pub(super) fn does_the_same_unimplemented_name(subject: DoesTheSameSubject) -> S
 /// creature attacking that player. When the rider carries the "attacking that
 /// player" combat qualifier, the affected set is therefore NARROWER than plain
 /// `Opponent` (all opponents): it is only those opponents who control a creature
-/// attacking the enchanted/defending player this combat (CR 102.2 + CR 508.1b).
+/// attacking the enchanted player when the effect is applied (CR 102.2).
 /// The qualifier is folded into a dedicated `OpponentAttackingEnchantedPlayer`
 /// scope so a non-attacking opponent — and, crucially, the enchanted defending
 /// player in a two-player game — never receives the copied effect. A plain
@@ -9987,9 +9998,9 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
         return None;
     }
     if has_attacking_qualifier {
-        // CR 508.6 + CR 102.2 + CR 508.1b: "each opponent attacking that player"
-        // = opponents of the controller who declared a creature attacking the
-        // enchanted player. Only composes with the opponent subject; any other
+        // CR 508.6 + CR 102.2: "each opponent attacking that player"
+        // = opponents of the controller who control a creature attacking the
+        // enchanted player when the effect is applied. Only composes with the opponent subject; any other
         // subject + combat qualifier stays an honest residual (no matching CR
         // scope, and no card exercises it).
         match scope {

@@ -840,6 +840,11 @@ fn damage_recipient_filter_can_match_player(filter: &TargetFilter) -> bool {
         TargetFilter::And { filters } => {
             filters.iter().all(damage_recipient_filter_can_match_player)
         }
+        // CR 303.4m + CR 120.1: "to enchanted player" — a player recipient when
+        // the source is attached to a player; `player_matches_filter` then
+        // checks that the damaged player is that host. Not player-scope for the
+        // object arm: an Aura on a permanent names that object instead.
+        TargetFilter::AttachedTo => true,
         // A pure object `Typed` filter (type constraints, no player-compatible
         // controller-only scope) can never be a player; everything else the
         // parser emits for a player recipient is covered by the player-scope
@@ -889,6 +894,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
@@ -1551,6 +1557,7 @@ pub(super) fn matching_damage_done_events(
     let GameEvent::CombatDamageDealtToPlayer {
         player_id,
         source_amounts,
+        source_incarnations,
         ..
     } = event
     else {
@@ -1571,6 +1578,12 @@ pub(super) fn matching_damage_done_events(
         amount: amt,
         is_combat: true,
         excess: 0,
+        // CR 400.7: the source as it dealt the damage, not a later object
+        // at the same id.
+        source_incarnation: source_incarnations
+            .iter()
+            .find(|source| source.object_id == src)
+            .map(|source| source.incarnation),
     })
     .collect()
 }
@@ -1690,6 +1703,7 @@ pub(super) fn matching_damage_done_once_by_controller_event(
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
             source_amounts,
+            source_incarnations,
             ..
         } => {
             if !damage_kind_matches(trigger.damage_kind, true) {
@@ -1715,10 +1729,21 @@ pub(super) fn matching_damage_done_once_by_controller_event(
                 None
             } else {
                 let filtered_total: u32 = matching_sources.iter().map(|(_, amt)| amt).sum();
+                // CR 400.7: keep the incarnations of the sources kept.
+                let source_incarnations = source_incarnations
+                    .iter()
+                    .filter(|source| {
+                        matching_sources
+                            .iter()
+                            .any(|(id, _)| *id == source.object_id)
+                    })
+                    .copied()
+                    .collect();
                 Some(GameEvent::CombatDamageDealtToPlayer {
                     player_id: *player_id,
                     source_amounts: matching_sources,
                     total_damage: filtered_total,
+                    source_incarnations,
                 })
             }
         }
@@ -8753,6 +8778,10 @@ mod tests {
                 core_types: vec![CoreType::Artifact],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 is_token: false,
                 ..ZoneChangeRecord::test_minimal(
                     nontoken_artifact,
@@ -8778,6 +8807,10 @@ mod tests {
                 core_types: vec![CoreType::Artifact],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 is_token: true,
                 ..ZoneChangeRecord::test_minimal(munitions, None, Zone::Battlefield)
             }),
@@ -9336,6 +9369,10 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(own_card, Some(Zone::Graveyard), Zone::Battlefield)
             }),
         };
@@ -9354,6 +9391,10 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(
                     opponent_card,
                     Some(Zone::Graveyard),
@@ -9380,6 +9421,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(
                     opponent_creature,
                     Some(Zone::Battlefield),
@@ -9523,6 +9568,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &event,
@@ -9591,6 +9637,7 @@ mod tests {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let blocker_damage = GameEvent::DamageDealt {
             source_id: source,
@@ -9598,6 +9645,7 @@ mod tests {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let nonblocking_creature_damage = GameEvent::DamageDealt {
             source_id: source,
@@ -9605,6 +9653,7 @@ mod tests {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
 
         assert!(
@@ -9660,6 +9709,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(source_a, 2), (source_b, 3)],
             total_damage: 5,
+            source_incarnations: vec![],
         };
         assert!(match_damage_done_once_by_controller(
             &event,
@@ -9711,6 +9761,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -9776,6 +9827,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -9832,6 +9884,7 @@ mod tests {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -9885,6 +9938,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(source, 3)],
             total_damage: 3,
+            source_incarnations: vec![],
         };
 
         assert!(matching_damage_done_once_by_controller_event(
@@ -9946,6 +10000,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(creature_a, 3), (creature_b, 2)],
             total_damage: 5,
+            source_incarnations: vec![],
         };
 
         // Trigger matches only Fractal creatures (i.e., creature_a) controlled by you.
@@ -10008,6 +10063,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(bearer, 3)],
             total_damage: 3,
+            source_incarnations: vec![],
         };
 
         assert!(match_damage_done(
@@ -10080,6 +10136,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
             total_damage: 5,
+            source_incarnations: vec![],
         };
 
         let per_source_event = GameEvent::DamageDealt {
@@ -10088,6 +10145,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_done(
@@ -10161,6 +10219,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
             total_damage: 5,
+            source_incarnations: vec![],
         };
 
         assert!(!match_damage_done(
@@ -10205,6 +10264,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(attacker, 2)],
             total_damage: 2,
+            source_incarnations: vec![],
         };
 
         assert!(
@@ -10273,6 +10333,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &to_creature,
@@ -10289,6 +10350,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_player,
@@ -10304,6 +10366,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_noncreature,
@@ -10352,6 +10415,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &to_pw,
@@ -10366,6 +10430,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_player,
@@ -10439,6 +10504,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_done(
@@ -10457,6 +10523,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_done(
@@ -10475,6 +10542,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_done(
@@ -10529,6 +10597,7 @@ mod tests {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &to_opp,
@@ -10543,6 +10612,7 @@ mod tests {
             amount: 1,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_opp_creature,
@@ -10600,6 +10670,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &to_player,
@@ -10615,6 +10686,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &to_creature,
@@ -10667,6 +10739,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(attacker, 3)],
             total_damage: 3,
+            source_incarnations: vec![],
         };
 
         assert!(listens_on_aggregate_combat_damage_done(&trigger));
@@ -10744,6 +10817,7 @@ mod tests {
             player_id: PlayerId(1),
             source_amounts: vec![(attacker, 4)],
             total_damage: 4,
+            source_incarnations: vec![],
         };
 
         assert!(listens_on_aggregate_combat_damage_done(&trigger));
@@ -14404,6 +14478,7 @@ mod tests {
                 amount: 3,
                 is_combat,
                 excess: 0,
+                source_incarnation: None,
             };
             assert!(match_damage_done(
                 &event,
@@ -14426,6 +14501,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14447,6 +14523,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14468,6 +14545,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &event,
@@ -14497,6 +14575,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
 
         assert!(!match_damage_received(
@@ -14527,6 +14606,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
 
         assert!(match_damage_received(
@@ -14560,6 +14640,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14575,6 +14656,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_done(
             &event_opp,
@@ -14622,6 +14704,7 @@ mod tests {
             amount: 4,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_done(
@@ -14640,6 +14723,7 @@ mod tests {
             amount: 4,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_done(
@@ -14676,6 +14760,7 @@ mod tests {
             amount: 4,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_done(
             &event,
@@ -14702,6 +14787,7 @@ mod tests {
                 amount,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             };
             assert!(
                 match_damage_done(
@@ -14728,6 +14814,7 @@ mod tests {
                 amount,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             };
             assert!(match_damage_done(
                 &event,
@@ -14769,6 +14856,7 @@ mod tests {
                 amount,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             };
             assert_eq!(
                 match_damage_received(
@@ -14822,6 +14910,7 @@ mod tests {
                 amount,
                 is_combat: true,
                 excess: 0,
+                source_incarnation: None,
             };
             assert_eq!(
                 match_damage_received(
@@ -14868,6 +14957,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -14885,6 +14975,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_received(
             &self_damage,
@@ -14937,6 +15028,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -14954,6 +15046,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15001,6 +15094,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15048,6 +15142,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15073,6 +15168,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15091,6 +15187,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15124,6 +15221,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15141,6 +15239,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15174,6 +15273,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             !match_damage_received(
@@ -15191,6 +15291,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(
             match_damage_received(
@@ -15241,6 +15342,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(match_damage_received(
             &event,
@@ -15255,6 +15357,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_damage_received(
             &own_event,
@@ -15281,6 +15384,7 @@ mod tests {
                 amount,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             };
             assert_eq!(
                 match_damage_done(
@@ -15881,6 +15985,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             excess: 3,
+            source_incarnation: None,
         };
         assert!(match_excess_damage(
             &event,
@@ -15901,6 +16006,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             excess: 3,
+            source_incarnation: None,
         };
         assert!(!match_excess_damage(
             &event,
@@ -15921,6 +16027,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_excess_damage(
             &event,
@@ -15941,6 +16048,7 @@ mod tests {
             amount: 5,
             is_combat: true,
             excess: 1,
+            source_incarnation: None,
         };
         assert!(match_excess_damage_all(
             &event,
@@ -15961,6 +16069,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         };
         assert!(!match_excess_damage_all(
             &event,
@@ -15982,6 +16091,7 @@ mod tests {
             amount: 5,
             is_combat: true,
             excess: 2,
+            source_incarnation: None,
         };
         assert!(!match_excess_damage_all(
             &event,
@@ -16033,6 +16143,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             excess: 2,
+            source_incarnation: None,
         };
         let non_matching = GameEvent::DamageDealt {
             source_id: ObjectId(99),
@@ -16040,6 +16151,7 @@ mod tests {
             amount: 5,
             is_combat: false,
             excess: 2,
+            source_incarnation: None,
         };
 
         assert!(match_excess_damage_all(
@@ -16104,6 +16216,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let to_planeswalker = GameEvent::DamageDealt {
             source_id,
@@ -16111,6 +16224,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
         let to_player = GameEvent::DamageDealt {
             source_id,
@@ -16118,6 +16232,7 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         };
 
         assert!(
@@ -17111,6 +17226,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
             }),
         };
@@ -17135,6 +17254,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(own_milled, Some(Zone::Library), Zone::Graveyard)
             }),
         };
@@ -17160,6 +17283,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(
                     opp_dying,
                     Some(Zone::Battlefield),
@@ -17188,6 +17315,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
             }),
         };
@@ -17468,6 +17599,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(0),
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(0),
+                },
                 ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
             }),
         };
@@ -17491,6 +17626,10 @@ mod tests {
                 core_types: vec![CoreType::Creature],
                 controller: PlayerId(1),
                 owner: PlayerId(1),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(1),
+                    controller: PlayerId(1),
+                },
                 ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
             }),
         };
@@ -18657,6 +18796,10 @@ mod tests {
             record: Box::new(ZoneChangeRecord {
                 core_types: vec![CoreType::Creature],
                 owner: pile_owner,
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: pile_owner,
+                    controller: reanimator,
+                },
                 controller: reanimator,
                 ..ZoneChangeRecord::test_minimal(entrant, Some(Zone::Graveyard), Zone::Battlefield)
             }),

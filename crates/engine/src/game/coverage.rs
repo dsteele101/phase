@@ -19,10 +19,10 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagn
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, AttackedYouScope,
-    AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult, CombatHistoryScope,
-    CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
+    AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult,
+    CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
     DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
     EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
     ManaProduction, MassLibraryShuffleMode, NameStickerSet, ObjectProperty, ObjectScope,
@@ -770,6 +770,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
+        TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
         TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
@@ -956,11 +957,18 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Foretold => parts.push("foretold".into()),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
-            FilterProp::AttachedToSource => parts.push("attached to self".into()),
-            FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
-            FilterProp::AttachedToPlayer { player } => {
-                parts.push(format!("attached to {}", fmt_controller(player)))
-            }
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            } => parts.push("attached to self".into()),
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            } => parts.push("attached to it".into()),
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player { player },
+            } => parts.push(format!("attached to {}", fmt_controller(player))),
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::DeclaredTarget { slot },
+            } => parts.push(format!("attached to target #{slot}")),
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -1069,6 +1077,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::ScopedPlayer => "that player's",
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::TargetOpponent => "target opponent's",
+                    ControllerRef::DeclaredPlayer { .. } => "that player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::EventTargetController => "the damaged object's controller's",
                     ControllerRef::ParentTargetOwner => "parent target owner's",
@@ -1218,6 +1227,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::HasSingleTarget => parts.push("single target".into()),
             FilterProp::Modal => parts.push("modal spell".into()),
+            FilterProp::PrepareSpell => parts.push("prepared spell".into()),
             FilterProp::FaceDown => parts.push("face-down".into()),
             FilterProp::Transformed => parts.push("transformed".into()),
             FilterProp::TargetsOnly { filter } => {
@@ -1260,6 +1270,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::TargetOpponent => "target opponent",
+                ControllerRef::DeclaredPlayer { .. } => "that player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::EventTargetController => {
                     "controller of the object the triggering event targeted"
@@ -1340,6 +1351,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::TargetOpponent => "target opponent controls",
+        ControllerRef::DeclaredPlayer { .. } => "that player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::EventTargetController => {
             "the controller of the object the triggering event targeted controls"
@@ -2211,6 +2223,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::AllExcept { exclude } => {
             return format!("each player other than {}", fmt_player_filter(exclude));
         }
+        // CR 102.1: `AnyOf` is a recursive carrier too — two different unions
+        // must not render identically, so each member is rendered.
+        PlayerFilter::AnyOf { filters } => {
+            return filters
+                .iter()
+                .map(fmt_player_filter)
+                .collect::<Vec<_>>()
+                .join(" and ");
+        }
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
         // CR 608.2c: the player scope and the action kind both select — "each
@@ -2241,6 +2262,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         }
         PlayerFilter::ParentObjectTargetOwner => "the parent target's owner",
         PlayerFilter::GrantingObjectCaster => "the player who cast the granting object",
+        PlayerFilter::TargetPlayer => "the target player",
         // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
         // [count] matching permanents"
         PlayerFilter::ControlsCount {
@@ -4299,9 +4321,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Tribute { count } => {
             d.push(("count".into(), count.to_string()));
         }
-        Effect::BecomePrepared { target }
-        | Effect::BecomeUnprepared { target }
-        | Effect::BecomeSaddled { target }
+        // CR 722.3a/b + CR 115.10a: key the subject by scope exactly as `ForceAttack`
+        // does — a declared/anaphoric `target` vs an untargeted population `filter`.
+        Effect::BecomePrepared { target, scope } | Effect::BecomeUnprepared { target, scope } => {
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
+        }
+        Effect::BecomeSaddled { target }
         | Effect::BecomeBlocked { target }
         | Effect::PairWith { target } => {
             d.push(("target".into(), fmt_target(target)));
@@ -4889,6 +4918,7 @@ fn fmt_trigger_condition(
         } => format!("attackers declared {} {count}", fmt_comparator(comparator)),
         TC::ExceptFirstDrawInDrawStep => "except first draw in draw step".into(),
         TC::PlacedByAbilitySource => "placed by this ability".into(),
+        TC::AddedManaWithThisAbilityThisTurn => "added mana with this ability this turn".into(),
         TC::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))
         }
@@ -7292,7 +7322,76 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
         &mut missing,
     );
     check_shared_source_graveyard_slot(face, &mut missing);
+    check_entry_projection(face, &mut missing);
     missing
+}
+
+/// The coverage label for a face whose as-enters choice is made before it
+/// enters (CR 614.12a) but whose own statics write a characteristic that entry
+/// consumers read and the CR 614.12 entry projection doesn't apply
+/// (`filter::entry_projection_proven_for` against `filter::ENTRY_CONSUMER_READS`).
+/// Entry replacements would see the permanent without that write, so the face
+/// is unsupported and fails closed.
+pub const ENTRY_PROJECTION_GAP: &str = "Replacement:as_enters_projection";
+
+/// The coverage label for a face whose battlefield-entry replacement or "enters
+/// with an additional counter" static reads an entrant characteristic outside
+/// `filter::ENTRY_CONSUMER_READS`: an entrant's own write of that kind isn't
+/// projected (CR 614.12), so the face is unsupported and fails closed.
+pub const ENTRY_CONSUMER_GAP: &str = "Replacement:entry_consumer_reads_unprojected";
+
+/// CR 614.12: whether a replacement can apply to an object entering the
+/// battlefield — a `ChangeZone` replacement (its matcher proposes only
+/// battlefield entries) or a `Moved` replacement (any zone change), with no
+/// destination or the battlefield as its destination.
+fn replacement_can_consume_battlefield_entry(
+    def: &crate::types::ability::ReplacementDefinition,
+) -> bool {
+    matches!(
+        def.event,
+        ReplacementEvent::ChangeZone | ReplacementEvent::Moved
+    ) && matches!(def.destination_zone, None | Some(Zone::Battlefield))
+}
+
+fn check_entry_projection(face: &CardFace, missing: &mut Vec<String>) {
+    let mut push = |label: &str| {
+        if !missing.iter().any(|existing| existing == label) {
+            missing.push(label.to_string());
+        }
+    };
+    let has_pre_entry_choice = face
+        .replacements
+        .iter()
+        .any(|def| crate::game::replacement::as_enters_choice_type(def).is_some());
+    if has_pre_entry_choice
+        && !crate::game::filter::entry_projection_proven_for(
+            &face.static_abilities,
+            crate::game::filter::ENTRY_CONSUMER_READS,
+        )
+    {
+        push(ENTRY_PROJECTION_GAP);
+    }
+    let entry_replacement_filters = face
+        .replacements
+        .iter()
+        .filter(|def| replacement_can_consume_battlefield_entry(def))
+        .filter_map(|def| def.valid_card.as_ref());
+    let entry_static_filters = face
+        .static_abilities
+        .iter()
+        .filter(|def| matches!(def.mode, StaticMode::EntersWithAdditionalCounters { .. }))
+        .filter_map(|def| def.affected.as_ref());
+    if entry_replacement_filters
+        .chain(entry_static_filters)
+        .any(|filter| {
+            !matches!(filter, TargetFilter::SelfRef)
+                && !crate::game::filter::ENTRY_CONSUMER_READS.contains(
+                    crate::game::filter::target_filter_characteristic_reads(filter),
+                )
+        })
+    {
+        push(ENTRY_CONSUMER_GAP);
+    }
 }
 
 /// The coverage label for a graveyard-cast permission whose extra cost
@@ -10303,6 +10402,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     match scope {
         PlayerFilter::All => ("All", Handled),
         PlayerFilter::AllExcept { .. } => ("AllExcept", Handled),
+        // CR 102.1 + CR 608.2c: the player_scope driver resolves every member
+        // through the exhaustive ability-aware `speed_effects::players_for_filter`.
+        PlayerFilter::AnyOf { .. } => ("AnyOf", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
@@ -10335,6 +10437,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
         // CR 201.5a: installing the grant replaces it with the caster's `SpecificPlayer`.
         PlayerFilter::GrantingObjectCaster => ("GrantingObjectCaster", Handled),
+        // CR 115.1: resolved from the declared player target by
+        // `speed_effects::players_for_filter`.
+        PlayerFilter::TargetPlayer => ("TargetPlayer", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
@@ -13950,6 +14055,37 @@ mod tests {
                 },
             ),
         ]);
+
+        // `AnyOf` is a recursive carrier too: unions over different members
+        // must differ, and the declared-target anchor must not render like
+        // its anchored neighbours.
+        let with_controller = |member: PlayerFilter| PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, member],
+        };
+        assert_all_distinct(&[
+            (
+                "you and the target player",
+                &with_controller(PlayerFilter::TargetPlayer),
+            ),
+            (
+                "you and the triggering player",
+                &with_controller(PlayerFilter::TriggeringPlayer),
+            ),
+            (
+                "you and the parent target's controller",
+                &with_controller(PlayerFilter::ParentObjectTargetController),
+            ),
+            (
+                "you and each opponent",
+                &with_controller(PlayerFilter::Opponent),
+            ),
+            ("the target player", &PlayerFilter::TargetPlayer),
+            (
+                "the parent target's controller",
+                &PlayerFilter::ParentObjectTargetController,
+            ),
+            ("the triggering player", &PlayerFilter::TriggeringPlayer),
+        ]);
     }
 
     /// Assert every rendering in `cases` is pairwise distinct, naming the pair
@@ -14866,6 +15002,40 @@ mod tests {
         let all = keys(EffectScope::All);
         assert!(all.iter().any(|k| k == "filter"));
         assert!(!all.iter().any(|k| k == "target"));
+    }
+
+    /// CR 722.3a/b + CR 115.10a: a mass "each creature you control becomes
+    /// (un)prepared" keys its subject as `filter`, a declared/anaphoric subject as
+    /// `target`, so `coverage-parse-diff` sees a Single → All reclassification.
+    #[test]
+    fn become_prepared_signature_keys_subject_by_scope() {
+        let subject = || TargetFilter::Typed(TypedFilter::creature());
+        let keys = |effect: Effect| -> Vec<String> {
+            effect_details(&effect)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        for scope in [EffectScope::Single, EffectScope::All] {
+            for effect in [
+                Effect::BecomePrepared {
+                    target: subject(),
+                    scope,
+                },
+                Effect::BecomeUnprepared {
+                    target: subject(),
+                    scope,
+                },
+            ] {
+                let got = keys(effect);
+                let (want, absent) = match scope {
+                    EffectScope::Single => ("target", "filter"),
+                    EffectScope::All => ("filter", "target"),
+                };
+                assert!(got.iter().any(|k| k == want), "{scope:?}: {got:?}");
+                assert!(!got.iter().any(|k| k == absent), "{scope:?}: {got:?}");
+            }
+        }
     }
 
     #[test]
