@@ -3347,8 +3347,13 @@ mod tests {
     }
 
     /// v136: target-bearing Unattach costs select their granting Equipment.
-    /// A v133 peer cannot preserve that cost subject; Full134/135 are reserved
-    /// for separate pending ports and do not identify this candidate.
+    /// A v135 peer cannot preserve that cost subject. Main Full134 activation
+    /// receipts are retained; pending Full135 is the distinct Attached-event port.
+    /// v134: `GameEvent::AbilityActivated` gains
+    /// `stack_entry`, the stack object a stack-using activation created, carried
+    /// in `GameState`'s trigger events; an older peer drops it silently and
+    /// resolves an activation trigger's "copy that ability" differently, so it
+    /// must be refused before it receives v134 state.
     ///
     /// v133: CR 614.12a pre-entry as-enters choices —
     /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s

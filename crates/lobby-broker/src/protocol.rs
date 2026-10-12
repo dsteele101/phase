@@ -63,7 +63,15 @@ pub struct TournamentRequestId(pub u64);
 /// 136 — `AbilityCost::Unattach.target` selects the granting Equipment rather
 ///       than the ability host. An older peer cannot preserve the target-bearing
 ///       cost semantics. P2P moves with it (wire118); lobby messages unchanged.
-///       Full134/135 and wire116/117 are reserved for other pending ports.
+///       Main Full134/wire116 activation receipts are retained; Full135/wire117
+///       remains distinct for the pending Attached-event port.
+/// 134 — `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
+///      omitted when absent) — the stack object a stack-using activation
+///      created (CR 602.2a), which an activation trigger's "copy that ability"
+///      names (CR 707.10). Events ride in `GameState` (`current_trigger_event`,
+///      each triggered ability's stored event), and an older peer drops the
+///      field silently, resolving those copies differently. Full-game peers and
+///      P2P move in lockstep (wire 116); no lobby carrier names it.
 ///
 /// 133 — CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
 ///      gains `enter_with_choices` (the answers riding the entry event),

@@ -608,7 +608,7 @@ fn object_cost_node(cost: &AbilityCost) -> ObjectCostNode<'_> {
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::PaySpeed { .. }
-        | AbilityCost::Unattach
+        | AbilityCost::Unattach { .. }
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert

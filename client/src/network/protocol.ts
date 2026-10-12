@@ -108,7 +108,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * Bumps to date:
  *  118 — Target-bearing Unattach costs select their granting Equipment rather
  *       than the ability host. Older peers cannot preserve that cost subject.
- *       Full136 moves with it; 116/117 are reserved for other pending ports.
+ *       Full136 moves with it, retaining main wire116 activation stack-entry receipts.
+ *  116 — game_setup and state_update carry GameState whose AbilityActivated trigger
+ *       events may name the activation's stack_entry. Bumped in lockstep with
+ *       full-game protocol 134.
  *  115 — game_setup and state_update carry GameState whose NamedChoice source
  *       binding may be PendingEntry (CR 614.12a pre-entry as-enters choices).
  *       Bumped in lockstep with full-game protocol 133.

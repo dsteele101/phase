@@ -212,7 +212,14 @@ export class NativeEngineVersionMismatchError extends Error {
  *
  * 136 — Target-bearing Unattach costs select their granting Equipment, not
  *       the ability host. Older peers cannot preserve that cost subject. Wire
- *       118 moves with it; Full134/135 are reserved for other pending ports.
+ *       118 moves with it, retaining main Full134 activation stack-entry receipts.
+ * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
+ *      stack-using activation created, carried in GameState's trigger events —
+ *      see PROTOCOL_VERSION's own `/// 134` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v133 peer drops it silently and
+ *      resolves an activation trigger's "copy that ability" differently; the
+ *      exact-match version check at connect refuses the pairing. Wire 116
+ *      moves with it.
  * 133 — CR 614.12a pre-entry as-enters choices: NamedChoiceSourceBinding gains
  *      PendingEntry (WaitingFor.NamedChoice.source.binding), and the parked
  *      entry event / PendingReplacement carry the answers and the paused
