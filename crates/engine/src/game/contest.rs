@@ -301,15 +301,26 @@ impl ContestState {
     /// Record a seat attaching/detaching. Returns whether the state changed.
     /// Idempotent: repeating the current state is a no-op.
     pub fn set_connected(&mut self, player: PlayerId, connected: bool, now_ms: u64) -> bool {
+        let Some(idx) = self.index_of(player) else {
+            return false;
+        };
+        // Reporting the state a seat is already in is clock-neutral: hosts repeat the
+        // report every tick, and a repeat must not advance the contest clock past
+        // input the host has stamped earlier but not yet delivered.
+        let is_edge = matches!(
+            (self.contestants[idx].connection, connected),
+            (ContestantConnection::Connected, false)
+                | (ContestantConnection::Disconnected { .. }, true)
+        );
+        if !is_edge {
+            return false;
+        }
         // Expired deadlines / grace resolve before the connection change.
         self.advance(now_ms);
         let now = self.clock_ms;
         if self.phase.is_terminal() || self.phase == ContestPhase::Resolving {
             return false;
         }
-        let Some(idx) = self.index_of(player) else {
-            return false;
-        };
         match (self.contestants[idx].connection, connected) {
             (ContestantConnection::Connected, false) => {
                 self.contestants[idx].connection =
@@ -1107,6 +1118,34 @@ mod tests {
             c.result,
             Some(ContestResult::Cancelled(ContestCancelReason::TimeLimit))
         );
+    }
+
+    /// Hosts repeat each seat's connectivity every tick. A repeat of the state the seat
+    /// is already in must not move the clock: a click stamped before a delayed tick
+    /// still has to be judged against the deadlines in force when it was made.
+    #[test]
+    fn repeating_a_seats_connectivity_does_not_advance_the_clock() {
+        let mut c = active(cfg()); // GO at 1000, deadlines at 2000
+        let before = c.clock_ms;
+        assert!(!c.set_connected(A, true, 5_151));
+        assert!(!c.set_connected(B, true, 5_151));
+        assert_eq!(c.clock_ms, before);
+        assert_eq!(c.phase, ContestPhase::Active);
+
+        // A click stamped inside A's window still counts and extends A's deadline.
+        assert_eq!(c.click(A, 1, 1_999), ClickDisposition::Counted);
+        assert_eq!(c.deadline_ms(0), 1_999 + cfg().inactivity_timeout_ms);
+    }
+
+    /// A real edge still resolves what expired before it, exactly as before.
+    #[test]
+    fn a_real_disconnect_edge_still_settles_earlier_expiry_first() {
+        let mut c = active(cfg());
+        c.click(A, 1, 2_900);
+        // The contest was already decided by the time the edge applies, so it is moot.
+        assert!(!c.set_connected(A, false, 3_500));
+        // B lapsed at 2000 while A was still clicking: B lost before the edge applied.
+        assert_eq!(c.phase, ContestPhase::Resolving);
     }
 
     #[test]

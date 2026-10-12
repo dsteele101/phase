@@ -8,10 +8,12 @@
 //! can both win and lose. It reads no clock — the host passes the same
 //! millisecond timebase it stamps human clicks with.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use engine::game::contest::{contest_click, ContestStep};
-use engine::types::contest::ContestPhase;
+use engine::game::contest::{
+    advance_contest, cancel_contest, contest_click, start_contest, ContestStep,
+};
+use engine::types::contest::{ContestCancelReason, ContestPhase};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -132,6 +134,51 @@ impl AiContestants {
             }
         }
     }
+}
+
+/// Virtual time between engine ticks when a headless host plays a contest out.
+const HEADLESS_TICK_MS: u64 = 50;
+
+/// Play a contest between AI seats to its conclusion on a deterministic virtual clock,
+/// for hosts with no clock or input of their own (self-play, benchmarks, gates).
+///
+/// A live host drives the contest in real time (`phase-server`, `engine-wasm`); a
+/// headless one would otherwise stop at the wait, because no seat acts on it. Returns
+/// whether it ran: `false` when the game is not in a contest or a contestant is not an
+/// AI seat (a human's contest is not this host's to play). The contest is bounded by
+/// its own hard cap, with a final cancellation as a backstop, so it always leaves the
+/// wait.
+pub fn settle_headless_contest(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    rng: &mut impl Rng,
+) -> bool {
+    let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+        return false;
+    };
+    if !contest.players().iter().all(|p| ai_players.contains(p)) {
+        return false;
+    }
+    let config = contest.config;
+    let seats: Vec<PlayerId> = contest.players().to_vec();
+    let budget_ms = config.countdown_ms
+        + config.max_active_ms
+        + config.settle_window_ms
+        + config.inactivity_timeout_ms;
+    let mut clickers = AiContestants::default();
+    let mut events = Vec::new();
+    let mut now = 0;
+    start_contest(state, config, now, &mut events);
+    while matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }) {
+        if now > budget_ms {
+            cancel_contest(state, ContestCancelReason::HostAborted, now, &mut events);
+            break;
+        }
+        now += HEADLESS_TICK_MS;
+        advance_contest(state, now, &mut events);
+        clickers.click_due(state, &seats, now, rng, |_, _| {});
+    }
+    true
 }
 
 #[cfg(test)]
@@ -278,5 +325,140 @@ mod tests {
             1,
             "a fresh contest plans a fresh schedule and clicks at its own GO"
         );
+    }
+
+    // ---- Headless hosting (`settle_headless_contest`) -------------------------
+
+    use std::sync::Arc;
+
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    use crate::auto_play::{run_ai_actions, run_ai_actions_bounded_headless, AiActionsStop};
+    use crate::config::{create_config, AiDifficulty, Platform};
+    use crate::session::AiSession;
+
+    const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+
+    /// A game parked on a contest that a REAL Eye to Eye cast produced.
+    fn cast_into_contest() -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_objects(&[victim]).resolve();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the cast must have parked the game on the contest"
+        );
+        (runner.state().clone(), victim)
+    }
+
+    fn configs() -> HashMap<PlayerId, crate::config::AiConfig> {
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        HashMap::from([(P0, config.clone()), (P1, config)])
+    }
+
+    fn seats(players: &[PlayerId]) -> HashSet<PlayerId> {
+        players.iter().copied().collect()
+    }
+
+    /// The batch every live host runs stops at the contest: no seat acts there.
+    #[test]
+    fn a_live_host_batch_stops_at_the_contest() {
+        let (mut state, _) = cast_into_contest();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let run = run_ai_actions(
+            &mut state,
+            &seats(&[P0, P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+        );
+
+        assert!(run.is_empty());
+        assert!(matches!(run.stop, AiActionsStop::NoEligibleAiActor));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::PhysicalContest { .. }
+        ));
+    }
+
+    /// The headless batch plays the contest out and the AI carries on in the same batch.
+    #[test]
+    fn a_headless_batch_plays_a_real_contest_out_and_resumes_play() {
+        let (mut state, victim) = cast_into_contest();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let run = run_ai_actions_bounded_headless(
+            &mut state,
+            &seats(&[P0, P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            4,
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }),
+            "the contest must have settled"
+        );
+        assert!(!run.is_empty(), "the AI must have acted after the contest");
+        // The result was applied exactly once: the victim is either destroyed or kept.
+        let zone = state.objects[&victim].zone;
+        assert!(zone == Zone::Graveyard || zone == Zone::Battlefield);
+    }
+
+    /// Deterministic: the same seed settles the same way.
+    #[test]
+    fn a_headless_contest_is_deterministic_per_seed() {
+        let outcome = |seed: u64| {
+            let (mut state, victim) = cast_into_contest();
+            let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+            run_ai_actions_bounded_headless(
+                &mut state,
+                &seats(&[P0, P1]),
+                &configs(),
+                &mut StdRng::seed_from_u64(seed),
+                &session,
+                1,
+            );
+            state.objects[&victim].zone
+        };
+        assert_eq!(outcome(5), outcome(5));
+        // Reach guard: across seeds both results occur, so equality above is not vacuous.
+        let zones: HashSet<Zone> = (0..40).map(outcome).collect();
+        assert!(zones.len() > 1, "the contest must be able to go either way");
+    }
+
+    /// A contest with a human contestant is that human's to play, not the headless host's.
+    #[test]
+    fn a_headless_batch_leaves_a_humans_contest_alone() {
+        let (mut state, _) = cast_into_contest();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let run = run_ai_actions_bounded_headless(
+            &mut state,
+            &seats(&[P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            4,
+        );
+
+        assert!(run.is_empty());
+        assert!(matches!(run.stop, AiActionsStop::NoEligibleAiActor));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::PhysicalContest { .. }
+        ));
     }
 }

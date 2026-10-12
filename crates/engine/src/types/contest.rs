@@ -208,11 +208,11 @@ pub enum ClickDisposition {
 /// is part of `GameState` and survives reconnects/persistence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContestState {
-    /// Engine-authored identity, unique within a game (derived from the state
-    /// revision at resolution, so strictly increasing) and immutable for the
-    /// contest's lifetime. Every host input (click, progress
-    /// frame, AI schedule) is bound to it so a frame delayed from an earlier contest
-    /// can never be mistaken for activity in a later one.
+    /// Engine-authored identity (derived from the state revision at resolution and
+    /// the interaction session, so a contest replayed after a takeback restore gets
+    /// a new one) and immutable for the contest's lifetime. Every host input (click,
+    /// progress frame, AI schedule) is bound to it so a frame delayed from an earlier
+    /// contest can never be mistaken for activity in a later one.
     #[serde(default)]
     pub id: u64,
     pub kind: ContestKind,

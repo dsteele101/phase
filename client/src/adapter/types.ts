@@ -2537,6 +2537,13 @@ export interface ContestDriveResult {
    * none is. A host reads it to decide which inputs it may accept and buffer.
    */
   contest: { id: number; players: [PlayerId, PlayerId] } | null;
+  /**
+   * Set by an adapter that already published this tick's transition (snapshot and
+   * events) through its own state channel before any follow-up play it ran. The caller
+   * must not commit it again: an adapter that publishes owns the commit, and a second
+   * one would replay the resolution events and log entries.
+   */
+  published?: boolean;
 }
 
 /** Which printed contest is being adapted. Presentation only. */

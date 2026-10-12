@@ -308,7 +308,10 @@ vi.mock("../ws-adapter", async (original) => {
       onEvent: nativeWebSocketMocks.onEvent,
       sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
       sendSeatMutation: nativeWebSocketMocks.sendSeatMutation,
-      dispose: nativeWebSocketMocks.dispose,
+      dispose(this: object) {
+        if (playerId !== null) nativeWebSocketMocks.openSockets.delete(playerId);
+        return nativeWebSocketMocks.dispose.call(this);
+      },
     };
   }),
 };
@@ -1156,24 +1159,41 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       guest.simulateClose();
       socket.frame("ActionRejected", { rejection: { code: "invalid_action", disposition: "invalid", message: "Concede rejected", related_object_ids: [] }, full_key: fullKey });
       await firstConcede;
-      expect(socket.readyState).toBe(1);
+      // The concession did not commit and the seat is still away, so its loopback is
+      // released again: the engine authority must keep seeing the seat as gone.
+      expect(socket.readyState).toBe(3);
       expect(events).not.toContainEqual(expect.objectContaining({ type: "playerConceded", playerId: 1 }));
       const rejectedSaves = persistenceMocks.saveP2PHostSession.mock.calls as unknown as Array<[string, { eliminatedSeats: number[] }]>;
       expect(rejectedSaves[rejectedSaves.length - 1]?.[1].eliminatedSeats).not.toContain(1);
       expect((await remaining.getSentMessages()).filter((m) => (m as P2PMessage).type === "player_conceded")).toHaveLength(0);
-      const retry = await joinGuest(emitConnection, { type: "reconnect", playerToken: setup.playerToken! });
+      // A returning seat reattaches its loopback on its own token first; the view the
+      // engine sends it on return is the handoff the guest's reconnect is acknowledged with.
+      const reattachSeat = async (index: number, revision: number, label: string) => {
+        await vi.waitFor(() => expect(AuditSocket.sockets).toHaveLength(index + 1));
+        const reattached = AuditSocket.sockets[index];
+        await flushPromises(20);
+        reattached.frame("ServerHello", { server_version: "0.0.0-test", build_commit: "testhash", protocol_version: PROTOCOL_VERSION, mode: "Full" });
+        await vi.waitFor(() => expect(reattached.sent.length).toBeGreaterThan(0));
+        reattached.frame("GameStarted", { state_revision: revision, state: remoteState(label), your_player: 1, player_token: "audit-native-1", full_key: fullKey });
+        return reattached;
+      };
+      const live = () => AuditSocket.sockets.filter((s) => s.readyState === 1);
+      const retrying = joinGuest(emitConnection, { type: "reconnect", playerToken: setup.playerToken! });
+      const returned = await reattachSeat(3, 2, "returning seat view");
+      const retry = await retrying;
       await flushPromises(40);
       expect(await retry.getSentMessages()).toContainEqual(expect.objectContaining({ type: "reconnect_ack" }));
       const nextAction = retry.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
-      await vi.waitFor(() => expect(socket.sent.filter((m) => m.type === "Action")).toHaveLength(2));
-      for (const s of AuditSocket.sockets) s.frame("StateUpdate", { state_revision: 2, state: remoteState("post-rejection operation"), events: [], full_key: fullKey });
+      await vi.waitFor(() => expect(returned.sent.filter((m) => m.type === "Action")).toHaveLength(1));
+      for (const s of live()) s.frame("StateUpdate", { state_revision: 3, state: remoteState("post-rejection operation"), events: [], full_key: fullKey });
       await nextAction;
       retry.simulateClose();
       expect(events).toContainEqual(expect.objectContaining({ type: "opponentDisconnectedWithChoice", playerId: 1 }));
-      expect(socket.readyState).toBe(1);
+      expect(returned.readyState).toBe(3);
       let concessionDone = false;
       void adapter.concedeDisconnected(1).then(() => { concessionDone = true; });
-      await vi.waitFor(() => expect(socket.sent.filter((m) => m.type === "Action")).toHaveLength(3));
+      const conceding = await reattachSeat(4, 3, "seat reattached to concede");
+      await vi.waitFor(() => expect(conceding.sent.filter((m) => m.type === "Action")).toHaveLength(1));
       const reconnect = await joinGuest(emitConnection, { type: "reconnect", playerToken: setup.playerToken! });
       await flushPromises(40);
       const frames = await reconnect.getSentMessages();
@@ -1182,10 +1202,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       await reconnect.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
       await adapter.concedeDisconnected(1);
       await adapter.kickPlayer(1);
-      expect(socket.sent.filter((m) => m.type === "Action")).toHaveLength(3);
+      expect(conceding.sent.filter((m) => m.type === "Action")).toHaveLength(1);
       // The Native reply must settle the original Concede, never a
       // replacement pending resolver from the reconnecting PeerSession.
-      for (const s of AuditSocket.sockets) s.frame("StateUpdate", { state_revision: 3, state: remoteState("Concede response"), events: [], full_key: fullKey });
+      for (const s of live()) s.frame("StateUpdate", { state_revision: 4, state: remoteState("Concede response"), events: [], full_key: fullKey });
       await flushPromises(60);
       expect(concessionDone).toBe(true);
       const host = adapter as unknown as { eliminatedSeats: Set<number>; gameRunState: string };
@@ -1253,9 +1273,12 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       playerId: 1,
     })));
 
-    // The native client remains attached to the bridge, while its underlying
-    // socket is no longer OPEN; WebSocketAdapter rejects before sending Action.
-    nativeWebSocketMocks.openSockets.delete(1);
+    // The seat's loopback was released when its PeerJS channel dropped, so the engine
+    // authority sees the seat away; its token and view are kept for the return.
+    expect(nativeWebSocketMocks.openSockets.has(1)).toBe(false);
+    // Conceding for it reattaches the loopback; the send itself is then rejected before
+    // reaching the wire (as WebSocketAdapter does for a socket that is not OPEN).
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
     nativeWebSocketMocks.submitAction.mockImplementationOnce(async (playerId, _action, _actor) => {
       nativeWebSocketMocks.preSendRejections.push(playerId ?? -1);
       throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
@@ -1270,6 +1293,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
     expect(nativeWebSocketMocks.preSendRejections).toEqual([1]);
     expect(nativeWebSocketMocks.sentActions).toEqual([]);
+    // A concession that did not commit leaves the seat away, so it is released again.
+    expect(nativeWebSocketMocks.openSockets.has(1)).toBe(false);
 
     const savedCalls = persistenceMocks.saveP2PHostSession.mock.calls as unknown as Array<
       [string, { playerTokens: Record<number, string>; eliminatedSeats: number[] }]
@@ -1278,10 +1303,28 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect.soft(saved?.playerTokens[1]).toBe(setup?.playerToken);
     expect.soft(saved?.eliminatedSeats).not.toContain(1);
 
-    const reconnect = await joinGuest(emitConnection, {
+    // The returning guest reattaches its seat to the engine authority; the view the
+    // authority sends the seat on its return is the handoff.
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+    const attachCalls = nativeWebSocketMocks.initializePregame.mock.calls.length;
+    const reconnecting = joinGuest(emitConnection, {
       type: "reconnect",
       playerToken: setup?.playerToken ?? "missing-player-token",
     });
+    await vi.waitFor(() =>
+      expect(nativeWebSocketMocks.initializePregame.mock.calls.length).toBe(attachCalls + 1),
+    );
+    await flushPromises(5);
+    const listeners = nativeWebSocketMocks.onEvent.mock.calls;
+    (listeners[listeners.length - 1][0] as (event: WsAdapterEvent) => void)({
+      type: "stateChanged",
+      snapshot: { ...nativeSnapshot, state: remoteState("native revision two") },
+      events: [],
+      serverRevision: 2,
+    });
+    const reconnect = await reconnecting;
+    await flushPromises(20);
+    expect(nativeWebSocketMocks.openSockets.has(1)).toBe(true);
     const reconnectMessages = await reconnect.getSentMessages();
     expect.soft(reconnectMessages).toContainEqual(expect.objectContaining({
       type: "reconnect_ack",
@@ -3355,7 +3398,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     guest.simulateClose();
 
     const host = adapter as unknown as { nativeBridge: object | null };
-    host.nativeBridge = {};
+    host.nativeBridge = { isGuestAttached: () => true, suspendGuest: () => undefined };
     const reconnect = await joinGuest(emitConnection, {
       type: "reconnect",
       playerToken: setup!.playerToken,
@@ -3402,7 +3445,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       legalResult: { actions: [{ type: "PassPriority" }], autoPassRecommended: false },
       seq: 2,
     };
-    host.nativeBridge = {};
+    host.nativeBridge = { isGuestAttached: () => true, suspendGuest: () => undefined };
     host.nativeDeliveredViews.set(1, { revision: 1, snapshot: oldSnapshot });
     host.authoritativeRevision = 1;
     const revisionDelivery = deferred<void>();
@@ -7974,6 +8017,93 @@ describe("P2PHostAdapter — contest input", () => {
     adapter.dispose();
   });
 
+  it("keeps a guest's buffered click when the engine rejects the drive, and counts it once", async () => {
+    const { adapter, guest } = await hostWithGuest();
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_000, [], []);
+    await guest.simulateData({ type: "contest_click", contest: 9, seq: 1 });
+
+    mocks.driveContest.mockRejectedValueOnce(new Error("engine busy"));
+    await expect(adapter.driveContest(1_050, [], [])).rejects.toThrow("engine busy");
+    expect(lastBatch()[2]).toEqual([expect.objectContaining({ player: 1, seq: 1, contest: 9 })]);
+
+    mocks.driveContest.mockClear();
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_100, [], []);
+    expect(lastBatch()[2]).toEqual([expect.objectContaining({ player: 1, seq: 1, contest: 9 })]);
+
+    await adapter.driveContest(1_150, [], []);
+    expect(lastBatch()[2]).toEqual([]);
+    adapter.dispose();
+  });
+
+  it("does not bring back a click addressed to a contest that has since ended", async () => {
+    const { adapter, guest } = await hostWithGuest();
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_000, [], []);
+    await guest.simulateData({ type: "contest_click", contest: 9, seq: 1 });
+
+    // The failed drive's retry finds a different contest running: the click is gone.
+    mocks.driveContest.mockRejectedValueOnce(new Error("engine busy"));
+    await expect(adapter.driveContest(1_050, [], [])).rejects.toThrow();
+    mocks.driveContest.mockResolvedValue(driveResult({ ...RUNNING, id: 10 }));
+    await adapter.driveContest(1_100, [], []);
+    mocks.driveContest.mockClear();
+    await adapter.driveContest(1_150, [], []);
+
+    expect(lastBatch()[2]).toEqual([]);
+    adapter.dispose();
+  });
+
+  describe("publication", () => {
+    const resolved = {
+      type: "PhysicalContestResolved",
+      data: { kind: "Staring", participants: [0, 1], result: { type: "Cancelled", data: "HostAborted" } },
+    };
+
+    it("publishes a settled contest to the host before the AI plays on, and owns that commit", async () => {
+      const { adapter } = await hostWithGuest();
+      const published = vi.fn();
+      adapter.onEvent(published);
+      mocks.driveContest.mockResolvedValueOnce({
+        step: "Settled",
+        events: [resolved as never],
+        log_entries: [],
+        contest: null,
+      });
+      published.mockClear();
+      mocks.getState.mockClear();
+
+      const result = await adapter.driveContest(1_000, [], []);
+
+      const resolution = published.mock.calls.findIndex(
+        ([event]) =>
+          event.type === "stateChanged"
+          && event.events.some((e: { type: string }) => e.type === "PhysicalContestResolved"),
+      );
+      expect(resolution, "the host must be told the contest resolved").toBeGreaterThanOrEqual(0);
+      // The AI loop reads the engine state first thing: publication has to precede it,
+      // because the AI's own snapshots unmount the contest.
+      const aiLoopReads = mocks.getState.mock.invocationCallOrder;
+      expect(aiLoopReads.length).toBeGreaterThan(0);
+      expect(published.mock.invocationCallOrder[resolution]).toBeLessThan(
+        Math.max(...aiLoopReads),
+      );
+      expect(result.published).toBe(true);
+      adapter.dispose();
+    });
+
+    it("leaves an unchanged tick unpublished for the caller", async () => {
+      const { adapter } = await hostWithGuest();
+      mocks.driveContest.mockResolvedValueOnce(driveResult(RUNNING));
+
+      const result = await adapter.driveContest(1_000, [], []);
+
+      expect(result.published).toBeUndefined();
+      adapter.dispose();
+    });
+  });
+
   it("does not claim a click when this engine hosts the contest itself", async () => {
     const { adapter } = await hostWithGuest();
     expect(adapter.submitContestClick(9, 1)).toBe(false);
@@ -8015,6 +8145,112 @@ describe("P2PHostAdapter — contest input", () => {
       expect(adapter.submitContestClick(9, 4)).toBe(true);
 
       expect(nativeWebSocketMocks.submitContestClick).toHaveBeenCalledWith(0, 9, 4);
+      adapter.dispose();
+    });
+
+    /** A started two-seat native game whose guest is attached on its own loopback. */
+    async function startedNativeHostWithGuest() {
+      const { adapter, emitConnection } = makeNativeHost(2);
+      nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+      nativeWebSocketMocks.initializePregame
+        .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+        .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+      await adapter.initialize();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+      });
+      await flushPromises(20);
+      const start = adapter.initializeGame();
+      await vi.waitFor(() =>
+        expect(nativeWebSocketMocks.sendSeatMutation).toHaveBeenCalledWith({ type: "Start" }),
+      );
+      const snapshot: EngineSnapshot = {
+        state: remoteState("native contest game started"),
+        legalResult: { actions: [], autoPassRecommended: false },
+        seq: 1,
+      };
+      const emitView = (listenerIndex: number, revision: number) =>
+        (nativeWebSocketMocks.onEvent.mock.calls[listenerIndex][0] as (event: WsAdapterEvent) => void)({
+          type: "stateChanged",
+          snapshot,
+          events: [],
+          serverRevision: revision,
+        });
+      emitView(0, 1);
+      emitView(1, 1);
+      await start;
+      await flushPromises(20);
+      return { adapter, emitConnection, guest, emitView, snapshot };
+    }
+
+    it("tells the engine authority a dropped guest is away, and that it returned", async () => {
+      const { adapter, emitConnection, guest, emitView } = await startedNativeHostWithGuest();
+      expect(nativeWebSocketMocks.openSockets.has(1)).toBe(true);
+      const setup = (await guest.getSentMessages()).find(
+        (message): message is { type: "game_setup"; playerToken: string } =>
+          (message as { type?: string }).type === "game_setup",
+      );
+      expect(setup).toBeDefined();
+
+      guest.simulateClose();
+      await flushPromises(20);
+
+      // The authority reads a seat's presence from that seat's own socket: it must close,
+      // or a running contest would never pause for the absentee.
+      expect(nativeWebSocketMocks.openSockets.has(1)).toBe(false);
+      expect(nativeWebSocketMocks.openSockets.has(0)).toBe(true);
+
+      // Its clicks cannot be relayed while it is away.
+      nativeWebSocketMocks.submitContestClick.mockClear();
+      await guest.simulateData({ type: "contest_click", contest: 9, seq: 1 });
+      expect(nativeWebSocketMocks.submitContestClick).not.toHaveBeenCalled();
+
+      // On return the seat reattaches (token preserved) and is handed the view it got.
+      nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+      const calls = nativeWebSocketMocks.initializePregame.mock.calls.length;
+      const returning = joinGuest(emitConnection, {
+        type: "reconnect",
+        playerToken: setup!.playerToken,
+      });
+      await vi.waitFor(() =>
+        expect(nativeWebSocketMocks.initializePregame.mock.calls.length).toBe(calls + 1),
+      );
+      await flushPromises(5);
+      emitView(nativeWebSocketMocks.onEvent.mock.calls.length - 1, 2);
+      const reconnect = await returning;
+      await flushPromises(20);
+
+      expect(nativeWebSocketMocks.openSockets.has(1)).toBe(true);
+      expect(await reconnect.getSentMessages()).toContainEqual(
+        expect.objectContaining({ type: "reconnect_ack", assignedPlayerId: 1, revision: 2 }),
+      );
+      // And its clicks flow again.
+      await reconnect.simulateData({ type: "contest_click", contest: 9, seq: 2 });
+      expect(nativeWebSocketMocks.submitContestClick).toHaveBeenCalledWith(1, 9, 2);
+      adapter.dispose();
+    });
+
+    it("keeps a seat away when its loopback cannot be reattached", async () => {
+      const { adapter, emitConnection, guest } = await startedNativeHostWithGuest();
+      const setup = (await guest.getSentMessages()).find(
+        (message): message is { type: "game_setup"; playerToken: string } =>
+          (message as { type?: string }).type === "game_setup",
+      );
+      guest.simulateClose();
+      await flushPromises(20);
+
+      nativeWebSocketMocks.initializePregame.mockRejectedValueOnce(new Error("loopback refused"));
+      const reconnect = await joinGuest(emitConnection, {
+        type: "reconnect",
+        playerToken: setup!.playerToken,
+      });
+      await flushPromises(40);
+
+      expect(await reconnect.getSentMessages()).toContainEqual(
+        expect.objectContaining({ type: "reconnect_rejected" }),
+      );
+      expect(nativeWebSocketMocks.openSockets.has(1)).toBe(false);
       adapter.dispose();
     });
 

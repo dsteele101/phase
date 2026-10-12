@@ -4680,6 +4680,92 @@ mod tests {
         );
     }
 
+    /// A contest's identity must survive a takeback of a COMPLETED contest. Undoing the
+    /// cast and replaying it reaches the same state revision, so an identity derived from
+    /// the revision alone would repeat — and a click frame stamped for the discarded
+    /// branch's contest would count in the replayed one. The restore rotates the
+    /// interaction session, and the identity is bound to it.
+    #[test]
+    fn a_contest_replayed_after_a_takeback_has_a_new_identity_and_rejects_the_old_frame() {
+        use engine::game::contest::{cancel_contest, contest_click, start_contest};
+        use engine::types::contest::{
+            ClickDisposition, ClickRejection, ContestCancelReason, ContestConfig,
+        };
+
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let (mgr, code, _token0, _token1) = setup_two_player_game();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = scenario.build().state().clone();
+        bind_fresh_interaction_session(&mut session.state, &code);
+        session.push_takeback_snapshot(P0);
+
+        let cast_into_contest = |session: &mut GameSession| {
+            let mut runner = GameRunner::from_state(session.state.clone());
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            session.state = runner.state().clone();
+            match &session.state.waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first = cast_into_contest(&mut session);
+        // A running contest refuses a takeback, so the contest completes first (the case
+        // this guards is undoing one that already has).
+        let mut events = Vec::new();
+        cancel_contest(
+            &mut session.state,
+            ContestCancelReason::HostAborted,
+            0,
+            &mut events,
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the contest completed"
+        );
+
+        assert_eq!(
+            session.request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Approved)
+        );
+        assert!(
+            !matches!(
+                session.state.waiting_for,
+                WaitingFor::PhysicalContest { .. }
+            ),
+            "reach guard: the takeback undid the cast that started the contest"
+        );
+        let second = cast_into_contest(&mut session);
+
+        assert_ne!(
+            first, second,
+            "a replayed contest must not reuse the old identity"
+        );
+        start_contest(&mut session.state, ContestConfig::default(), 0, &mut events);
+        // Past the countdown the contest is Active, and only the new identity counts.
+        let go = ContestConfig::default().countdown_ms;
+        let (stale, _) = contest_click(&mut session.state, first, P0, 1, go + 10, &mut events);
+        assert_eq!(
+            stale,
+            ClickDisposition::Rejected(ClickRejection::WrongContest),
+            "the frame stamped for the discarded branch's contest must not count"
+        );
+        let (current, _) = contest_click(&mut session.state, second, P0, 1, go + 20, &mut events);
+        assert_eq!(current, ClickDisposition::Counted);
+    }
+
     /// A takeback restores a live shortcut offer through the same rekeying
     /// boundary as persisted sessions. The old offer capability must not be
     /// usable after the approved rollback.

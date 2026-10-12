@@ -2146,104 +2146,28 @@ pub fn drive_contest_js(
     away_players: Vec<u8>,
     clicks: JsValue,
 ) -> JsValue {
-    use engine::game::contest::{
-        advance_contest, contest_click, set_contest_connection, start_contest, ContestStep,
-    };
     let clicks = decode_contest_clicks(clicks);
     let ai_players: Vec<PlayerId> = ai_players.into_iter().map(PlayerId).collect();
     let away_players: Vec<PlayerId> = away_players.into_iter().map(PlayerId).collect();
     let now = now_ms.max(0.0) as u64;
     let outcome = with_state_mut(|state| {
-        let mut events = Vec::new();
-        let mut strongest = ContestStep::NotInContest;
-        let mut note = |step: ContestStep| {
-            let rank = |s: ContestStep| match s {
-                ContestStep::NotInContest => 0,
-                ContestStep::Unchanged => 1,
-                ContestStep::Updated => 2,
-                ContestStep::Settled => 3,
-            };
-            if rank(step) > rank(strongest) {
-                strongest = step;
-            }
-        };
         if matches!(
             state.waiting_for,
             engine::types::game_state::WaitingFor::PhysicalContest { .. }
         ) {
             REPLAY_LOG.with(|cell| cell.set(None));
         }
-        let config = engine::types::contest::ContestConfig::default();
-        // A repeated start is a no-op that does not observe `now`, so buffered clicks
-        // below are still applied at their own stamps, before the tick's time.
-        note(start_contest(state, config, now, &mut events));
-        // The host's live seat connectivity, reported every tick (idempotent in the
-        // engine): a seat that dropped pauses the contest clock and starts its
-        // reconnect grace; one that returned resumes it.
-        let contestants = match &state.waiting_for {
-            engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
-                Some(contest.players())
-            }
-            _ => None,
-        };
-        for player in contestants.into_iter().flatten() {
-            let connected = !away_players.contains(&player);
-            note(set_contest_connection(
-                state,
-                player,
-                connected,
-                now,
-                &mut events,
-            ));
-        }
-        for click in clicks {
-            let (_, step) = contest_click(
-                state,
-                click.contest,
-                PlayerId(click.player),
-                click.seq,
-                // The host cannot have stamped a click later than its own tick.
-                (click.at_ms.max(0.0) as u64).min(now),
-                &mut events,
-            );
-            note(step);
-        }
-        note(advance_contest(state, now, &mut events));
         AI_CONTESTANTS.with(|cell| {
-            let mut ai = cell.borrow_mut();
-            let mut ai_steps = Vec::new();
-            ai.click_due(
+            run_contest_drive(
                 state,
-                &ai_players,
                 now,
+                &ai_players,
+                &away_players,
+                clicks,
+                &mut cell.borrow_mut(),
                 &mut rand::rng(),
-                |step, step_events| ai_steps.push((step, step_events)),
-            );
-            for (step, step_events) in ai_steps {
-                events.extend(step_events);
-                note(step);
-            }
-        });
-        let log_entries = if events.is_empty() {
-            Vec::new()
-        } else {
-            engine::game::log::resolve_log_entries(&events, state, state)
-        };
-        let contest = match &state.waiting_for {
-            engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
-                Some(RunningContest {
-                    id: contest.id,
-                    players: contest.players(),
-                })
-            }
-            _ => None,
-        };
-        ContestDriveOutcome {
-            step: contest_step_label(strongest),
-            events,
-            log_entries,
-            contest,
-        }
+            )
+        })
     });
     match outcome {
         Ok(outcome) => {
@@ -2253,6 +2177,111 @@ pub fn drive_contest_js(
             to_js(&outcome)
         }
         Err(error) => error,
+    }
+}
+
+/// One host tick of a locally hosted contest, everything `drive_contest_js` does to the
+/// engine once its arguments are decoded (extracted so a native test drives the same
+/// ordering production runs).
+///
+/// Input is processed in the order it happened: buffered clicks first, each at its own
+/// stamp (the host cannot have stamped one later than its own tick); then the seats'
+/// connectivity, an edge the host can only observe at `now`; then the clock itself.
+/// Running the connectivity report or the clock first would judge a click against
+/// deadlines that expired only because the tick was delivered late, rejecting an
+/// on-time click and deciding the contest from the stale deadlines.
+fn run_contest_drive(
+    state: &mut GameState,
+    now: u64,
+    ai_players: &[PlayerId],
+    away_players: &[PlayerId],
+    clicks: Vec<ContestClickInput>,
+    ai: &mut phase_ai::contest::AiContestants,
+    rng: &mut impl rand::Rng,
+) -> ContestDriveOutcome {
+    use engine::game::contest::{
+        advance_contest, contest_click, set_contest_connection, start_contest, ContestStep,
+    };
+    let mut events = Vec::new();
+    let mut strongest = ContestStep::NotInContest;
+    let mut note = |step: ContestStep| {
+        let rank = |s: ContestStep| match s {
+            ContestStep::NotInContest => 0,
+            ContestStep::Unchanged => 1,
+            ContestStep::Updated => 2,
+            ContestStep::Settled => 3,
+        };
+        if rank(step) > rank(strongest) {
+            strongest = step;
+        }
+    };
+    let config = engine::types::contest::ContestConfig::default();
+    // A repeated start is a no-op that does not observe `now`, so buffered clicks
+    // below are still applied at their own stamps, before the tick's time.
+    note(start_contest(state, config, now, &mut events));
+    // Delivery order is not chronological order (the decoder sorts, but a caller may
+    // not): earlier input must be applied before later input.
+    let mut clicks = clicks;
+    clicks.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms));
+    for click in clicks {
+        let (_, step) = contest_click(
+            state,
+            click.contest,
+            PlayerId(click.player),
+            click.seq,
+            // The host cannot have stamped a click later than its own tick.
+            (click.at_ms.max(0.0) as u64).min(now),
+            &mut events,
+        );
+        note(step);
+    }
+    // The host's live seat connectivity, reported every tick (idempotent in the
+    // engine): a seat that dropped pauses the contest clock and starts its
+    // reconnect grace; one that returned resumes it.
+    let contestants = match &state.waiting_for {
+        engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
+            Some(contest.players())
+        }
+        _ => None,
+    };
+    for player in contestants.into_iter().flatten() {
+        let connected = !away_players.contains(&player);
+        note(set_contest_connection(
+            state,
+            player,
+            connected,
+            now,
+            &mut events,
+        ));
+    }
+    note(advance_contest(state, now, &mut events));
+    let mut ai_steps = Vec::new();
+    ai.click_due(state, ai_players, now, rng, |step, step_events| {
+        ai_steps.push((step, step_events))
+    });
+    for (step, step_events) in ai_steps {
+        events.extend(step_events);
+        note(step);
+    }
+    let log_entries = if events.is_empty() {
+        Vec::new()
+    } else {
+        engine::game::log::resolve_log_entries(&events, state, state)
+    };
+    let contest = match &state.waiting_for {
+        engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
+            Some(RunningContest {
+                id: contest.id,
+                players: contest.players(),
+            })
+        }
+        _ => None,
+    };
+    ContestDriveOutcome {
+        step: contest_step_label(strongest),
+        events,
+        log_entries,
+        contest,
     }
 }
 
@@ -7836,5 +7865,128 @@ mod settlement_election_host_resume_tests {
             resumed, expected,
             "the resumed host locks and places the same activation"
         );
+    }
+}
+
+/// The local contest host's per-tick ordering, driven through the same
+/// `run_contest_drive` that `drive_contest_js` runs. `#[cfg(test)]`, not
+/// `wasm32`-gated: the JS marshalling around it cannot run natively, the engine
+/// ordering inside it can.
+#[cfg(test)]
+mod contest_drive_tests {
+    use super::*;
+    use engine::types::contest::{
+        ContestConfig, ContestKind, ContestLossReason, ContestOutcome, ContestResult, ContestState,
+    };
+    use engine::types::game_state::WaitingFor;
+
+    const CONTEST: u64 = 7;
+    const CONTROLLER: PlayerId = PlayerId(0);
+    const OPPONENT: PlayerId = PlayerId(1);
+
+    fn parked_contest() -> GameState {
+        let mut state = GameState::new_two_player(1);
+        state.waiting_for = WaitingFor::PhysicalContest {
+            contest: Box::new(ContestState::new(
+                CONTEST,
+                ContestKind::Staring,
+                CONTROLLER,
+                OPPONENT,
+                ContestConfig::default(),
+            )),
+            source_id: ObjectId(1),
+        };
+        state
+    }
+
+    fn tick(
+        state: &mut GameState,
+        now: u64,
+        away: &[PlayerId],
+        clicks: Vec<ContestClickInput>,
+    ) -> ContestDriveOutcome {
+        run_contest_drive(
+            state,
+            now,
+            &[],
+            away,
+            clicks,
+            &mut phase_ai::contest::AiContestants::default(),
+            &mut ChaCha20Rng::seed_from_u64(1),
+        )
+    }
+
+    fn click(player: PlayerId, seq: u32, at_ms: f64) -> ContestClickInput {
+        ContestClickInput {
+            contest: CONTEST,
+            player: player.0,
+            seq,
+            at_ms,
+        }
+    }
+
+    fn resolved(outcome: &ContestDriveOutcome) -> Option<ContestResult> {
+        outcome.events.iter().find_map(|event| match event {
+            GameEvent::PhysicalContestResolved { result, .. } => Some(*result),
+            _ => None,
+        })
+    }
+
+    /// GO at 3000, both deadlines at 5000. The controller's click is stamped 4999, but
+    /// the host's tick is delivered at 5151 — past the opponent's recovery window and,
+    /// judged against the OLD deadlines, past the controller's too. Processed in the
+    /// order it happened, the click extends the controller's deadline and only the
+    /// opponent has lapsed; judging the tick first would tie the contest and reject the
+    /// click.
+    #[test]
+    fn a_click_stamped_before_a_delayed_tick_is_judged_before_that_tick() {
+        let mut state = parked_contest();
+        tick(&mut state, 0, &[], vec![]);
+        tick(&mut state, 3_000, &[], vec![]);
+
+        let outcome = tick(&mut state, 5_151, &[], vec![click(CONTROLLER, 1, 4_999.0)]);
+
+        assert_eq!(outcome.step, "Settled");
+        assert_eq!(
+            resolved(&outcome),
+            Some(ContestResult::Outcome(ContestOutcome::Decided {
+                winner: CONTROLLER,
+                loser: OPPONENT,
+                reason: ContestLossReason::Inactivity,
+            })),
+            "the on-time click must win the contest, not be rejected into a tie"
+        );
+    }
+
+    /// Reach guard for the discriminator above: with no click the same delayed tick
+    /// IS a tie, so the click is what changed the result.
+    #[test]
+    fn the_same_delayed_tick_without_the_click_is_a_tie() {
+        let mut state = parked_contest();
+        tick(&mut state, 0, &[], vec![]);
+        tick(&mut state, 3_000, &[], vec![]);
+
+        let outcome = tick(&mut state, 5_151, &[], vec![]);
+
+        assert_eq!(
+            resolved(&outcome),
+            Some(ContestResult::Outcome(ContestOutcome::Tie))
+        );
+    }
+
+    /// A real disconnect edge is still observed at the tick and pauses the contest.
+    #[test]
+    fn a_seat_reported_away_pauses_the_contest() {
+        let mut state = parked_contest();
+        tick(&mut state, 0, &[], vec![]);
+        tick(&mut state, 3_000, &[], vec![]);
+
+        let outcome = tick(&mut state, 3_500, &[OPPONENT], vec![]);
+
+        assert_eq!(outcome.step, "Updated");
+        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+            panic!("the contest is still running while a seat is away");
+        };
+        assert!(contest.paused_since_ms.is_some());
     }
 }

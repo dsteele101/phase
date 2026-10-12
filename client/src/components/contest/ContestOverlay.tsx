@@ -382,8 +382,23 @@ function useLocalContestHost(active: boolean) {
         const clicks = useContestStore.getState().drainClicks();
         // The seats the engine clicks for are the established AI seat bindings
         // (empty in human hotseat); a P2P host replaces them with its pregame seats.
-        const result = await drive(performance.now(), aiSeatIds, clicks);
-        if (stopped || (result.step !== "Updated" && result.step !== "Settled")) return;
+        let result;
+        try {
+          result = await drive(performance.now(), aiSeatIds, clicks);
+        } catch (error) {
+          // The engine may never have seen these clicks: keep them for the next tick,
+          // where the contest's sequence check rejects any it did accept.
+          useContestStore.getState().restoreClicks(clicks);
+          throw error;
+        }
+        // An adapter that publishes its own transitions has already committed this one.
+        if (
+          stopped ||
+          result.published === true ||
+          (result.step !== "Updated" && result.step !== "Settled")
+        ) {
+          return;
+        }
         const snapshot = await adapter.getSnapshot();
         const current = useGameStore.getState();
         if (stopped || current.adapter !== adapter || current.gameSessionGeneration !== generation) {

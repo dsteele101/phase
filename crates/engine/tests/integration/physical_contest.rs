@@ -693,7 +693,11 @@ fn consecutive_contests_get_distinct_identities() {
     let second_id = table.contest().id;
 
     assert_ne!(first_id, second_id);
-    assert!(second_id > first_id, "identities only ever increase");
+    assert_ne!(first_id, 0, "0 is never a valid identity");
+    assert!(
+        first_id < 1 << 53 && second_id < 1 << 53,
+        "an identity must survive a round trip through a JavaScript number"
+    );
 }
 
 /// The host settles outside `apply()`, so it must rebind the interaction slots that

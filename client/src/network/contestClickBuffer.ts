@@ -77,6 +77,28 @@ export class ContestClickBuffer {
     return clicks;
   }
 
+  /**
+   * Put back clicks a drive rejected before the engine accepted them, ahead of anything
+   * that arrived since. They keep their original stamps, and only clicks of the running
+   * contest return, within the same per-seat bound as any other, so a failing engine
+   * cannot grow the buffer. A restored click the engine did already accept is rejected
+   * there as a stale sequence, so a retry can never count it twice.
+   */
+  restore(clicks: readonly ContestClickInput[]): void {
+    const contest = this.contest;
+    if (!contest) return;
+    const restored: ContestClickInput[] = [];
+    const perSeat = new Map<PlayerId, number>();
+    for (const click of [...clicks, ...this.pending]) {
+      if (click.contest !== contest.id) continue;
+      const kept = perSeat.get(click.player) ?? 0;
+      if (kept >= MAX_PENDING_CLICKS_PER_SEAT) continue;
+      perSeat.set(click.player, kept + 1);
+      restored.push(click);
+    }
+    this.pending = restored;
+  }
+
   private takeToken(seat: PlayerId, nowMs: number): boolean {
     const bucket = this.buckets.get(seat) ?? { tokens: CLICK_BURST, lastMs: nowMs };
     const elapsed = Math.max(0, nowMs - bucket.lastMs);

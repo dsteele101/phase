@@ -343,6 +343,52 @@ describe("ContestOverlay local host tick", () => {
     expect(commitEngineSnapshot).not.toHaveBeenCalled();
   });
 
+  it("keeps a buffered click when the engine rejects the drive, and hands it over once", async () => {
+    const click = { contest: 1, player: 0, seq: 1, at_ms: 1_020 };
+    const driveContest = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("engine unavailable"))
+      .mockResolvedValue({ step: "Unchanged", events: [], log_entries: [], contest: running });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    showContest(contestState("Active"), { driveContest });
+    useContestStore.getState().bufferClick(click);
+    render(<ContestOverlay />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(210);
+    });
+
+    const batches = driveContest.mock.calls.map((call) => call[2]);
+    expect(batches[0]).toEqual([click]); // the rejected attempt took it
+    expect(batches[1]).toEqual([click]); // ...and the next tick still carried it
+    expect(batches.slice(2).flat()).toEqual([]); // ...exactly once more, never again
+    expect(useContestStore.getState().pendingClicks).toEqual([]);
+    consoleError.mockRestore();
+  });
+
+  it("does not commit a transition its adapter already published", async () => {
+    const getSnapshot = vi.fn();
+    const driveContest = vi.fn().mockResolvedValue({
+      step: "Settled",
+      events: [],
+      log_entries: [],
+      contest: null,
+      published: true,
+    });
+    const commitEngineSnapshot = vi.fn();
+    showContest(contestState("Active"), { driveContest, getSnapshot });
+    useGameStore.setState({ commitEngineSnapshot });
+    render(<ContestOverlay />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+
+    expect(driveContest).toHaveBeenCalled();
+    expect(getSnapshot).not.toHaveBeenCalled();
+    expect(commitEngineSnapshot).not.toHaveBeenCalled();
+  });
+
   it("survives a rejected drive call and keeps ticking", async () => {
     const driveContest = vi
       .fn()

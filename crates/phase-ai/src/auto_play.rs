@@ -46,6 +46,18 @@ impl ActionLimit {
     }
 }
 
+/// Who drives a game parked on `WaitingFor::PhysicalContest`, where no seat acts.
+///
+/// A live host (phase-server, the WASM engine) owns a real clock and real input, so the
+/// batch stops there and the host's own driver settles the contest. A headless host
+/// (self-play, benchmarks, gates) has neither, so the batch settles an all-AI contest
+/// itself on a deterministic virtual clock and plays on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContestHosting {
+    External,
+    Headless,
+}
+
 /// Result of a single AI action: the action taken and the resulting events.
 pub struct AiActionResult {
     pub action: GameAction,
@@ -183,6 +195,7 @@ pub fn run_ai_actions(
         rng,
         session,
         ActionLimit::SafetyCap,
+        ContestHosting::External,
     )
 }
 
@@ -219,6 +232,52 @@ pub fn run_ai_actions_bounded(
         ActionLimit::CallerBudget {
             requested: max_actions,
         },
+        ContestHosting::External,
+    )
+}
+
+/// [`run_ai_actions`] for a headless host: an Eye to Eye / Mouth to Mouth contest
+/// between two AI seats is settled in-batch on a deterministic virtual clock
+/// (`contest::settle_headless_contest`) instead of stopping the batch at a wait no seat
+/// acts on. A contest with a human contestant still hands off (`NoEligibleAiActor`).
+pub fn run_ai_actions_headless(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+) -> AiActionsRun {
+    run_ai_actions_with_limit(
+        state,
+        ai_players,
+        ai_configs,
+        rng,
+        session,
+        ActionLimit::SafetyCap,
+        ContestHosting::Headless,
+    )
+}
+
+/// [`run_ai_actions_bounded`] for a headless host; see [`run_ai_actions_headless`].
+/// Settling a contest spends one unit of the batch budget.
+pub fn run_ai_actions_bounded_headless(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    max_actions: usize,
+) -> AiActionsRun {
+    run_ai_actions_with_limit(
+        state,
+        ai_players,
+        ai_configs,
+        rng,
+        session,
+        ActionLimit::CallerBudget {
+            requested: max_actions,
+        },
+        ContestHosting::Headless,
     )
 }
 
@@ -229,6 +288,7 @@ fn run_ai_actions_with_limit(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
     action_limit: ActionLimit,
+    contest_hosting: ContestHosting,
 ) -> AiActionsRun {
     let mut results = Vec::new();
     let limit = action_limit.effective();
@@ -248,6 +308,13 @@ fn run_ai_actions_with_limit(
         let decision = eligible_ai_decision(state, ai_players);
 
         let Some((semantic_owner, actor)) = decision else {
+            // A contest between AI seats has no actor, but a headless host has no clock
+            // or input to settle it with: play it out here and carry on.
+            if contest_hosting == ContestHosting::Headless
+                && crate::contest::settle_headless_contest(state, ai_players, rng)
+            {
+                continue;
+            }
             return AiActionsRun {
                 results,
                 stop: AiActionsStop::NoEligibleAiActor,
@@ -455,7 +522,7 @@ pub fn run_driver_loop(
     loop {
         let remaining = action_cap - total;
         let mut results =
-            run_ai_actions_bounded(state, ai_players, ai_configs, rng, session, remaining);
+            run_ai_actions_bounded_headless(state, ai_players, ai_configs, rng, session, remaining);
         on_batch(&mut results, &*state, total);
 
         let step = driver_step(results);

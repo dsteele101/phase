@@ -3,6 +3,36 @@ use crate::types::contest::{ContestConfig, ContestState};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
+/// Engine-authored identity of the contest about to start.
+///
+/// Every host input (click, progress frame, AI schedule) is addressed to it, so a
+/// frame delayed from an earlier contest is never counted in a later one. Two inputs
+/// make it unique: the state revision at resolution (every contest resolves inside a
+/// distinct action, and each action advances the revision) and the interaction
+/// session, which an approved takeback rotates when it restores an earlier state.
+/// The revision alone is rewindable — replaying the same actions after a restore would
+/// reach the same revision — so without the session a frame stamped for the
+/// discarded branch's contest could match the replayed one.
+///
+/// Folded into 53 bits so every host can carry it as a JavaScript number, and never
+/// `0`, which is not a valid identity.
+fn contest_identity(state: &GameState) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let session = state
+        .interaction_session_id
+        .as_ref()
+        .map_or("", |session| session.0.as_str());
+    let revision = state.state_revision.saturating_add(1);
+    let hash = session
+        .bytes()
+        .chain(revision.to_le_bytes())
+        .fold(FNV_OFFSET, |acc, byte| {
+            (acc ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+        });
+    (hash & ((1 << 53) - 1)).max(1)
+}
+
 /// Eye to Eye / Mouth to Mouth: "You and [player] have a [staring | breath-holding]
 /// contest."
 ///
@@ -35,13 +65,9 @@ pub fn resolve(
 
     // `Pending` until the host supplies a clock reading (`start_contest`); the
     // engine itself never reads time.
-    // Identity: the state revision at resolution. Every contest resolves inside a
-    // distinct action, and each action advances the revision, so two contests of one
-    // game never share an id; the host stamps frames with it so a frame delayed from
-    // an earlier contest is never counted in a later one. Offset by one so `0` is
-    // never a valid identity.
+    // Identity: see `contest_identity`.
     let contest = ContestState::new(
-        state.state_revision.saturating_add(1),
+        contest_identity(state),
         *kind,
         controller,
         opponent,
