@@ -95,6 +95,7 @@ use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
+use super::oracle_nom::target::ControllerSubject;
 use super::oracle_quantity::{
     parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause_with_context,
@@ -4530,8 +4531,8 @@ fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) ->
         })
         .is_some()
             || nom_primitives::scan_at_word_boundaries(condition_text, |input| {
-                verify(nom_filter::parse_zone_controller, |controller| {
-                    *controller == ControllerRef::You
+                verify(nom_target::parse_controller_phrase, |phrase| {
+                    phrase.subject == ControllerSubject::Direct(ControllerRef::You)
                 })
                 .parse(input)
             })
@@ -8366,6 +8367,21 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
     })
 }
 
+/// CR 122.1: "<article> <counter type> counter on " — the counter type must
+/// consume exactly the phrase before " counter on " (one counter, a single
+/// named/keyword/P-T type), so a multi-word or prose phrase can't be read as
+/// its first token. Shared head of the put-one-counter-per-iteration forms.
+fn parse_article_counter_on(input: &str) -> OracleResult<'_, CounterType> {
+    preceded(
+        nom_primitives::parse_article,
+        terminated(
+            nom_primitives::parse_counter_type_typed,
+            tag(" counter on "),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 608.2c + CR 105.1 / CR 122.1: Parse the for-each-category put-counter
 /// clause — "for each color, put a +1/+1 counter on a Dragon you control of
 /// that color" (Call the Spirit Dragons). Composes the category axis and the
@@ -8397,9 +8413,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
     .parse(rest)
     .ok()?;
     let (rest, _) = tag::<_, _, E>(", put ").parse(rest).ok()?;
-    let (rest, _) = nom_primitives::parse_article.parse(rest).ok()?;
-    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
-    let (rest, _) = tag::<_, _, E>(" counter on ").parse(rest).ok()?;
+    let (rest, counter_type) = parse_article_counter_on(rest).ok()?;
     let (target, rest) = parse_type_phrase_folding(rest);
     if matches!(target, TargetFilter::Any) {
         return None;
@@ -18653,25 +18667,20 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return Some(parsed_clause(effect));
     }
 
-    // "put a [counter type] counter on [target] for each X" → PutCounter with dynamic count.
+    // CR 608.2c + CR 122.1: "put a <counter type> counter on <target> for each <X>"
+    // → PutCounter with the for-each count. The head must BE the put instruction
+    // and the counter type must end exactly at " counter on ". Verb-less,
+    // subject-led, or prose-led text ("It enters with an additional loyalty
+    // counter on it for each …" — a CR 614.1c enters-with replacement, not a put)
+    // declines here and falls to the same outcome it has without the for-each tail.
     // Not a NumericImperativeAst — counter placement has its own structure.
-    if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("counter on").parse(base_tp.lower)
+    if let Ok((after_counter_on_lower, counter_type)) = preceded(
+        tag::<_, _, OracleError<'_>>("put "),
+        parse_article_counter_on,
+    )
+    .parse(base_tp.lower)
     {
-        // before = "put a +1/+1 " — strip "put a[n] " prefix then parse counter type.
-        let ct_start = alt((
-            value((), tag::<_, _, OracleError<'_>>("put a ")),
-            value((), tag("put an ")),
-            value((), tag("put ")),
-        ))
-        .parse(before)
-        .map(|(rest, _)| rest)
-        .unwrap_or(before)
-        .trim();
-        let (_, counter_type) = nom_primitives::parse_counter_type_typed
-            .parse(ct_start)
-            .ok()?;
-        let counter_on_end = before.len() + "counter on ".len();
-        let after_counter_on = base_tp.original[counter_on_end..].trim();
+        let after_counter_on = base_tp.original_remainder(after_counter_on_lower)?.trim();
         // Strip clause separators (", then") that leak into the counter target text.
         let after_counter_on_lower = after_counter_on.to_lowercase();
         let counter_target_text = if let Ok((_, before_sep)) =
@@ -33071,8 +33080,8 @@ fn is_choose_as_targeting(rest: &str) -> bool {
         // where "they" refers to the targeted player (CR 608.2d).
         // CR 109.4 + CR 102.2: the NEGATED controller form "a creature you
         // don't control" is equally a controller-scoped selection — only this
-        // exact phrase is admitted, because `parse_zone_controller`
-        // (`oracle_nom/filter.rs`) maps `"you don't control"` →
+        // exact phrase is admitted, because `nom_target::parse_controller_phrase`
+        // (`oracle_nom/target.rs`) maps `"you don't control"` →
         // `ControllerRef::Opponent` and nothing else. Broader negated forms
         // ("they don't control", "an opponent doesn't control") are NOT
         // consumed by `parse_target`, so admitting them here would route the

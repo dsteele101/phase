@@ -106,10 +106,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  114 — game_setup and state_update carry GameState whose waiting_for may be
+ *  116 — game_setup and state_update carry GameState whose waiting_for may be
  *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
- *       abilities may hold Effect::PhysicalContest; a v113 peer cannot parse
- *       either tag. Bumped in lockstep with full-game protocol 132.
+ *       abilities may hold Effect::PhysicalContest; a v115 peer cannot parse
+ *       either tag. Bumped in lockstep with full-game protocol 134.
+ *  115 — game_setup and state_update carry GameState whose NamedChoice source
+ *       binding may be PendingEntry (CR 614.12a pre-entry as-enters choices).
+ *       Bumped in lockstep with full-game protocol 133.
+ *  114 — GameObject.exile_from_stack_linked_source carries the stamping incarnation
+ *       (ObjectIncarnationRef) in game_setup and state_update; a v113 peer cannot decode
+ *       a set rider. Bumped with full-game protocol 132.
  *  113 — game_setup and state_update carry GameState whose ability player scopes
  *       may hold PlayerFilter AnyOf / TargetPlayer. Bumped in lockstep with
  *       full-game protocol 131.
@@ -657,7 +663,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 114 as const;
+export const WIRE_PROTOCOL_VERSION = 116 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

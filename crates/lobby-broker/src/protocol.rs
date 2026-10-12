@@ -60,13 +60,28 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 132 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
+/// 134 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
 ///      PhysicalContest` (serialized `ContestState` inside `GameState`),
 ///      `Effect::PhysicalContest`, `GameEvent::PhysicalContestStarted` /
 ///      `PhysicalContestResolved`, `ClientMessage::ContestClick` and
-///      `ServerMessage::ContestProgress`. A v131 peer cannot parse the new
+///      `ServerMessage::ContestProgress`. A v133 peer cannot parse the new
 ///      `WaitingFor`/`Effect`/`GameEvent` tags or either message. Full-game
-///      peers and P2P move in lockstep; no lobby carrier names it.
+///      peers and P2P move in lockstep; no lobby carrier names it (wire 116).
+///
+/// 133 — CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
+///      gains `enter_with_choices` (the answers riding the entry event),
+///      `PendingReplacement` gains `delivery_boundary` (the event the paused
+///      delivery's owner parked on), and `NamedChoiceSourceBinding` gains
+///      `PendingEntry` (`WaitingFor::NamedChoice.source.binding`). All are
+///      serialized inside `GameState`; a v132 peer cannot parse the new binding
+///      tag. Full-game peers and P2P move in lockstep (wire 115); no lobby
+///      carrier names it.
+///
+/// 132 — `GameObject::exile_from_stack_linked_source` carries the stamping
+///      incarnation (`ObjectIncarnationRef`, CR 400.7). A v131 peer cannot
+///      decode a set rider; a legacy bare id decodes as `LEGACY_INCARNATION`
+///      and is attributed to no live object. Full-game peers and P2P move in
+///      lockstep (wire 114); no lobby carrier names it.
 ///
 /// 131 — `PlayerFilter` gains `AnyOf { filters }`
 ///      (`{"type":"AnyOf","filters":[…]}`, the union of player sets) and
@@ -1020,7 +1035,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 132;
+pub const PROTOCOL_VERSION: u32 = 134;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2277,12 +2292,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 132);
+        assert_eq!(PROTOCOL_VERSION, 134);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 131);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 133);
     }
 
     #[test]
