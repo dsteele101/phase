@@ -3348,12 +3348,12 @@ mod tests {
 
     /// v135: `GameEvent::Attached` reaches Full `StateUpdate.events` (CR 701.3a
     /// + CR 603.2e). A v134 peer cannot parse the new tag; this newer history
-    /// also retains main activation stack-entry receipts.
-    /// v134: `GameEvent::AbilityActivated` gains
-    /// `stack_entry`, the stack object a stack-using activation created, carried
-    /// in `GameState`'s trigger events; an older peer drops it silently and
-    /// resolves an activation trigger's "copy that ability" differently, so it
-    /// must be refused before it receives v134 state.
+    ///   also retains main activation stack-entry receipts.
+    ///   v134: `GameEvent::AbilityActivated` gains
+    ///   `stack_entry`, the stack object a stack-using activation created, carried
+    ///   in `GameState`'s trigger events; an older peer drops it silently and
+    ///   resolves an activation trigger's "copy that ability" differently, so it
+    ///   must be refused before it receives v134 state.
     ///
     /// v133: CR 614.12a pre-entry as-enters choices —
     /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s
