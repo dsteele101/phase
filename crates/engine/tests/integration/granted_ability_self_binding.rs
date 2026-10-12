@@ -597,6 +597,7 @@ const CLASS_CORPUS: &[(&str, &str, &[&str], &[&str])] = &[
     ),
     (FISHING_POLE, "Fishing Pole", &["Artifact"], &["Equipment"]),
     (HANKYU, "Hankyu", &["Artifact"], &["Equipment"]),
+    (HEARTSEEKER, "Heartseeker", &["Artifact"], &["Equipment"]),
     (
         RAKDOS_RITEKNIFE,
         "Rakdos Riteknife",
@@ -692,7 +693,6 @@ const REFUSED_CORPUS: &[(&str, &str, &[&str], &[&str])] = &[
         &["Artifact"],
         &["Equipment"],
     ),
-    (HEARTSEEKER, "Heartseeker", &["Artifact"], &["Equipment"]),
     (
         MEANDERED_TOWERSHELL,
         "Meandered Towershell",

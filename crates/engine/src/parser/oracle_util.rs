@@ -4015,8 +4015,19 @@ mod tests {
         assert_eq!(
             normalized,
             format!(
-                "Equipped creature has \"{{T}}, Unattach ~: Attach {GRANTING_SELF_PLACEHOLDER} to target creature.\""
+                "Equipped creature has \"{{T}}, Unattach {GRANTING_SELF_PLACEHOLDER}: Attach {GRANTING_SELF_PLACEHOLDER} to target creature.\""
             )
+        );
+    }
+
+    #[test]
+    fn granter_lookbehind_rejects_a_verb_suffix() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Equipped creature has \"Reunattach Foo Bar: Draw a card.\"",
+                "Foo Bar",
+            ),
+            "Equipped creature has \"Reunattach ~: Draw a card.\""
         );
     }
 
