@@ -6,6 +6,7 @@ import type {
   ContestResult,
   ContestState,
   EngineAdapter,
+  EngineSnapshot,
   GameEvent,
 } from "../../../adapter/types.ts";
 import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
@@ -16,6 +17,7 @@ import { ContestOverlay } from "../ContestOverlay.tsx";
 
 function contestState(phase: ContestPhase, overrides: Partial<ContestState> = {}): ContestState {
   return {
+    id: 1,
     kind: "Staring",
     phase,
     config: {
@@ -65,7 +67,7 @@ describe("ContestOverlay", () => {
   });
 
   it("names the contest, explains the rule and shows both contestants", () => {
-    showContest(contestState("Preparing"), { submitContestClick: vi.fn() });
+    showContest(contestState("Preparing"), { submitContestClick: vi.fn(() => true) });
     render(<ContestOverlay />);
 
     expect(screen.getByRole("heading", { name: "Staring Contest" })).toBeInTheDocument();
@@ -76,13 +78,13 @@ describe("ContestOverlay", () => {
   });
 
   it("uses the breath-holding wording for Mouth to Mouth", () => {
-    showContest(contestState("Preparing", { kind: "BreathHolding" }), { submitContestClick: vi.fn() });
+    showContest(contestState("Preparing", { kind: "BreathHolding" }), { submitContestClick: vi.fn(() => true) });
     render(<ContestOverlay />);
     expect(screen.getByRole("heading", { name: "Breath-Holding Contest" })).toBeInTheDocument();
   });
 
   it("does not register clicks before GO and tells the player to wait", () => {
-    const submitContestClick = vi.fn();
+    const submitContestClick = vi.fn(() => true);
     showContest(contestState("Preparing"), { submitContestClick });
     render(<ContestOverlay />);
 
@@ -95,7 +97,7 @@ describe("ContestOverlay", () => {
   });
 
   it("submits each pointer press with a strictly increasing sequence number once Active", () => {
-    const submitContestClick = vi.fn();
+    const submitContestClick = vi.fn((_contest: number, _seq: number) => true);
     showContest(contestState("Active"), { submitContestClick });
     render(<ContestOverlay />);
 
@@ -104,23 +106,23 @@ describe("ContestOverlay", () => {
     fireEvent.pointerDown(button);
     fireEvent.pointerDown(button);
 
-    expect(submitContestClick.mock.calls.map(([seq]) => seq)).toEqual([1, 2, 3]);
+    expect(submitContestClick.mock.calls.map(([, seq]) => seq)).toEqual([1, 2, 3]);
     expect(screen.getByText("GO! Keep clicking!")).toBeInTheDocument();
   });
 
   it("continues numbering above what the engine has already confirmed", () => {
-    const submitContestClick = vi.fn();
+    const submitContestClick = vi.fn(() => true);
     const contest = contestState("Active");
     contest.contestants[0].last_seq = 41;
     showContest(contest, { submitContestClick });
     render(<ContestOverlay />);
 
     fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
-    expect(submitContestClick).toHaveBeenCalledWith(42);
+    expect(submitContestClick).toHaveBeenCalledWith(1, 42);
   });
 
   it("supports keyboard activation, counts a press once and ignores key auto-repeat", () => {
-    const submitContestClick = vi.fn();
+    const submitContestClick = vi.fn(() => true);
     showContest(contestState("Active"), { submitContestClick });
     render(<ContestOverlay />);
 
@@ -134,7 +136,7 @@ describe("ContestOverlay", () => {
   });
 
   it("counts an assistive-technology activation (click with no pointer or key event)", () => {
-    const submitContestClick = vi.fn();
+    const submitContestClick = vi.fn(() => true);
     showContest(contestState("Active"), { submitContestClick });
     render(<ContestOverlay />);
 
@@ -154,15 +156,15 @@ describe("ContestOverlay", () => {
     fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
 
     const [click] = useContestStore.getState().pendingClicks;
-    expect(click).toMatchObject({ player: 0, seq: 1 });
+    expect(click).toMatchObject({ contest: 1, player: 0, seq: 1 });
     expect(typeof click.at_ms).toBe("number");
   });
 
   it("shows live counters pushed between full states", () => {
-    showContest(contestState("Active"), { submitContestClick: vi.fn() });
+    showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
     render(<ContestOverlay />);
 
-    act(() => useContestStore.getState().setProgress([[0, 12], [1, 9]]));
+    act(() => useContestStore.getState().setProgress(1, [[0, 12], [1, 9]]));
 
     expect(screen.getByText("You: 12")).toBeInTheDocument();
     expect(screen.getByText("Alice: 9")).toBeInTheDocument();
@@ -174,7 +176,7 @@ describe("ContestOverlay", () => {
       { ...contest.contestants[0], player: 5 },
       { ...contest.contestants[1], player: 6 },
     ];
-    showContest(contest, { submitContestClick: vi.fn() });
+    showContest(contest, { submitContestClick: vi.fn(() => true) });
     render(<ContestOverlay />);
 
     expect(screen.getByRole("status")).toHaveTextContent("Contest paused while a player reconnects…");
@@ -197,5 +199,165 @@ describe("ContestOverlay", () => {
     act(() => useGameStore.setState({ events: [event] }));
 
     expect(screen.getByText(text)).toBeInTheDocument();
+  });
+});
+
+
+describe("ContestOverlay contest identity and seating", () => {
+  it("addresses each click to the running contest and restarts numbering for the next one", () => {
+    const submitContestClick = vi.fn((_contest: number, _seq: number) => true);
+    showContest(contestState("Active", { id: 7 }), { submitContestClick });
+    const view = render(<ContestOverlay />);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
+    expect(submitContestClick.mock.calls).toEqual([
+      [7, 1],
+      [7, 2],
+    ]);
+
+    // A later contest is a new identity: its sequence is its own, not 3.
+    act(() => showContest(contestState("Active", { id: 8 }), { submitContestClick }));
+    view.rerender(<ContestOverlay />);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
+    expect(submitContestClick).toHaveBeenLastCalledWith(8, 1);
+  });
+
+  it("ignores live counters that belong to a different contest", () => {
+    showContest(contestState("Active", { id: 2 }), { submitContestClick: vi.fn(() => true) });
+    render(<ContestOverlay />);
+
+    act(() => useContestStore.getState().setProgress(1, [[0, 40], [1, 30]]));
+    expect(screen.getByText("You: 0")).toBeInTheDocument();
+
+    act(() => useContestStore.getState().setProgress(2, [[0, 3], [1, 2]]));
+    expect(screen.getByText("You: 3")).toBeInTheDocument();
+  });
+
+  it("does not buffer a locally stamped click when the transport took it (native host)", () => {
+    const submitContestClick = vi.fn(() => true);
+    const driveContest = vi.fn();
+    showContest(contestState("Active"), { submitContestClick, driveContest });
+    render(<ContestOverlay />);
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
+
+    expect(submitContestClick).toHaveBeenCalledWith(1, 1);
+    expect(useContestStore.getState().pendingClicks).toHaveLength(0);
+  });
+
+  it("falls back to a stamped local click when the adapter declines the route (local host)", () => {
+    const submitContestClick = vi.fn(() => false);
+    const driveContest = vi.fn();
+    showContest(contestState("Active"), { submitContestClick, driveContest });
+    render(<ContestOverlay />);
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Keep clicking!" }));
+
+    expect(useContestStore.getState().pendingClicks).toMatchObject([{ contest: 1, player: 0, seq: 1 }]);
+  });
+
+  it("gives each human in hotseat their own control, and clicks as that seat", () => {
+    useGameStore.setState({ aiSeatIds: [] });
+    showContest(contestState("Active"), { driveContest: vi.fn() });
+    useGameStore.setState({ gameMode: "local" });
+    useMultiplayerStore.setState({ playerNames: new Map([[0, "Ann"], [1, "Bob"]]) });
+    render(<ContestOverlay />);
+
+    const buttons = screen.getAllByRole("button", { name: "Keep clicking!" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.pointerDown(buttons[0]);
+    fireEvent.pointerDown(buttons[1]);
+    fireEvent.pointerDown(buttons[1]);
+
+    expect(
+      useContestStore.getState().pendingClicks.map((c) => [c.player, c.seq]),
+    ).toEqual([
+      [0, 1],
+      [1, 1],
+      [1, 2],
+    ]);
+  });
+
+  it("gives a solo player against a configured AI seat one control", () => {
+    useGameStore.setState({ aiSeatIds: [1] });
+    showContest(contestState("Active"), { driveContest: vi.fn() });
+    render(<ContestOverlay />);
+
+    expect(screen.getAllByRole("button", { name: "Keep clicking!" })).toHaveLength(1);
+  });
+});
+
+describe("ContestOverlay local host tick", () => {
+  const running = { id: 1, players: [0, 1] as [number, number] };
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("drives the engine with the configured AI seats, not a guess from who is not me", async () => {
+    const driveContest = vi.fn().mockResolvedValue({
+      step: "Unchanged",
+      events: [],
+      log_entries: [],
+      contest: running,
+    });
+    showContest(contestState("Active"), { driveContest });
+    useGameStore.setState({ aiSeatIds: [1] });
+    render(<ContestOverlay />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+
+    expect(driveContest).toHaveBeenCalled();
+    expect(driveContest.mock.calls[0][1]).toEqual([1]);
+  });
+
+  it("does not commit a snapshot that resolves after the game was reset", async () => {
+    let finishSnapshot: (snapshot: unknown) => void = () => {};
+    const getSnapshot = vi.fn(
+      () => new Promise<EngineSnapshot>((resolve) => (finishSnapshot = resolve as (s: unknown) => void)),
+    );
+    const driveContest = vi.fn().mockResolvedValue({
+      step: "Settled",
+      events: [],
+      log_entries: [],
+      contest: null,
+    });
+    const commitEngineSnapshot = vi.fn();
+    showContest(contestState("Active"), { driveContest, getSnapshot });
+    useGameStore.setState({ commitEngineSnapshot, gameSessionGeneration: 1 });
+    render(<ContestOverlay />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(getSnapshot).toHaveBeenCalled();
+
+    // The session is reset while the snapshot read is still in flight.
+    useGameStore.setState({ gameSessionGeneration: 2 });
+    await act(async () => {
+      finishSnapshot({});
+      await Promise.resolve();
+    });
+
+    expect(commitEngineSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("survives a rejected drive call and keeps ticking", async () => {
+    const driveContest = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("engine unavailable"))
+      .mockResolvedValue({ step: "Unchanged", events: [], log_entries: [], contest: running });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    showContest(contestState("Active"), { driveContest });
+    render(<ContestOverlay />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(160);
+    });
+
+    expect(driveContest.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 });

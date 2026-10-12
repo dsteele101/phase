@@ -35,7 +35,18 @@ pub fn resolve(
 
     // `Pending` until the host supplies a clock reading (`start_contest`); the
     // engine itself never reads time.
-    let contest = ContestState::new(*kind, controller, opponent, ContestConfig::default());
+    // Identity: the state revision at resolution. Every contest resolves inside a
+    // distinct action, and each action advances the revision, so two contests of one
+    // game never share an id; the host stamps frames with it so a frame delayed from
+    // an earlier contest is never counted in a later one. Offset by one so `0` is
+    // never a valid identity.
+    let contest = ContestState::new(
+        state.state_revision.saturating_add(1),
+        *kind,
+        controller,
+        opponent,
+        ContestConfig::default(),
+    );
     events.push(GameEvent::PhysicalContestStarted {
         kind: *kind,
         participants: contest.players(),

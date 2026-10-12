@@ -680,8 +680,10 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "action"; senderPlayerId: number; action: GameAction }
   /** One click in the running Eye to Eye / Mouth to Mouth contest. No `senderPlayerId`
    *  and no timestamp: the host reads the seat from the authenticated connection and
-   *  stamps the instant on its own clock, so a guest can claim neither. */
-  | { type: "contest_click"; seq: number }
+   *  stamps the instant on its own clock, so a guest can claim neither. `contest` is
+   *  the engine-authored identity of the contest the click was made in, so a frame
+   *  delayed from an earlier contest is never counted in a later one. */
+  | { type: "contest_click"; contest: number; seq: number }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   /** Carries the request VERBATIM. No `senderPlayerId`: the host reads the

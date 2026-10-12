@@ -329,10 +329,11 @@ export class EngineWorkerClient {
   async driveContest(
     nowMs: number,
     aiPlayers: number[],
+    awayPlayers: number[],
     clicks: unknown[],
   ): Promise<ContestDriveResult> {
     return this.request<ContestDriveResult>(
-      { type: "driveContest", nowMs, aiPlayers, clicks },
+      { type: "driveContest", nowMs, aiPlayers, awayPlayers, clicks },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

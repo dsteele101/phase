@@ -155,7 +155,7 @@ export function deckSupplyForFormat(format: any): any;
  * the first drive call invalidates an in-progress replay recording (the same
  * treatment debug actions get).
  */
-export function drive_contest_js(now_ms: number, ai_players: Uint8Array, clicks: any): any;
+export function drive_contest_js(now_ms: number, ai_players: Uint8Array, away_players: Uint8Array, clicks: any): any;
 
 /**
  * Estimates a Commander deck's bracket without touching `GAME_STATE`.
@@ -745,7 +745,7 @@ export interface InitOutput {
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly deckSupplyForFormat: (a: any) => any;
-    readonly drive_contest_js: (a: number, b: number, c: number, d: any) => any;
+    readonly drive_contest_js: (a: number, b: number, c: number, d: number, e: number, f: any) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];

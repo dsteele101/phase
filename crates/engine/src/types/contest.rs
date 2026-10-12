@@ -192,6 +192,9 @@ pub enum ClickRejection {
     StaleSequence,
     /// The submitter's recovery window already closed.
     Lapsed,
+    /// The click was addressed to a different contest than the one running
+    /// (a frame delayed from an earlier contest). Ignored without advancing time.
+    WrongContest,
 }
 
 /// Result of submitting a click.
@@ -205,6 +208,13 @@ pub enum ClickDisposition {
 /// is part of `GameState` and survives reconnects/persistence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContestState {
+    /// Engine-authored identity, unique within a game (derived from the state
+    /// revision at resolution, so strictly increasing) and immutable for the
+    /// contest's lifetime. Every host input (click, progress
+    /// frame, AI schedule) is bound to it so a frame delayed from an earlier contest
+    /// can never be mistaken for activity in a later one.
+    #[serde(default)]
+    pub id: u64,
     pub kind: ContestKind,
     pub phase: ContestPhase,
     pub config: ContestConfig,

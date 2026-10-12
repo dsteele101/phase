@@ -490,12 +490,13 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     nowMs: number,
     aiPlayers: PlayerId[],
     clicks: ContestClickInput[],
+    awayPlayers: PlayerId[] = [],
   ): Promise<ContestDriveResult> {
     this.assertInitialized("driveContest");
     try {
       const result = this.engine
-        ? await this.engine.driveContest(nowMs, aiPlayers, clicks)
-        : await this.fallback!.driveContest(nowMs, aiPlayers, clicks);
+        ? await this.engine.driveContest(nowMs, aiPlayers, awayPlayers, clicks)
+        : await this.fallback!.driveContest(nowMs, aiPlayers, awayPlayers, clicks);
       this.invalidateAiDecisionDiagnostics();
       return result;
     } catch (err) {
@@ -1449,6 +1450,7 @@ interface MainThreadFallback {
   driveContest(
     nowMs: number,
     aiPlayers: PlayerId[],
+    awayPlayers: PlayerId[],
     clicks: ContestClickInput[],
   ): Promise<ContestDriveResult>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
@@ -1576,9 +1578,19 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
   return {
     ensureCardDatabase: () => cardData.ensureCardDatabase(),
 
-    driveContest: (nowMs: number, aiPlayers: PlayerId[], clicks: ContestClickInput[]) =>
+    driveContest: (
+      nowMs: number,
+      aiPlayers: PlayerId[],
+      awayPlayers: PlayerId[],
+      clicks: ContestClickInput[],
+    ) =>
       enqueue(() => {
-        const outcome = wasm.drive_contest_js(nowMs, Uint8Array.from(aiPlayers), clicks);
+        const outcome = wasm.drive_contest_js(
+          nowMs,
+          Uint8Array.from(aiPlayers),
+          Uint8Array.from(awayPlayers),
+          clicks,
+        );
         if (typeof outcome === "string") throw new Error(outcome);
         return outcome as ContestDriveResult;
       }),

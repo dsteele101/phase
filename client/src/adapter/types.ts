@@ -2516,8 +2516,12 @@ export type MulliganDecisionPhase =
   | { type: "Declare" }
   | { type: "BottomCards"; count: number; then: PendingMulliganAction };
 
-/** One click collected by a local contest host, stamped with the host's own clock. */
+/**
+ * One click collected by a local contest host, stamped with the host's own clock
+ * and addressed to the engine-authored identity of the contest it was made in.
+ */
 export interface ContestClickInput {
+  contest: number;
   player: PlayerId;
   seq: number;
   at_ms: number;
@@ -2528,6 +2532,11 @@ export interface ContestDriveResult {
   step: "NotInContest" | "Unchanged" | "Updated" | "Settled";
   events: GameEvent[];
   log_entries: GameLogEntry[];
+  /**
+   * The contest still running after this tick (its identity and seats), or null when
+   * none is. A host reads it to decide which inputs it may accept and buffer.
+   */
+  contest: { id: number; players: [PlayerId, PlayerId] } | null;
 }
 
 /** Which printed contest is being adapted. Presentation only. */
@@ -2581,6 +2590,8 @@ export interface ContestConfig {
  * moment it received the snapshot — it never compares against its own clock.
  */
 export interface ContestState {
+  /** Engine-authored identity, unique within a game; every input is bound to it. */
+  id: number;
   kind: ContestKind;
   phase: ContestPhase;
   config: ContestConfig;
@@ -5192,20 +5203,26 @@ export interface EngineAdapter {
   /**
    * Submit one click in the running Eye to Eye / Mouth to Mouth contest for the
    * local seat. Fire-and-forget: the host stamps the instant and decides the
-   * winner, so a click carries only a per-contest sequence number (duplicate and
-   * reorder protection). Transports that cannot host a contest omit it.
+   * winner, so a click carries only the contest's identity and a per-contest
+   * sequence number (duplicate and reorder protection). Returns whether the
+   * transport took the click; `false` means this client hosts the contest itself and
+   * must stamp the click for `driveContest`. Transports that cannot host a contest
+   * omit it.
    */
-  submitContestClick?(seq: number): void;
+  submitContestClick?(contest: number, seq: number): boolean;
   /**
    * Local engines only (single-player WASM, P2P host): there is no server to host
    * the running contest, so the client drives it. `nowMs` and each click's `at_ms`
    * are the client's own monotonic clock; `aiPlayers` are the seats the engine
-   * should click for. Server transports omit this — the server drives.
+   * should click for, and `awayPlayers` the seats currently disconnected (the
+   * engine pauses the contest for them and forfeits them past its reconnect grace).
+   * Server transports omit this — the server drives.
    */
   driveContest?(
     nowMs: number,
     aiPlayers: PlayerId[],
     clicks: ContestClickInput[],
+    awayPlayers?: PlayerId[],
   ): Promise<ContestDriveResult>;
   /** Submit an opaque response from the engine's current interaction projection. */
   submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;

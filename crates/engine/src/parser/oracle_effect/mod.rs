@@ -23817,15 +23817,19 @@ fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<Pars
     let lower = text.to_lowercase();
     let (_, (second, kind)) = parse_physical_contest_clause(lower.trim()).ok()?;
     let application = subject::parse_subject_application(second.trim(), ctx)?;
-    let names_one_player = application.affected.denotes_player_target()
-        || matches!(
-            application.affected,
-            TargetFilter::ParentTargetController
-                | TargetFilter::ParentTargetOwner
-                | TargetFilter::ScopedPlayer
-                | TargetFilter::DefendingPlayer
-        );
-    if !names_one_player || application.multi_target.is_some() {
+    // CR 115.1 + CR 608.2c: the contestant must be a player the ability has already
+    // bound — a relation to an announced object target, an anaphor to an earlier
+    // slot, or a player slot this clause declares itself. An unbound population
+    // ("an opponent", "your opponents") resolves to no particular player and would
+    // fall back to the controller, so it is declined rather than guessed.
+    let names_one_bound_player = match &application.affected {
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::DefendingPlayer => true,
+        other => other.denotes_player_target() && application.target.is_some(),
+    };
+    if !names_one_bound_player || application.multi_target.is_some() {
         return None;
     }
     let contest = parsed_clause(Effect::PhysicalContest {

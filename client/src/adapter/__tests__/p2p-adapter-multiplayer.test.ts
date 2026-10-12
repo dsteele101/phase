@@ -162,6 +162,12 @@ const mocks = vi.hoisted(() => {
       result: { events: [], log_entries: [] },
     })),
     exportPersistenceState: vi.fn(async () => JSON.stringify({ players: [], objects: {} })),
+    driveContest: vi.fn(async (..._args: unknown[]) => ({
+      step: "Unchanged",
+      events: [],
+      log_entries: [],
+      contest: null as { id: number; players: [number, number] } | null,
+    })),
     resumeMultiplayerHostState: vi.fn<() => Promise<RestoredGameStateResult>>(async () => ({
       snapshot: {
         state: { players: [], objects: {}, waiting_for: { type: "Priority", data: { player: 0 } } } as unknown as GameState,
@@ -252,6 +258,7 @@ const nativeWebSocketMocks = vi.hoisted(() => {
     onEvent: vi.fn(),
     sendAbandonGame: vi.fn(),
     sendSeatMutation: vi.fn(),
+    submitContestClick: vi.fn(),
     submitAction: vi.fn(async (playerId: number | null, action: unknown, actor: number) => {
       // Match WebSocketAdapter's pre-send guard while keeping an attached
       // NativeP2PBridge client addressable after its socket closes.
@@ -296,6 +303,8 @@ vi.mock("../ws-adapter", async (original) => {
       },
       submitAction: (action: unknown, actor: number) =>
         nativeWebSocketMocks.submitAction(playerId, action, actor),
+      submitContestClick: (contest: number, seq: number) =>
+        nativeWebSocketMocks.submitContestClick(playerId, contest, seq),
       onEvent: nativeWebSocketMocks.onEvent,
       sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
       sendSeatMutation: nativeWebSocketMocks.sendSeatMutation,
@@ -422,6 +431,7 @@ vi.mock("../wasm-adapter", () => {
     getAiActionProposal: mocks.getAiActionProposal,
     submitAiActionProposal: mocks.submitAiActionProposal,
     exportPersistenceState: mocks.exportPersistenceState,
+    driveContest: mocks.driveContest,
     resumeMultiplayerHostState: mocks.resumeMultiplayerHostState,
     applySeatMutation: mocks.applySeatMutation,
     projectSeatView: mocks.projectSeatView,
@@ -7849,6 +7859,175 @@ describe("NativeP2PBridge — dispose during a native client's handshake", () =>
 
       expect(settled).toBe(true);
       expect(unhandled).toEqual([]);
+    });
+  });
+});
+
+
+describe("P2PHostAdapter — contest input", () => {
+  const RUNNING = { id: 9, players: [0, 1] as [number, number] };
+  const driveResult = (contest: typeof RUNNING | null) => ({
+    step: "Unchanged",
+    events: [],
+    log_entries: [],
+    contest,
+  });
+  const lastBatch = () => {
+    const calls = mocks.driveContest.mock.calls;
+    return calls[calls.length - 1] as unknown as [
+      number,
+      number[],
+      Array<{ contest: number; player: number; seq: number }>,
+      number[],
+    ];
+  };
+
+  async function hostWithGuest() {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    return { adapter, guest };
+  }
+
+  beforeEach(() => {
+    mocks.driveContest.mockReset();
+    mocks.driveContest.mockResolvedValue(driveResult(null));
+  });
+
+  it("buffers no guest click outside a contest, however many arrive", async () => {
+    const { adapter, guest } = await hostWithGuest();
+    for (let seq = 1; seq <= 500; seq++) {
+      await guest.simulateData({ type: "contest_click", contest: 9, seq });
+    }
+
+    // Nothing was held back: outside a contest the queue stays empty, so ordinary play
+    // cannot grow host memory (this is the invariant — a later contest discarding
+    // stale input would hide a leak, not prevent it).
+    const held = (adapter as unknown as { guestContestClicks: { drain(): unknown[] } })
+      .guestContestClicks;
+    expect(held.drain()).toEqual([]);
+
+    // The contest begins; the very first tick reports it.
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_000, [], []);
+    await adapter.driveContest(1_050, [], []);
+
+    expect(lastBatch()[2]).toEqual([]);
+    adapter.dispose();
+  });
+
+  it("accepts only the running contest's seats, identity and well-formed sequences, mixed with valid clicks", async () => {
+    const { adapter, guest } = await hostWithGuest();
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_000, [], []);
+
+    const malformed: unknown[] = [-1, 1.5, 2 ** 32, Number.NaN, "7", null];
+    for (const [index, seq] of malformed.entries()) {
+      await guest.simulateData({ type: "contest_click", contest: 9, seq } as never);
+      await guest.simulateData({ type: "contest_click", contest: 9, seq: index + 1 });
+    }
+    await guest.simulateData({ type: "contest_click", contest: 8, seq: 1 }); // earlier contest
+
+    await adapter.driveContest(1_050, [], []);
+
+    const batch = lastBatch()[2];
+    expect(batch.map((click) => [click.contest, click.player, click.seq])).toEqual(
+      [1, 2, 3, 4, 5, 6].map((seq) => [9, 1, seq]),
+    );
+    adapter.dispose();
+  });
+
+  it("bounds a flood inside a contest", async () => {
+    const { adapter, guest } = await hostWithGuest();
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_000, [], []);
+
+    for (let seq = 1; seq <= 5_000; seq++) {
+      await guest.simulateData({ type: "contest_click", contest: 9, seq });
+    }
+    await adapter.driveContest(1_050, [], []);
+
+    expect(lastBatch()[2].length).toBeLessThanOrEqual(64);
+    expect(lastBatch()[2].length).toBeGreaterThan(0);
+    adapter.dispose();
+  });
+
+  it("keeps ticking the contest while a seat is away and tells the engine who is away", async () => {
+    const { adapter, guest } = await hostWithGuest();
+    mocks.driveContest.mockResolvedValue(driveResult(RUNNING));
+    await adapter.driveContest(1_000, [], []);
+    expect(lastBatch()[3]).toEqual([]);
+
+    guest.simulateClose();
+    await flushPromises(10);
+    expect((adapter as unknown as { gameRunState: string }).gameRunState).toBe("paused-disconnect");
+
+    mocks.driveContest.mockClear();
+    await adapter.driveContest(2_000, [], []);
+
+    expect(mocks.driveContest).toHaveBeenCalledTimes(1);
+    expect(lastBatch()[3]).toEqual([1]);
+    adapter.dispose();
+  });
+
+  it("does not claim a click when this engine hosts the contest itself", async () => {
+    const { adapter } = await hostWithGuest();
+    expect(adapter.submitContestClick(9, 1)).toBe(false);
+    adapter.dispose();
+  });
+
+  describe("native host", () => {
+    afterEach(() => {
+      nativeWebSocketMocks.submitContestClick.mockClear();
+    });
+
+    async function nativeHostWithGuest() {
+      const { adapter, emitConnection } = makeNativeHost(2);
+      nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+      nativeWebSocketMocks.initializePregame
+        .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+        .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+      await adapter.initialize();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+      });
+      await flushPromises(20);
+      return { adapter, guest };
+    }
+
+    it("relays a guest's click over that guest's own authenticated seat socket", async () => {
+      const { adapter, guest } = await nativeHostWithGuest();
+
+      await guest.simulateData({ type: "contest_click", contest: 9, seq: 3 });
+
+      expect(nativeWebSocketMocks.submitContestClick).toHaveBeenCalledWith(1, 9, 3);
+      adapter.dispose();
+    });
+
+    it("relays the host seat's own click over the host's socket and takes ownership of it", async () => {
+      const { adapter } = await nativeHostWithGuest();
+
+      expect(adapter.submitContestClick(9, 4)).toBe(true);
+
+      expect(nativeWebSocketMocks.submitContestClick).toHaveBeenCalledWith(0, 9, 4);
+      adapter.dispose();
+    });
+
+    it("never forwards a malformed guest frame to the server", async () => {
+      const { adapter, guest } = await nativeHostWithGuest();
+
+      for (const seq of [-1, 1.5, 2 ** 32, Number.NaN, "7", null]) {
+        await guest.simulateData({ type: "contest_click", contest: 9, seq } as never);
+      }
+      await guest.simulateData({ type: "contest_click", contest: 1.5, seq: 1 } as never);
+
+      expect(nativeWebSocketMocks.submitContestClick).not.toHaveBeenCalled();
+      adapter.dispose();
     });
   });
 });

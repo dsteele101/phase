@@ -47,6 +47,7 @@ import {
   type NativeSessionAttachment,
 } from "./ws-adapter";
 import { dialPeer, RECONNECT_DIAL_TIMEOUT_MS } from "../network/connection";
+import { ContestClickBuffer, isContestSequence } from "../network/contestClickBuffer";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
@@ -554,6 +555,11 @@ class NativeP2PBridge {
     return attachment;
   }
 
+  /** One contest click for `playerId`, sent on that seat's own authenticated socket. */
+  submitContestClick(playerId: PlayerId, contest: number, seq: number): void {
+    this.clients.get(playerId)?.submitContestClick(contest, seq);
+  }
+
   private clientFor(playerId: PlayerId): WebSocketAdapter {
     const client = this.clients.get(playerId);
     if (!client) {
@@ -924,8 +930,9 @@ export class P2PHostAdapter implements EngineAdapter {
   private readonly engineClaim = Symbol("p2p-host-engine-claim");
 
   private guestSessions = new Map<PlayerId, PeerSession>();
-  /** Guests' contest clicks awaiting the next `driveContest` tick. */
-  private pendingGuestContestClicks: ContestClickInput[] = [];
+  /** Guests' contest clicks awaiting the next `driveContest` tick, gated to the
+   *  running contest's seats and bounded per seat. */
+  private readonly guestContestClicks = new ContestClickBuffer();
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -2450,6 +2457,20 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   /**
+   * The host seat's own contest click. A native host's contest runs on its server, so
+   * the click goes out the seat's authenticated loopback socket exactly as a server
+   * client's does (and the adapter reports it took the click). Otherwise this engine
+   * hosts the contest itself and the caller stamps the click for `driveContest`.
+   */
+  submitContestClick(contest: number, seq: number): boolean {
+    if (!this.nativeBridge) return false;
+    if (isContestSequence(seq) && Number.isSafeInteger(contest)) {
+      this.nativeBridge.submitContestClick(0, contest, seq);
+    }
+    return true;
+  }
+
+  /**
    * Host a running Eye to Eye / Mouth to Mouth contest. Guests' clicks arrive as
    * `contest_click` frames and wait here until the next tick; the AI seats are the
    * engine's own `Ai` seats (the caller's `aiPlayers` guess cannot know which
@@ -2462,16 +2483,30 @@ export class P2PHostAdapter implements EngineAdapter {
     clicks: ContestClickInput[],
   ): Promise<ContestDriveResult> {
     this.assertNotDisposed();
-    const idle: ContestDriveResult = { step: "NotInContest", events: [], log_entries: [] };
-    if (!this.ownsAuthority() || this.nativeBridge || this.gameRunState !== "running") {
+    const idle: ContestDriveResult = {
+      step: "NotInContest",
+      events: [],
+      log_entries: [],
+      contest: null,
+    };
+    // A native host's contest is driven by its server; its clicks travel through
+    // `submitContestClick`. A seat dropping pauses the game, NOT the contest: the
+    // engine owns that clock and must keep ticking so it can pause for the absentee
+    // and forfeit them once the reconnect grace lapses.
+    const contestRunnable =
+      this.gameRunState === "running" || this.gameRunState === "paused-disconnect";
+    if (!this.ownsAuthority() || this.nativeBridge || !contestRunnable) {
       return idle;
     }
     const aiPlayers = this.pregameSeatState.seats.flatMap((seat, index) =>
       seat.type === "Ai" ? [index] : [],
     );
-    const guestClicks = this.pendingGuestContestClicks.splice(0);
-    const ordered = [...clicks, ...guestClicks].sort((a, b) => a.at_ms - b.at_ms);
-    const result = await this.wasm.driveContest(nowMs, aiPlayers, ordered);
+    const awayPlayers = [...this.disconnectedSeats.keys()];
+    const ordered = [...clicks, ...this.guestContestClicks.drain()].sort(
+      (a, b) => a.at_ms - b.at_ms,
+    );
+    const result = await this.wasm.driveContest(nowMs, aiPlayers, ordered, awayPlayers);
+    this.guestContestClicks.setContest(result.contest);
     if (result.step === "Updated" || result.step === "Settled") {
       const transition = this.stampBrowserMutation({
         events: result.events,
@@ -3432,13 +3467,16 @@ export class P2PHostAdapter implements EngineAdapter {
         // machine rejects anything stale, duplicate, early or late — so a guest can
         // claim neither a win nor a timestamp. An eliminated or paused seat's click
         // is simply dropped.
-        if (this.eliminatedSeats.has(pid) || this.gameRunState !== "running") return;
-        if (typeof msg.seq !== "number" || !Number.isFinite(msg.seq)) return;
-        this.pendingGuestContestClicks.push({
-          player: pid,
-          seq: msg.seq,
-          at_ms: performance.now(),
-        });
+        if (this.eliminatedSeats.has(pid)) return;
+        if (this.nativeBridge) {
+          // The native server owns the contest: relay on the seat's own authenticated
+          // loopback socket, after the same well-formedness gate the engine relies on.
+          if (isContestSequence(msg.seq) && Number.isSafeInteger(msg.contest)) {
+            this.nativeBridge.submitContestClick(pid, msg.contest, msg.seq);
+          }
+          return;
+        }
+        this.guestContestClicks.offer(pid, msg, performance.now());
         break;
       }
       case "preview_mana_payment": {
@@ -4228,9 +4266,11 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   /** One click in the running contest; the host stamps it on arrival. Never queued. */
-  submitContestClick(seq: number): void {
-    if (!this.session || !this.assignedPlayerId) return;
-    this.send({ type: "contest_click", seq });
+  submitContestClick(contest: number, seq: number): boolean {
+    if (this.session && this.assignedPlayerId !== null) {
+      this.send({ type: "contest_click", contest, seq });
+    }
+    return true;
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {

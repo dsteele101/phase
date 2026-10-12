@@ -46,13 +46,19 @@ Outcome is decided by sustained activity, never by click count or rate.
 * **Ordering rule.** Before any input is applied, time is advanced to that input's stamp. A click stamped *at* the deadline counts; a timeout needs `now > deadline`.
 * **Settle window.** A lapsed player may still recover by clicking until `deadline + settle_window`, which doubles as the jitter allowance. The contest is decided once at least one player has lapsed and every lapsed player is out of that window.
 * **Tie.** If both lapsed and their deadlines are within `settle_window` of each other the result is `ContestOutcome::Tie`: a distinct outcome, not a win, loss or cancellation. It never restarts the contest and triggers neither player's consequences. Otherwise the earlier deadline loses.
-* The result depends only on stamps and deadlines, never on how late a tick ran.
+* The result depends only on stamps and deadlines, never on how late a tick ran. That includes the hard cap: inactivity is evaluated up to the cap *first*, and only a contest still undecided is cancelled, so a late tick that crosses the cap cannot turn a decidable contest into a cancellation.
+* A repeated `start` is a no-op that observes no time, so a host that re-sends its start every tick cannot move the clock past inputs it is about to apply. Inputs are applied in stamp order, each at its own stamp, before the tick's time.
 
-Defaults (`ContestConfig`): countdown 3s, inactivity 2s, reconnect grace 10s, settle window 150ms, hard cap 5 minutes of Active play (→ `Cancelled(TimeLimit)`).
+Defaults (`ContestConfig`): countdown 3s, inactivity 2s, reconnect grace 10s, settle window 150ms, hard cap 5 minutes of *unpaused* Active play (→ `Cancelled(TimeLimit)`).
+
+## Identity
+
+Every contest carries an engine-authored `id` (the state revision at resolution plus one: every contest resolves in its own action and each action advances the revision, so ids are distinct and increasing within a game; `0` is never valid). Every host input — a click, a progress frame, the AI's schedule — is bound to it: `contest_click` takes the id and rejects any other (`ClickRejection::WrongContest`) *before* it can observe time or consume the running contest's sequence numbers. Sequence numbers restart per contest, so without the id a frame delayed from one contest would be accepted as fresh activity in the next. `ClientMessage::ContestClick { contest, seq }`, `ServerMessage::ContestProgress { contest, .. }`, the P2P `contest_click { contest, seq }` frame and the WASM click batch all carry it.
 
 ## Disconnects
 
-* While any seat is away the contest clock is **paused for everyone** (a connected player cannot lose to a clock the absentee does not share). On return every running clock is shifted by the outage, so nobody gains or loses inactivity budget and nothing resets.
+* While any seat is away the contest clock is **paused for everyone** (a connected player cannot lose to a clock the absentee does not share). On return every running clock is shifted by the outage — the inactivity deadlines *and* the hard cap's epoch — so nobody gains or loses budget and nothing resets. `ContestState::active_elapsed_ms` is that same unpaused timebase, and the AI's cadence and stamina run on it (and it does not click while paused).
+* Every host must report seats' connectivity to the engine, including seats that were already away when the contest started: the server seeds it from its live connection table on each tick; the local WASM driver is handed the away seats on every `drive_contest_js` call; a native host's server does it itself. The engine keeps evaluating grace expiry on every tick, even while the surrounding game is paused for the disconnect.
 * An absentee past `reconnect_grace` **forfeits the contest only** (`ContestLossReason::Forfeit`), not the game.
 * If both seats are away when a grace expires, or either is gone for good, the contest is `Cancelled(BothDisconnected)`.
 * A participant who concedes or is eliminated → `Cancelled(ParticipantLeftGame)`.
@@ -64,6 +70,8 @@ Defaults (`ContestConfig`): countdown 3s, inactivity 2s, reconnect grace 10s, se
 * The server resolves the sender from the authenticated token and the instant from its own clock. `ClientMessage::ContestClick` carries only a per-contest sequence number; clients can claim neither a timestamp, a click count nor a winner. P2P guests do the same (`contest_click`, host-stamped).
 * Duplicate or reordered deliveries are rejected by the sequence number; clicks outside `Active`, from non-participants, or after a player's recovery window are rejected by the engine.
 * Per-seat token bucket (`ContestPolicy`, default 30 clicks/s sustained, burst 40). A dropped click is harmless — it only ever signals activity, and a player at the limit is active. Fast human clicking tops out near 15/s, so legitimate input is never throttled.
+* A P2P host applies the same policy to guests' `contest_click` frames before buffering them (`ContestClickBuffer`): only while a contest is running, only from its two seats, only for its identity, only with a `u32` sequence, within the same rate and a 64-click per-seat queue bound. A malformed frame is dropped on its own; the WASM driver likewise decodes the click batch entry by entry, so a bad entry can never abort the batch (which also advances the clock).
+* A takeback cannot be requested while a contest is running — ordinary actions are frozen during a takeback vote, and the real-time contest must not mutate under it.
 * Macros and automation are bounded, not detected: a bot can sustain the maximum rate, but only for the 5-minute cap, after which the contest is cancelled with no effect.
 * Held keys do not auto-click (`event.repeat` is ignored), so holding Space is not a cheap macro.
 
@@ -71,6 +79,7 @@ Defaults (`ContestConfig`): countdown 3s, inactivity 2s, reconnect grace 10s, se
 
 * `WaitingFor::PhysicalContest` has no acting player (`NoActor::HostContestDriver`) — the host advances it.
 * On settle the controller's win is stamped on the parked continuation as `optional_effect_performed`, which the existing `AbilityCondition::EventOutcomeWon` ("If you win") reads. A loss, a tie and a cancellation all leave it false, so Eye to Eye does not destroy and Mouth to Mouth does not steal.
+* The host settles outside `apply()`, so settlement itself runs what `apply()` would after a resolution: the active player (CR 117.3b — not necessarily the caster) is handed priority, the parked continuation resumes, and the normal post-action pipeline then runs state-based actions and puts triggers on the stack (CR 117.5, CR 704.3, CR 603.3) — a destroyed token ceases to exist, a death trigger is stacked, the legend rule can prompt after control changes. A continuation that pauses on a decision of its own is left parked for the action that answers it.
 * Results are applied exactly once; after settlement every further tick/click/cancel is `NotInContest`.
 
 ## Transports
@@ -78,8 +87,9 @@ Defaults (`ContestConfig`): countdown 3s, inactivity 2s, reconnect grace 10s, se
 | Mode | Host |
 |------|------|
 | phase-server (online, native-ai) | server tick task every 50ms; clients send `ContestClick`; live counters via `ContestProgress` |
-| Single-player WASM | client drives `drive_contest_js` every 50ms with `performance.now()` |
-| P2P | host drives like single-player; guests send `contest_click`, stamped on arrival |
+| Single-player WASM, human hotseat | client drives `drive_contest_js` every 50ms with `performance.now()`; the AI seats are the established `aiSeatIds` (none in hotseat, where each human gets their own control) |
+| P2P (browser engine) | host drives like single-player (and keeps ticking while a guest is away); guests send `contest_click`, gated and stamped on arrival |
+| P2P (native engine) | the native server drives; the host's own and every guest's click is relayed over that seat's own authenticated loopback socket as a `ContestClick` |
 
 AI seats click on a human-ish schedule (`phase_ai::contest::ContestClicker`): a 220–380ms cadence for a random 2.5–9s, so the AI can win or lose.
 
@@ -88,4 +98,5 @@ AI seats click on a human-ish schedule (`phase_ai::contest::ContestClicker`): a 
 * A contest is only ever between the controller and one other player (both printed cards). "You and each opponent" is deliberately declined by the parser.
 * A recorded replay cannot reproduce a real-time result; starting a contest invalidates an in-progress WASM replay recording, as debug actions do.
 * P2P guests see opponent click counters only at state transitions (no live `ContestProgress` over the P2P wire).
+* The WASM batch decoder (`decode_contest_clicks`) takes `JsValue` and cannot run in a native unit test; its guarantees are covered at the P2P boundary (`contestClickBuffer`, host adapter tests) and by the engine's own sequence/identity rejection.
 * Server restarts cancel a running contest.

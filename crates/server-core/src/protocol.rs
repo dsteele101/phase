@@ -439,11 +439,14 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
-    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries only a
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries the
+    /// engine-authored identity of the contest it is for (so a frame delayed from an
+    /// earlier contest is dropped, never counted as activity in a later one) and a
     /// per-contest sequence number (duplicate / reorder protection): the sender is
     /// the authenticated seat and the instant is the server's own clock, so a client
     /// can claim neither a win nor a timestamp.
     ContestClick {
+        contest: u64,
         seq: u32,
     },
     SpectatorJoin {
@@ -985,6 +988,8 @@ pub enum ServerMessage {
     ContestProgress {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_key: Option<FullSessionKey>,
+        /// The contest these counters belong to; a client ignores any other.
+        contest: u64,
         clicks: Vec<(PlayerId, u32)>,
     },
     TimerUpdate {
@@ -2132,16 +2137,20 @@ mod tests {
         }
     }
 
-    /// `ContestClick` carries only a sequence number: no seat, timestamp or count for a
-    /// client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// `ContestClick` carries only a contest identity and a sequence number: no seat,
+    /// timestamp or count for a client to forge. The exact wire shape is pinned because the TypeScript adapter
     /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
     #[test]
     fn client_message_contest_click_roundtrips_with_only_a_sequence() {
-        let json = serde_json::to_string(&ClientMessage::ContestClick { seq: 7 }).unwrap();
-        assert_eq!(json, r#"{"type":"ContestClick","data":{"seq":7}}"#);
+        let json =
+            serde_json::to_string(&ClientMessage::ContestClick { contest: 3, seq: 7 }).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestClick","data":{"contest":3,"seq":7}}"#
+        );
         assert!(matches!(
             serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            ClientMessage::ContestClick { seq: 7 }
+            ClientMessage::ContestClick { contest: 3, seq: 7 }
         ));
     }
 
@@ -2149,12 +2158,13 @@ mod tests {
     fn server_message_contest_progress_roundtrips() {
         let msg = ServerMessage::ContestProgress {
             full_key: None,
+            contest: 3,
             clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"ContestProgress","data":{"clicks":[[0,12],[1,9]]}}"#
+            r#"{"type":"ContestProgress","data":{"contest":3,"clicks":[[0,12],[1,9]]}}"#
         );
         match serde_json::from_str::<ServerMessage>(&json).unwrap() {
             ServerMessage::ContestProgress { clicks, .. } => {

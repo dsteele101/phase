@@ -12,6 +12,7 @@ import { playContestCue } from "../../game/contestAudio.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CONTEST_RESULT_BANNER_MS, useContestStore } from "../../stores/contestStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import type { GameMode } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
 
 /** Wall-clock cadence of the local countdown redraw. Cosmetic only. */
@@ -42,14 +43,33 @@ function ContestGlyph({ kind }: { kind: ContestKind }) {
   );
 }
 
-/** Clicks the engine has counted for `player`, preferring the fresher live counter. */
+/** Clicks the engine has counted for `player`, preferring the fresher live counter.
+ *  Live counters belong to one contest; another contest's are never shown. */
 function countedClicks(
   contest: ContestState,
-  progress: Record<number, number>,
+  progress: { contest: number | null; clicks: Record<number, number> },
   player: PlayerId,
 ): number {
   const confirmed = contest.contestants.find((c) => c.player === player)?.clicks ?? 0;
-  return Math.max(confirmed, progress[player] ?? 0);
+  const live = progress.contest === contest.id ? (progress.clicks[player] ?? 0) : 0;
+  return Math.max(confirmed, live);
+}
+
+/**
+ * The contestants this client plays: its own seat, or — in human hotseat, where one
+ * client seats every non-AI player — each of them. The established seating
+ * configuration (`aiSeatIds`, `gameMode`) decides; nothing is guessed from who is
+ * "not me".
+ */
+function localContestSeats(
+  contest: ContestState,
+  gameMode: GameMode | null,
+  me: PlayerId,
+  aiSeatIds: readonly PlayerId[],
+): PlayerId[] {
+  const seats = contest.contestants.map((c) => c.player);
+  if (gameMode === "local") return seats.filter((seat) => !aiSeatIds.includes(seat));
+  return seats.filter((seat) => seat === me);
 }
 
 /** Display-only: the localized sentence for a settled contest. */
@@ -69,6 +89,66 @@ function resultCue(result: ContestResult, me: PlayerId) {
 }
 
 /**
+ * The large click target for one local seat. Pointer, keyboard (Space/Enter) and
+ * assistive-technology activation all click; the state is carried by text and a
+ * dashed border as well as colour.
+ */
+function ContestButton({
+  seat,
+  caption,
+  isActive,
+  pulse,
+  onClick: click,
+}: {
+  seat: PlayerId;
+  caption: string | null;
+  isActive: boolean;
+  pulse: number;
+  onClick: (seat: PlayerId) => void;
+}) {
+  const { t } = useTranslation("game");
+  const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    click(seat);
+  };
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== " " && event.key !== "Enter") return;
+    event.preventDefault();
+    // A held key auto-repeats; one press is one click.
+    if (!event.repeat) click(seat);
+  };
+  // Assistive-technology activation arrives as a click with no pointer or key
+  // event (`detail === 0`); pointer and keyboard activation are handled above.
+  const onActivate = (event: MouseEvent<HTMLButtonElement>) => {
+    if (event.detail === 0) click(seat);
+  };
+  return (
+    <div className="flex w-full flex-col items-center gap-1">
+      {caption && <span className="text-sm font-semibold text-slate-200">{caption}</span>}
+      <button
+        type="button"
+        aria-disabled={!isActive}
+        onPointerDown={onPointerDown}
+        onKeyDown={onKeyDown}
+        onClick={onActivate}
+        className={[
+          "min-h-32 w-full touch-manipulation select-none rounded-2xl border-4 px-6 text-2xl font-black",
+          "focus-visible:outline-4 focus-visible:outline-offset-4 focus-visible:outline-white",
+          isActive
+            ? "border-white bg-emerald-600 active:bg-emerald-500"
+            : "cursor-not-allowed border-dashed border-slate-500 bg-slate-800 text-slate-400",
+        ].join(" ")}
+      >
+        <span key={pulse} className="inline-block motion-safe:animate-pulse-once">
+          {isActive ? t("physicalContest.button.active") : t("physicalContest.button.wait")}
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/**
  * Eye to Eye / Mouth to Mouth. The Comprehensive Rules define no physical
  * contests, so an online game adapts them: both players keep clicking and the
  * first to stop for the inactivity timeout loses. The engine/host owns the
@@ -78,36 +158,45 @@ function ContestPanel({ contest }: { contest: ContestState }) {
   const { t } = useTranslation("game");
   const me = usePlayerId();
   const adapter = useGameStore((s) => s.adapter);
+  const gameMode = useGameStore((s) => s.gameMode);
+  const aiSeatIds = useGameStore((s) => s.aiSeatIds);
   const progress = useContestStore((s) => s.progress);
-  const mySlot = contest.contestants.findIndex((c) => c.player === me);
-  const isParticipant = mySlot >= 0;
+  const localSeats = localContestSeats(contest, gameMode, me, aiSeatIds);
+  const isParticipant = localSeats.length > 0;
   const paused = contest.paused_since_ms != null;
   const isActive = contest.phase === "Active";
   const isPreparing = contest.phase === "Pending" || contest.phase === "Preparing";
 
-  // Highest sequence used locally; the next click is strictly above both it and
-  // what the engine has confirmed, so duplicate/stale protection never rejects a
-  // genuine click even across back-to-back contests.
-  const seqRef = useRef(0);
+  // Highest sequence used locally per seat, for the contest it was counted in. The
+  // next click is strictly above both it and what the engine has confirmed, so
+  // duplicate/stale protection never rejects a genuine click — and a new contest
+  // starts its own sequence from zero, never inheriting the last one's.
+  const seqRef = useRef<{ contest: number; bySeat: Record<number, number> }>({
+    contest: contest.id,
+    bySeat: {},
+  });
   const [pulse, setPulse] = useState(0);
-  const click = useCallback(() => {
-    if (!isParticipant || !isActive || !adapter) return;
-    const confirmed = contest.contestants[mySlot]?.last_seq ?? 0;
-    seqRef.current = Math.max(seqRef.current, confirmed) + 1;
-    if (adapter.submitContestClick) {
-      // A server hosts the contest and stamps the click itself.
-      adapter.submitContestClick(seqRef.current);
-    } else if (adapter.driveContest) {
-      // A local engine hosts it: stamp with this client's own clock, which is the
+  const click = useCallback(
+    (seat: PlayerId) => {
+      if (!isActive || !adapter) return;
+      if (seqRef.current.contest !== contest.id) seqRef.current = { contest: contest.id, bySeat: {} };
+      const confirmed = contest.contestants.find((c) => c.player === seat)?.last_seq ?? 0;
+      const seq = Math.max(seqRef.current.bySeat[seat] ?? 0, confirmed) + 1;
+      seqRef.current.bySeat[seat] = seq;
+      // A server (or a native host's server) hosts the contest and stamps the click
+      // itself; otherwise this client hosts it, so stamp with its own clock — the
       // timebase the local driver advances the engine in.
-      useContestStore
-        .getState()
-        .bufferClick({ player: me, seq: seqRef.current, at_ms: performance.now() });
-    } else {
-      return;
-    }
-    setPulse((n) => n + 1);
-  }, [adapter, contest.contestants, isActive, isParticipant, me, mySlot]);
+      const routed = adapter.submitContestClick?.(contest.id, seq) ?? false;
+      if (!routed) {
+        if (!adapter.driveContest) return;
+        useContestStore
+          .getState()
+          .bufferClick({ contest: contest.id, player: seat, seq, at_ms: performance.now() });
+      }
+      setPulse((n) => n + 1);
+    },
+    [adapter, contest.contestants, contest.id, isActive],
+  );
 
   // Countdown: milliseconds until GO as of this snapshot, drawn down by local
   // elapsed time. The host's clock is never compared against ours.
@@ -143,23 +232,6 @@ function ContestPanel({ contest }: { contest: ContestState }) {
   useEffect(() => {
     if (isActive) playContestCue("go");
   }, [isActive]);
-
-  const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    event.preventDefault();
-    click();
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== " " && event.key !== "Enter") return;
-    event.preventDefault();
-    // A held key auto-repeats; one press is one click.
-    if (!event.repeat) click();
-  };
-  // Assistive-technology activation arrives as a click with no pointer or key
-  // event (`detail === 0`); pointer and keyboard activation are handled above.
-  const onClick = (event: MouseEvent<HTMLButtonElement>) => {
-    if (event.detail === 0) click();
-  };
 
   const [first, second] = contest.contestants;
   const name = (player: PlayerId) =>
@@ -212,26 +284,17 @@ function ContestPanel({ contest }: { contest: ContestState }) {
           </p>
         )}
 
-        {isParticipant && (
-          <button
-            type="button"
-            aria-disabled={!isActive}
-            onPointerDown={onPointerDown}
-            onKeyDown={onKeyDown}
-            onClick={onClick}
-            className={[
-              "min-h-32 w-full touch-manipulation select-none rounded-2xl border-4 px-6 text-2xl font-black",
-              "focus-visible:outline-4 focus-visible:outline-offset-4 focus-visible:outline-white",
-              isActive
-                ? "border-white bg-emerald-600 active:bg-emerald-500"
-                : "cursor-not-allowed border-dashed border-slate-500 bg-slate-800 text-slate-400",
-            ].join(" ")}
-          >
-            <span key={pulse} className="inline-block motion-safe:animate-pulse-once">
-              {isActive ? t("physicalContest.button.active") : t("physicalContest.button.wait")}
-            </span>
-          </button>
-        )}
+        {localSeats.map((seat) => (
+          <ContestButton
+            key={seat}
+            seat={seat}
+            // Hotseat seats two humans at one screen, so each gets a captioned button.
+            caption={localSeats.length > 1 ? getOpponentDisplayName(seat) : null}
+            isActive={isActive}
+            pulse={pulse}
+            onClick={click}
+          />
+        ))}
 
         <ul className="flex w-full justify-around text-base" aria-label={t("physicalContest.versus", {
           first: name(first.player),
@@ -304,7 +367,6 @@ const LOCAL_HOST_TICK_MS = 50;
  */
 function useLocalContestHost(active: boolean) {
   const adapter = useGameStore((s) => s.adapter);
-  const me = usePlayerId();
   useEffect(() => {
     const drive = adapter?.driveContest?.bind(adapter);
     if (!active || !adapter || !drive) return;
@@ -314,16 +376,27 @@ function useLocalContestHost(active: boolean) {
       if (stopped || inFlight) return;
       inFlight = true;
       try {
+        // The session this tick belongs to: a reset or new game while the engine call
+        // is in flight must not have this tick's snapshot committed over it.
+        const { gameSessionGeneration: generation, aiSeatIds } = useGameStore.getState();
         const clicks = useContestStore.getState().drainClicks();
-        const players = useGameStore.getState().gameState?.players ?? [];
-        const aiPlayers = players.map((p) => p.id).filter((id) => id !== me);
-        const result = await drive(performance.now(), aiPlayers, clicks);
+        // The seats the engine clicks for are the established AI seat bindings
+        // (empty in human hotseat); a P2P host replaces them with its pregame seats.
+        const result = await drive(performance.now(), aiSeatIds, clicks);
         if (stopped || (result.step !== "Updated" && result.step !== "Settled")) return;
         const snapshot = await adapter.getSnapshot();
-        useGameStore.getState().commitEngineSnapshot(snapshot, {
+        const current = useGameStore.getState();
+        if (stopped || current.adapter !== adapter || current.gameSessionGeneration !== generation) {
+          return;
+        }
+        current.commitEngineSnapshot(snapshot, {
           events: result.events,
           logEntries: result.log_entries,
         });
+      } catch (error) {
+        // A failed tick is dropped, not fatal: the next one re-reads the engine's own
+        // clock, and the contest's lifecycle never depends on a single call landing.
+        console.error("[contest] local host tick failed:", error);
       } finally {
         inFlight = false;
       }
@@ -333,7 +406,7 @@ function useLocalContestHost(active: boolean) {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [active, adapter, me]);
+  }, [active, adapter]);
 }
 
 /**

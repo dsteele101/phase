@@ -70,6 +70,8 @@ impl ContestClicker {
 /// all click on the same schedule.
 #[derive(Debug, Default)]
 pub struct AiContestants {
+    /// The contest the schedules below were planned for.
+    contest_id: Option<u64>,
     clickers: HashMap<PlayerId, ContestClicker>,
 }
 
@@ -77,6 +79,7 @@ impl AiContestants {
     /// Forget every schedule — call when no contest is running, so the next contest
     /// plans fresh ones.
     pub fn clear(&mut self) {
+        self.contest_id = None;
         self.clickers.clear();
     }
 
@@ -96,10 +99,21 @@ impl AiContestants {
             self.clear();
             return;
         };
-        if contest.phase != ContestPhase::Active {
+        // A schedule planned for an earlier contest must never carry over.
+        if self.contest_id != Some(contest.id) {
+            self.clear();
+            self.contest_id = Some(contest.id);
+        }
+        // No AI click while the clock is paused for an absent seat: the engine
+        // freezes everyone's budget, and the AI's own stamina must not run down
+        // (or its cadence advance) during an outage either.
+        if contest.phase != ContestPhase::Active || contest.paused_since_ms.is_some() {
             return;
         }
-        let go_at = contest.go_at_ms.unwrap_or(now_ms);
+        let contest_id = contest.id;
+        // The schedule runs on the contest's own unpaused timebase, the same one the
+        // engine shifts its deadlines and hard cap by, starting at GO.
+        let elapsed = contest.active_elapsed_ms(now_ms);
         let timeout = contest.config.inactivity_timeout_ms;
         let participating: Vec<PlayerId> = contest
             .players()
@@ -110,10 +124,10 @@ impl AiContestants {
             let clicker = self
                 .clickers
                 .entry(player)
-                .or_insert_with(|| ContestClicker::new(go_at, timeout, rng));
-            if let Some(seq) = clicker.poll(now_ms) {
+                .or_insert_with(|| ContestClicker::new(0, timeout, rng));
+            if let Some(seq) = clicker.poll(elapsed) {
                 let mut events = Vec::new();
-                let (_, step) = contest_click(state, player, seq, now_ms, &mut events);
+                let (_, step) = contest_click(state, contest_id, player, seq, now_ms, &mut events);
                 on_step(step, events);
             }
         }
@@ -180,5 +194,89 @@ mod tests {
                 prev = seq;
             }
         }
+    }
+
+    // ---- Host integration (`AiContestants::click_due`) ------------------------
+
+    use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+    use engine::types::identifiers::ObjectId;
+
+    const AI: PlayerId = PlayerId(1);
+
+    fn contest_state(id: u64) -> GameState {
+        let config = ContestConfig {
+            reconnect_grace_ms: 600_000,
+            ..ContestConfig::default()
+        };
+        let mut contest = ContestState::new(id, ContestKind::Staring, PlayerId(0), AI, config);
+        assert!(contest.start(0));
+        contest.advance(config.countdown_ms); // Active; GO at 3000
+        let mut state = GameState::new_two_player(1);
+        state.waiting_for = WaitingFor::PhysicalContest {
+            contest: Box::new(contest),
+            source_id: ObjectId(1),
+        };
+        state
+    }
+
+    fn contest_mut(state: &mut GameState) -> &mut ContestState {
+        let WaitingFor::PhysicalContest { contest, .. } = &mut state.waiting_for else {
+            panic!("not in a contest");
+        };
+        contest
+    }
+
+    fn clicks_at(ai: &mut AiContestants, state: &mut GameState, now: u64) -> usize {
+        let mut count = 0;
+        ai.click_due(state, &[AI], now, &mut StdRng::seed_from_u64(11), |_, _| {
+            count += 1
+        });
+        count
+    }
+
+    /// While a seat is away the engine freezes the contest clock; the AI must not
+    /// click through the outage, and the outage must not spend its stamina — it runs
+    /// on the contest's unpaused timebase.
+    #[test]
+    fn the_ai_neither_clicks_nor_tires_while_the_contest_is_paused() {
+        let mut state = contest_state(1);
+        let mut ai = AiContestants::default();
+        assert_eq!(clicks_at(&mut ai, &mut state, 3_000), 1, "clicks at GO");
+
+        contest_mut(&mut state).set_connected(PlayerId(0), false, 3_500);
+        assert_eq!(
+            clicks_at(&mut ai, &mut state, 20_000),
+            0,
+            "silent while paused"
+        );
+
+        // A minute-long outage later, the AI is 0.5s into the contest, not a minute in.
+        contest_mut(&mut state).set_connected(PlayerId(0), true, 63_500);
+        assert_eq!(
+            clicks_at(&mut ai, &mut state, 63_500),
+            1,
+            "an outage is not stamina: the AI is still in its first seconds"
+        );
+    }
+
+    /// A schedule planned for one contest never carries into the next, even when the
+    /// host never observed a gap between them.
+    #[test]
+    fn a_new_contest_discards_the_previous_ones_schedule() {
+        let mut ai = AiContestants::default();
+        let mut state = contest_state(1);
+        assert_eq!(clicks_at(&mut ai, &mut state, 3_000), 1);
+        assert_eq!(
+            clicks_at(&mut ai, &mut state, 3_001),
+            0,
+            "inside its interval"
+        );
+
+        let mut next = contest_state(2);
+        assert_eq!(
+            clicks_at(&mut ai, &mut next, 3_001),
+            1,
+            "a fresh contest plans a fresh schedule and clicks at its own GO"
+        );
     }
 }

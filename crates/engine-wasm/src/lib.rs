@@ -2067,12 +2067,39 @@ thread_local! {
         RefCell::new(phase_ai::contest::AiContestants::default());
 }
 
-/// One click the local host collected, stamped with its own clock.
+/// One click the local host collected, stamped with its own clock and addressed to
+/// the contest it was made in.
 #[derive(serde::Deserialize)]
 struct ContestClickInput {
+    contest: u64,
     player: u8,
     seq: u32,
     at_ms: f64,
+}
+
+/// Most clicks one drive call will consider. The JS host drains its buffer every
+/// ~50ms, so a legitimate batch is a handful; the bound keeps a flooding peer from
+/// turning one tick into unbounded work.
+const MAX_CONTEST_CLICKS_PER_DRIVE: usize = 256;
+
+/// Decode the host's click batch entry by entry. A malformed entry (a negative,
+/// fractional or oversized sequence, an unknown seat, a non-finite stamp) is dropped
+/// on its own — it must never abort the batch, because the same call also advances
+/// the contest clock and a batch that fails to decode would freeze the contest.
+/// Valid entries are returned oldest stamp first, so earlier input is applied before
+/// later input regardless of delivery order.
+fn decode_contest_clicks(clicks: JsValue) -> Vec<ContestClickInput> {
+    if clicks.is_undefined() || clicks.is_null() {
+        return Vec::new();
+    }
+    let mut decoded: Vec<ContestClickInput> = js_sys::Array::from(&clicks)
+        .iter()
+        .take(MAX_CONTEST_CLICKS_PER_DRIVE)
+        .filter_map(|entry| serde_wasm_bindgen::from_value::<ContestClickInput>(entry).ok())
+        .filter(|click| click.at_ms.is_finite())
+        .collect();
+    decoded.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms));
+    decoded
 }
 
 /// What a `drive_contest_js` call did, for the JS driver to decide whether to
@@ -2082,6 +2109,14 @@ struct ContestDriveOutcome {
     step: &'static str,
     events: Vec<engine::types::events::GameEvent>,
     log_entries: Vec<engine::types::log::GameLogEntry>,
+    /// The contest still running after this call (identity and seats), if any.
+    contest: Option<RunningContest>,
+}
+
+#[derive(serde::Serialize)]
+struct RunningContest {
+    id: u64,
+    players: [PlayerId; 2],
 }
 
 fn contest_step_label(step: engine::game::contest::ContestStep) -> &'static str {
@@ -2105,17 +2140,18 @@ fn contest_step_label(step: engine::game::contest::ContestStep) -> &'static str 
 /// the first drive call invalidates an in-progress replay recording (the same
 /// treatment debug actions get).
 #[wasm_bindgen]
-pub fn drive_contest_js(now_ms: f64, ai_players: Vec<u8>, clicks: JsValue) -> JsValue {
-    use engine::game::contest::{advance_contest, contest_click, start_contest, ContestStep};
-    let clicks: Vec<ContestClickInput> = if clicks.is_undefined() || clicks.is_null() {
-        Vec::new()
-    } else {
-        match serde_wasm_bindgen::from_value(clicks) {
-            Ok(clicks) => clicks,
-            Err(_) => return JsValue::from_str("invalid contest clicks"),
-        }
+pub fn drive_contest_js(
+    now_ms: f64,
+    ai_players: Vec<u8>,
+    away_players: Vec<u8>,
+    clicks: JsValue,
+) -> JsValue {
+    use engine::game::contest::{
+        advance_contest, contest_click, set_contest_connection, start_contest, ContestStep,
     };
+    let clicks = decode_contest_clicks(clicks);
     let ai_players: Vec<PlayerId> = ai_players.into_iter().map(PlayerId).collect();
+    let away_players: Vec<PlayerId> = away_players.into_iter().map(PlayerId).collect();
     let now = now_ms.max(0.0) as u64;
     let outcome = with_state_mut(|state| {
         let mut events = Vec::new();
@@ -2138,13 +2174,36 @@ pub fn drive_contest_js(now_ms: f64, ai_players: Vec<u8>, clicks: JsValue) -> Js
             REPLAY_LOG.with(|cell| cell.set(None));
         }
         let config = engine::types::contest::ContestConfig::default();
+        // A repeated start is a no-op that does not observe `now`, so buffered clicks
+        // below are still applied at their own stamps, before the tick's time.
         note(start_contest(state, config, now, &mut events));
+        // The host's live seat connectivity, reported every tick (idempotent in the
+        // engine): a seat that dropped pauses the contest clock and starts its
+        // reconnect grace; one that returned resumes it.
+        let contestants = match &state.waiting_for {
+            engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
+                Some(contest.players())
+            }
+            _ => None,
+        };
+        for player in contestants.into_iter().flatten() {
+            let connected = !away_players.contains(&player);
+            note(set_contest_connection(
+                state,
+                player,
+                connected,
+                now,
+                &mut events,
+            ));
+        }
         for click in clicks {
             let (_, step) = contest_click(
                 state,
+                click.contest,
                 PlayerId(click.player),
                 click.seq,
-                click.at_ms.max(0.0) as u64,
+                // The host cannot have stamped a click later than its own tick.
+                (click.at_ms.max(0.0) as u64).min(now),
                 &mut events,
             );
             note(step);
@@ -2170,10 +2229,20 @@ pub fn drive_contest_js(now_ms: f64, ai_players: Vec<u8>, clicks: JsValue) -> Js
         } else {
             engine::game::log::resolve_log_entries(&events, state, state)
         };
+        let contest = match &state.waiting_for {
+            engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
+                Some(RunningContest {
+                    id: contest.id,
+                    players: contest.players(),
+                })
+            }
+            _ => None,
+        };
         ContestDriveOutcome {
             step: contest_step_label(strongest),
             events,
             log_entries,
+            contest,
         }
     });
     match outcome {

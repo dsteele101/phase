@@ -21,8 +21,9 @@ export interface ContestAnnouncement {
 }
 
 interface ContestStoreState {
-  /** Live click counters pushed between full state snapshots, by seat. */
-  progress: Record<number, number>;
+  /** Live click counters pushed between full state snapshots, by seat, and the
+   *  contest they belong to — counters for any other contest are never shown. */
+  progress: { contest: number | null; clicks: Record<number, number> };
   announcement: ContestAnnouncement | null;
   nextAnnouncementId: number;
   /** Clicks awaiting the next local-host tick (local engines only). */
@@ -30,13 +31,19 @@ interface ContestStoreState {
   bufferClick: (click: ContestClickInput) => void;
   /** Take every buffered click, oldest first. */
   drainClicks: () => ContestClickInput[];
-  setProgress: (clicks: ReadonlyArray<readonly [PlayerId, number]>) => void;
+  setProgress: (contest: number, clicks: ReadonlyArray<readonly [PlayerId, number]>) => void;
   announce: (kind: ContestKind, participants: [PlayerId, PlayerId], result: ContestResult) => void;
   dismissAnnouncement: (id: number) => void;
   reset: () => void;
 }
 
-const initial = { progress: {}, announcement: null, nextAnnouncementId: 1, pendingClicks: [] };
+const NO_PROGRESS = { contest: null, clicks: {} };
+const initial = {
+  progress: NO_PROGRESS,
+  announcement: null,
+  nextAnnouncementId: 1,
+  pendingClicks: [],
+};
 
 export const useContestStore = create<ContestStoreState>((set, get) => ({
   ...initial,
@@ -46,13 +53,18 @@ export const useContestStore = create<ContestStoreState>((set, get) => ({
     if (clicks.length > 0) set({ pendingClicks: [] });
     return clicks;
   },
-  setProgress: (clicks) =>
-    set({ progress: Object.fromEntries(clicks.map(([player, count]) => [player, count])) }),
+  setProgress: (contest, clicks) =>
+    set({
+      progress: {
+        contest,
+        clicks: Object.fromEntries(clicks.map(([player, count]) => [player, count])),
+      },
+    }),
   announce: (kind, participants, result) =>
     set((state) => ({
       announcement: { kind, participants, result, id: state.nextAnnouncementId },
       nextAnnouncementId: state.nextAnnouncementId + 1,
-      progress: {},
+      progress: NO_PROGRESS,
     })),
   dismissAnnouncement: (id) =>
     set((state) => (state.announcement?.id === id ? { announcement: null } : state)),

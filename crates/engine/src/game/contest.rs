@@ -36,6 +36,7 @@ use crate::types::player::PlayerId;
 impl ContestState {
     /// A new contest in `Pending`. `controller` is contestant 0.
     pub fn new(
+        id: u64,
         kind: ContestKind,
         controller: PlayerId,
         opponent: PlayerId,
@@ -49,6 +50,7 @@ impl ContestState {
             connection: ContestantConnection::Connected,
         };
         Self {
+            id,
             kind,
             phase: ContestPhase::Pending,
             config,
@@ -96,8 +98,13 @@ impl ContestState {
     /// `Pending -> Preparing`: start the countdown. Idempotent — a duplicate
     /// start (retry, duplicate event) changes nothing and returns `false`.
     pub fn start(&mut self, now_ms: u64) -> bool {
+        // A duplicate start must not observe `now_ms`: a retried start stamped after
+        // buffered clicks would otherwise advance the clock past their stamps.
+        if self.phase != ContestPhase::Pending {
+            return false;
+        }
         let now = self.observe(now_ms);
-        if self.phase != ContestPhase::Pending || !self.transition(ContestPhase::Preparing) {
+        if !self.transition(ContestPhase::Preparing) {
             return false;
         }
         self.go_at_ms = Some(now + self.config.countdown_ms);
@@ -130,11 +137,30 @@ impl ContestState {
             }
         }
         if self.phase == ContestPhase::Active {
-            self.settle_time_limit(now);
+            // Inactivity is decided over the history up to the cap first, so a late
+            // tick that crosses the cap cannot turn a contest an on-time tick would
+            // have decided into a cancellation. Only an undecided contest is capped.
+            self.settle_inactivity(now.min(self.time_limit_ms()));
             if self.phase == ContestPhase::Active {
-                self.settle_inactivity(now);
+                self.settle_time_limit(now);
             }
         }
+    }
+
+    /// The instant the Active phase hits its hard duration cap.
+    fn time_limit_ms(&self) -> u64 {
+        self.go_at_ms.unwrap_or(0) + self.config.max_active_ms
+    }
+
+    /// Unpaused Active-phase time elapsed at `now_ms`: the shared timebase for
+    /// anything that schedules itself against the contest (AI cadence, stamina).
+    /// Frozen while the clock is paused, because resuming shifts `go_at_ms` by the
+    /// outage — the same adjustment the inactivity deadlines receive.
+    pub fn active_elapsed_ms(&self, now_ms: u64) -> u64 {
+        let until = self
+            .paused_since_ms
+            .map_or(now_ms, |paused| paused.min(now_ms));
+        until.saturating_sub(self.go_at_ms.unwrap_or(until))
     }
 
     fn activate(&mut self, go_at: u64) {
@@ -146,8 +172,7 @@ impl ContestState {
     }
 
     fn settle_time_limit(&mut self, now: u64) {
-        let go = self.go_at_ms.unwrap_or(0);
-        if now > go + self.config.max_active_ms {
+        if now > self.time_limit_ms() {
             self.cancel(ContestCancelReason::TimeLimit, now);
         }
     }
@@ -319,6 +344,9 @@ impl ContestState {
                 self.go_at_ms = self.go_at_ms.map(|go| go + elapsed);
             }
             ContestPhase::Active => {
+                // The hard cap measures unpaused play, so its epoch shifts with the
+                // inactivity clocks.
+                self.go_at_ms = self.go_at_ms.map(|go| go + elapsed);
                 for contestant in &mut self.contestants {
                     contestant.last_activity_ms += elapsed;
                 }
@@ -403,6 +431,11 @@ fn drive<R>(
 /// `apply()` would: advance the state revision and refresh the public projection
 /// that clients render.
 fn publish_state(state: &mut GameState) {
+    // The wait just changed outside `apply()` (a contest settling into a priority
+    // window, say), so the interaction slots `apply()` would have rebound must be
+    // rebound here: without them the new prompt has no valid interaction id and
+    // the player's answer to it is rejected.
+    super::interaction::ensure_interaction_authority(state);
     bump_state_revision(state);
     mark_public_state_all_dirty(state);
     finalize_public_state(state);
@@ -450,15 +483,24 @@ pub fn advance_contest(
     drive(state, events, |contest| contest.advance(now_ms)).1
 }
 
-/// Submit a click. `seq` is the submitter's per-contest click counter.
+/// Submit a click addressed to contest `contest_id`. `seq` is the submitter's
+/// per-contest click counter. A click for any other contest — a frame delayed from
+/// an earlier one — is rejected before it can observe time or touch the sequence
+/// counters of the running contest.
 pub fn contest_click(
     state: &mut GameState,
+    contest_id: u64,
     player: PlayerId,
     seq: u32,
     now_ms: u64,
     events: &mut Vec<GameEvent>,
 ) -> (ClickDisposition, ContestStep) {
-    let (disposition, step) = drive(state, events, |contest| contest.click(player, seq, now_ms));
+    let (disposition, step) = drive(state, events, |contest| {
+        if contest.id != contest_id {
+            return ClickDisposition::Rejected(ClickRejection::WrongContest);
+        }
+        contest.click(player, seq, now_ms)
+    });
     (
         disposition.unwrap_or(ClickDisposition::Rejected(ClickRejection::NotActive)),
         step,
@@ -535,10 +577,38 @@ fn settle(state: &mut GameState, events: &mut Vec<GameEvent>) {
         frame.pending.chain.context.optional_effect_performed = controller_won;
     }
 
-    state.waiting_for = WaitingFor::Priority { player: controller };
-    state.priority_player = controller;
+    // CR 117.3b: the active player receives priority after a spell or ability
+    // resolves — not necessarily the contest's controller (Eye to Eye is an instant).
+    let active_player = state.active_player;
+    state.waiting_for = WaitingFor::Priority {
+        player: active_player,
+    };
+    state.priority_player = active_player;
+    let event_start = events.len();
     super::engine::resume_pending_continuation_if_priority(state, events)
         .expect("a settled contest must resume its continuation");
+
+    // CR 117.5 + CR 704.3 + CR 603.3: the host settled this outside `apply()`, so run
+    // the pass `apply()` would — state-based actions (a destroyed token ceasing to
+    // exist, the legend rule after control changes), then triggers put on the stack —
+    // before anyone receives priority. A continuation that paused on a decision of its
+    // own is left parked; the action that answers it runs the pipeline.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        let default_wf = state.waiting_for.clone();
+        match super::engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        ) {
+            Ok(settled) => super::public_state::sync_waiting_for(state, &settled),
+            // The effect already resolved; fail toward the priority window already
+            // installed rather than wedging a host-driven wait nobody can answer.
+            Err(error) => debug_assert!(false, "contest settlement pipeline failed: {error:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -560,7 +630,7 @@ mod tests {
 
     /// Active contest whose GO instant is t=1000.
     fn active(config: ContestConfig) -> ContestState {
-        let mut c = ContestState::new(ContestKind::Staring, A, B, config);
+        let mut c = ContestState::new(1, ContestKind::Staring, A, B, config);
         assert!(c.start(0));
         c.advance(config.countdown_ms);
         assert_eq!(c.phase, ContestPhase::Active);
@@ -595,7 +665,7 @@ mod tests {
 
     #[test]
     fn start_is_idempotent() {
-        let mut c = ContestState::new(ContestKind::Staring, A, B, cfg());
+        let mut c = ContestState::new(1, ContestKind::Staring, A, B, cfg());
         assert!(c.start(100));
         let go = c.go_at_ms;
         assert!(
@@ -608,7 +678,7 @@ mod tests {
 
     #[test]
     fn clicks_before_go_are_not_counted() {
-        let mut c = ContestState::new(ContestKind::Staring, A, B, cfg());
+        let mut c = ContestState::new(1, ContestKind::Staring, A, B, cfg());
         assert_eq!(
             c.click(A, 1, 0),
             ClickDisposition::Rejected(ClickRejection::NotActive)
@@ -866,7 +936,7 @@ mod tests {
 
     #[test]
     fn disconnect_during_preparing_pauses_then_forfeits_past_grace() {
-        let mut c = ContestState::new(ContestKind::BreathHolding, A, B, cfg());
+        let mut c = ContestState::new(1, ContestKind::BreathHolding, A, B, cfg());
         c.start(0);
         assert!(c.set_connected(B, false, 200));
         c.advance(1_500); // past original GO; paused so still Preparing
@@ -1004,6 +1074,55 @@ mod tests {
         assert_eq!(
             c.click(A, 1, 1_300),
             ClickDisposition::Rejected(ClickRejection::NotActive)
+        );
+    }
+
+    /// The hard cap measures UNPAUSED play: an outage while a seat is away shifts
+    /// the cap epoch exactly as it shifts the inactivity clocks, so the cap cannot
+    /// fire early just because the contest sat paused.
+    #[test]
+    fn an_outage_does_not_count_toward_the_hard_cap() {
+        let config = ContestConfig {
+            max_active_ms: 3_000,
+            reconnect_grace_ms: 10_000,
+            ..cfg()
+        };
+        let mut c = active(config); // GO at 1000, so the cap is at 4000
+        c.click(A, 1, 1_900);
+        c.click(B, 1, 1_900);
+        assert!(c.set_connected(B, false, 2_000));
+        assert!(c.set_connected(B, true, 4_000)); // 2s outage: the cap moves to 6000
+
+        // Still Active well past the unshifted cap, with both players clicking.
+        c.click(A, 2, 4_500);
+        c.click(B, 2, 4_500);
+        c.click(A, 3, 5_300);
+        c.click(B, 3, 5_300);
+        c.click(A, 4, 5_900);
+        c.click(B, 4, 5_900);
+        assert_eq!(c.phase, ContestPhase::Active);
+
+        c.advance(6_001);
+        assert_eq!(
+            c.result,
+            Some(ContestResult::Cancelled(ContestCancelReason::TimeLimit))
+        );
+    }
+
+    #[test]
+    fn active_elapsed_time_freezes_while_paused_and_ignores_the_outage() {
+        let mut c = active(ContestConfig {
+            reconnect_grace_ms: 60_000,
+            ..cfg()
+        }); // GO at 1000
+        assert_eq!(c.active_elapsed_ms(1_500), 500);
+        c.set_connected(B, false, 1_500);
+        assert_eq!(c.active_elapsed_ms(9_000), 500, "frozen at the pause");
+        c.set_connected(B, true, 9_000);
+        assert_eq!(
+            c.active_elapsed_ms(9_200),
+            700,
+            "the 7.5s outage is not play time"
         );
     }
 }

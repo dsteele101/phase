@@ -1305,7 +1305,7 @@ export type WsAdapterEvent =
       rewindTargets?: RewindOption[] }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
-  | { type: "contestProgress"; clicks: [PlayerId, number][] }
+  | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
   | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
@@ -2014,12 +2014,15 @@ export class WebSocketAdapter implements EngineAdapter {
   /**
    * One click in the running Eye to Eye / Mouth to Mouth contest. The server
    * authenticates the seat and stamps the instant from its own clock, so the
-   * frame carries only a sequence number. Never queued: a click that cannot be
-   * sent now is stale by the time a reconnect could deliver it.
+   * frame carries only the contest's identity and a sequence number. Never queued:
+   * a click that cannot be sent now is stale by the time a reconnect could deliver
+   * it. Always `true` — the server hosts the contest, so the caller never stamps.
    */
-  submitContestClick(seq: number): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.send({ type: "ContestClick", data: { seq } });
+  submitContestClick(contest: number, seq: number): boolean {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.send({ type: "ContestClick", data: { contest, seq } });
+    }
+    return true;
   }
 
   /**
@@ -2885,8 +2888,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ContestProgress": {
-        const data = msg.data as { clicks: [PlayerId, number][] };
-        this.emit({ type: "contestProgress", clicks: data.clicks });
+        const data = msg.data as { contest: number; clicks: [PlayerId, number][] };
+        this.emit({ type: "contestProgress", contest: data.contest, clicks: data.clicks });
         break;
       }
 

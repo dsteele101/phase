@@ -134,6 +134,7 @@ pub struct ContestRuntime {
 /// without re-serializing the whole game 20 times a second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContestProgress {
+    pub contest: u64,
     pub clicks: [(PlayerId, u32); 2],
 }
 
@@ -183,7 +184,12 @@ impl GameSession {
     /// Submit a click from the seat that owns `player_token`. The sender is
     /// resolved from the authenticated token and the instant from the server
     /// clock — nothing about timing or identity is taken from the payload.
-    pub fn handle_contest_click(&mut self, player_token: &str, seq: u32) -> ContestClickReceipt {
+    pub fn handle_contest_click(
+        &mut self,
+        player_token: &str,
+        contest: u64,
+        seq: u32,
+    ) -> ContestClickReceipt {
         let Some(player) = self.player_for_token(player_token) else {
             return ContestClickReceipt::UnknownSeat;
         };
@@ -200,17 +206,19 @@ impl GameSession {
         if !limiter.allow(now) {
             return ContestClickReceipt::Throttled;
         }
-        self.submit_contest_click(player, seq, now)
+        self.submit_contest_click(contest, player, seq, now)
     }
 
     fn submit_contest_click(
         &mut self,
+        contest: u64,
         player: PlayerId,
         seq: u32,
         now: u64,
     ) -> ContestClickReceipt {
         let mut events = Vec::new();
-        let (disposition, step) = contest_click(&mut self.state, player, seq, now, &mut events);
+        let (disposition, step) =
+            contest_click(&mut self.state, contest, player, seq, now, &mut events);
         self.publish_contest_step(step, events);
         match disposition {
             ClickDisposition::Counted => ContestClickReceipt::Counted,
@@ -227,6 +235,7 @@ impl GameSession {
             return;
         }
         let now = self.contest.clock.now_ms();
+        self.sync_contest_connections(now);
         let mut events = Vec::new();
         let step = start_contest(
             &mut self.state,
@@ -238,6 +247,34 @@ impl GameSession {
         let step = advance_contest(&mut self.state, now, &mut events);
         self.publish_contest_step(step, std::mem::take(&mut events));
         self.drive_ai_contestants(now);
+    }
+
+    /// Seed the contest with the seats' live connection state. A contest starts with
+    /// every contestant `Connected`, so a seat that was already away when the effect
+    /// resolved (or whose disconnect landed before the driver's first tick) must be
+    /// reported here, or its grace would never start and its absence would not pause
+    /// the clock. Idempotent: repeating a seat's current state is a no-op.
+    fn sync_contest_connections(&mut self, now: u64) {
+        let WaitingFor::PhysicalContest { contest, .. } = &self.state.waiting_for else {
+            return;
+        };
+        let away: Vec<PlayerId> = contest
+            .players()
+            .into_iter()
+            .filter(|player| {
+                !self.ai_seats.contains(player)
+                    && !self
+                        .connected
+                        .get(player.0 as usize)
+                        .copied()
+                        .unwrap_or(true)
+            })
+            .collect();
+        for player in away {
+            let mut events = Vec::new();
+            let step = set_contest_connection(&mut self.state, player, false, now, &mut events);
+            self.publish_contest_step(step, events);
+        }
     }
 
     /// AI seats click on the schedule `phase_ai::contest` plans for them.
@@ -351,7 +388,10 @@ impl GameSession {
         }
         self.contest.last_progress = Some(clicks);
         self.contest.last_progress_ms = now;
-        Some(ContestProgress { clicks })
+        Some(ContestProgress {
+            contest: contest.id,
+            clicks,
+        })
     }
 }
 
@@ -424,9 +464,12 @@ mod tests {
         let (code, _) = mgr.create_game(PlayerDeckPayload::default(), None);
         let session = mgr.session_exclusive(&code).expect("session exists");
         session.player_tokens = vec![HOST.to_string(), GUEST.to_string()];
+        // Both seats are attached: the driver seeds the contest from this table.
+        session.connected = vec![true, true];
         session.contest.policy = policy;
         session.state.waiting_for = WaitingFor::PhysicalContest {
             contest: Box::new(ContestState::new(
+                1,
                 ContestKind::Staring,
                 PlayerId(0),
                 PlayerId(1),
@@ -488,12 +531,12 @@ mod tests {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
         assert_eq!(
-            session.handle_contest_click("nobody", 1),
+            session.handle_contest_click("nobody", 1, 1),
             ContestClickReceipt::UnknownSeat
         );
         // Pending: not started, so not counted.
         assert_eq!(
-            session.handle_contest_click(HOST, 1),
+            session.handle_contest_click(HOST, 1, 1),
             ContestClickReceipt::Ignored
         );
 
@@ -503,11 +546,11 @@ mod tests {
         assert_eq!(phase(session), ContestPhase::Active);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 1),
+            session.handle_contest_click(HOST, 1, 1),
             ContestClickReceipt::Counted
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1),
+            session.handle_contest_click(HOST, 1, 1),
             ContestClickReceipt::Ignored,
             "a duplicate delivery is not counted twice"
         );
@@ -532,7 +575,7 @@ mod tests {
         session.tick_contest();
 
         let receipts: Vec<_> = (1..=50)
-            .map(|seq| session.handle_contest_click(HOST, seq))
+            .map(|seq| session.handle_contest_click(HOST, 1, seq))
             .collect();
         assert!(receipts.contains(&ContestClickReceipt::Throttled));
         assert!(
@@ -576,6 +619,132 @@ mod tests {
             panic!("contest ended");
         };
         assert!(contest.paused_since_ms.is_none());
+    }
+
+    /// A frame delayed from an earlier contest names that contest's identity; it is
+    /// dropped before it can count as activity — or consume the running contest's
+    /// sequence numbers — in the one that is Active now.
+    #[test]
+    fn a_click_addressed_to_another_contest_is_ignored() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        session.tick_contest();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.tick_contest();
+        assert_eq!(phase(session), ContestPhase::Active);
+
+        assert_eq!(
+            session.handle_contest_click(HOST, 99, 1),
+            ContestClickReceipt::Ignored,
+            "a prior contest's frame is not activity in this one"
+        );
+        assert_eq!(
+            session.handle_contest_click(HOST, 1, 1),
+            ContestClickReceipt::Counted,
+            "and it did not burn the sequence number the real click needs"
+        );
+    }
+
+    /// A seat already away when the contest starts must pause it and start its
+    /// reconnect grace — the engine begins every contestant `Connected`.
+    #[test]
+    fn a_seat_already_away_at_start_pauses_the_contest() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        session.connected[1] = false;
+
+        session.tick_contest();
+
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("contest ended");
+        };
+        assert!(
+            contest.paused_since_ms.is_some(),
+            "the absent seat pauses the clock from the first tick"
+        );
+        assert!(matches!(
+            contest.contestants[1].connection,
+            engine::types::contest::ContestantConnection::Disconnected { .. }
+        ));
+    }
+
+    /// A seat that stays away past the reconnect grace forfeits the CONTEST — the
+    /// game itself carries on — and the grace is measured from the moment the host
+    /// first saw it away, even when that was before the contest started.
+    #[test]
+    fn a_seat_away_past_grace_forfeits_the_contest_but_not_the_game() {
+        let policy = ContestPolicy {
+            config: ContestConfig {
+                reconnect_grace_ms: 30,
+                ..fast_policy().config
+            },
+            ..fast_policy()
+        };
+        let mut mgr = session_with_contest(policy);
+        let session = only_session(&mut mgr);
+        session.connected[1] = false;
+
+        session.tick_contest();
+        assert!(
+            session.contest_active(),
+            "within grace the contest only waits"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        session.tick_contest();
+
+        assert!(
+            !session.contest_active(),
+            "the absentee forfeited the contest"
+        );
+        assert!(
+            matches!(session.state.waiting_for, WaitingFor::Priority { .. }),
+            "the game continues: {:?}",
+            session.state.waiting_for
+        );
+    }
+
+    /// Returning within the grace resumes the contest and nobody forfeits.
+    #[test]
+    fn a_seat_returning_within_grace_resumes_without_forfeiting() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        session.connected[1] = false;
+        session.tick_contest();
+
+        session.mark_connected(PlayerId(1));
+        session.tick_contest();
+
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!("the contest ended although the seat returned in time");
+        };
+        assert!(contest.paused_since_ms.is_none(), "resumed");
+        assert_eq!(
+            contest.contestants[1].connection,
+            engine::types::contest::ContestantConnection::Connected
+        );
+    }
+
+    /// Ordinary actions are frozen while a takeback vote is open, so a vote opened
+    /// mid-contest would let the real-time contest keep mutating under it.
+    #[test]
+    fn a_takeback_cannot_be_requested_during_a_contest() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+
+        let result =
+            session.request_takeback(PlayerId(0), crate::takeback::RewindTarget::LastAction);
+
+        // The message pins the REASON: with no history the request would also fail
+        // ("no previous action"), so a bare `is_err` would pass vacuously.
+        let error = result.expect_err("the request is refused");
+        assert!(
+            error.contains("contest"),
+            "refused for the contest: {error}"
+        );
+        assert!(
+            session.pending_takeback.is_none(),
+            "and no vote was installed"
+        );
     }
 
     #[test]

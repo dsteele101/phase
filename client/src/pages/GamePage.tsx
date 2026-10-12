@@ -475,7 +475,7 @@ export function GamePage() {
         );
         break;
       case "contestProgress":
-        useContestStore.getState().setProgress(event.clicks);
+        useContestStore.getState().setProgress(event.contest, event.clicks);
         break;
       case "timerUpdate":
         setTimerRemaining((prev) => ({

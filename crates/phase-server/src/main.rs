@@ -7327,12 +7327,17 @@ const CONTEST_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 /// Start this game's contest driver task if a contest is running and none owns it.
 /// Idempotent — `GameSession::claim_contest_driver` hands the right out once per
 /// contest, so every action path may call this after it applies a game submission.
+// Same shape as the sibling transport fan-outs: every argument is a distinct shared
+// handle the driver task must own, and a bundling struct would only move the arity.
+#[allow(clippy::too_many_arguments)]
 async fn ensure_contest_driver(
     state: &SharedState,
     connections: &SharedConnections,
     draft_state: &SharedDraftState,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
+    lobby: &SharedLobby,
+    lobby_subscribers: &SharedLobbySubscribers,
     game_code: &str,
 ) {
     let claimed = match lock_session(state, game_code).await {
@@ -7348,6 +7353,8 @@ async fn ensure_contest_driver(
         draft_state.clone(),
         game_db.clone(),
         game_spectators.clone(),
+        lobby.clone(),
+        lobby_subscribers.clone(),
         game_code.to_string(),
     ));
 }
@@ -7356,12 +7363,16 @@ async fn ensure_contest_driver(
 /// server clock, publish every transition (and the AI follow-up after a settle)
 /// exactly like any other game transition, and stream lightweight click counters in
 /// between. Exits — releasing the driver claim — once no contest is running.
+// See `ensure_contest_driver`: one owned handle per argument.
+#[allow(clippy::too_many_arguments)]
 async fn run_contest_driver(
     state: SharedState,
     connections: SharedConnections,
     draft_state: SharedDraftState,
     game_db: SharedGameDb,
     game_spectators: SharedGameSpectators,
+    lobby: SharedLobby,
+    lobby_subscribers: SharedLobbySubscribers,
     game_code: String,
 ) {
     let mut ticker = tokio::time::interval(CONTEST_TICK);
@@ -7445,6 +7456,7 @@ async fn run_contest_driver(
                 for sender in players.values() {
                     let _ = sender.send(ServerMessage::ContestProgress {
                         full_key: Some(full_key.clone()),
+                        contest: progress.contest,
                         clicks: progress.clicks.to_vec(),
                     });
                 }
@@ -7476,6 +7488,13 @@ async fn run_contest_driver(
                     state.lock().await.remove_game(&game_code);
                     connections.lock().await.remove(&game_code);
                     game_spectators.lock().await.remove(&game_code);
+                    // A finished game must not stay joinable in the public lobby.
+                    delist_and_announce(
+                        &lobby,
+                        &lobby_subscribers,
+                        std::iter::once(game_code.as_str()),
+                    )
+                    .await;
                     return;
                 }
                 Err(error) => {
@@ -7498,6 +7517,7 @@ async fn run_contest_driver(
 /// never answered (a throttled or ignored click is not an error to the player), and
 /// the result reaches clients through the driver task's state transitions.
 async fn handle_contest_click(
+    contest: u64,
     seq: u32,
     state: &SharedState,
     connections: &SharedConnections,
@@ -7516,7 +7536,7 @@ async fn handle_contest_click(
     if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await {
         return;
     }
-    session.handle_contest_click(player_token, seq);
+    session.handle_contest_click(player_token, contest, seq);
 }
 
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
@@ -9479,6 +9499,8 @@ async fn handle_client_message(
                     draft_state,
                     game_db,
                     game_spectators,
+                    lobby,
+                    lobby_subscribers,
                     game_code,
                 )
                 .await;
@@ -9506,14 +9528,16 @@ async fn handle_client_message(
                     draft_state,
                     game_db,
                     game_spectators,
+                    lobby,
+                    lobby_subscribers,
                     game_code,
                 )
                 .await;
             }
         }
 
-        ClientMessage::ContestClick { seq } => {
-            handle_contest_click(seq, state, connections, tx, identity).await;
+        ClientMessage::ContestClick { contest, seq } => {
+            handle_contest_click(contest, seq, state, connections, tx, identity).await;
         }
 
         ClientMessage::Reconnect {
@@ -18389,10 +18413,19 @@ mod game_submission_tests {
         socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
         booster_pack_pool: Option<Vec<String>>,
     ) -> (String, String, server_core::FullSessionKey) {
+        create_started_ai_game_listed(socket, booster_pack_pool, false).await
+    }
+
+    /// [`create_started_ai_game`], optionally as a public room (listed in the lobby).
+    async fn create_started_ai_game_listed(
+        socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        booster_pack_pool: Option<Vec<String>>,
+        public: bool,
+    ) -> (String, String, server_core::FullSessionKey) {
         let create = ClientMessage::CreateGameWithSettings {
             deck: DeckData::default(),
             display_name: "Alice".to_string(),
-            public: false,
+            public,
             password: None,
             timer_seconds: None,
             player_count: 2,
@@ -18439,6 +18472,108 @@ mod game_submission_tests {
             }
         }
         created.expect("Full game identity")
+    }
+
+    /// Whether the lobby snapshot a fresh subscriber receives lists `code`.
+    async fn lobby_lists(url: &str, code: &str) -> bool {
+        let mut socket = connect_and_hello(url.to_string()).await;
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&ClientMessage::SubscribeLobby)
+                    .expect("subscribe json")
+                    .into(),
+            ))
+            .await
+            .expect("send subscribe");
+        loop {
+            if let ServerMessage::LobbyUpdate { games } = recv_server_message(&mut socket).await {
+                return games.iter().any(|game| game.game_code == code);
+            }
+        }
+    }
+
+    /// A contest that settles into the end of the game (the winner's opponent was at
+    /// 0 life, so the settlement's state-based-action pass ends it) is a TERMINAL AI
+    /// follow-up from the contest driver. The driver must retire the room through the
+    /// same authority as every other terminal path, `delist_and_announce`, so no lobby
+    /// row outlives the finished game. A game start already unregisters its row, so
+    /// this seeds one to stand for any entry left behind (an expiry-sweep race, a
+    /// relist) and checks the driver's retirement removes it.
+    #[tokio::test]
+    async fn a_game_that_ends_at_contest_settlement_is_delisted_from_the_lobby() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+
+        let (url, server, _temp_dir, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let mut host = connect_and_hello(url.clone()).await;
+            let (code, _token, _key) = create_started_ai_game_listed(&mut host, None, true).await;
+            app.lobby.lock().await.lobby_mut().register_game(
+                &code,
+                RegisterGameRequest {
+                    host_name: "Alice".to_string(),
+                    public: true,
+                    ..Default::default()
+                },
+                &SysEnv,
+            );
+            assert!(
+                lobby_lists(&url, &code).await,
+                "reach guard: a public row for the running game exists"
+            );
+
+            // Park the game on a contest between the human host (P0, who never clicks)
+            // and the AI (P1, who does), with the AI at 0 life: the AI wins the
+            // contest, and the pass that settles it ends the game.
+            {
+                let handle = app.sessions.lock().await.session(&code).expect("session");
+                let mut session = handle.lock().await;
+                let config = ContestConfig {
+                    countdown_ms: 1,
+                    inactivity_timeout_ms: 400,
+                    reconnect_grace_ms: 5_000,
+                    settle_window_ms: 0,
+                    max_active_ms: 60_000,
+                };
+                session.contest.policy.config = config;
+                session.state.players[1].life = 0;
+                session.state.waiting_for =
+                    engine::types::game_state::WaitingFor::PhysicalContest {
+                        contest: Box::new(ContestState::new(
+                            1,
+                            ContestKind::Staring,
+                            PlayerId(0),
+                            PlayerId(1),
+                            config,
+                        )),
+                        source_id: engine::types::identifiers::ObjectId(1),
+                    };
+            }
+            ensure_contest_driver(
+                &app.sessions,
+                &app.connections,
+                &app.draft_sessions,
+                &app.game_db,
+                &app.game_spectators,
+                &app.lobby,
+                &app.lobby_subscribers,
+                &code,
+            )
+            .await;
+
+            loop {
+                if !lobby_lists(&url, &code).await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(
+                app.sessions.lock().await.session(&code).is_none(),
+                "and the finished session was retired with it"
+            );
+        })
+        .await;
+        server.abort();
+        assert!(result.is_ok(), "the finished game was never delisted");
     }
 
     #[tokio::test]
