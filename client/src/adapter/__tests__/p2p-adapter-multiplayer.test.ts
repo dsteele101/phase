@@ -5591,6 +5591,16 @@ describe("P2P wire-protocol version gate", () => {
       expect.objectContaining({ type: "reconnectFailed" }),
     );
 
+    // Reject main and independently reserved payload histories, not only v119.
+    for (const earlierVersion of [115, 116, 117, 118]) {
+      const earlier = makeGuest();
+      await earlier.adapter.initialize();
+      await earlier.conn.simulateData(setupFrameAt(earlierVersion));
+      await expect(earlier.adapter.initializeGame()).rejects.toMatchObject({
+        code: "P2P_REJECTED",
+      });
+    }
+
     const admitting = makeGuest();
     await admitting.adapter.initialize();
     await admitting.conn.simulateData(setupFrameAt(120));

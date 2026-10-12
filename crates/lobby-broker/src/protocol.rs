@@ -76,6 +76,14 @@ pub struct TournamentRequestId(pub u64);
 ///      subset split — or any total smaller than the candidate count — can
 ///      never be confirmed. A silent capability loss the handshake must refuse
 ///      (see 24).
+/// 134 — `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
+///      omitted when absent) — the stack object a stack-using activation
+///      created (CR 602.2a), which an activation trigger's "copy that ability"
+///      names (CR 707.10). Events ride in `GameState` (`current_trigger_event`,
+///      each triggered ability's stored event), and an older peer drops the
+///      field silently, resolving those copies differently. Full-game peers and
+///      P2P move in lockstep (wire 116); no lobby carrier names it.
+///
 /// 133 — CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
 ///      gains `enter_with_choices` (the answers riding the entry event),
 ///      `PendingReplacement` gains `delivery_boundary` (the event the paused

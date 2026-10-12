@@ -14548,6 +14548,7 @@ fn auto_tap_mana_sources_inner(
                     player,
                     option.object_id,
                     crate::types::events::ActivatedAbilityKind::Mana,
+                    None,
                     crate::types::zones::Zone::Battlefield,
                     events,
                 );

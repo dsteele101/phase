@@ -113,6 +113,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       require every candidate to receive at least one; first contact
  *       rejects the skew instead. Bumped in lockstep with full-game
  *       protocol 138.
+ *  116 — game_setup and state_update carry GameState whose AbilityActivated trigger
+ *       events may name the activation's stack_entry. Bumped in lockstep with
+ *       full-game protocol 134.
  *  115 — game_setup and state_update carry GameState whose NamedChoice source
  *       binding may be PendingEntry (CR 614.12a pre-entry as-enters choices).
  *       Bumped in lockstep with full-game protocol 133.

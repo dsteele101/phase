@@ -3351,7 +3351,13 @@ mod tests {
     /// (CR 608.2d); a v137 peer cannot parse the tag and would misread the
     /// prompt as an announce-time division, so it must be refused before it
     /// receives v138 state.
-    /// The bump this number is at: CR 614.12a pre-entry as-enters choices —
+    /// v134: `GameEvent::AbilityActivated` gains
+    /// `stack_entry`, the stack object a stack-using activation created, carried
+    /// in `GameState`'s trigger events; an older peer drops it silently and
+    /// resolves an activation trigger's "copy that ability" differently, so it
+    /// must be refused before it receives v134 state.
+    ///
+    /// v133: CR 614.12a pre-entry as-enters choices —
     /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s
     /// `enter_with_choices` and `PendingReplacement::delivery_boundary`, all
     /// inside `GameState`; a v132 peer cannot parse the new binding tag, so it
