@@ -15160,8 +15160,8 @@ impl AbilityCost {
     /// other permanent. A cost that sacrifices nothing is vacuously `true`.
     ///
     /// `Composite` requires every leg; `OneOf` requires every branch, since
-    /// any of them may be the one paid (CR 118.12a classification, mirroring
-    /// `categories()`); `PerCounter` delegates to its base.
+    /// any of them may be the one paid (mirroring `categories()`);
+    /// `PerCounter` delegates to its base.
     pub fn sacrifices_only_source(&self) -> bool {
         match self {
             AbilityCost::Sacrifice(sacrifice) => matches!(sacrifice.target, TargetFilter::SelfRef),

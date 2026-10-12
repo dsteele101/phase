@@ -1,8 +1,14 @@
+use std::cell::Cell;
+use std::sync::Arc;
+use std::time::Duration;
+
 use engine::ai_support::flat_priority_actions;
+use engine::game::deck_loading::DeckEntry;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::card::CardFace;
+use engine::types::game_state::{GameState, PlayerDeckPool, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -1030,11 +1036,6 @@ fn certification_spends_from_the_shared_ensemble_budget() {
 /// Obstinate Baloth, Hymn's discard puts it onto the battlefield instead
 /// (CR 614.1a) and its controller gains 4 life — out of Spike's reach.
 fn hymn_over_hidden_card(hidden_is_baloth: bool) -> GameState {
-    use engine::game::deck_loading::DeckEntry;
-    use engine::types::card::CardFace;
-    use engine::types::game_state::PlayerDeckPool;
-    use std::sync::Arc;
-
     let mut scenario = scenario(1, 3);
     scenario.with_life(P0, 5);
     scenario.add_basic_land(P0, ManaColor::Black);
@@ -1365,32 +1366,30 @@ fn a_response_that_cannot_outlast_the_settlement_is_not_certified() {
 /// not accepted; the same agreement inside the budget is.
 #[test]
 fn a_sampled_certificate_completed_past_the_deadline_is_rejected() {
-    use std::cell::Cell;
-    use std::time::Duration;
-
     let mut scenario = scenario(1, 5);
     lightning_bolt(&mut scenario);
     let state = scenario.build().state().clone();
 
     let agree = |deadline, final_decision_overruns: bool| {
         let calls = Cell::new(0);
-        crate::search::agreed_across_samples(&state, P0, 2, deadline, |_| {
+        let decision = crate::search::agreed_across_samples(&state, P0, 2, deadline, |_| {
             calls.set(calls.get() + 1);
             if final_decision_overruns && calls.get() == 2 {
                 std::thread::sleep(Duration::from_millis(60));
             }
             Some(GameAction::PassPriority)
-        })
+        });
+        (decision, calls.get())
     };
 
     assert_eq!(
         agree(engine::util::Deadline::after(10_000), false),
-        Some(GameAction::PassPriority),
+        (Some(GameAction::PassPriority), 2),
         "in budget, the agreement is the decision"
     );
     assert_eq!(
         agree(engine::util::Deadline::after(30), true),
-        None,
+        (None, 2),
         "the final world began in budget and completed past it"
     );
 }
