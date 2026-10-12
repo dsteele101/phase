@@ -33388,7 +33388,7 @@ fn ir_facade_accepts_unattach_of_the_granting_equipment() {
             &granted.cost,
             Some(AbilityCost::Composite { costs }) if costs.iter().any(|cost| matches!(
                 cost,
-                AbilityCost::Unattach { target: Some(TargetFilter::GrantingObject) }
+                AbilityCost::Unattach { target: Some(TargetFilter::GrantingObject { bound: None }) }
             ))
         ),
         "{granted:#?}"
