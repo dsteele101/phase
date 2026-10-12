@@ -1013,6 +1013,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::PutAtLibraryPosition { .. }

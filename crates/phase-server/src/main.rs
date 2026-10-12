@@ -1286,6 +1286,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
@@ -1567,6 +1568,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
 
         ClientMessage::Action { .. }
         | ClientMessage::Interaction { .. }
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
@@ -7317,6 +7319,206 @@ async fn broadcast_ai_failure(
     }
 }
 
+/// How often a running contest evaluates timeouts and flushes its transitions.
+/// Short against the 2s default inactivity timeout so a lapse resolves promptly,
+/// long enough that an idle contest costs one cheap lock per tick.
+const CONTEST_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Start this game's contest driver task if a contest is running and none owns it.
+/// Idempotent — `GameSession::claim_contest_driver` hands the right out once per
+/// contest, so every action path may call this after it applies a game submission.
+async fn ensure_contest_driver(
+    state: &SharedState,
+    connections: &SharedConnections,
+    draft_state: &SharedDraftState,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+) {
+    let claimed = match lock_session(state, game_code).await {
+        Ok(mut session) => session.claim_contest_driver(),
+        Err(_) => false,
+    };
+    if !claimed {
+        return;
+    }
+    tokio::spawn(run_contest_driver(
+        state.clone(),
+        connections.clone(),
+        draft_state.clone(),
+        game_db.clone(),
+        game_spectators.clone(),
+        game_code.to_string(),
+    ));
+}
+
+/// Drive one game's contests to completion: tick the engine state machine on the
+/// server clock, publish every transition (and the AI follow-up after a settle)
+/// exactly like any other game transition, and stream lightweight click counters in
+/// between. Exits — releasing the driver claim — once no contest is running.
+async fn run_contest_driver(
+    state: SharedState,
+    connections: SharedConnections,
+    draft_state: SharedDraftState,
+    game_db: SharedGameDb,
+    game_spectators: SharedGameSpectators,
+    game_code: String,
+) {
+    let mut ticker = tokio::time::interval(CONTEST_TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let tick = {
+            let Ok(mut session) = lock_session(&state, &game_code).await else {
+                return;
+            };
+            session.tick_contest();
+            let drain = session.drain_contest_outbox();
+            let progress = session.contest_progress();
+            let done = !session.contest_active();
+            let Some(full_key) = session.full_runtime.as_ref().map(|r| r.key.clone()) else {
+                session.release_contest_driver();
+                return;
+            };
+            let session = &mut *session;
+            let eliminated = session.state.eliminated_players.clone();
+            let rewind_targets = session.rewind_options();
+            let player_count = session.player_count;
+            let game_over_winner = match &session.state.waiting_for {
+                engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                _ => None,
+            };
+            let terminal = if let Some(winner) = game_over_winner {
+                let ranked_result = ranked_duel_players(session).and_then(|players| {
+                    ranked_result_for_duel(&game_db, &game_code, &players, winner)
+                });
+                terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                    .map(Some)
+            } else {
+                if !drain.transitions.is_empty() {
+                    persist_full_session_async(&game_db, session);
+                }
+                Ok(None)
+            };
+            if done {
+                session.release_contest_driver();
+            }
+            (
+                full_key,
+                player_count,
+                eliminated,
+                rewind_targets,
+                drain,
+                progress,
+                done,
+                game_over_winner,
+                terminal,
+            )
+        };
+        let (
+            full_key,
+            player_count,
+            eliminated,
+            rewind_targets,
+            drain,
+            progress,
+            done,
+            game_over_winner,
+            terminal,
+        ) = tick;
+
+        broadcast_ai_results(
+            &connections,
+            &game_spectators,
+            &full_key,
+            player_count,
+            &eliminated,
+            &drain.transitions,
+            &rewind_targets,
+        )
+        .await;
+        broadcast_ai_failure(&connections, &game_code, drain.ai_failure).await;
+
+        if let Some(progress) = progress {
+            let conns = connections.lock().await;
+            if let Some(players) = conns.get(&game_code) {
+                for sender in players.values() {
+                    let _ = sender.send(ServerMessage::ContestProgress {
+                        full_key: Some(full_key.clone()),
+                        clicks: progress.clicks.to_vec(),
+                    });
+                }
+            }
+        }
+
+        match terminal {
+            Ok(Some(artifact)) => match prepare_full_terminal(&game_db, artifact).await {
+                Ok(deliveries) => {
+                    {
+                        let conns = connections.lock().await;
+                        if let Some(players) = conns.get(&game_code) {
+                            for (player, delivery) in &deliveries {
+                                if let Some(sender) = players.get(player) {
+                                    let _ = sender.send(ServerMessage::TerminalResult {
+                                        delivery: Some(delivery.clone()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    report_draft_game_over(
+                        &draft_state,
+                        &connections,
+                        &game_code,
+                        game_over_winner.flatten(),
+                    )
+                    .await;
+                    state.lock().await.remove_game(&game_code);
+                    connections.lock().await.remove(&game_code);
+                    game_spectators.lock().await.remove(&game_code);
+                    return;
+                }
+                Err(error) => {
+                    error!(game = %game_code, %error, "contest terminal preparation failed");
+                }
+            },
+            Ok(None) => {}
+            Err(error) => {
+                error!(game = %game_code, %error, "contest terminal artifact failed");
+            }
+        }
+
+        if done {
+            return;
+        }
+    }
+}
+
+/// Apply one click from the authenticated seat. A click is fire-and-forget: it is
+/// never answered (a throttled or ignored click is not an error to the player), and
+/// the result reaches clients through the driver task's state transitions.
+async fn handle_contest_click(
+    seq: u32,
+    state: &SharedState,
+    connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+    identity: &SocketIdentity,
+) {
+    let (Some(game_code), Some(player_token)) = (
+        identity.game_code.as_deref(),
+        identity.player_token.as_deref(),
+    ) else {
+        return;
+    };
+    let Ok(mut session) = lock_session(state, game_code).await else {
+        return;
+    };
+    if !full_socket_is_current_while_state_locked(&session, connections, identity, tx).await {
+        return;
+    }
+    session.handle_contest_click(player_token, seq);
+}
+
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
 /// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
@@ -7504,6 +7706,8 @@ fn operation_failed_message(msg: &ClientMessage, message: String) -> Option<Serv
         | ClientMessage::JoinGameWithPassword { .. }
         | ClientMessage::LookupJoinTarget { .. }
         | ClientMessage::Emote { .. }
+        // Fire-and-forget: a click is never answered, so there is no promise to settle.
+        | ClientMessage::ContestClick { .. }
         | ClientMessage::SpectatorJoin { .. }
         | ClientMessage::Ping { .. }
         | ClientMessage::UpdateLobbyMetadata { .. }
@@ -9268,6 +9472,17 @@ async fn handle_client_message(
                 identity,
             )
             .await;
+            if let Some(game_code) = identity.game_code.as_deref() {
+                ensure_contest_driver(
+                    state,
+                    connections,
+                    draft_state,
+                    game_db,
+                    game_spectators,
+                    game_code,
+                )
+                .await;
+            }
         }
 
         ClientMessage::Interaction { submission } => {
@@ -9284,6 +9499,21 @@ async fn handle_client_message(
                 identity,
             )
             .await;
+            if let Some(game_code) = identity.game_code.as_deref() {
+                ensure_contest_driver(
+                    state,
+                    connections,
+                    draft_state,
+                    game_db,
+                    game_spectators,
+                    game_code,
+                )
+                .await;
+            }
+        }
+
+        ClientMessage::ContestClick { seq } => {
+            handle_contest_click(seq, state, connections, tx, identity).await;
         }
 
         ClientMessage::Reconnect {

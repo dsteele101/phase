@@ -2060,6 +2060,133 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }
 }
 
+thread_local! {
+    /// AI seats' click schedules for the contest in progress (Eye to Eye / Mouth to
+    /// Mouth). Per-thread like the game state; cleared whenever no contest runs.
+    static AI_CONTESTANTS: RefCell<phase_ai::contest::AiContestants> =
+        RefCell::new(phase_ai::contest::AiContestants::default());
+}
+
+/// One click the local host collected, stamped with its own clock.
+#[derive(serde::Deserialize)]
+struct ContestClickInput {
+    player: u8,
+    seq: u32,
+    at_ms: f64,
+}
+
+/// What a `drive_contest_js` call did, for the JS driver to decide whether to
+/// refresh the store. `step` mirrors `engine::game::contest::ContestStep`.
+#[derive(serde::Serialize)]
+struct ContestDriveOutcome {
+    step: &'static str,
+    events: Vec<engine::types::events::GameEvent>,
+    log_entries: Vec<engine::types::log::GameLogEntry>,
+}
+
+fn contest_step_label(step: engine::game::contest::ContestStep) -> &'static str {
+    use engine::game::contest::ContestStep;
+    match step {
+        ContestStep::NotInContest => "NotInContest",
+        ContestStep::Unchanged => "Unchanged",
+        ContestStep::Updated => "Updated",
+        ContestStep::Settled => "Settled",
+    }
+}
+
+/// Host the running Eye to Eye / Mouth to Mouth contest locally (single-player and
+/// P2P-host engines have no server to stamp time). The JS driver passes its own
+/// monotonic `now_ms` (`performance.now()`), the seats that are AI, and any clicks it
+/// collected since the last call — each stamped with its own `at_ms`. Clicks are
+/// applied in order, then the clock is advanced to `now_ms`, exactly as the server
+/// does; the engine's state machine decides everything.
+///
+/// A contest's real-time result cannot be replayed from a recorded action list, so
+/// the first drive call invalidates an in-progress replay recording (the same
+/// treatment debug actions get).
+#[wasm_bindgen]
+pub fn drive_contest_js(now_ms: f64, ai_players: Vec<u8>, clicks: JsValue) -> JsValue {
+    use engine::game::contest::{advance_contest, contest_click, start_contest, ContestStep};
+    let clicks: Vec<ContestClickInput> = if clicks.is_undefined() || clicks.is_null() {
+        Vec::new()
+    } else {
+        match serde_wasm_bindgen::from_value(clicks) {
+            Ok(clicks) => clicks,
+            Err(_) => return JsValue::from_str("invalid contest clicks"),
+        }
+    };
+    let ai_players: Vec<PlayerId> = ai_players.into_iter().map(PlayerId).collect();
+    let now = now_ms.max(0.0) as u64;
+    let outcome = with_state_mut(|state| {
+        let mut events = Vec::new();
+        let mut strongest = ContestStep::NotInContest;
+        let mut note = |step: ContestStep| {
+            let rank = |s: ContestStep| match s {
+                ContestStep::NotInContest => 0,
+                ContestStep::Unchanged => 1,
+                ContestStep::Updated => 2,
+                ContestStep::Settled => 3,
+            };
+            if rank(step) > rank(strongest) {
+                strongest = step;
+            }
+        };
+        if matches!(
+            state.waiting_for,
+            engine::types::game_state::WaitingFor::PhysicalContest { .. }
+        ) {
+            REPLAY_LOG.with(|cell| cell.set(None));
+        }
+        let config = engine::types::contest::ContestConfig::default();
+        note(start_contest(state, config, now, &mut events));
+        for click in clicks {
+            let (_, step) = contest_click(
+                state,
+                PlayerId(click.player),
+                click.seq,
+                click.at_ms.max(0.0) as u64,
+                &mut events,
+            );
+            note(step);
+        }
+        note(advance_contest(state, now, &mut events));
+        AI_CONTESTANTS.with(|cell| {
+            let mut ai = cell.borrow_mut();
+            let mut ai_steps = Vec::new();
+            ai.click_due(
+                state,
+                &ai_players,
+                now,
+                &mut rand::rng(),
+                |step, step_events| ai_steps.push((step, step_events)),
+            );
+            for (step, step_events) in ai_steps {
+                events.extend(step_events);
+                note(step);
+            }
+        });
+        let log_entries = if events.is_empty() {
+            Vec::new()
+        } else {
+            engine::game::log::resolve_log_entries(&events, state, state)
+        };
+        ContestDriveOutcome {
+            step: contest_step_label(strongest),
+            events,
+            log_entries,
+        }
+    });
+    match outcome {
+        Ok(outcome) => {
+            if outcome.step != "NotInContest" && outcome.step != "Unchanged" {
+                invalidate_ai_proposals();
+            }
+            to_js(&outcome)
+        }
+        Err(error) => error,
+    }
+}
+
 /// Submit one opaque, engine-authored interaction response. The browser never
 /// materializes a `GameAction`; only a successful engine reducer result exposes
 /// the exact action to the replay recorder.

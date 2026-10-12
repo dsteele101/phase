@@ -864,6 +864,7 @@ where
         | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
+        | Effect::PhysicalContest { .. }
         | Effect::Behold { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }

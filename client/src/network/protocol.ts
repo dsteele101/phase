@@ -106,6 +106,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  114 — game_setup and state_update carry GameState whose waiting_for may be
+ *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
+ *       abilities may hold Effect::PhysicalContest; a v113 peer cannot parse
+ *       either tag. Bumped in lockstep with full-game protocol 132.
  *  113 — game_setup and state_update carry GameState whose ability player scopes
  *       may hold PlayerFilter AnyOf / TargetPlayer. Bumped in lockstep with
  *       full-game protocol 131.
@@ -653,7 +657,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 113 as const;
+export const WIRE_PROTOCOL_VERSION = 114 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -674,6 +678,10 @@ export type P2PMessage = P2PAuthorityWire & (
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  /** One click in the running Eye to Eye / Mouth to Mouth contest. No `senderPlayerId`
+   *  and no timestamp: the host reads the seat from the authenticated connection and
+   *  stamps the instant on its own clock, so a guest can claim neither. */
+  | { type: "contest_click"; seq: number }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   /** Carries the request VERBATIM. No `senderPlayerId`: the host reads the
@@ -772,6 +780,7 @@ const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "contest_click",
   "interaction",
   "preview_mana_payment",
   "preview_interaction",

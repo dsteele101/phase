@@ -2516,6 +2516,81 @@ export type MulliganDecisionPhase =
   | { type: "Declare" }
   | { type: "BottomCards"; count: number; then: PendingMulliganAction };
 
+/** One click collected by a local contest host, stamped with the host's own clock. */
+export interface ContestClickInput {
+  player: PlayerId;
+  seq: number;
+  at_ms: number;
+}
+
+/** What one local-host contest tick did. `step` mirrors the engine's `ContestStep`. */
+export interface ContestDriveResult {
+  step: "NotInContest" | "Unchanged" | "Updated" | "Settled";
+  events: GameEvent[];
+  log_entries: GameLogEntry[];
+}
+
+/** Which printed contest is being adapted. Presentation only. */
+export type ContestKind = "Staring" | "BreathHolding";
+
+export type ContestPhase =
+  | "Pending"
+  | "Preparing"
+  | "Active"
+  | "Resolving"
+  | "Completed"
+  | "Cancelled";
+
+export type ContestLossReason = "Inactivity" | "Forfeit";
+
+export type ContestOutcome =
+  | { Decided: { winner: PlayerId; loser: PlayerId; reason: ContestLossReason } }
+  | "Tie";
+
+export type ContestCancelReason =
+  | "BothDisconnected"
+  | "TimeLimit"
+  | "ParticipantLeftGame"
+  | "HostAborted";
+
+export type ContestResult = { Outcome: ContestOutcome } | { Cancelled: ContestCancelReason };
+
+export type ContestantConnection = "Connected" | { Disconnected: { since_ms: number } };
+
+export interface Contestant {
+  player: PlayerId;
+  /** Valid clicks counted while Active (display only — never decides the winner). */
+  clicks: number;
+  last_activity_ms: number;
+  last_seq?: number | null;
+  connection: ContestantConnection;
+}
+
+export interface ContestConfig {
+  countdown_ms: number;
+  inactivity_timeout_ms: number;
+  reconnect_grace_ms: number;
+  settle_window_ms: number;
+  max_active_ms: number;
+}
+
+/**
+ * Engine-owned contest state. Times are in the host's monotonic millisecond
+ * timebase (`clock_ms` is the host instant this snapshot was produced at), so a
+ * client derives "time until GO" as `go_at_ms - clock_ms` and counts down from the
+ * moment it received the snapshot — it never compares against its own clock.
+ */
+export interface ContestState {
+  kind: ContestKind;
+  phase: ContestPhase;
+  config: ContestConfig;
+  contestants: [Contestant, Contestant];
+  clock_ms: number;
+  go_at_ms?: number | null;
+  paused_since_ms?: number | null;
+  result?: ContestResult | null;
+}
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
@@ -2747,6 +2822,10 @@ export type WaitingFor =
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
+  // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
+  // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
+  // engine's state machine. See `ContestState`.
+  | { type: "PhysicalContest"; data: { contest: ContestState; source_id: ObjectId } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
       remaining_votes: number;
@@ -3491,6 +3570,10 @@ export type GameEvent =
   // results tables, aggregates, and AI must not read it. `result` is always
   // the natural value (modifiers never touch ignored rolls).
   | { type: "DieRollIgnored"; data: { player_id: PlayerId; sides: number; result: number } }
+  // Eye to Eye / Mouth to Mouth: the contest between `participants` (controller first)
+  // began / reached a terminal result (a decided win, a tie, or a technical cancellation).
+  | { type: "PhysicalContestStarted"; data: { kind: ContestKind; participants: [PlayerId, PlayerId] } }
+  | { type: "PhysicalContestResolved"; data: { kind: ContestKind; participants: [PlayerId, PlayerId]; result: ContestResult } }
   // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
   // preserves the round boundaries (round 1 = every seat; each later round = the
   // previous round's tied-max group that rerolled); `winner` is the engine's
@@ -5106,6 +5189,24 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /**
+   * Submit one click in the running Eye to Eye / Mouth to Mouth contest for the
+   * local seat. Fire-and-forget: the host stamps the instant and decides the
+   * winner, so a click carries only a per-contest sequence number (duplicate and
+   * reorder protection). Transports that cannot host a contest omit it.
+   */
+  submitContestClick?(seq: number): void;
+  /**
+   * Local engines only (single-player WASM, P2P host): there is no server to host
+   * the running contest, so the client drives it. `nowMs` and each click's `at_ms`
+   * are the client's own monotonic clock; `aiPlayers` are the seats the engine
+   * should click for. Server transports omit this — the server drives.
+   */
+  driveContest?(
+    nowMs: number,
+    aiPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+  ): Promise<ContestDriveResult>;
   /** Submit an opaque response from the engine's current interaction projection. */
   submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**

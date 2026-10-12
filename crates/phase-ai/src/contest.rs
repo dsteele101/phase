@@ -1,0 +1,184 @@
+//! AI participation in the online sustained-clicking contests (Eye to Eye,
+//! Mouth to Mouth — see `engine::types::contest`).
+//!
+//! An AI seat never receives a `GameAction` while the game is parked on
+//! `WaitingFor::PhysicalContest`; the host drives the contest. This module is the
+//! pure policy a host consults to decide *when the AI clicks*. It keeps a steady,
+//! human-ish cadence and runs out of stamina after a random stretch, so the AI
+//! can both win and lose. It reads no clock — the host passes the same
+//! millisecond timebase it stamps human clicks with.
+
+use std::collections::HashMap;
+
+use engine::game::contest::{contest_click, ContestStep};
+use engine::types::contest::ContestPhase;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::player::PlayerId;
+use rand::Rng;
+
+/// Fastest and slowest AI click cadence, in milliseconds between clicks.
+const MIN_INTERVAL_MS: u64 = 220;
+const MAX_INTERVAL_MS: u64 = 380;
+/// How long past GO the AI keeps clicking before it gives up.
+const MIN_STAMINA_MS: u64 = 2_500;
+const MAX_STAMINA_MS: u64 = 9_000;
+
+/// One AI contestant's click schedule for a single contest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestClicker {
+    interval_ms: u64,
+    quit_at_ms: u64,
+    next_click_ms: u64,
+    seq: u32,
+}
+
+impl ContestClicker {
+    /// Plan a schedule for a contest whose GO instant is `go_at_ms`. The cadence is
+    /// capped at half the inactivity timeout so a configured short timeout can never
+    /// make the AI lose by merely clicking at its natural rate.
+    pub fn new(go_at_ms: u64, inactivity_timeout_ms: u64, rng: &mut impl Rng) -> Self {
+        let max_interval = MAX_INTERVAL_MS.min((inactivity_timeout_ms / 2).max(1));
+        let min_interval = MIN_INTERVAL_MS.min(max_interval);
+        Self {
+            interval_ms: rng.random_range(min_interval..=max_interval),
+            quit_at_ms: go_at_ms + rng.random_range(MIN_STAMINA_MS..=MAX_STAMINA_MS),
+            next_click_ms: go_at_ms,
+            seq: 0,
+        }
+    }
+
+    /// The next click's sequence number if one is due at `now_ms`. At most one
+    /// click per poll, so a late tick never produces a burst.
+    pub fn poll(&mut self, now_ms: u64) -> Option<u32> {
+        if now_ms >= self.quit_at_ms || now_ms < self.next_click_ms {
+            return None;
+        }
+        self.next_click_ms = now_ms + self.interval_ms;
+        self.seq += 1;
+        Some(self.seq)
+    }
+
+    /// The instant the AI stops clicking.
+    pub fn quit_at_ms(&self) -> u64 {
+        self.quit_at_ms
+    }
+}
+
+/// The AI seats' clickers for the contest currently running in one game. Shared by
+/// every host that can seat an AI (phase-server sessions, the WASM engine) so they
+/// all click on the same schedule.
+#[derive(Debug, Default)]
+pub struct AiContestants {
+    clickers: HashMap<PlayerId, ContestClicker>,
+}
+
+impl AiContestants {
+    /// Forget every schedule — call when no contest is running, so the next contest
+    /// plans fresh ones.
+    pub fn clear(&mut self) {
+        self.clickers.clear();
+    }
+
+    /// Submit every AI click due at `now_ms` for the running contest. Each
+    /// resulting engine step is reported through `on_step` together with the events
+    /// it emitted, so the host can publish it exactly as it publishes a human click.
+    /// A no-op outside an Active contest.
+    pub fn click_due(
+        &mut self,
+        state: &mut GameState,
+        ai_players: &[PlayerId],
+        now_ms: u64,
+        rng: &mut impl Rng,
+        mut on_step: impl FnMut(ContestStep, Vec<GameEvent>),
+    ) {
+        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+            self.clear();
+            return;
+        };
+        if contest.phase != ContestPhase::Active {
+            return;
+        }
+        let go_at = contest.go_at_ms.unwrap_or(now_ms);
+        let timeout = contest.config.inactivity_timeout_ms;
+        let participating: Vec<PlayerId> = contest
+            .players()
+            .into_iter()
+            .filter(|player| ai_players.contains(player))
+            .collect();
+        for player in participating {
+            let clicker = self
+                .clickers
+                .entry(player)
+                .or_insert_with(|| ContestClicker::new(go_at, timeout, rng));
+            if let Some(seq) = clicker.poll(now_ms) {
+                let mut events = Vec::new();
+                let (_, step) = contest_click(state, player, seq, now_ms, &mut events);
+                on_step(step, events);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    fn clicker(timeout: u64) -> ContestClicker {
+        ContestClicker::new(1_000, timeout, &mut StdRng::seed_from_u64(7))
+    }
+
+    #[test]
+    fn clicks_steadily_from_go_and_never_leaves_the_inactivity_window() {
+        let mut c = clicker(2_000);
+        let mut last = None;
+        let mut clicks = 0;
+        for now in (1_000..c.quit_at_ms()).step_by(10) {
+            if c.poll(now).is_some() {
+                if let Some(prev) = last {
+                    assert!(now - prev < 2_000, "gap {} exceeds the timeout", now - prev);
+                }
+                last = Some(now);
+                clicks += 1;
+            }
+        }
+        assert!(clicks >= 5, "an AI that clicks too rarely is not a contest");
+    }
+
+    #[test]
+    fn stops_after_its_stamina_runs_out() {
+        let mut c = clicker(2_000);
+        let quit = c.quit_at_ms();
+        assert!((1_000 + MIN_STAMINA_MS..=1_000 + MAX_STAMINA_MS).contains(&quit));
+        assert_eq!(c.poll(quit), None);
+        assert_eq!(c.poll(quit + 5_000), None);
+    }
+
+    #[test]
+    fn does_not_click_before_go_and_never_bursts() {
+        let mut c = clicker(2_000);
+        assert_eq!(c.poll(999), None);
+        assert_eq!(c.poll(1_000), Some(1));
+        assert_eq!(c.poll(1_001), None, "one click per interval");
+    }
+
+    #[test]
+    fn a_short_timeout_caps_the_cadence() {
+        let c = clicker(300);
+        assert!(c.interval_ms <= 150);
+    }
+
+    #[test]
+    fn sequence_numbers_strictly_increase() {
+        let mut c = clicker(2_000);
+        let mut prev = 0;
+        for now in (1_000..c.quit_at_ms()).step_by(5) {
+            if let Some(seq) = c.poll(now) {
+                assert!(seq > prev);
+                prev = seq;
+            }
+        }
+    }
+}

@@ -439,6 +439,13 @@ pub enum ClientMessage {
     Emote {
         emote: String,
     },
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries only a
+    /// per-contest sequence number (duplicate / reorder protection): the sender is
+    /// the authenticated seat and the instant is the server's own clock, so a client
+    /// can claim neither a win nor a timestamp.
+    ContestClick {
+        seq: u32,
+    },
     SpectatorJoin {
         game_code: String,
     },
@@ -972,6 +979,13 @@ pub enum ServerMessage {
     Emote {
         from_player: PlayerId,
         emote: String,
+    },
+    /// Live click counters of the running contest, sent between full state
+    /// transitions (display only — the counts never decide the winner).
+    ContestProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        clicks: Vec<(PlayerId, u32)>,
     },
     TimerUpdate {
         player: PlayerId,
@@ -2113,6 +2127,38 @@ mod tests {
             ServerMessage::Emote { from_player, emote } => {
                 assert_eq!(from_player, PlayerId(1));
                 assert_eq!(emote, "Nice!");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// `ContestClick` carries only a sequence number: no seat, timestamp or count for a
+    /// client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
+    #[test]
+    fn client_message_contest_click_roundtrips_with_only_a_sequence() {
+        let json = serde_json::to_string(&ClientMessage::ContestClick { seq: 7 }).unwrap();
+        assert_eq!(json, r#"{"type":"ContestClick","data":{"seq":7}}"#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::ContestClick { seq: 7 }
+        ));
+    }
+
+    #[test]
+    fn server_message_contest_progress_roundtrips() {
+        let msg = ServerMessage::ContestProgress {
+            full_key: None,
+            clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestProgress","data":{"clicks":[[0,12],[1,9]]}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::ContestProgress { clicks, .. } => {
+                assert_eq!(clicks, vec![(PlayerId(0), 12), (PlayerId(1), 9)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -3517,8 +3563,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_131_for_coordinated_player_set() {
-        assert_eq!(PROTOCOL_VERSION, 131);
+    fn protocol_version_is_132_for_physical_contest() {
+        assert_eq!(PROTOCOL_VERSION, 132);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3529,7 +3575,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_131_for_coordinated_player_set` stays
+    /// `protocol_version_is_132_for_physical_contest` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

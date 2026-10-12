@@ -2,6 +2,8 @@ import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
   AiProposalSubmission,
+  ContestClickInput,
+  ContestDriveResult,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -922,6 +924,8 @@ export class P2PHostAdapter implements EngineAdapter {
   private readonly engineClaim = Symbol("p2p-host-engine-claim");
 
   private guestSessions = new Map<PlayerId, PeerSession>();
+  /** Guests' contest clicks awaiting the next `driveContest` tick. */
+  private pendingGuestContestClicks: ContestClickInput[] = [];
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -2445,6 +2449,43 @@ export class P2PHostAdapter implements EngineAdapter {
       return transition.result;
   }
 
+  /**
+   * Host a running Eye to Eye / Mouth to Mouth contest. Guests' clicks arrive as
+   * `contest_click` frames and wait here until the next tick; the AI seats are the
+   * engine's own `Ai` seats (the caller's `aiPlayers` guess cannot know which
+   * non-host seats are human guests). A step that changes the contest is broadcast to
+   * the guests like any other transition, and a settle hands the AI its turn back.
+   */
+  async driveContest(
+    nowMs: number,
+    _aiPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+  ): Promise<ContestDriveResult> {
+    this.assertNotDisposed();
+    const idle: ContestDriveResult = { step: "NotInContest", events: [], log_entries: [] };
+    if (!this.ownsAuthority() || this.nativeBridge || this.gameRunState !== "running") {
+      return idle;
+    }
+    const aiPlayers = this.pregameSeatState.seats.flatMap((seat, index) =>
+      seat.type === "Ai" ? [index] : [],
+    );
+    const guestClicks = this.pendingGuestContestClicks.splice(0);
+    const ordered = [...clicks, ...guestClicks].sort((a, b) => a.at_ms - b.at_ms);
+    const result = await this.wasm.driveContest(nowMs, aiPlayers, ordered);
+    if (result.step === "Updated" || result.step === "Settled") {
+      const transition = this.stampBrowserMutation({
+        events: result.events,
+        log_entries: result.log_entries,
+      });
+      await this.broadcastStateUpdate(transition);
+      if (result.step === "Settled") {
+        await this.runAiLoop();
+        void this.persistAuthoritativeState();
+      }
+    }
+    return result;
+  }
+
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     // Host's own UI submissions: `actor` is the host's local PlayerId (the
     // caller — gameStore — derived it from `getPlayerId()`). The host is
@@ -3385,6 +3426,21 @@ export class P2PHostAdapter implements EngineAdapter {
         }
         break;
       }
+      case "contest_click": {
+        // Fire-and-forget, never answered. The seat is the authenticated session's
+        // (`pid`), the instant is this host's own clock, and the engine's state
+        // machine rejects anything stale, duplicate, early or late — so a guest can
+        // claim neither a win nor a timestamp. An eliminated or paused seat's click
+        // is simply dropped.
+        if (this.eliminatedSeats.has(pid) || this.gameRunState !== "running") return;
+        if (typeof msg.seq !== "number" || !Number.isFinite(msg.seq)) return;
+        this.pendingGuestContestClicks.push({
+          player: pid,
+          seq: msg.seq,
+          at_ms: performance.now(),
+        });
+        break;
+      }
       case "preview_mana_payment": {
         const session = this.guestSessions.get(pid);
         if (!session) return;
@@ -4169,6 +4225,12 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   async initializeGame(): Promise<SubmitResult> {
     return this.gameSetupPromise;
+  }
+
+  /** One click in the running contest; the host stamps it on arrival. Never queued. */
+  submitContestClick(seq: number): void {
+    if (!this.session || !this.assignedPlayerId) return;
+    this.send({ type: "contest_click", seq });
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {

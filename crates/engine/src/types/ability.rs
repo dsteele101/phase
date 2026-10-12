@@ -20080,6 +20080,25 @@ pub enum Effect {
         )]
         player: TargetFilter,
     },
+    /// "You and [player] have a [staring | breath-holding] contest" (Eye to Eye,
+    /// Mouth to Mouth). The resolving ability's controller and `contestant` take
+    /// part in a real-time sustained-clicking adaptation of the physical contest
+    /// (see `types::contest`): the resolver pauses on
+    /// `WaitingFor::PhysicalContest`, the host feeds timestamped clicks, and the
+    /// settled outcome sets `optional_effect_performed` for the controller so the
+    /// existing "if you win" rider (`AbilityCondition::EventOutcomeWon`) gates the
+    /// rest of the chain. A tie or a technical cancellation leaves the rider
+    /// ungated-false, so nothing happens.
+    ///
+    /// `contestant` is the second participant, resolved through
+    /// `resolve_player_for_context_ref` ("target creature's controller" is
+    /// `ParentTargetController`; "that player" is the previously declared player
+    /// target). The Comprehensive Rules define no physical contests, so there is
+    /// no CR number for the contest itself.
+    PhysicalContest {
+        kind: crate::types::contest::ContestKind,
+        contestant: TargetFilter,
+    },
     /// Heist — designed-for-digital (MTG Arena) keyword action. NOT in the
     /// Comprehensive Rules; operates per the Arena programmed rules (see
     /// `docs/MagicCompRules.txt` — absent). Reminder text:
@@ -22577,6 +22596,9 @@ impl Effect {
             // target via the same `is_context_ref()` filter the other player-axis
             // effects use.
             | Effect::Discover { player, .. }
+            // The second contestant surfaces like any other player-axis effect: a
+            // context ref (`ParentTargetController`) adds no slot of its own.
+            | Effect::PhysicalContest { contestant: player, .. }
             | Effect::BlightEffect { player, .. }
             // CR 701.47a: Amass's performer. The default `Controller` is a
             // context ref, but a subject-targeted form ("target player amasses
@@ -23310,6 +23332,8 @@ impl Effect {
             // library. That player may then put that card on the bottom of their
             // library." Either way the card stays in its own library.
             Effect::Clash => false,
+            // No card moves: the contest is a real-time click race between two players.
+            Effect::PhysicalContest { .. } => false,
 
             // CR 701.24a: shuffling randomizes "the cards within it" — a reorder,
             // not a move. `Effect::Shuffle` carries a player filter and no
@@ -24183,6 +24207,7 @@ impl Effect {
             | Effect::ProliferateTarget { .. }
             | Effect::Populate
             | Effect::Clash
+            | Effect::PhysicalContest { .. }
             | Effect::Behold { .. }
             | Effect::EndTheTurn
             | Effect::EndCombatPhase
@@ -24603,6 +24628,7 @@ impl Effect {
             | Effect::ExileFromTopUntil { .. }
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -24871,6 +24897,7 @@ impl Effect {
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::CreateEmblem { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::DraftFromSpellbook { .. }
@@ -25136,6 +25163,7 @@ impl Effect {
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::CreateEmblem { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::DraftFromSpellbook { .. }
@@ -25391,6 +25419,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ExileFromTopUntil { .. } => "ExileFromTopUntil",
         Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
+        Effect::PhysicalContest { .. } => "PhysicalContest",
         Effect::Heist { .. } => "Heist",
         Effect::HeistExile => "HeistExile",
         Effect::Cascade => "Cascade",
@@ -25643,6 +25672,7 @@ pub enum EffectKind {
     ExileFaceDownPile,
     RevealUntil,
     Discover,
+    PhysicalContest,
     Heist,
     HeistExile,
     Cascade,
@@ -25931,6 +25961,7 @@ impl From<&Effect> for EffectKind {
             Effect::ExileFaceDownPile { .. } => EffectKind::ExileFaceDownPile,
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
+            Effect::PhysicalContest { .. } => EffectKind::PhysicalContest,
             Effect::Heist { .. } => EffectKind::Heist,
             Effect::HeistExile => EffectKind::HeistExile,
             Effect::Cascade => EffectKind::Cascade,
@@ -34583,6 +34614,7 @@ impl ResolvedAbility {
             | Effect::ExileFromTopUntil { .. }
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::Cascade

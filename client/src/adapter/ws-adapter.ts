@@ -210,6 +210,10 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 132 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
+ *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
+ *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 132` entry
+ *      in crates/lobby-broker/src/protocol.rs. Wire 114 moves with it.
  * 131 — PlayerFilter gains AnyOf (the union of player sets) and TargetPlayer
  *      (the first declared player target), carried in an ability's
  *      player_scope inside GameState — see PROTOCOL_VERSION's own `/// 131`
@@ -828,7 +832,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 131;
+export const PROTOCOL_VERSION = 132;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1301,6 +1305,7 @@ export type WsAdapterEvent =
       rewindTargets?: RewindOption[] }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
+  | { type: "contestProgress"; clicks: [PlayerId, number][] }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
   | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
@@ -2004,6 +2009,17 @@ export class WebSocketAdapter implements EngineAdapter {
 
   sendEmote(emote: string): void {
     this.send({ type: "Emote", data: { emote } });
+  }
+
+  /**
+   * One click in the running Eye to Eye / Mouth to Mouth contest. The server
+   * authenticates the seat and stamps the instant from its own clock, so the
+   * frame carries only a sequence number. Never queued: a click that cannot be
+   * sent now is stale by the time a reconnect could deliver it.
+   */
+  submitContestClick(seq: number): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.send({ type: "ContestClick", data: { seq } });
   }
 
   /**
@@ -2865,6 +2881,12 @@ export class WebSocketAdapter implements EngineAdapter {
           fromPlayer: data.from_player,
           emote: data.emote,
         });
+        break;
+      }
+
+      case "ContestProgress": {
+        const data = msg.data as { clicks: [PlayerId, number][] };
+        this.emit({ type: "contestProgress", clicks: data.clicks });
         break;
       }
 

@@ -593,6 +593,9 @@ pub struct GameSession {
     /// ([`GameSession::seed_deck_pools_encoding`]), so the first persist after
     /// a restart re-serializes nothing either.
     deck_pools_cache: Option<(Vec<PlayerDeckPool>, Arc<str>)>,
+    /// Runtime state for the online sustained-clicking contests (Eye to Eye,
+    /// Mouth to Mouth). Never persisted; see `crate::contest`.
+    pub contest: crate::contest::ContestRuntime,
 }
 
 impl GameSession {
@@ -1706,6 +1709,7 @@ impl GameSession {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number,
+            contest: Default::default(),
         })
     }
 
@@ -2224,6 +2228,9 @@ impl GameSession {
     /// caller under the same held session guard.
     pub fn mark_disconnected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = false;
+        // A seat away mid-contest pauses the contest clock and starts its
+        // reconnect grace (`engine::game::contest`).
+        self.note_contest_connection(player, false);
     }
 
     /// Mark a seat connected again, after the registry half
@@ -2231,6 +2238,7 @@ impl GameSession {
     /// allows it.
     pub fn mark_connected(&mut self, player: PlayerId) {
         self.connected[player.0 as usize] = true;
+        self.note_contest_connection(player, true);
     }
 
     pub fn reserve_seat(&mut self, display_name: String) -> Result<SeatReservation, String> {
@@ -2684,6 +2692,7 @@ impl SessionManager {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number,
+            contest: Default::default(),
         };
         // Seat 0 is installed the way every other seat is, through the
         // per-seat setter, rather than seeded into the struct literal.
@@ -2897,6 +2906,8 @@ impl SessionManager {
         // walk straight into a shared server. Order matters: this reads the
         // `hosting` just stamped.
         session.revoke_unentitled_debug_capability();
+        // A contest's clock epoch did not survive the restart.
+        session.cancel_contest_after_restore();
         let game_code = session.game_code.clone();
         for token in &session.player_tokens {
             if !token.is_empty() {
@@ -7449,6 +7460,7 @@ mod tests {
             turn_rewind_history: VecDeque::new(),
             deck_pools_cache: None,
             rewind_game_number: 1,
+            contest: Default::default(),
         };
 
         let game_started_before = session.game_started;
