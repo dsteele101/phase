@@ -63,8 +63,15 @@ pub struct TournamentRequestId(pub u64);
 /// 135 — `GameEvent::Attached` reaches Full `StateUpdate.events` when an Aura
 ///       or Equipment becomes attached (CR 701.3a + CR 603.2e). Older peers
 ///       cannot decode the new tagged variant. P2P moves in lockstep (wire 117);
-///       lobby messages are unchanged. Protocol 134 / wire 116 are reserved
-///       for the separate pending clause-answer port.
+///       lobby messages are unchanged. Main v134 / wire 116 activation
+///       stack-entry receipts remain part of this newer history.
+/// 134 — `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
+///      omitted when absent) — the stack object a stack-using activation
+///      created (CR 602.2a), which an activation trigger's "copy that ability"
+///      names (CR 707.10). Events ride in `GameState` (`current_trigger_event`,
+///      each triggered ability's stored event), and an older peer drops the
+///      field silently, resolving those copies differently. Full-game peers and
+///      P2P move in lockstep (wire 116); no lobby carrier names it.
 ///
 /// 133 — CR 614.12a pre-entry as-enters choices: `ProposedEvent::ZoneChange`
 ///      gains `enter_with_choices` (the answers riding the entry event),

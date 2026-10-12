@@ -72,6 +72,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // scopes in GameState.
 // v132 adds the CR 614.12a pre-entry as-enters choice (`NamedChoiceSourceBinding::
 // PendingEntry`, `ZoneChange.enter_with_choices`, `PendingReplacement.delivery_boundary`).
+// v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -147,7 +148,7 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +60: v131 adds PlayerFilter AnyOf / TargetPlayer to ability player scopes in GameState.
 // +61: v132 stamps `GameObject::exile_from_stack_linked_source` with the rider's incarnation (`ObjectIncarnationRef`).
 // +62: v133 adds the CR 614.12a pre-entry as-enters choice carriers.
-// +63: v134 is reserved for the separate pending clause-answer port.
+// +63: v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
 // +64: v135 adds the GameEvent::Attached event tag.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 64;
 // The LOBBY message-set version, not derived from the full-game number above.
@@ -239,7 +240,7 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +59: wire 113 moves with full-game v131 for PlayerFilter AnyOf / TargetPlayer.
 // +60: wire 114 moves with full-game v132 for the stack-exile rider's incarnation.
 // +61: wire 115 moves with full-game v133 for the pre-entry as-enters choice.
-// +62: wire 116 is reserved for the separate pending clause-answer port.
+// +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
 // +63: wire 117 moves with full-game v135 for the Attached event tag.
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 63;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this

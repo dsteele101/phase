@@ -107,8 +107,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  117 — GameEvent.Attached is carried in state_update events when an Aura or
- *       Equipment becomes attached. Reserved distinctly from the pending
- *       clause-answer port (wire 116); full-game protocol 135 moves with it.
+ *       Equipment becomes attached. Full-game protocol 135 moves with it,
+ *       retaining main wire 116 activation stack-entry receipts.
+ *  116 — game_setup and state_update carry GameState whose AbilityActivated trigger
+ *       events may name the activation's stack_entry. Bumped in lockstep with
+ *       full-game protocol 134.
  *  115 — game_setup and state_update carry GameState whose NamedChoice source
  *       binding may be PendingEntry (CR 614.12a pre-entry as-enters choices).
  *       Bumped in lockstep with full-game protocol 133.
