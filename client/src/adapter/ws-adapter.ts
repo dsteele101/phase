@@ -210,8 +210,18 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 135 — GameEvent.Attached reaches Full StateUpdate.events; an older peer
- *       cannot decode its new tag. Wire 117 moves with it.
+ * 141 — GameEvent.Attached reaches Full StateUpdate.events; an older peer
+ *       cannot decode its new tag. Wire 123 moves with it.
+ * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
+ *      event's attackers attacked), carried in an ability's player_scope
+ *      inside GameState — see PROTOCOL_VERSION's own `/// 140` entry in
+ *      crates/lobby-broker/src/protocol.rs. A v139 peer cannot parse the tag;
+ *      the exact-match version check at connect refuses the pairing. Wire 122
+ *      moves with it.
+ * 139 — CR 702.122c per-turn crew relation: GameState gains
+ *      crew_history_this_turn and FilterProp gains CrewedThisTurn — see
+ *      PROTOCOL_VERSION's own `/// 139` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v138 peer cannot parse the new filter tag. Wire 121 moves with it.
  * 134 — GameEvent::AbilityActivated gains stack_entry, the stack object a
  *      stack-using activation created, carried in GameState's trigger events —
  *      see PROTOCOL_VERSION's own `/// 134` entry in
@@ -846,7 +856,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 135;
+export const PROTOCOL_VERSION = 141;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

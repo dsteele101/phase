@@ -286,21 +286,44 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it.each([133, 134])("refuses Full v%s before Attached event delivery", async (version) => {
+  it("refuses Full v140 before Attached event delivery", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 140 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("rejects Full v139 before it can read the attack event's attacked players", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 139 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it.each([134, 135, 136, 137, 138])("rejects Full v%s before it can read the crew relation", async (version) => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
     ws.deliverMessage(helloFrame({ protocol_version: version }));
+
     await expect(promise).rejects.toMatchObject({ kind: "protocol_mismatch" });
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("admits its own Full v135 after the Attached event bump", async () => {
+  it("admits its own Full v141 after the Attached event bump", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 135 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 141 }));
     await expect(promise).resolves.toMatchObject({
       ws,
-      serverInfo: { protocolVersion: 135, mode: "Full" },
+      serverInfo: { protocolVersion: 141, mode: "Full" },
     });
     expect(ws.close).not.toHaveBeenCalled();
   });

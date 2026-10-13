@@ -158,26 +158,44 @@ pub(crate) fn link_search_look(
     );
 }
 
-/// CR 400.7 + CR 607.2a: `source_id`'s links, skipping a look link made by an
-/// earlier incarnation of that object.
+/// CR 400.7 + CR 607.2a: `source_id`'s links that belong to the object as it
+/// now exists.
 pub(crate) fn live_links_for_source(
     state: &GameState,
     source_id: ObjectId,
 ) -> impl Iterator<Item = &ExileLink> {
+    links_for_reader(
+        state,
+        source_id,
+        state.objects.get(&source_id).map(|obj| obj.incarnation),
+    )
+}
+
+/// CR 400.7 + CR 607.2a + CR 113.7a: `source_id`'s links that belong to the
+/// incarnation `reader` (see `linked_exile_incarnation`).
+pub(crate) fn links_for_reader(
+    state: &GameState,
+    source_id: ObjectId,
+    reader: Option<u64>,
+) -> impl Iterator<Item = &ExileLink> {
+    let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     state.exile_links.iter().filter(move |link| {
         link.source_id == source_id
             && match &link.kind {
+                // CR 400.7 + CR 607.2a: a look link's card belongs to the
+                // incarnation that made it.
                 ExileLinkKind::HideawayLookable {
                     source_incarnation, ..
-                } => state
-                    .objects
-                    .get(&source_id)
-                    .is_some_and(|src| src.incarnation == *source_incarnation),
+                } => reader == Some(*source_incarnation),
+                // CR 400.7 + CR 607.2a: a tracked link belongs to the object that
+                // now holds it (kept for its in-exile successor, Mechtitan Core);
+                // an older incarnation's ability reads its own pile from the
+                // linked-exile LKI.
+                ExileLinkKind::TrackedBySource => reader == live,
                 // CR 400.7d + CR 400.7j: the object these links were made for may
                 // be a later incarnation of the one that made them.
                 ExileLinkKind::UntilSourceLeaves { .. }
                 | ExileLinkKind::UntilOpponentBecomesMonarch { .. }
-                | ExileLinkKind::TrackedBySource
                 | ExileLinkKind::ParadigmSource { .. }
                 | ExileLinkKind::Cipher
                 | ExileLinkKind::Haunt
@@ -211,16 +229,17 @@ pub(crate) fn lki_snapshots_for_reader(
 }
 
 /// CR 607.2a + CR 113.7a: Whether `exiled_id` was exiled by the acting
-/// incarnation of `source_id` as a tracked exile: a live tracked link, or a
-/// card kept in that incarnation's linked-exile LKI because it acted after it
-/// was replaced. The same-resolution "exiled this way" readers ask this.
+/// incarnation of `source_id` as a tracked exile: a tracked link of that
+/// incarnation (only the live object holds them), or a card kept in that
+/// incarnation's linked-exile LKI because it acted after it was replaced. The
+/// same-resolution "exiled this way" readers ask this.
 pub(crate) fn tracked_exile_of_acting_incarnation(
     state: &GameState,
     source_id: ObjectId,
     exiled_id: ObjectId,
 ) -> bool {
     let reader = linked_exile_incarnation(state, source_id);
-    live_links_for_source(state, source_id)
+    links_for_reader(state, source_id, reader)
         .any(|link| link.exiled_id == exiled_id && link.kind == ExileLinkKind::TrackedBySource)
         || lki_snapshots_for_reader(state, source_id, reader)
             .any(|snap| snap.exiled_id == exiled_id)
@@ -337,9 +356,10 @@ pub(crate) fn push_with_kind(
 }
 
 /// CR 400.7 + CR 607.2a + CR 113.7a: Link a card exiled by `creator`, an
-/// incarnation of `source_id`. A tracked exile made by an incarnation that is
-/// no longer the live object is that incarnation's: it is kept in the
-/// linked-exile LKI and never becomes a link of the object that replaced it.
+/// incarnation of `source_id`. A tracked exile, or an exile "until [this
+/// object] leaves the battlefield", made by an incarnation that is no longer
+/// the live object is that incarnation's: it is kept in the linked-exile LKI
+/// and never becomes a link of the object that replaced it.
 pub(crate) fn push_with_kind_as(
     state: &mut GameState,
     exiled_id: ObjectId,
@@ -350,18 +370,23 @@ pub(crate) fn push_with_kind_as(
     let live = state.objects.get(&source_id).map(|obj| obj.incarnation);
     let departed_creator = creator.filter(|creator| live != Some(*creator));
     let recorded = match (&kind, departed_creator) {
-        (ExileLinkKind::TrackedBySource, Some(creator)) => {
-            record_departed_linked_exile(state, exiled_id, source_id, creator)
-        }
-        // The live object's own tracked exile, or a kind that is never
-        // diverted: a look link carries its creator (`push_look_link`); a
-        // craft material is linked at cost time; cipher, haunt and paradigm
-        // links are keyed to the object they belong to; and the "until" kinds
-        // track a return (CR 610.3).
-        (ExileLinkKind::TrackedBySource, None)
+        // CR 610.3 + CR 400.7: the incarnation that made an "until it leaves"
+        // exile had already left the battlefield (a copy of its ability put
+        // onto the stack afterwards still exiles, CR 610.3a + CR 707.10). The
+        // specified event is past, so no return is ever created; the object
+        // that replaced it is a new object whose departure is not that event.
+        (
+            ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. },
+            Some(creator),
+        ) => record_departed_linked_exile(state, exiled_id, source_id, creator),
+        // The live object's own exile, or a kind that is never diverted: a
+        // look link carries its creator (`push_look_link`); a craft material is
+        // linked at cost time; cipher, haunt and paradigm links are keyed to
+        // the object they belong to; and a monarch-bounded exile returns on an
+        // event that is not about its source (CR 610.3).
+        (ExileLinkKind::TrackedBySource | ExileLinkKind::UntilSourceLeaves { .. }, None)
         | (
             ExileLinkKind::HideawayLookable { .. }
-            | ExileLinkKind::UntilSourceLeaves { .. }
             | ExileLinkKind::UntilOpponentBecomesMonarch { .. }
             | ExileLinkKind::ParadigmSource { .. }
             | ExileLinkKind::Cipher
@@ -763,6 +788,8 @@ fn contains_linked_exile_consumer_value(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::CharacteristicSetRef;
@@ -2258,6 +2285,65 @@ mod tests {
         assert!(!state.linked_exile_lki.contains_key(&source));
     }
 
+    /// CR 610.3 + CR 400.7 + CR 113.7a: an "until it leaves" exile made by an
+    /// ability of a departed incarnation installs no return link and no per-turn
+    /// ledger entry; the card is kept in that incarnation's linked-exile LKI. Made
+    /// by the live object, it is an ordinary return link. A monarch-bounded exile
+    /// is never diverted: its event is not about its source.
+    #[test]
+    fn until_source_leaves_exile_by_a_departed_incarnation_installs_no_return() {
+        let until = || ExileLinkKind::UntilSourceLeaves {
+            return_zone: Zone::Battlefield,
+        };
+
+        // Stamped 4, live 6.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        push_with_kind(&mut state, card, source, until());
+        assert!(!has_link(&state, card, source), "no return link");
+        assert!(
+            !state
+                .cards_exiled_with_source_this_turn
+                .contains_key(&source),
+            "the live object did not exile it this turn"
+        );
+        assert_eq!(
+            state.linked_exile_lki[&source],
+            vec![LinkedExileLki {
+                departed: 4,
+                successor: 4,
+                snapshot: vec![snapshot_of(&state, card)],
+            }],
+            "kept for the incarnation that exiled it"
+        );
+
+        // Stamped 6 (the live object): the return link, the LKI untouched.
+        let (mut state, source) = departed_creator_fixture();
+        stamp_resolving(&mut state, source, 6);
+        let card = exile_card(&mut state);
+        push_with_kind(&mut state, card, source, until());
+        assert!(
+            state.exile_links.iter().any(|link| link.exiled_id == card
+                && link.source_id == source
+                && link.kind == until()),
+            "the live object's return link"
+        );
+        assert!(!state.linked_exile_lki.contains_key(&source));
+
+        // Stamped 4, monarch-bounded: linked regardless of the departure.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        let monarch = ExileLinkKind::UntilOpponentBecomesMonarch {
+            return_zone: Zone::Battlefield,
+            controller: PlayerId(0),
+        };
+        push_with_kind(&mut state, card, source, monarch.clone());
+        assert!(state.exile_links.iter().any(|link| link.exiled_id == card
+            && link.source_id == source
+            && link.kind == monarch));
+        assert!(!state.linked_exile_lki.contains_key(&source));
+    }
+
     /// CR 607.2a + CR 113.7a: the membership view answers for the acting
     /// incarnation: its own LKI pile while its ability resolves, the live
     /// links for the live object, and never another incarnation's pile.
@@ -2293,8 +2379,8 @@ mod tests {
         // The ability stamped 4 is resolving.
         assert!(member(&state, creator_card), "its own pile");
         assert!(
-            member(&state, live_card),
-            "the live half is not gated by reader"
+            !member(&state, live_card),
+            "the live object's link is not the acting incarnation's"
         );
         assert!(!member(&state, older_card), "another incarnation's pile");
 
@@ -2310,6 +2396,74 @@ mod tests {
         assert!(
             !member(&state, creator_card),
             "a departed incarnation's pile"
+        );
+    }
+
+    /// CR 400.7 + CR 607.2a + CR 113.7a: each link kind is read by the
+    /// incarnations it belongs to. A tracked link is the live object's, a look
+    /// link is its creator's, and every other kind is read by any incarnation.
+    #[test]
+    fn links_for_reader_admits_each_kind_to_its_incarnation() {
+        fn kinds_of<'a>(links: impl Iterator<Item = &'a ExileLink>) -> Vec<ExileLinkKind> {
+            links.map(|link| link.kind.clone()).collect()
+        }
+
+        // The source is live as incarnation 6; incarnation 4 is a departed one.
+        let (mut state, source) = departed_creator_fixture();
+        let look = |source_incarnation| ExileLinkKind::HideawayLookable {
+            grant: LookGrant::SourceController,
+            lookers: BTreeSet::from([PlayerId(0)]),
+            source_incarnation,
+        };
+        let every_reader = [
+            ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
+            ExileLinkKind::UntilOpponentBecomesMonarch {
+                return_zone: Zone::Battlefield,
+                controller: PlayerId(0),
+            },
+            ExileLinkKind::ParadigmSource {
+                player: PlayerId(0),
+            },
+            ExileLinkKind::Cipher,
+            ExileLinkKind::Haunt,
+            ExileLinkKind::CraftMaterial,
+        ];
+        let kinds = [ExileLinkKind::TrackedBySource, look(6), look(4)]
+            .into_iter()
+            .chain(every_reader.clone());
+        for kind in kinds {
+            let exiled_id = exile_card(&mut state);
+            state.exile_links.push(ExileLink {
+                exiled_id,
+                source_id: source,
+                kind,
+            });
+        }
+        let read = |reader| kinds_of(links_for_reader(&state, source, Some(reader)));
+
+        let live_reading: Vec<ExileLinkKind> = [ExileLinkKind::TrackedBySource, look(6)]
+            .into_iter()
+            .chain(every_reader.clone())
+            .collect();
+        assert_eq!(
+            read(6),
+            live_reading,
+            "the live object reads its tracked link and its own look link, not the old look link"
+        );
+        assert_eq!(
+            read(4),
+            [look(4)]
+                .into_iter()
+                .chain(every_reader)
+                .collect::<Vec<_>>(),
+            "the departed incarnation reads its own look link, not the tracked or new look link"
+        );
+        assert_eq!(
+            kinds_of(live_links_for_source(&state, source)),
+            live_reading,
+            "the live links are the live object's reading"
         );
     }
 }

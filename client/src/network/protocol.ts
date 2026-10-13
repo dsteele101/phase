@@ -106,9 +106,15 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  117 — GameEvent.Attached is carried in state_update events when an Aura or
- *       Equipment becomes attached. Full-game protocol 135 moves with it,
- *       retaining main wire 116 activation stack-entry receipts.
+ *  123 — GameEvent.Attached is carried in state_update events when an Aura or
+ *       Equipment becomes attached. Bumped in lockstep with full-game
+ *       protocol 141.
+ *  122 — game_setup and state_update carry GameState whose ability player scopes
+ *       may hold AttackSubject EventAttackers. Bumped in lockstep with full-game
+ *       protocol 140.
+ *  121 — game_setup and state_update carry GameState with the per-turn crew
+ *       relation (crew_history_this_turn) and FilterProp::CrewedThisTurn
+ *       (CR 702.122c). Bumped in lockstep with full-game protocol 139.
  *  116 — game_setup and state_update carry GameState whose AbilityActivated trigger
  *       events may name the activation's stack_entry. Bumped in lockstep with
  *       full-game protocol 134.
@@ -665,7 +671,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 117 as const;
+export const WIRE_PROTOCOL_VERSION = 123 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
