@@ -236,6 +236,7 @@ pub use bracket_estimate::{
 // definition in `casting_costs.rs`, not on this visibility re-export.
 pub use casting_costs::{
     extract_x_mana_cost, feasible_mana_methods_for_spell, max_x_value, max_x_value_excluding,
+    preview_auto_payment, AutoPaymentFate, AutoPaymentPreview,
 };
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,

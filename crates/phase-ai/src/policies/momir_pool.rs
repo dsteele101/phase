@@ -83,6 +83,15 @@ impl PoolProfile {
         Self { by_mana_value }
     }
 
+    /// Whether any creature is drawable at a mana value satisfying `cmp`
+    /// against `bound`, whether or not its body is a fixed number. CR 609.3:
+    /// when none is, the activation creates no token.
+    pub(super) fn has_drawable(&self, cmp: Comparator, bound: u32) -> bool {
+        self.by_mana_value.iter().any(|(mana_value, bucket)| {
+            bucket.drawable > 0 && cmp.evaluate(*mana_value as i32, bound as i32)
+        })
+    }
+
     /// Mean combat body of a random draw whose mana value satisfies `cmp`
     /// against `bound` — `None` when nothing is drawable there (CR 609.3: the
     /// activation would create no token) or nothing drawable has a fixed body
