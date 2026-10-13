@@ -1095,7 +1095,11 @@ fn gated_attached_targeting_allows_after_the_condition_ceases() {
     scenario.with_library_top(P1, &["Forest", "Forest", "Forest"]);
     let island = scenario.add_basic_land(P0, ManaColor::Blue);
     let protected = scenario.add_creature(P0, "Condition Host", 2, 2).id();
+    // Two unprotected siblings: a lone legal assignment is auto-selected before
+    // the interactive target prompt, so the exclusion assertions below would
+    // never be reached.
     let bystander = scenario.add_creature(P0, "Target Reach Control", 2, 2).id();
+    let second_bystander = scenario.add_creature(P0, "Second Target Reach Control", 2, 2).id();
     let aura = scenario.add_spell_to_hand(P0, "Conditional Targeting Probe", false)
         .as_enchantment().with_subtypes(vec!["Aura"])
         .with_mana_cost(ManaCost::generic(0))
@@ -1143,12 +1147,14 @@ fn gated_attached_targeting_allows_after_the_condition_ceases() {
     let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
         panic!("must reach production target selection")
     };
-    assert!(
-        target_slots[0]
-            .legal_targets
-            .contains(&TargetRef::Object(bystander)),
-        "nonempty sibling targets guard the negative"
-    );
+    for sibling in [bystander, second_bystander] {
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(sibling)),
+            "nonempty sibling targets guard the negative"
+        );
+    }
     assert!(!target_slots[0]
         .legal_targets
         .contains(&TargetRef::Object(protected)));

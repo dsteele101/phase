@@ -1841,6 +1841,62 @@ pub(crate) fn can_attach_to_player_with_authority(
     }
 }
 
+/// CR 702.5a + CR 303.4: does the attachment's own enchant restriction admit
+/// `target_player`, per the supplied authority?
+///
+/// An Aura that enchants a player must carry an `Enchant` restriction whose
+/// filter the player satisfies; one that carries none has no stated player
+/// restriction and so cannot be attached to a player at all. The restriction is
+/// read from the authority's keywords, so a token's intrinsic `Enchant` has to
+/// be part of its materialized characteristics (see
+/// `token::intrinsic_enchant_keywords_from_token_statics`) before this is asked.
+fn enchant_restriction_admits_player(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    let attachment = match authority {
+        AttachmentAuthority::Stored => state.objects.get(&attachment_id),
+        AttachmentAuthority::Projected(projection) => Some(projection),
+    };
+    let Some(attachment) = attachment else {
+        return true;
+    };
+    let Some(enchant_filter) = attachment.keywords.iter().find_map(|k| match k {
+        crate::types::keywords::Keyword::Enchant(f) => Some(f),
+        _ => None,
+    }) else {
+        return false;
+    };
+    crate::game::filter::player_matches_target_filter_in_state(
+        state,
+        enchant_filter,
+        target_player,
+        Some(attachment.controller),
+        Some(attachment_id),
+    )
+}
+
+/// CR 303.4 + CR 303.4i + CR 702.5a + CR 702.16c: may the attachment, per the
+/// supplied authority, legally enchant `target_player`?
+///
+/// The single legality authority for a player host: an Aura (CR 303.4), a live
+/// host (CR 303.4c) not protected from it (CR 702.16c), and one its enchant
+/// restriction admits (CR 702.5a). Both the CR 303.4i entry decision for an
+/// Aura token and the attachment action ask exactly this, so the two can never
+/// disagree about one host.
+pub(crate) fn can_enchant_player_with_authority(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    authority_is_aura(state, attachment_id, authority)
+        && can_attach_to_player_with_authority(state, attachment_id, target_player, authority)
+        && enchant_restriction_admits_player(state, attachment_id, target_player, authority)
+}
+
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
 /// Core attachment logic: attach `attachment_id` to `target_id`.
 /// Handles detaching from a previous target if already attached.
@@ -1926,33 +1982,8 @@ pub(crate) fn attach_to_player_with_authority_and_events(
     if prior_host == Some(TargetRef::Player(target_player)) {
         return false;
     }
-    if !authority_is_aura(state, attachment_id, authority) {
+    if !can_enchant_player_with_authority(state, attachment_id, target_player, authority) {
         return false;
-    }
-    if !can_attach_to_player_with_authority(state, attachment_id, target_player, authority) {
-        return false;
-    }
-    let attachment_obj = match authority {
-        AttachmentAuthority::Stored => state.objects.get(&attachment_id),
-        AttachmentAuthority::Projected(projection) => Some(projection),
-    };
-    if let Some(obj) = attachment_obj {
-        if let Some(enchant_filter) = obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Enchant(f) => Some(f),
-            _ => None,
-        }) {
-            if !crate::game::filter::player_matches_target_filter_in_state(
-                state,
-                enchant_filter,
-                target_player,
-                Some(obj.controller),
-                Some(attachment_id),
-            ) {
-                return false;
-            }
-        } else {
-            return false;
-        }
     }
     let old_target =
         attach_to_player_with_authority(state, attachment_id, target_player, authority);
