@@ -217,7 +217,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      in crates/lobby-broker/src/protocol.rs. A v140 client would ignore
  *      scope and demand at least one for every candidate, leaving valid
  *      subset divisions unconfirmable; the exact-match version check at
- *      connect refuses the pairing.
+ *      connect refuses the pairing. Wire 123 moves with it.
  *
  * 140 — AttackSubject gains EventAttackers (the players a trigger's attack
  *      event's attackers attacked), carried in an ability's player_scope

@@ -62,7 +62,7 @@ pub struct TournamentRequestId(pub u64);
 ///
 /// 141 — CR 608.2d resolution-time division (Master of the Wild Hunt). Every
 ///      change rides full-game state; lobby messages are unchanged, and P2P
-///      moves in lockstep (wire 120). `ThisWayCause::Tapped` is a new unit tag
+///      moves in lockstep (wire 123). `ThisWayCause::Tapped` is a new unit tag
 ///      on the enum a `TrackedSetFiltered` filter carries, so any `GameObject`
 ///      whose parsed abilities read "tapped this way" is unparseable by a v140
 ///      peer — a conditional PARSE bump like 76/79/81. `WaitingFor::

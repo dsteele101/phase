@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, DistributionScope, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -1711,6 +1711,42 @@ fn single_damage_source(
         Some(DamageSource::EachTarget) => {
             unreachable!("EachTarget handled by resolve_each_target_power_damage")
         }
+    }
+}
+
+/// CR 608.2d + CR 702.2b + CR 704.5h: does the source dealing a paused
+/// resolution-time division have deathtouch? With deathtouch, any nonzero share
+/// destroys a creature recipient, so the question decides which divisions are
+/// lethal.
+///
+/// The answer binds the source exactly as the resume path does: it asks
+/// [`single_damage_source`] about the same stored node that
+/// [`resume_resolution_division`] resolves, so the prompt-time fact cannot
+/// diverge from the damage actually dealt (a node whose subject is gone deals
+/// no damage and has no deathtouch; a fallback source carries none). Keywords
+/// are read live (CR 702.2d: deathtouch functions from any zone); no player acts
+/// between the prompt and its answer, so the source cannot change in between.
+///
+/// `AnnouncedTargets` answers `false`: the announce-time source lives on the
+/// pending cast or trigger, not on the prompt.
+pub fn division_source_has_deathtouch(state: &GameState, scope: &DistributionScope) -> bool {
+    match scope {
+        DistributionScope::ResolutionCandidates { pending_effect } => {
+            let Effect::DealDamage { damage_source, .. } = &pending_effect.effect else {
+                return false;
+            };
+            match damage_source {
+                // CR 120.1: a multi-source node never pauses for a division (it
+                // resolves through `resolve_each_target_power_damage`); a
+                // deserialized prompt carrying one has no single source.
+                Some(DamageSource::EachTarget) => false,
+                Some(DamageSource::Target | DamageSource::TriggeringSource) | None => {
+                    single_damage_source(state, pending_effect, *damage_source)
+                        .is_some_and(|ctx| ctx.has_deathtouch)
+                }
+            }
+        }
+        DistributionScope::AnnouncedTargets => false,
     }
 }
 
@@ -8333,6 +8369,71 @@ mod tests {
             0,
             "no damage before the choice"
         );
+    }
+
+    /// CR 608.2d + CR 702.2b + CR 704.5h: `division_source_has_deathtouch` reads
+    /// the paused node's damage source — the TARGET creature, not the ability's
+    /// source — exactly as the resume path binds it.
+    #[test]
+    fn division_source_deathtouch_follows_the_paused_nodes_damage_source() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 2, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &wolves_division_node(giant, master),
+            &mut events,
+        )
+        .unwrap();
+        let WaitingFor::DistributeAmong { scope, .. } = state.waiting_for.clone() else {
+            panic!("reach guard: two candidates pause for the division");
+        };
+        assert!(
+            !division_source_has_deathtouch(&state, &scope),
+            "a source without deathtouch"
+        );
+
+        // Deathtouch on the ability's source (Master) is not the damage source's.
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Deathtouch);
+        assert!(!division_source_has_deathtouch(&state, &scope));
+
+        state
+            .objects
+            .get_mut(&giant)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Deathtouch);
+        assert!(
+            division_source_has_deathtouch(&state, &scope),
+            "the target creature deals the divided damage"
+        );
+
+        // Announce-time prompts carry no source; a deserialized multi-source
+        // node never pauses and has no single source.
+        assert!(!division_source_has_deathtouch(
+            &state,
+            &DistributionScope::AnnouncedTargets
+        ));
+        let mut each_target = wolves_division_node(giant, master);
+        if let Effect::DealDamage { damage_source, .. } = &mut each_target.effect {
+            *damage_source = Some(DamageSource::EachTarget);
+        }
+        assert!(!division_source_has_deathtouch(
+            &state,
+            &DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(each_target),
+            }
+        ));
     }
 
     /// V5b: one candidate — the only legal division is applied without a prompt.

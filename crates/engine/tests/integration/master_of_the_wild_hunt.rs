@@ -12,6 +12,7 @@
 //!   CR 117.3b: the active player then receives priority.
 //! CR 608.2b: an ability whose only target is illegal does not resolve.
 
+use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::EngineError;
 use engine::types::ability::{EffectKind, TargetRef};
@@ -745,6 +746,221 @@ fn raw_division_with_overflowing_budget_is_refused() {
     ));
 }
 
+/// One offered resolution-time division, as the AI candidate generator emits it.
+type Division = Vec<(TargetRef, u32)>;
+
+/// Every `DistributeAmong` answer the production AI candidate generator
+/// (`ai_support::candidate_actions`) offers at the current prompt.
+fn offered_divisions(runner: &GameRunner) -> Vec<Division> {
+    candidate_actions(runner.state())
+        .into_iter()
+        .filter_map(|candidate| match candidate.action {
+            GameAction::DistributeAmong { distribution } => Some(distribution),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Apply each offered division to a fresh copy of the paused game and count how
+/// many of `wolves` it destroys once the ability finishes resolving (CR 704.3:
+/// SBAs run after resolution, not mid-resolution).
+fn destroyed_wolves_by_division(
+    runner: &GameRunner,
+    wolves: &[ObjectId],
+) -> Vec<(Division, usize)> {
+    offered_divisions(runner)
+        .into_iter()
+        .map(|division| {
+            let mut copy = GameRunner::from_state(runner.state().clone());
+            copy.act(GameAction::DistributeAmong {
+                distribution: division.clone(),
+            })
+            .expect("every offered division is legal");
+            let destroyed = wolves
+                .iter()
+                .filter(|id| zone(&copy, **id) == Zone::Graveyard)
+                .count();
+            (division, destroyed)
+        })
+        .collect()
+}
+
+/// Master, two plain 3/3 Wolves (P0), and P1's Vampire Nighthawk (2/3 flying,
+/// lifelink, and deathtouch when `deathtouch`) as clause 2's target, paused at
+/// clause 3's division prompt: P1 divides the Nighthawk's 2 power.
+struct NighthawkPrompt {
+    runner: GameRunner,
+    w1: ObjectId,
+    w2: ObjectId,
+    nighthawk: ObjectId,
+}
+
+fn nighthawk_division_prompt(deathtouch: bool) -> NighthawkPrompt {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let master = master(&mut s);
+    let w1 = wolf(&mut s, P0, "Wolf One", 3, 3);
+    let w2 = wolf(&mut s, P0, "Wolf Two", 3, 3);
+    let nighthawk = {
+        let mut builder = s.add_creature(P1, "Vampire Nighthawk", 2, 3);
+        builder.flying().lifelink();
+        if deathtouch {
+            builder.deathtouch();
+        }
+        builder.id()
+    };
+    let mut runner = s.build();
+    let (wait, _) = activate_until_division(&mut runner, master, nighthawk);
+    let (player, total, targets) = division(wait);
+    assert_eq!(
+        player, P1,
+        "reach guard: the Nighthawk's controller divides"
+    );
+    assert_eq!(total, 2, "reach guard: the Nighthawk's power");
+    assert_eq!(as_set(&targets), ids(&[w1, w2]));
+    NighthawkPrompt {
+        runner,
+        w1,
+        w2,
+        nighthawk,
+    }
+}
+
+/// CR 608.2d + CR 702.2b + CR 704.5h: when the creature dividing its damage has
+/// deathtouch, one point destroys a Wolf, so the production candidate set must
+/// offer the 1 + 1 spread that destroys BOTH Wolves. The paused node still
+/// holds the target creature (the damage source) in its targets, unbound.
+#[test]
+fn deathtouch_divider_is_offered_a_division_that_destroys_both_wolves() {
+    let NighthawkPrompt {
+        runner,
+        w1,
+        w2,
+        nighthawk,
+    } = nighthawk_division_prompt(true);
+
+    // U5: the paused node's damage source is the target, read through the
+    // unbound (historical lookup) arm.
+    let WaitingFor::DistributeAmong {
+        scope: DistributionScope::ResolutionCandidates { pending_effect },
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected a resolution-time division prompt");
+    };
+    assert_eq!(
+        pending_effect.targets,
+        vec![TargetRef::Object(nighthawk)],
+        "the paused node keeps the target creature, its damage source"
+    );
+    assert_eq!(pending_effect.context.target_damage_source, None);
+
+    let outcomes = destroyed_wolves_by_division(&runner, &[w1, w2]);
+    assert!(
+        outcomes.iter().any(|(_, destroyed)| *destroyed == 2),
+        "a deathtouch divider must be offered a division destroying both Wolves, got {outcomes:?}"
+    );
+}
+
+/// CR 704.5g control: without deathtouch, 2 damage cannot destroy a 3/3, so no
+/// offered division destroys a Wolf, while every offered division is applied
+/// (2 damage marked in total) and each Wolf has an all-on-one division.
+#[test]
+fn non_deathtouch_divider_destroys_no_wolf() {
+    let NighthawkPrompt { runner, w1, w2, .. } = nighthawk_division_prompt(false);
+
+    let offered = offered_divisions(&runner);
+    for wolf in [w1, w2] {
+        assert!(
+            offered.contains(&vec![(TargetRef::Object(wolf), 2)]),
+            "reach guard: all of the 2 on {wolf:?} is offered, got {offered:?}"
+        );
+    }
+    for division in &offered {
+        let mut copy = GameRunner::from_state(runner.state().clone());
+        copy.act(GameAction::DistributeAmong {
+            distribution: division.clone(),
+        })
+        .expect("every offered division is legal");
+        assert_eq!(
+            damage(&copy, w1) + damage(&copy, w2),
+            2,
+            "reach guard: {division:?} marks the whole 2 on the Wolves"
+        );
+        for wolf in [w1, w2] {
+            assert_eq!(
+                zone(&copy, wolf),
+                Zone::Battlefield,
+                "{division:?} must not destroy {wolf:?} without deathtouch"
+            );
+        }
+    }
+}
+
+/// CR 702.2b + CR 704.5h: the generator's deathtouch fact matches the
+/// resolver's. The destroy-both division is taken from the GENERATED set at the
+/// deathtouch prompt and applied: both Wolves die, and the lifelink source's
+/// controller gains the whole 2.
+#[test]
+fn generated_deathtouch_division_destroys_both_wolves_when_applied() {
+    let NighthawkPrompt {
+        mut runner, w1, w2, ..
+    } = nighthawk_division_prompt(true);
+    let (destroy_both, _) = destroyed_wolves_by_division(&runner, &[w1, w2])
+        .into_iter()
+        .find(|(_, destroyed)| *destroyed == 2)
+        .expect("the generated set holds a division destroying both Wolves");
+    let life_before = runner.life(P1);
+
+    runner
+        .act(GameAction::DistributeAmong {
+            distribution: destroy_both,
+        })
+        .expect("the generated division is legal");
+
+    assert_eq!(zone(&runner, w1), Zone::Graveyard);
+    assert_eq!(zone(&runner, w2), Zone::Graveyard);
+    assert_eq!(
+        runner.life(P1),
+        life_before + 2,
+        "reach guard: the lifelink Nighthawk dealt the whole 2"
+    );
+}
+
+/// CR 608.2d + CR 704.5g: dividing among your own Wolves, the generator offers a
+/// survivable fill — each Wolf receives at most one less than its lethal
+/// damage, in descending capacity — so applying it destroys neither Wolf.
+#[test]
+fn own_target_division_offers_a_survivable_fill() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let master = master(&mut s);
+    let a = wolf(&mut s, P0, "Wolf A", 5, 5);
+    let b = wolf(&mut s, P0, "Wolf B", 5, 5);
+    let own = s.add_creature(P0, "Own Giant", 6, 12).id();
+    let mut runner = s.build();
+    let (wait, _) = activate_until_division(&mut runner, master, own);
+    let (player, total, _) = division(wait);
+    assert_eq!(player, P0, "reach guard: the activator divides");
+    assert_eq!(total, 6);
+
+    let fill = vec![(TargetRef::Object(a), 4), (TargetRef::Object(b), 2)];
+    let offered = offered_divisions(&runner);
+    assert!(
+        offered.iter().any(|division| {
+            division.len() == fill.len() && fill.iter().all(|entry| division.contains(entry))
+        }),
+        "the survivable 4 + 2 fill is offered, got {offered:?}"
+    );
+
+    runner
+        .act(GameAction::DistributeAmong { distribution: fill })
+        .expect("the survivable fill is legal");
+    assert_eq!(zone(&runner, a), Zone::Battlefield);
+    assert_eq!(zone(&runner, b), Zone::Battlefield);
+    assert_eq!(damage(&runner, a) + damage(&runner, b), 6);
+}
+
 /// CR 601.2d: an announce-time division must give every announced target at
 /// least one; the raw reducer refuses a split that leaves one out, while the
 /// resolution-time scope (CR 608.2d) accepts the same subset.
@@ -776,9 +992,18 @@ fn raw_announced_division_must_cover_every_target_but_resolution_may_not() {
     let partial = GameAction::DistributeAmong {
         distribution: vec![(TargetRef::Object(a), 3)],
     };
-    assert!(
-        runner.act(partial.clone()).is_err(),
-        "announced target {b:?} would receive nothing"
+    let announced_wait = runner.state().waiting_for.clone();
+    match runner.act(partial.clone()) {
+        Err(EngineError::InvalidAction(message)) => assert!(
+            message.contains("Each announced target must receive at least 1"),
+            "announced target {b:?} would receive nothing — rejected for coverage, got {message:?}"
+        ),
+        other => panic!("announced target {b:?} would receive nothing, got {other:?}"),
+    }
+    assert_eq!(
+        runner.state().waiting_for,
+        announced_wait,
+        "the rejected division leaves the prompt intact"
     );
 
     // Restore the resolution-time prompt: the subset is a legal division.

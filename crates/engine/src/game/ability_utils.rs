@@ -27888,6 +27888,48 @@ mod tests {
         assert!(validate_distribution(&[(a, 3)], 3, &legal, AnySubset).is_ok());
     }
 
+    /// CR 601.2d + CR 608.2d: each division scope selects its coverage rule —
+    /// announced targets must all be named, resolution-time candidates need not
+    /// be — and the same partial division is rejected under the first and
+    /// accepted under the second.
+    #[test]
+    fn distribution_coverage_follows_the_division_scope() {
+        use crate::types::game_state::DistributionScope;
+        assert_eq!(
+            DistributionCoverage::of(&DistributionScope::AnnouncedTargets),
+            DistributionCoverage::EveryRecipient
+        );
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            DistributionCoverage::of(&DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            }),
+            DistributionCoverage::AnySubset
+        );
+
+        let a = TargetRef::Object(ObjectId(21));
+        let b = TargetRef::Object(ObjectId(22));
+        let legal = vec![a.clone(), b];
+        let partial = [(a, 3)];
+        assert!(
+            validate_distribution(&partial, 3, &legal, DistributionCoverage::EveryRecipient)
+                .is_err()
+        );
+        assert!(
+            validate_distribution(&partial, 3, &legal, DistributionCoverage::AnySubset).is_ok()
+        );
+    }
+
     thread_local! {
         static EXISTENCE_WALK_DIFFERENTIALS: std::cell::Cell<u64> =
             const { std::cell::Cell::new(0) };

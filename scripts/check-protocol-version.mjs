@@ -249,6 +249,7 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +61: wire 115 moves with full-game v133 for the pre-entry as-enters choice.
 // +67: wire 121 moves with full-game v139 for the per-turn crew relation.
 // +68: wire 122 moves with full-game v140 for `AttackSubject::EventAttackers`.
+// +69: wire 123 moves with full-game v141 for the CR 608.2d resolution-time division and ThisWayCause::Tapped.
 // +62: wire 116 moves with full-game v134 for `AbilityActivated.stack_entry`.
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 69;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
