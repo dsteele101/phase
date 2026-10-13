@@ -3124,20 +3124,6 @@ pub enum EventCounterReproductionCount {
     PerKind(u32),
 }
 
-/// CR 701.6 + CR 608.2c: A follow-up instruction carried by `Effect::Counter`
-/// that acts on the *source permanent* of an ability countered by the effect.
-///
-/// The rider only fires when the countered object was an activated or triggered
-/// ability — per CR 701.8a / CR 110.1 a spell is not a permanent, so when a
-/// spell is countered there is no permanent for the rider to act on and it is
-/// skipped (the conditional "if a permanent's ability is countered this way" is
-/// encoded structurally by this spell-vs-ability gate, not by a separate
-/// `AbilityCondition`).
-///
-/// Both variants share one categorical axis — "an effect applied to the
-/// countered ability's source permanent" — so they live on a single enum rather
-/// than as sibling `Option` fields on `Effect::Counter` (parameterize, don't
-/// proliferate).
 /// serde default for `CounterSourceRider::LosesAbilities::duration` — keeps
 /// card-data serialized before the field was added deserializing correctly.
 /// Deliberately the OLD reading: before the field existed the resolver
@@ -3150,6 +3136,22 @@ fn duration_until_host_leaves_play() -> Box<Duration> {
     Box::new(Duration::UntilHostLeavesPlay)
 }
 
+/// CR 701.6 + CR 608.2c: A follow-up instruction carried by `Effect::Counter`
+/// that acts on the *source permanent* of an ability countered by the effect.
+///
+/// The rider only fires when the countered object was an activated or triggered
+/// ability — per CR 110.1 (a permanent is on the battlefield) + CR 113.1c (a stack ability is an object whose source can be a permanent) a spell is not a permanent, so when a
+/// spell is countered there is no permanent for the rider to act on and it is
+/// skipped (the conditional "if a permanent's ability is countered this way" is
+/// encoded structurally by this spell-vs-ability gate, not by a separate
+/// `AbilityCondition`). A type-restricted conditional ("if an ability of an
+/// artifact, creature, or planeswalker is countered this way") adds a typed
+/// gate on the source permanent: `LosesAbilities::source_filter`.
+///
+/// Both variants share one categorical axis — "an effect applied to the
+/// countered ability's source permanent" — so they live on a single enum rather
+/// than as sibling `Option` fields on `Effect::Counter` (parameterize, don't
+/// proliferate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CounterSourceRider {
@@ -3166,8 +3168,18 @@ pub enum CounterSourceRider {
     /// an explicit field (rather than hard-coded in the resolver) so the
     /// "as long as" clause is visible in the serialized AST and threaded to
     /// the transient continuous effect.
+    ///
+    /// CR 608.2c + CR 109.2: `source_filter` is the printed type condition on
+    /// the countered ability's source ("an ability of an artifact, creature, or
+    /// planeswalker is countered this way" — a description with a card type and
+    /// no zone means a permanent of that type). `None` is the untyped "a
+    /// permanent's ability" reading (and pre-field card data). It is evaluated
+    /// live at resolution against the source's current characteristics
+    /// (CR 608.2h), so a land or enchantment source is left untouched.
     LosesAbilities {
         static_def: Box<StaticDefinition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_filter: Option<Box<TargetFilter>>,
         // Boxed: `Duration` is a large enum, and this rider is embedded in the
         // frequently-constructed `ZoneCounterImperativeAst`/`Effect::Counter`
         // holders — boxing keeps `CounterSourceRider` small (clippy
@@ -6545,6 +6557,18 @@ pub enum CombatRelation {
     BlockedBySubject { scope: CombatHistoryScope },
 }
 
+/// CR 702.122b + CR 702.122c: which side of a crew payment the candidate of a
+/// [`FilterProp::CrewedThisTurn`] stands on, relative to the filter source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewRelation {
+    /// The candidate crewed the source Vehicle this turn (was tapped to pay its
+    /// crew cost) — "creature that crewed it this turn".
+    CrewedSource,
+    /// The candidate is a Vehicle the source crewed this turn — "Vehicle crewed
+    /// by ~ this turn".
+    CrewedBySource,
+}
+
 /// Context object for a combat relationship filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CombatRelationSubject {
@@ -6679,6 +6703,16 @@ pub enum FilterProp {
     /// of `BlockingSource`; used by "choose a creature that saddled it this turn"
     /// (Calamity, Galloping Inferno).
     SaddledSource,
+    /// CR 702.122b + CR 702.122c: crew-payment relation between the candidate
+    /// and the filter source this turn, read from
+    /// `GameState::crew_history_this_turn` by both objects' exact incarnations
+    /// (CR 400.7). `CrewedSource` — "creature that crewed it this turn"
+    /// (Getaway Car, Golden Argosy); `CrewedBySource` — "Vehicle crewed by ~
+    /// this turn" (Balthier and Fran). Recorded at crew cost payment, so a crew
+    /// ability countered after payment still counts (CR 702.122c).
+    CrewedThisTurn {
+        relation: CrewRelation,
+    },
     /// CR 702.51c: Matches a creature that convoked the filter source — i.e. was
     /// tapped to pay the source spell's convoke cost, recorded in the source
     /// object's `convoked_creatures`. Source-relative, mirroring `SaddledSource`
@@ -9574,7 +9608,10 @@ pub enum QuantityRef {
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
-    /// Used by The Mimeoplasm to read the second exiled card's power for counter placement.
+    /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
+    /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
+    /// "the power of the exiled card" use
+    /// `PropertyAggregate(Sum, Power, CardTypeSetSource::ExiledBySource)` instead.
     ExiledCardPower { index: u32 },
     /// CR 400.1: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
@@ -11124,6 +11161,13 @@ pub enum AttackSubject {
     You,
     /// The ability's source creature — "opponents this creature attacked".
     Source,
+    /// CR 508.1b + CR 508.6: the attacking creatures of the attack event the
+    /// resolving trigger answers to ("those players" of "one or more Devils you
+    /// control attack one or more players"). Read from `state.current_trigger_event`'s
+    /// `AttackersDeclared.attacks`, which a batched trigger narrows to its matching
+    /// attackers. One declaration is one combat, so `CombatHistoryScope` is inert
+    /// for this subject; the parser emits `ThisCombat`.
+    EventAttackers,
 }
 
 /// CR 500.8 + CR 511.3: The time window a combat-history predicate is measured over.
@@ -28602,6 +28646,100 @@ impl AbilityCondition {
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
+    /// CR 608.2c + CR 603.12: the "… this way" zone-change head of a clause
+    /// gate — the `ZoneChangedThisWay` condition itself (an "if" head), or the
+    /// trigger-event member of a reflexive creation gate built by
+    /// `when_you_do_with_guard` ("When <zone change> this way"). Lets a body
+    /// rewrite or runtime binder that keys on the zone-change head read both
+    /// connectors.
+    ///
+    /// Contract: a root `ZoneChangedThisWay` member beside `WhenYouDo` is always
+    /// the reflexive's trigger event. The parser refuses a zone-change
+    /// intervening "if" on a reflexive (`has_root_zone_changed_this_way` at the
+    /// "When you do, if …" composition sites), so the role is never ambiguous.
+    pub fn zone_changed_this_way_head(&self) -> Option<&AbilityCondition> {
+        match self {
+            AbilityCondition::ZoneChangedThisWay { .. } => Some(self),
+            AbilityCondition::And { conditions } => {
+                if !self.has_when_you_do_marker() {
+                    return None;
+                }
+                conditions
+                    .iter()
+                    .find(|member| matches!(member, AbilityCondition::ZoneChangedThisWay { .. }))
+            }
+            AbilityCondition::WhenYouDo
+            | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::PreviousEffectAmount { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::ConditionInstead { .. }
+            | AbilityCondition::Or { .. }
+            | AbilityCondition::Not { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. } => None,
+        }
+    }
+
+    /// Whether `ZoneChangedThisWay` is this condition or a member of its flat
+    /// root `And`. Used to refuse a zone-change guard as a reflexive's
+    /// intervening "if" (see `zone_changed_this_way_head`).
+    pub fn has_root_zone_changed_this_way(&self) -> bool {
+        let is_zone_change = |condition: &AbilityCondition| {
+            matches!(condition, AbilityCondition::ZoneChangedThisWay { .. })
+        };
+        match self {
+            AbilityCondition::And { conditions } => conditions.iter().any(is_zone_change),
+            condition => is_zone_change(condition),
         }
     }
 

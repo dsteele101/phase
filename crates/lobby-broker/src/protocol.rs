@@ -60,22 +60,35 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 138 — CR 608.2d resolution-time division (Master of the Wild Hunt). Every
+/// 141 — CR 608.2d resolution-time division (Master of the Wild Hunt). Every
 ///      change rides full-game state; lobby messages are unchanged, and P2P
 ///      moves in lockstep (wire 120). `ThisWayCause::Tapped` is a new unit tag
 ///      on the enum a `TrackedSetFiltered` filter carries, so any `GameObject`
-///      whose parsed abilities read "tapped this way" is unparseable by a v137
+///      whose parsed abilities read "tapped this way" is unparseable by a v140
 ///      peer — a conditional PARSE bump like 76/79/81. `WaitingFor::
 ///      DistributeAmong` gained `scope: DistributionScope` (adjacently tagged,
 ///      `{"type":"ResolutionCandidates","data":{"pending_effect":{…}}}`),
 ///      `#[serde(default)]` and omitted for the announce-time
 ///      `AnnouncedTargets`, so every pre-existing division prompt is
-///      byte-identical. A resolution-time prompt still parses on a v137 client,
+///      byte-identical. A resolution-time prompt still parses on a v140 client,
 ///      which drops `scope` and reads it as an announce-time division: its
 ///      modal then requires every candidate to receive at least one, so a
 ///      subset split — or any total smaller than the candidate count — can
 ///      never be confirmed. A silent capability loss the handshake must refuse
 ///      (see 24).
+///
+/// 140 — `AttackSubject` gains `EventAttackers` (`"EventAttackers"`, the
+///      players a trigger's attack event's attackers were declared attacking,
+///      CR 508.6), serialized inside `GameState` wherever a resolving or pending
+///      ability carries a `player_scope` (Zurzoth, Chaos Rider). A v139 peer
+///      cannot parse the tag. Full-game peers and P2P move in lockstep (wire
+///      122); no lobby carrier names it.
+///
+/// 139 — CR 702.122c per-turn crew relation: `GameState` gains
+///      `crew_history_this_turn` (the Vehicle/crewer incarnation pairs) and
+///      `FilterProp` gains `CrewedThisTurn { relation }`, both serialized inside
+///      `GameState`; a v138 peer cannot parse the new filter tag. Full-game
+///      peers and P2P move in lockstep (wire 121); no lobby carrier names it.
 /// 134 — `GameEvent::AbilityActivated` gains `stack_entry` (`Option<ObjectId>`,
 ///      omitted when absent) — the stack object a stack-using activation
 ///      created (CR 602.2a), which an activation trigger's "copy that ability"
@@ -1051,7 +1064,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 138;
+pub const PROTOCOL_VERSION: u32 = 141;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2308,12 +2321,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 138);
+        assert_eq!(PROTOCOL_VERSION, 141);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 137);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 140);
     }
 
     #[test]

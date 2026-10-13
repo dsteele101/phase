@@ -12807,6 +12807,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::AttachedTo { to: AttachmentReferent::Source }
         | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
         | FilterProp::ConvokedSource
         | FilterProp::BlockingSource
         | FilterProp::PowerGTSource
@@ -13067,6 +13068,9 @@ fn attack_subject_binding_diverges(subject: &crate::types::ability::AttackSubjec
         // CR 109.5 + CR 400.7: the controller and the source object, both
         // carried by the fire-time context.
         AttackSubject::You | AttackSubject::Source => false,
+        // CR 603.2: like `PlayerFilter::TriggeringPlayer`, read from
+        // `state.current_trigger_event` directly.
+        AttackSubject::EventAttackers => true,
     }
 }
 
@@ -26363,6 +26367,10 @@ pub mod tests {
                  carried by the fire-time context"
             );
         }
+        assert!(
+            attack_subject_binding_diverges(&crate::types::ability::AttackSubject::EventAttackers),
+            "CR 603.2: read from state.current_trigger_event directly, like PlayerFilter::TriggeringPlayer"
+        );
         // The two composite arms those axes feed, end to end.
         assert!(
             filter_prop_binding_diverges(&FilterProp::ManaValueParity {

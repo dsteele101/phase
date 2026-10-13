@@ -3346,11 +3346,22 @@ mod tests {
         }
     }
 
-    /// `ThisWayCause::Tapped` is new in serialized abilities and
+    /// v141: `ThisWayCause::Tapped` is new in serialized abilities and
     /// `WaitingFor::DistributeAmong` gained a resolution-time `scope`
-    /// (CR 608.2d); a v137 peer cannot parse the tag and would misread the
+    /// (CR 608.2d); a v140 peer cannot parse the tag and would misread the
     /// prompt as an announce-time division, so it must be refused before it
-    /// receives v138 state.
+    /// receives v141 state.
+    ///
+    /// v140: `AttackSubject` gains `EventAttackers` (the players a trigger's
+    /// attack event's attackers attacked), carried in a resolving or pending
+    /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
+    /// tag, so it must be refused before it receives v140 state.
+    ///
+    /// v139: CR 702.122c per-turn crew relation —
+    /// `GameState::crew_history_this_turn` and `FilterProp::CrewedThisTurn`, both
+    /// inside `GameState`; a v138 peer cannot parse the new filter tag, so it
+    /// must be refused before it receives v139 state.
+    ///
     /// v134: `GameEvent::AbilityActivated` gains
     /// `stack_entry`, the stack object a stack-using activation created, carried
     /// in `GameState`'s trigger events; an older peer drops it silently and
@@ -3539,8 +3550,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_138_for_resolution_division() {
-        assert_eq!(PROTOCOL_VERSION, 138);
+    fn protocol_version_is_141_for_resolution_division() {
+        assert_eq!(PROTOCOL_VERSION, 141);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3551,7 +3562,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_138_for_resolution_division` stays
+    /// `protocol_version_is_141_for_resolution_division` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

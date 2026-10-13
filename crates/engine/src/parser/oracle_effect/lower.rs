@@ -20,7 +20,7 @@ use super::super::oracle_nom::target::parse_declared_target_prefix;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
     parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
-    parse_player_attribute_attr_clause, parse_quantity_ref,
+    parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
     parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
@@ -33,14 +33,15 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-    AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
-    CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
-    ControllerRef, CountBinding, DamageChannel, DamageSource, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    MultiTargetSpec, NameStickerSet, ObjectScope, PermissionGrantee, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
+    CastPermissionConstraint, CastingPermission, CombatHistoryScope, Comparator, ConjureSource,
+    ContinuousModification, ControllerRef, CountBinding, DamageChannel, DamageSource,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider, FilterProp,
+    GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope,
+    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -3019,10 +3020,11 @@ fn is_exile_resolving_return_rider(sub: &AbilityDefinition) -> bool {
 pub(super) fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_mut() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
-            && matches!(
-                sub.condition,
-                Some(AbilityCondition::ZoneChangedThisWay { .. })
-            );
+            && sub
+                .condition
+                .as_ref()
+                .and_then(AbilityCondition::zone_changed_this_way_head)
+                .is_some();
         let parent_moves_to_battlefield = matches!(
             *def.effect,
             Effect::Dig {
@@ -5032,6 +5034,10 @@ pub(crate) fn strip_for_each_prefix_with_difference(
             let parsed_comparison = nom_quantity::parse_for_each_clause_ref_with_difference(clause)
                 .ok()
                 .and_then(|(rest, parsed)| rest.is_empty().then_some(parsed));
+            if let Some(short_of) = parse_for_each_short_of_clause_expr(clause) {
+                let offset = text.len() - remainder.len();
+                return (Some(short_of), None, text[offset..].to_string());
+            }
             let parsed_clause = parsed_comparison
                 .clone()
                 .map(|(qty, difference)| (qty, Some(difference)))
@@ -5081,6 +5087,7 @@ pub(crate) fn strip_for_each_prefix_with_difference(
 #[cfg(test)]
 mod difference_binding_tests {
     use super::strip_for_each_prefix_with_difference;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
 
     #[test]
     fn comparison_parser_product_carries_difference_provenance() {
@@ -5101,6 +5108,40 @@ mod difference_binding_tests {
             let (_, difference, _) = strip_for_each_prefix_with_difference(text);
             assert!(difference.is_none(), "nested property must not bind: {text}");
         }
+    }
+
+    /// CR 107.1b + CR 608.2c: a leading "for each <noun> less than N …" counts
+    /// the shortfall below N (Truce), while the same clause without "less than"
+    /// keeps the plain "this way" count.
+    #[test]
+    fn leading_less_than_clause_counts_the_shortfall() {
+        let tracked = || QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let (repeat_for, difference, rest) = strip_for_each_prefix_with_difference(
+            "For each card less than two a player draws this way, that player gains 2 life.",
+        );
+        assert_eq!(
+            repeat_for,
+            Some(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(tracked()),
+                    }),
+                    offset: 2,
+                }),
+                minimum: 0,
+            })
+        );
+        assert!(difference.is_none());
+        assert_eq!(rest, "that player gains 2 life.");
+
+        let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(
+            "For each card a player draws this way, that player gains 2 life.",
+        );
+        assert_eq!(repeat_for, Some(tracked()));
+        assert_eq!(rest, "that player gains 2 life.");
     }
 }
 
@@ -9754,7 +9795,9 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                         ecr_rem,
                     ));
                 } else {
-                    let (target, remainder) = parse_target(target_phrase);
+                    let (target, remainder) = ctx.with_player_antecedents(|scoped| {
+                        parse_target_with_ctx(target_phrase, scoped)
+                    });
                     let (target, remainder) = refine_damage_target_remainder(target, remainder);
                     if !remainder.trim().is_empty() {
                         ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
@@ -11077,18 +11120,26 @@ fn parse_where_x_quantity_with(
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
 }
 
-/// CR 107.3c + CR 608.2h: "where X is the power of the exiled card" DEFINES X as
-/// the power of the card exiled by this ability's source — Bishop of Binding
-/// ("Whenever this creature attacks, target Vampire gets +X/+X until end of
-/// turn, where X is the power of the exiled card") and Redemptor Dreadnought.
-/// CR 608.2h: the exiled card is read via last known information, which is what
-/// `QuantityRef::ExiledCardPower` resolves against (game/quantity.rs).
+/// CR 607.2a + CR 607.3 + CR 608.2h: "where X is the power of the exiled card"
+/// is the power of the card(s) in exile linked to this object; with several
+/// linked cards X is their sum. Bishop of Binding ("Whenever this creature
+/// attacks, target Vampire gets +X/+X until end of turn, where X is the power of
+/// the exiled card") and Redemptor Dreadnought print it.
 ///
-/// `index: 0` is the first (and, for this class, only) card the source exiled.
+/// The `CardTypeSetSource::ExiledBySource` population reads the linked-exile
+/// authority (`linked_exile_for_context` in game/quantity.rs), the same pile
+/// "if a card is exiled with it" (`QuantityRef::CardsExiledBySource`) counts.
 fn parse_where_x_exiled_card_power(expression_lower: &str) -> Option<QuantityExpr> {
     all_consuming(value(
         QuantityExpr::Ref {
-            qty: QuantityRef::ExiledCardPower { index: 0 },
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::ExiledBySource,
+                )
+                .expect("statically valid property aggregate"),
+            ),
         },
         tag::<_, _, OracleError<'_>>("the power of the exiled card"),
     ))

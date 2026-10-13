@@ -106,13 +106,19 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  120 — game_setup and state_update carry GameState, whose DistributeAmong
+ *  123 — game_setup and state_update carry GameState, whose DistributeAmong
  *       prompt can now carry scope { type: "ResolutionCandidates" } (a CR
  *       608.2d division among any number of candidates) and whose abilities
- *       can carry ThisWayCause "Tapped". A v119 peer would drop scope and
+ *       can carry ThisWayCause "Tapped". A v122 peer would drop scope and
  *       require every candidate to receive at least one; first contact
  *       rejects the skew instead. Bumped in lockstep with full-game
- *       protocol 138.
+ *       protocol 141.
+ *  122 — game_setup and state_update carry GameState whose ability player scopes
+ *       may hold AttackSubject EventAttackers. Bumped in lockstep with full-game
+ *       protocol 140.
+ *  121 — game_setup and state_update carry GameState with the per-turn crew
+ *       relation (crew_history_this_turn) and FilterProp::CrewedThisTurn
+ *       (CR 702.122c). Bumped in lockstep with full-game protocol 139.
  *  116 — game_setup and state_update carry GameState whose AbilityActivated trigger
  *       events may name the activation's stack_entry. Bumped in lockstep with
  *       full-game protocol 134.
@@ -669,7 +675,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 120 as const;
+export const WIRE_PROTOCOL_VERSION = 123 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

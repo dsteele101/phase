@@ -498,7 +498,8 @@ pub(crate) fn parse_quantity_ref_with_context(
         if let Ok((after_head_tag, head_text)) =
             take_until::<_, _, OracleError<'_>>(" you controlled ").parse(rest)
         {
-            let (head_filter, head_rem) = parse_type_phrase_folding(head_text);
+            let (head_filter, head_rem) =
+                parse_type_phrase_folding_with_ctx(head_text, &mut ctx.clone_player_antecedents());
             if head_rem.trim().is_empty()
                 && !matches!(head_filter, TargetFilter::Any)
                 && !is_empty_typed_filter(&head_filter)
@@ -2715,6 +2716,10 @@ fn parse_for_each_clause_expr_with_parser(
         return rest.is_empty().then_some(expr);
     }
 
+    if let Some(expr) = parse_for_each_short_of_clause_expr_with_parser(clause, parse_clause) {
+        return Some(expr);
+    }
+
     fn segment(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
@@ -2761,6 +2766,46 @@ fn parse_for_each_beyond_first_clause_expr_with_parser(
             minimum: 0,
         },
     ))
+}
+
+/// CR 107.1b + CR 608.2c: "for each <noun> less than N <qualifier>" (or
+/// "fewer than N") counts how far the qualified count of `<noun>` falls short of
+/// N: N minus the count of "<noun> <qualifier>", clamped at zero because a
+/// calculation that yields a negative number uses zero. Truce: "for each card
+/// less than two a player draws this way". The noun is a single type word, so a
+/// property comparison ("creature with power less than 0") never matches here.
+fn parse_for_each_short_of_clause_expr_with_parser(
+    input: &str,
+    parse_clause: impl Fn(&str) -> Option<QuantityRef>,
+) -> Option<QuantityExpr> {
+    let (qualifier, (noun, _, ceiling, _)) = (
+        recognize(nom_target::parse_type_filter_word),
+        alt((
+            tag::<_, _, OracleError<'_>>(" less than "),
+            tag(" fewer than "),
+        )),
+        nom_primitives::parse_number,
+        tag(" "),
+    )
+        .parse(input)
+        .ok()?;
+    let qty = parse_clause(&format!("{noun} {qualifier}"))?;
+    Some(QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref { qty }),
+            }),
+            offset: i32::try_from(ceiling).ok()?,
+        }),
+        minimum: 0,
+    })
+}
+
+/// CR 107.1b + CR 608.2c: the leading-prefix entry for
+/// [`parse_for_each_short_of_clause_expr_with_parser`].
+pub(crate) fn parse_for_each_short_of_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_short_of_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
 /// CR 109.4 + CR 400.1 + CR 608.2c: Parse an anaphoric hand-card union like
@@ -3378,7 +3423,10 @@ fn parse_for_each_clause_with_they_controller(
         .parse(clause)
         {
             if after.trim().is_empty() {
-                let (type_filter, type_rest) = parse_type_phrase_folding(prefix);
+                let (type_filter, type_rest) = parse_type_phrase_folding_with_ctx(
+                    prefix,
+                    &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+                );
                 if type_rest.trim().is_empty() && !matches!(type_filter, TargetFilter::Any) {
                     return Some(QuantityRef::ObjectCount {
                         filter: TargetFilter::And {
@@ -3575,7 +3623,10 @@ fn parse_for_each_clause_with_they_controller(
     // "[counter type] counter(s) on that creature/permanent" — anaphoric, must check
     // before the wildcard "counter on" guard below which would misroute to CountersOnSelf.
     if clause.contains("counter on that") {
-        if let Some(qty) = parse_quantity_ref(clause) {
+        if let Some(qty) = parse_quantity_ref_with_context(
+            clause,
+            &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+        ) {
             return Some(qty);
         }
     }
@@ -3596,7 +3647,10 @@ fn parse_for_each_clause_with_they_controller(
             // The counter suffix must consume the rest of the clause (possibly with
             // trailing whitespace / punctuation already stripped by trim_end_matches).
             if suffix_part[consumed..].trim().is_empty() {
-                let (filter, type_rest) = parse_type_phrase_folding(type_part);
+                let (filter, type_rest) = parse_type_phrase_folding_with_ctx(
+                    type_part,
+                    &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+                );
                 if type_rest.trim().is_empty() {
                     // Compose: attach the counter property onto the typed filter.
                     // parse_type_phrase_folding always emits TargetFilter::Typed for non-Any
@@ -3635,13 +3689,19 @@ fn parse_for_each_clause_with_they_controller(
     // "card in your hand" (→ HandSize), "life you gained this turn", etc.
     // "for each" strips the quantifier, so the clause may be singular or have
     // slightly different phrasing. Try both as-is and with "s" appended.
-    if let Some(qty) = parse_quantity_ref(clause) {
+    if let Some(qty) = parse_quantity_ref_with_context(
+        clause,
+        &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+    ) {
         return Some(qty);
     }
     // Handle singular → plural: "card in your hand" → "cards in your hand"
     if let Some((first_word, rest)) = clause.split_once(' ') {
         let pluralized = format!("{first_word}s {rest}");
-        if let Some(qty) = parse_quantity_ref(&pluralized) {
+        if let Some(qty) = parse_quantity_ref_with_context(
+            &pluralized,
+            &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
+        ) {
             return Some(qty);
         }
     }
@@ -7643,6 +7703,42 @@ mod tests {
                 assert_eq!(filter.properties, vec![FilterProp::BlockingSource]);
             }
             other => panic!("expected blocking-source ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1b + CR 608.2c: "for each <noun> fewer than N <qualifier>" is N
+    /// minus the count of "<noun> <qualifier>", clamped at zero (Stabwhisker the
+    /// Odious). A property comparison on the noun is not a shortfall count.
+    #[test]
+    fn for_each_fewer_than_clamps_shortfall_below_ceiling() {
+        let qty = parse_for_each_clause("card in their hand").expect("base clause parses");
+        assert_eq!(
+            parse_for_each_clause_expr("card fewer than three in their hand"),
+            Some(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(QuantityExpr::Ref { qty }),
+                    }),
+                    offset: 3,
+                }),
+                minimum: 0,
+            })
+        );
+        for clause in [
+            "creature with power less than 0 on the battlefield",
+            "opponent whose life total is less than half their starting life total",
+        ] {
+            let result = parse_for_each_clause_expr(clause);
+            assert!(
+                !matches!(
+                    &result,
+                    Some(QuantityExpr::ClampMin { inner, .. })
+                        if matches!(inner.as_ref(), QuantityExpr::Offset { inner, .. }
+                            if matches!(inner.as_ref(), QuantityExpr::Multiply { .. }))
+                ),
+                "a property comparison must not parse as a shortfall: {clause} → {result:?}"
+            );
         }
     }
 
