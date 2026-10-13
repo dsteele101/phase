@@ -1463,6 +1463,10 @@ fn pause_for_resolution_division(
     if let [only] = candidates.as_slice() {
         let mut stamped = ability.clone();
         stamped.distribution = Some(vec![(TargetRef::Object(*only), total)]);
+        // CR 608.2c: instructions are followed in order. The enclosing chain
+        // owns the trailing instruction; a replacement-choice pause inside this
+        // recursive resolution must not park a second copy of it.
+        stamped.sub_ability = None;
         return resolve_with_splice(
             state,
             &stamped,
@@ -8674,6 +8678,56 @@ mod tests {
         assert!(
             at_w2 < at_w3 && at_w3 < at_tail,
             "remaining portions run before the parked tail: {summary:?}"
+        );
+    }
+
+    /// CR 608.2c: with exactly one candidate the division is applied directly;
+    /// a replacement-choice pause inside that recursion must not give the
+    /// trailing instruction a second owner. Entered through the production
+    /// chain entry, the tail runs exactly once.
+    #[test]
+    fn single_candidate_division_replacement_pause_runs_tail_once() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 1, 4, true);
+        let giant = division_creature(&mut state, 3, PlayerId(1), 3, 3, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1]);
+        install_optional_damage_replacement(&mut state);
+        let mut node = wolves_division_node(giant, master);
+        node.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            master,
+            PlayerId(0),
+        )));
+        let life_before = state.players[0].life;
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &node, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: the lone portion paused on the replacement choice"
+        );
+        assert_eq!(
+            state.players[0].life, life_before,
+            "tail waits for the choice"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 5,
+            "the trailing instruction resolves exactly once"
         );
     }
 

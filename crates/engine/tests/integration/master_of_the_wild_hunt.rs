@@ -719,3 +719,71 @@ fn division_routes_to_the_targets_controller_in_multiplayer() {
         WaitingFor::Priority { player: P0 }
     );
 }
+
+/// CR 601.2d + CR 608.2d at the raw reducer boundary: a submitted budget that
+/// overflows `u32` is refused rather than wrapping to the required total.
+#[test]
+fn raw_division_with_overflowing_budget_is_refused() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let master = master(&mut s);
+    let a = wolf(&mut s, P0, "Wolf A", 2, 2);
+    let b = wolf(&mut s, P0, "Wolf B", 2, 2);
+    let brute = s.add_creature(P1, "Target Brute", 1, 1).id();
+    let mut runner = s.build();
+    let (wait, _) = activate_until_division(&mut runner, master, brute);
+    let (_, total, _) = division(wait);
+    assert_eq!(total, 1);
+
+    let result = runner.act(GameAction::DistributeAmong {
+        distribution: vec![(TargetRef::Object(a), u32::MAX), (TargetRef::Object(b), 2)],
+    });
+    assert!(result.is_err(), "u32::MAX + 2 must not wrap to 1");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DistributeAmong { .. }
+    ));
+}
+
+/// CR 601.2d: an announce-time division must give every announced target at
+/// least one; the raw reducer refuses a split that leaves one out, while the
+/// resolution-time scope (CR 608.2d) accepts the same subset.
+#[test]
+fn raw_announced_division_must_cover_every_target_but_resolution_may_not() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let master = master(&mut s);
+    let a = wolf(&mut s, P0, "Wolf A", 2, 2);
+    let b = wolf(&mut s, P0, "Wolf B", 2, 2);
+    let brute = s.add_creature(P1, "Target Brute", 3, 3).id();
+    let mut runner = s.build();
+    let (wait, _) = activate_until_division(&mut runner, master, brute);
+    let (_, total, targets) = division(wait);
+    assert_eq!(total, 3);
+
+    // Same prompt re-scoped to announce time.
+    let resolution_wait = runner.state().waiting_for.clone();
+    let WaitingFor::DistributeAmong { player, unit, .. } = resolution_wait.clone() else {
+        panic!("expected a division prompt");
+    };
+    runner.state_mut().waiting_for = WaitingFor::DistributeAmong {
+        player,
+        total,
+        targets: targets.clone(),
+        unit,
+        scope: DistributionScope::AnnouncedTargets,
+    };
+    let partial = GameAction::DistributeAmong {
+        distribution: vec![(TargetRef::Object(a), 3)],
+    };
+    assert!(
+        runner.act(partial.clone()).is_err(),
+        "announced target {b:?} would receive nothing"
+    );
+
+    // Restore the resolution-time prompt: the subset is a legal division.
+    runner.state_mut().waiting_for = resolution_wait;
+    runner
+        .act(partial)
+        .expect("a resolution-time subset is legal");
+}

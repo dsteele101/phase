@@ -6880,8 +6880,13 @@ mod tests {
         assert!(!distributions.is_empty(), "reach guard: candidates exist");
         for distribution in &distributions {
             assert!(
-                crate::game::ability_utils::validate_distribution(distribution, 2, &targets)
-                    .is_ok(),
+                crate::game::ability_utils::validate_distribution(
+                    distribution,
+                    2,
+                    &targets,
+                    crate::game::ability_utils::DistributionCoverage::AnySubset
+                )
+                .is_ok(),
                 "illegal resolution-time division {distribution:?}"
             );
             assert!(distribution.len() < targets.len(), "strict subset");
@@ -6899,9 +6904,13 @@ mod tests {
             "a split killing both bodies must be offered, got {distributions:?}"
         );
         for distribution in &distributions {
-            assert!(
-                crate::game::ability_utils::validate_distribution(distribution, 5, &pair).is_ok()
-            );
+            assert!(crate::game::ability_utils::validate_distribution(
+                distribution,
+                5,
+                &pair,
+                crate::game::ability_utils::DistributionCoverage::AnySubset
+            )
+            .is_ok());
         }
     }
 
@@ -6959,8 +6968,13 @@ mod tests {
         assert_eq!(unique.len(), distributions.len(), "no duplicate candidates");
         for distribution in &distributions {
             assert!(
-                crate::game::ability_utils::validate_distribution(distribution, 3, &targets)
-                    .is_ok(),
+                crate::game::ability_utils::validate_distribution(
+                    distribution,
+                    3,
+                    &targets,
+                    crate::game::ability_utils::DistributionCoverage::AnySubset
+                )
+                .is_ok(),
                 "illegal resolution-time division {distribution:?}"
             );
         }

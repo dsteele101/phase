@@ -15462,7 +15462,12 @@ fn apply_non_priority_pass_action(
 
             // CR 601.2d + CR 608.2d: the single division validator (sum, each
             // entry ≥ 1, legal recipient, no duplicates) for both scopes.
-            ability_utils::validate_distribution(&distribution, *total, targets)
+            ability_utils::validate_distribution(
+                &distribution,
+                *total,
+                targets,
+                ability_utils::DistributionCoverage::of(scope),
+            )
                 .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
 
             match scope {

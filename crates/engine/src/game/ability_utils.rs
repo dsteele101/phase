@@ -2756,16 +2756,43 @@ pub(crate) fn resolution_time_division(
     }
 }
 
+/// Which of the legal recipients a submitted division must name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DistributionCoverage {
+    /// CR 601.2d: "Each of these targets must receive at least one of whatever
+    /// is being divided" — an announce-time division names every target.
+    EveryRecipient,
+    /// CR 608.2d: a resolution-time division among candidates the chooser may
+    /// leave unchosen, so any subset of the legal recipients is a division.
+    AnySubset,
+}
+
+impl DistributionCoverage {
+    pub(crate) fn of(scope: &crate::types::game_state::DistributionScope) -> Self {
+        use crate::types::game_state::DistributionScope;
+        match scope {
+            DistributionScope::AnnouncedTargets => Self::EveryRecipient,
+            DistributionScope::ResolutionCandidates { .. } => Self::AnySubset,
+        }
+    }
+}
+
 /// CR 601.2d + CR 608.2d + CR 115.7f: the single validator for a submitted
 /// division, shared by both `DistributionScope`s. Each entry names a distinct
-/// legal recipient and receives at least one, and the portions sum to the
-/// whole amount. An empty submission for a positive total fails the sum check.
+/// legal recipient and receives at least one, the portions sum to the whole
+/// amount, and `coverage` says whether every legal recipient must be named.
+/// An empty submission for a positive total fails the sum check. The sum is
+/// checked so a submitted budget cannot wrap past the required total.
 pub(crate) fn validate_distribution(
     distribution: &[(TargetRef, u32)],
     total: u32,
     legal: &[TargetRef],
+    coverage: DistributionCoverage,
 ) -> Result<(), crate::types::ability::EffectError> {
-    let actual_total: u32 = distribution.iter().map(|(_, amount)| *amount).sum();
+    let actual_total = distribution
+        .iter()
+        .try_fold(0u32, |sum, (_, amount)| sum.checked_add(*amount))
+        .ok_or_else(|| EffectError::InvalidParam("Distribution total overflows".to_string()))?;
     if actual_total != total {
         return Err(EffectError::InvalidParam(format!(
             "Distribution total {actual_total} != required {total}"
@@ -2789,6 +2816,13 @@ pub(crate) fn validate_distribution(
                 "Distribution names a recipient more than once".to_string(),
             ));
         }
+    }
+    if coverage == DistributionCoverage::EveryRecipient
+        && !legal.iter().all(|target| seen.contains(target))
+    {
+        return Err(EffectError::InvalidParam(
+            "Each announced target must receive at least 1".to_string(),
+        ));
     }
     Ok(())
 }
@@ -27802,20 +27836,56 @@ mod tests {
     /// CR 601.2d + CR 608.2d + CR 115.7f: the shared division validator.
     #[test]
     fn validate_distribution_enforces_sum_minimum_membership_and_distinctness() {
+        use DistributionCoverage::{AnySubset, EveryRecipient};
         let a = TargetRef::Object(ObjectId(21));
         let b = TargetRef::Object(ObjectId(22));
         let outsider = TargetRef::Object(ObjectId(99));
         let legal = vec![a.clone(), b.clone()];
-        assert!(validate_distribution(&[(a.clone(), 2), (b.clone(), 1)], 3, &legal).is_ok());
         assert!(
-            validate_distribution(&[(a.clone(), 3)], 3, &legal).is_ok(),
+            validate_distribution(&[(a.clone(), 2), (b.clone(), 1)], 3, &legal, AnySubset).is_ok()
+        );
+        assert!(
+            validate_distribution(&[(a.clone(), 3)], 3, &legal, AnySubset).is_ok(),
             "a subset of the legal recipients is a valid division"
         );
-        assert!(validate_distribution(&[(a.clone(), 1), (b.clone(), 1)], 3, &legal).is_err());
-        assert!(validate_distribution(&[(a.clone(), 3), (b.clone(), 0)], 3, &legal).is_err());
-        assert!(validate_distribution(&[(outsider, 3)], 3, &legal).is_err());
-        assert!(validate_distribution(&[(a.clone(), 1), (a.clone(), 2)], 3, &legal).is_err());
-        assert!(validate_distribution(&[], 3, &legal).is_err());
+        assert!(
+            validate_distribution(&[(a.clone(), 1), (b.clone(), 1)], 3, &legal, AnySubset).is_err()
+        );
+        assert!(
+            validate_distribution(&[(a.clone(), 3), (b.clone(), 0)], 3, &legal, AnySubset).is_err()
+        );
+        assert!(validate_distribution(&[(outsider, 3)], 3, &legal, AnySubset).is_err());
+        assert!(
+            validate_distribution(&[(a.clone(), 1), (a.clone(), 2)], 3, &legal, AnySubset).is_err()
+        );
+        assert!(validate_distribution(&[], 3, &legal, AnySubset).is_err());
+
+        // Raw-ingress overflow: u32::MAX + 2 wraps to 1 without a checked add.
+        assert!(validate_distribution(
+            &[(a.clone(), u32::MAX), (b.clone(), 2)],
+            1,
+            &legal,
+            AnySubset
+        )
+        .is_err());
+        assert!(validate_distribution(
+            &[(a.clone(), u32::MAX), (b.clone(), 2)],
+            1,
+            &legal,
+            EveryRecipient
+        )
+        .is_err());
+        // CR 601.2d: announced targets must all receive something; a
+        // resolution-time division may leave candidates out.
+        assert!(validate_distribution(&[(a.clone(), 3)], 3, &legal, EveryRecipient).is_err());
+        assert!(validate_distribution(
+            &[(a.clone(), 2), (b.clone(), 1)],
+            3,
+            &legal,
+            EveryRecipient
+        )
+        .is_ok());
+        assert!(validate_distribution(&[(a, 3)], 3, &legal, AnySubset).is_ok());
     }
 
     thread_local! {
