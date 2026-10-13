@@ -7,7 +7,7 @@ use engine::game::engine::{
 use engine::game::turn_control;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::log::GameLogEntry;
 use engine::types::player::PlayerId;
 use rand::Rng;
@@ -20,6 +20,13 @@ use crate::session::AiSession;
 /// Maximum AI actions before forcing a stop (safety invariant — not CR-derived).
 /// Typical AI sequences (mulligans + full turn) are 30–50 actions.
 const MAX_AI_ACTIONS_PER_SEQUENCE: usize = 200;
+
+/// Maximum host contest settlements one headless batch may perform before it
+/// gives up (safety invariant — not CR-derived). Settlement is host work, not an
+/// AI action, so it is bounded separately from the caller's action budget: a
+/// batch that spent its budget on settlements would report `ActionBudgetReached`
+/// with no applied action, which a driver cannot tell apart from a stall.
+const MAX_HOST_SETTLEMENTS_PER_SEQUENCE: usize = 200;
 
 /// Identifies whether a batch bound belongs to the caller or to the module's
 /// infinite-loop safety cap. A caller requesting exactly the cap remains a
@@ -259,7 +266,10 @@ pub fn run_ai_actions_headless(
 }
 
 /// [`run_ai_actions_bounded`] for a headless host; see [`run_ai_actions_headless`].
-/// Settling a contest spends one unit of the batch budget.
+/// Settling a contest is host work and does not spend the batch budget: `max_actions`
+/// bounds applied AI actions only, so a bounded batch that settles a contest still
+/// applies its resumed action(s) and never returns `ActionBudgetReached` empty. A
+/// separate finite bound ([`MAX_HOST_SETTLEMENTS_PER_SEQUENCE`]) guards the settlements.
 pub fn run_ai_actions_bounded_headless(
     state: &mut GameState,
     ai_players: &HashSet<PlayerId>,
@@ -300,7 +310,9 @@ fn run_ai_actions_with_limit(
         };
     }
 
-    for _ in 0..limit {
+    // The budget counts applied AI actions only; host settlements are counted apart.
+    let mut settlements = 0;
+    while results.len() < limit {
         // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
         // submitter is the controller — not the active player. Only run AI when
         // that submitter is an AI seat; otherwise wait for the human controller
@@ -310,10 +322,25 @@ fn run_ai_actions_with_limit(
         let Some((semantic_owner, actor)) = decision else {
             // A contest between AI seats has no actor, but a headless host has no clock
             // or input to settle it with: play it out here and carry on.
-            if contest_hosting == ContestHosting::Headless
-                && crate::contest::settle_headless_contest(state, ai_players, rng)
-            {
-                continue;
+            if contest_hosting == ContestHosting::Headless {
+                if settlements >= MAX_HOST_SETTLEMENTS_PER_SEQUENCE
+                    && matches!(state.waiting_for, WaitingFor::PhysicalContest { .. })
+                {
+                    tracing::warn!(
+                        count = settlements,
+                        "AI action loop hit host settlement cap — possible infinite loop"
+                    );
+                    return AiActionsRun {
+                        results,
+                        stop: AiActionsStop::ActionSafetyCapReached {
+                            limit: MAX_HOST_SETTLEMENTS_PER_SEQUENCE,
+                        },
+                    };
+                }
+                if crate::contest::settle_headless_contest(state, ai_players, rng) {
+                    settlements += 1;
+                    continue;
+                }
             }
             return AiActionsRun {
                 results,

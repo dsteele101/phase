@@ -2538,10 +2538,11 @@ export interface ContestDriveResult {
    */
   contest: { id: number; players: [PlayerId, PlayerId] } | null;
   /**
-   * Set by an adapter that already published this tick's transition (snapshot and
-   * events) through its own state channel before any follow-up play it ran. The caller
-   * must not commit it again: an adapter that publishes owns the commit, and a second
-   * one would replay the resolution events and log entries.
+   * Set by an adapter that owns the commit of this tick's transition (snapshot and
+   * events) through its own state channel, ahead of any follow-up play it runs. The
+   * caller must not commit it again: an adapter that publishes owns the commit, and a
+   * second one would replay the resolution events and log entries. An adapter whose
+   * snapshot read failed keeps the transition and delivers it, once, on a later tick.
    */
   published?: boolean;
 }

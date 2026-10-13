@@ -1050,6 +1050,15 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Guests' contest clicks awaiting the next `driveContest` tick, gated to the
    *  running contest's seats and bounded per seat. */
   private readonly guestContestClicks = new ContestClickBuffer();
+  /**
+   * Accepted transitions whose state/events never reached the host's own store
+   * because the snapshot read failed. The engine has already moved on, so nothing
+   * can recreate them: they are held here and delivered, in order and exactly once,
+   * with the next successful host publication.
+   */
+  private unpublishedHostTransitions: SubmitResult[] = [];
+  /** A settled contest's AI follow-up is owed once its resolution has been published. */
+  private aiFollowUpOwedAfterPublication = false;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -2618,6 +2627,10 @@ export class P2PHostAdapter implements EngineAdapter {
     const aiPlayers = this.pregameSeatState.seats.flatMap((seat, index) =>
       seat.type === "Ai" ? [index] : [],
     );
+    // A settled contest whose resolution never reached the host screen is delivered
+    // (and its AI follow-up run) before the engine is driven any further: the
+    // engine reports NotInContest from here on and cannot recreate its events.
+    if (!(await this.settleOwedHostPublication())) return idle;
     const awayPlayers = [...this.disconnectedSeats.keys()];
     const guestClicks = this.guestContestClicks.drain();
     const ordered = [...clicks, ...guestClicks].sort((a, b) => a.at_ms - b.at_ms);
@@ -2641,12 +2654,21 @@ export class P2PHostAdapter implements EngineAdapter {
     // follow-up AI play: the AI's own snapshots unmount the contest, and a transition
     // published after them would never reach the host's store, resolution events included.
     // The adapter owns this commit, so the caller must not repeat it.
-    await this.publishHostSnapshot(transition.result);
+    const hostPublished = await this.publishHostSnapshot(transition.result);
     await this.broadcastStateUpdate(transition);
     if (result.step === "Settled") {
-      await this.runAiLoop();
-      void this.persistAuthoritativeState();
+      if (hostPublished) {
+        await this.runAiLoop();
+        void this.persistAuthoritativeState();
+      } else {
+        // The AI's own snapshots would unmount the contest before its resolution was
+        // shown: hold the follow-up until the retained transition has been delivered.
+        this.aiFollowUpOwedAfterPublication = true;
+      }
     }
+    // The adapter owns this commit either way: when the host's snapshot read failed,
+    // the transition is retained and delivered on a later tick, so the caller must
+    // not commit (and so double-deliver) it.
     return { ...result, published: true };
   }
 
@@ -3193,20 +3215,51 @@ export class P2PHostAdapter implements EngineAdapter {
    * missed its frame belongs to the ledger and sweep. Naming it rather than
    * changing a public adapter contract in this PR.
    *
+   * A failed publication is not a dropped one: the engine has already accepted
+   * the transition, so nothing could recreate its events. It is retained and goes
+   * out, in order and exactly once, with the next successful publication. Resolves
+   * `true` once the host's store has been told, `false` while it is still behind.
+   *
    * No-op under `nativeBridge`, which publishes its own revisions.
    */
-  private async publishHostSnapshot(result: SubmitResult): Promise<void> {
-    if (this.nativeBridge) return;
+  private async publishHostSnapshot(result: SubmitResult): Promise<boolean> {
+    if (this.nativeBridge) return true;
+    // Anything an earlier failed publication left behind goes out first and in the
+    // same frame, so the host's store sees every accepted transition's events once.
+    const transitions = [...this.unpublishedHostTransitions, result];
     try {
       this.emit({
         type: "stateChanged",
         snapshot: await this.wasm.getSnapshot(),
-        events: result.events,
-        logEntries: result.log_entries,
+        events: transitions.flatMap((t) => t.events),
+        logEntries: transitions.some((t) => t.log_entries)
+          ? transitions.flatMap((t) => t.log_entries ?? [])
+          : undefined,
       });
+      this.unpublishedHostTransitions = [];
+      return true;
     } catch (err) {
       console.error("[P2PHost] host snapshot publication failed:", err);
+      this.unpublishedHostTransitions = transitions;
+      return false;
     }
+  }
+
+  /**
+   * Settle what a failed host publication left owed: deliver the retained
+   * transitions, then run the AI follow-up they were holding back. `false` while the
+   * host screen is still behind the engine.
+   */
+  private async settleOwedHostPublication(): Promise<boolean> {
+    if (this.unpublishedHostTransitions.length > 0) {
+      if (!(await this.publishHostSnapshot({ events: [] }))) return false;
+    }
+    if (this.aiFollowUpOwedAfterPublication) {
+      this.aiFollowUpOwedAfterPublication = false;
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
+    }
+    return true;
   }
 
   async getState(): Promise<GameState> {

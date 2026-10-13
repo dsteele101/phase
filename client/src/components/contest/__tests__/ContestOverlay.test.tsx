@@ -13,7 +13,17 @@ import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
 import { useContestStore } from "../../../stores/contestStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { useKeyboardShortcuts } from "../../../hooks/useKeyboardShortcuts.ts";
 import { ContestOverlay } from "../ContestOverlay.tsx";
+
+const dispatchActionMock = vi.hoisted(() => vi.fn());
+vi.mock("../../../game/dispatch", () => ({ dispatchAction: dispatchActionMock }));
+
+/** Mounts the page's real global shortcut handler next to the overlay. */
+function GlobalShortcuts() {
+  useKeyboardShortcuts();
+  return null;
+}
 
 function contestState(phase: ContestPhase, overrides: Partial<ContestState> = {}): ContestState {
   return {
@@ -54,6 +64,87 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   useGameStore.setState({ waitingFor: null, adapter: null, events: [] });
+});
+
+describe("ContestOverlay keyboard focus", () => {
+  beforeEach(() => dispatchActionMock.mockClear());
+
+  it("focuses the first local contest control as the contest opens", () => {
+    showContest(contestState("Preparing"), { submitContestClick: vi.fn(() => true) });
+    render(<ContestOverlay />);
+    expect(screen.getByRole("button", { name: "Wait for GO…" })).toHaveFocus();
+  });
+
+  it("gives a spectator's dialog the focus, since it has no control", () => {
+    const contest = contestState("Active");
+    contest.contestants = [
+      { ...contest.contestants[0], player: 5 },
+      { ...contest.contestants[1], player: 6 },
+    ];
+    showContest(contest, { submitContestClick: vi.fn(() => true) });
+    render(<ContestOverlay />);
+    expect(screen.getByRole("dialog")).toHaveFocus();
+  });
+
+  it("restores the prior focus when the contest closes", () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
+    render(<ContestOverlay />);
+    expect(outside).not.toHaveFocus();
+
+    act(() => useGameStore.setState({ waitingFor: null }));
+
+    expect(outside).toHaveFocus();
+    outside.remove();
+  });
+
+  it("brings focus back when it leaves the modal, so the keys never reach the page behind", () => {
+    showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
+    render(<ContestOverlay />);
+    const button = screen.getByRole("button", { name: "Keep clicking!" });
+
+    act(() => button.blur());
+
+    expect(button).toHaveFocus();
+  });
+
+  it("clicks on Space and Enter from the focused control without passing priority or arming auto-pass", () => {
+    const submitContestClick = vi.fn(() => true);
+    showContest(contestState("Active"), { submitContestClick });
+    render(
+      <>
+        <GlobalShortcuts />
+        <ContestOverlay />
+      </>,
+    );
+    const button = screen.getByRole("button", { name: "Keep clicking!" });
+    expect(button).toHaveFocus();
+
+    fireEvent.keyDown(button, { key: " " });
+    fireEvent.keyDown(button, { key: "Enter" });
+
+    expect(submitContestClick).toHaveBeenCalledTimes(2);
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+  });
+
+  it("never lets a document-routed Space or Enter reach the global shortcuts", () => {
+    showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
+    render(
+      <>
+        <GlobalShortcuts />
+        <ContestOverlay />
+      </>,
+    );
+
+    // Routed from outside the dialog, as it would be with focus on the page behind it.
+    fireEvent.keyDown(document.body, { key: " " });
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    fireEvent.keyDown(window, { key: "Enter" });
+
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("ContestOverlay", () => {
@@ -363,6 +454,45 @@ describe("ContestOverlay local host tick", () => {
     expect(batches[1]).toEqual([click]); // ...and the next tick still carried it
     expect(batches.slice(2).flat()).toEqual([]); // ...exactly once more, never again
     expect(useContestStore.getState().pendingClicks).toEqual([]);
+    consoleError.mockRestore();
+  });
+
+  it("keeps an accepted settlement when its snapshot read fails once, and delivers its events exactly once", async () => {
+    const resolved: GameEvent = {
+      type: "PhysicalContestResolved",
+      data: { kind: "Staring", participants: [0, 1], result: { Outcome: "Tie" } },
+    };
+    const snapshot = {} as EngineSnapshot;
+    const getSnapshot = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("worker restarting"))
+      .mockResolvedValue(snapshot);
+    // The engine settled on the first drive; from then on it reports NotInContest and
+    // could never recreate the resolution events.
+    const driveContest = vi
+      .fn()
+      .mockResolvedValueOnce({ step: "Settled", events: [resolved], log_entries: [], contest: null })
+      .mockResolvedValue({ step: "NotInContest", events: [], log_entries: [], contest: null });
+    const commitEngineSnapshot = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    showContest(contestState("Active"), { driveContest, getSnapshot });
+    useGameStore.setState({ commitEngineSnapshot, gameSessionGeneration: 1 });
+    render(<ContestOverlay />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+
+    expect(commitEngineSnapshot).toHaveBeenCalledTimes(1);
+    expect(commitEngineSnapshot).toHaveBeenCalledWith(snapshot, {
+      events: [resolved],
+      logEntries: [],
+    });
+    // The retry came before the engine was driven any further.
+    expect(getSnapshot).toHaveBeenCalledTimes(2);
+    expect(getSnapshot.mock.invocationCallOrder[1]).toBeLessThan(
+      driveContest.mock.invocationCallOrder[1],
+    );
     consoleError.mockRestore();
   });
 

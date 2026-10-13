@@ -46,8 +46,9 @@ fn contest_identity(state: &GameState) -> u64 {
 /// controller, or a previously declared player target). If it no longer names a legal
 /// player — an illegal target, or a player who left the game — the instruction cannot
 /// be performed and nothing happens; the rider's `EventOutcomeWon` gate stays false.
-/// CR 608.2c: a contest needs two distinct participants, so a contestant that
-/// resolves to the controller likewise performs nothing.
+/// Adaptation policy, not a CR rule: the online contest needs two distinct
+/// participants, so a contestant that resolves to the controller likewise performs
+/// nothing.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,

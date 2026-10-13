@@ -2909,7 +2909,8 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ContestProgress": {
-        const data = msg.data as { contest: number; clicks: [PlayerId, number][] };
+        const data = msg.data as { contest: number; clicks: [PlayerId, number][]; full_key?: FullSessionKey };
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         this.emit({ type: "contestProgress", contest: data.contest, clicks: data.clicks });
         break;
       }

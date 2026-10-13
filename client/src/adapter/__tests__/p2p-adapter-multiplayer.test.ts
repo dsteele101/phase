@@ -8107,6 +8107,43 @@ describe("P2PHostAdapter — contest input", () => {
       adapter.dispose();
     });
 
+    it("keeps an accepted settlement when the host snapshot read fails once, and delivers it exactly once", async () => {
+      const { adapter } = await hostWithGuest();
+      const published = vi.fn();
+      adapter.onEvent(published);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      mocks.driveContest
+        .mockResolvedValueOnce({
+          step: "Settled",
+          events: [resolved as never],
+          log_entries: [],
+          contest: null,
+        })
+        // The engine has settled: from here on it reports NotInContest.
+        .mockResolvedValue(driveResult(null));
+      mocks.getSnapshot.mockRejectedValueOnce(new Error("worker restarting"));
+      published.mockClear();
+
+      const first = await adapter.driveContest(1_000, [], []);
+
+      const resolutionFrames = () =>
+        published.mock.calls.filter(
+          ([event]) =>
+            event.type === "stateChanged"
+            && event.events.some((e: { type: string }) => e.type === "PhysicalContestResolved"),
+        );
+      // The adapter owns the commit, and nothing reached the host yet.
+      expect(first.published).toBe(true);
+      expect(resolutionFrames()).toHaveLength(0);
+
+      await adapter.driveContest(1_050, [], []);
+      await adapter.driveContest(1_100, [], []);
+
+      expect(resolutionFrames()).toHaveLength(1);
+      consoleError.mockRestore();
+      adapter.dispose();
+    });
+
     it("leaves an unchanged tick unpublished for the caller", async () => {
       const { adapter } = await hostWithGuest();
       mocks.driveContest.mockResolvedValueOnce(driveResult(RUNNING));

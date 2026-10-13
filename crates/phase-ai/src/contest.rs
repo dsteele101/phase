@@ -335,7 +335,9 @@ mod tests {
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
 
-    use crate::auto_play::{run_ai_actions, run_ai_actions_bounded_headless, AiActionsStop};
+    use crate::auto_play::{
+        run_ai_actions, run_ai_actions_bounded_headless, run_driver_loop, AiActionsStop, DriverExit,
+    };
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::session::AiSession;
 
@@ -415,6 +417,56 @@ mod tests {
         // The result was applied exactly once: the victim is either destroyed or kept.
         let zone = state.objects[&victim].zone;
         assert!(zone == Zone::Graveyard || zone == Zone::Battlefield);
+    }
+
+    /// Host settlement is not an AI action: a batch budgeted to one action settles the
+    /// contest AND applies the resumed action, instead of spending its only unit on the
+    /// settlement and reporting `ActionBudgetReached` with nothing applied (which a
+    /// duel driver reads as a stall).
+    #[test]
+    fn a_budget_of_one_settles_the_contest_and_still_applies_an_action() {
+        let (mut state, _) = cast_into_contest();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let run = run_ai_actions_bounded_headless(
+            &mut state,
+            &seats(&[P0, P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            1,
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }),
+            "the contest must have settled"
+        );
+        assert_eq!(run.len(), 1, "the one budgeted action must be applied");
+        assert!(matches!(
+            run.stop,
+            AiActionsStop::ActionBudgetReached { limit: 1 }
+        ));
+    }
+
+    /// The driver sees the progress: at cap 1 it counts the resumed action and reaches
+    /// its cap, rather than breaking out on a zero-action batch.
+    #[test]
+    fn a_driver_capped_at_one_action_counts_the_resumed_action_after_a_contest() {
+        let (mut state, _) = cast_into_contest();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let outcome = run_driver_loop(
+            &mut state,
+            &seats(&[P0, P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            1,
+            &mut |_, _, _| {},
+        );
+
+        assert_eq!(outcome.total_actions, 1);
+        assert!(matches!(outcome.exit, DriverExit::CapReached));
     }
 
     /// Deterministic: the same seed settles the same way.

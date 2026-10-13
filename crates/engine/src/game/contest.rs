@@ -542,6 +542,31 @@ pub fn cancel_contest(
     drive(state, events, |contest| contest.cancel(reason, now_ms)).1
 }
 
+/// Settle a contest that a restore found in flight.
+///
+/// A contest's deadlines, grace timestamps and hard cap are stamped on the host
+/// clock of the process that ran it, and that clock does not survive the process:
+/// a state exported from one page or worker and imported into another carries
+/// timestamps from an epoch the new host cannot compare with its own. Continuing
+/// would freeze the contest until the new clock caught up with the old one
+/// (`observe` never moves backwards) and would keep grace deadlines that no longer
+/// mean anything. So every restore authority cancels it, through the ordinary
+/// cancellation and settlement: the controller does not win, the parked
+/// continuation resumes exactly once, and the game carries on. The events are the
+/// ordinary settlement's; a restore has no audience for them.
+///
+/// Stamped with the contest's own clock, so cancelling depends on no new epoch.
+/// A no-op outside a contest.
+pub fn cancel_contest_after_restore(state: &mut GameState) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+        return events;
+    };
+    let now_ms = contest.clock_ms;
+    cancel_contest(state, ContestCancelReason::HostAborted, now_ms, &mut events);
+    events
+}
+
 /// Apply a finished contest to the game exactly once and resume the parked
 /// continuation.
 ///

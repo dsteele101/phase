@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, MouseEvent, PointerEvent } from "react";
+import type { FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
   ContestKind,
   ContestResult,
   ContestState,
+  GameEvent,
+  GameLogEntry,
   PlayerId,
 } from "../../adapter/types.ts";
 import { playContestCue } from "../../game/contestAudio.ts";
@@ -99,12 +101,14 @@ function ContestButton({
   isActive,
   pulse,
   onClick: click,
+  buttonRef,
 }: {
   seat: PlayerId;
   caption: string | null;
   isActive: boolean;
   pulse: number;
   onClick: (seat: PlayerId) => void;
+  buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const { t } = useTranslation("game");
   const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
@@ -115,6 +119,9 @@ function ContestButton({
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== " " && event.key !== "Enter") return;
     event.preventDefault();
+    // The activation keys belong to the contest while it is on screen: they must not
+    // bubble to the page's global Space / Enter shortcuts (pass priority, auto-pass).
+    event.stopPropagation();
     // A held key auto-repeats; one press is one click.
     if (!event.repeat) click(seat);
   };
@@ -127,6 +134,7 @@ function ContestButton({
     <div className="flex w-full flex-col items-center gap-1">
       {caption && <span className="text-sm font-semibold text-slate-200">{caption}</span>}
       <button
+        ref={buttonRef}
         type="button"
         aria-disabled={!isActive}
         onPointerDown={onPointerDown}
@@ -176,6 +184,29 @@ function ContestPanel({ contest }: { contest: ContestState }) {
     bySeat: {},
   });
   const [pulse, setPulse] = useState(0);
+
+  // Focus lifecycle of the modal. A timed contest cannot wait for the player to Tab
+  // to the button, so focus moves to the first local control as the contest opens
+  // (spectators have none, so the dialog itself) and returns to where it was when the
+  // contest closes.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const firstControlRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    (firstControlRef.current ?? dialogRef.current)?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, []);
+  // The dialog is modal: focus that leaves it (a backdrop click, Tab past the last
+  // control) comes back, so the activation keys never land on the page behind.
+  const keepFocusInside = (event: FocusEvent<HTMLDivElement>) => {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
+      return;
+    }
+    (firstControlRef.current ?? event.currentTarget).focus();
+  };
+
   const click = useCallback(
     (seat: PlayerId) => {
       if (!isActive || !adapter) return;
@@ -250,7 +281,10 @@ function ContestPanel({ contest }: { contest: ContestState }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+      ref={dialogRef}
+      tabIndex={-1}
+      onBlur={keepFocusInside}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 outline-none"
       role="dialog"
       aria-modal="true"
       aria-labelledby="contest-title"
@@ -284,9 +318,10 @@ function ContestPanel({ contest }: { contest: ContestState }) {
           </p>
         )}
 
-        {localSeats.map((seat) => (
+        {localSeats.map((seat, index) => (
           <ContestButton
             key={seat}
+            buttonRef={index === 0 ? firstControlRef : undefined}
             seat={seat}
             // Hotseat seats two humans at one screen, so each gets a captioned button.
             caption={localSeats.length > 1 ? getOpponentDisplayName(seat) : null}
@@ -372,6 +407,25 @@ function useLocalContestHost(active: boolean) {
     if (!active || !adapter || !drive) return;
     let stopped = false;
     let inFlight = false;
+    // Accepted transitions whose snapshot read failed. The engine has moved on (its
+    // next drive reports NotInContest), so nothing can recreate their events: they are
+    // kept until a commit lands, in order and exactly once, and delivered before the
+    // engine is driven any further.
+    let owed: { generation: number; events: GameEvent[]; logEntries: GameLogEntry[] } | null = null;
+    const commitOwed = async (): Promise<boolean> => {
+      if (!owed) return true;
+      const snapshot = await adapter.getSnapshot();
+      const current = useGameStore.getState();
+      if (stopped || current.adapter !== adapter || current.gameSessionGeneration !== owed.generation) {
+        // A reset or new game replaced this session: the transition belongs to a game
+        // that is gone, and committing it would overwrite the new one.
+        owed = null;
+        return false;
+      }
+      current.commitEngineSnapshot(snapshot, { events: owed.events, logEntries: owed.logEntries });
+      owed = null;
+      return true;
+    };
     const tick = async () => {
       if (stopped || inFlight) return;
       inFlight = true;
@@ -379,6 +433,8 @@ function useLocalContestHost(active: boolean) {
         // The session this tick belongs to: a reset or new game while the engine call
         // is in flight must not have this tick's snapshot committed over it.
         const { gameSessionGeneration: generation, aiSeatIds } = useGameStore.getState();
+        if (owed && owed.generation !== generation) owed = null;
+        if (owed && !(await commitOwed())) return;
         const clicks = useContestStore.getState().drainClicks();
         // The seats the engine clicks for are the established AI seat bindings
         // (empty in human hotseat); a P2P host replaces them with its pregame seats.
@@ -399,18 +455,16 @@ function useLocalContestHost(active: boolean) {
         ) {
           return;
         }
-        const snapshot = await adapter.getSnapshot();
-        const current = useGameStore.getState();
-        if (stopped || current.adapter !== adapter || current.gameSessionGeneration !== generation) {
-          return;
-        }
-        current.commitEngineSnapshot(snapshot, {
-          events: result.events,
-          logEntries: result.log_entries,
-        });
+        owed = {
+          generation,
+          events: [...(owed?.events ?? []), ...result.events],
+          logEntries: [...(owed?.logEntries ?? []), ...result.log_entries],
+        };
+        await commitOwed();
       } catch (error) {
         // A failed tick is dropped, not fatal: the next one re-reads the engine's own
         // clock, and the contest's lifecycle never depends on a single call landing.
+        // A transition the engine accepted stays in `owed` for that next tick.
         console.error("[contest] local host tick failed:", error);
       } finally {
         inFlight = false;
