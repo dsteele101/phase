@@ -8144,6 +8144,150 @@ describe("P2PHostAdapter — contest input", () => {
       adapter.dispose();
     });
 
+    // The overlay's interval exists only while the host's store already shows the contest,
+    // so a publication that fails on the way IN, or on the way OUT through a game end,
+    // has no ticking component to retry it. The adapter owns that retry itself.
+    describe("an owned retry for retained host publications", () => {
+      const logEntry = { message: "the contest resolved" } as never;
+      const gameOver = { type: "GameOver", data: { winner: 0 } };
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      const retryArmed = (adapter: unknown) =>
+        (adapter as { hostPublicationTimer: unknown }).hostPublicationTimer !== null;
+      const settle = async () => {
+        await flushPromises(30);
+        await vi.advanceTimersByTimeAsync(0);
+        await flushPromises(30);
+      };
+      const stateFrames = (published: ReturnType<typeof vi.fn>) =>
+        published.mock.calls
+          .map(([event]) => event as { type: string; events?: Array<{ type: string }>; logEntries?: unknown[] })
+          .filter((event) => event.type === "stateChanged");
+      const resolutionFrames = (published: ReturnType<typeof vi.fn>) =>
+        stateFrames(published).filter((event) =>
+          event.events?.some((e) => e.type === "PhysicalContestResolved"),
+        );
+
+      it("delivers a contest entered by a guest action once the first host publication has failed, with no overlay ticking", async () => {
+        const { adapter, guest } = await hostWithGuest();
+        const published = vi.fn();
+        adapter.onEvent(published);
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        mocks.submitAction.mockResolvedValueOnce({
+          events: [resolved],
+          log_entries: [logEntry],
+        } as never);
+        mocks.getSnapshot.mockRejectedValueOnce(new Error("worker restarting"));
+        const sentBefore = (await guest.getSentMessages()).length;
+        published.mockClear();
+
+        await guest.simulateData({
+          type: "action",
+          senderPlayerId: 1,
+          action: { type: "PassPriority" },
+        });
+        await settle();
+
+        // The guests heard the accepted action; the host's own screen did not.
+        expect((await guest.getSentMessages()).length).toBeGreaterThan(sentBefore);
+        expect(resolutionFrames(published)).toHaveLength(0);
+        expect(retryArmed(adapter), "the adapter armed its own retry").toBe(true);
+        expect(mocks.driveContest).not.toHaveBeenCalled();
+
+        const sentAfterAction = (await guest.getSentMessages()).length;
+        await vi.advanceTimersByTimeAsync(1_000);
+        await settle();
+
+        const delivered = resolutionFrames(published);
+        expect(delivered).toHaveLength(1);
+        expect(delivered[0].logEntries).toEqual([logEntry]);
+        // The retry served the host's store only: nothing was replayed to the guests.
+        expect((await guest.getSentMessages()).length).toBe(sentAfterAction);
+        // Delivered, so the retry stands down and nothing is delivered twice.
+        expect(retryArmed(adapter)).toBe(false);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(resolutionFrames(published)).toHaveLength(1);
+        consoleError.mockRestore();
+        adapter.dispose();
+      });
+
+      it.each([
+        ["the close publishes what the failed settlement owed, then the terminal statement", 1],
+        ["a close that still cannot publish waits for the retry, then delivers in order", 2],
+      ])("a game-ending settlement: %s", async (_name, failures) => {
+        const { adapter, guest } = await hostWithGuest();
+        const published = vi.fn();
+        adapter.onEvent(published);
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        const priorState = mocks.getState.getMockImplementation();
+        const priorViewer = mocks.getViewerSnapshot.getMockImplementation();
+        try {
+          mocks.getState.mockResolvedValue({ players: [], objects: {}, waiting_for: gameOver } as never);
+          mocks.getViewerSnapshot.mockImplementation(async (pid: number) => ({
+            state: { filteredFor: pid, players: [], waiting_for: gameOver },
+            actions: [],
+            autoPassRecommended: false,
+          }) as never);
+          mocks.submitAction.mockResolvedValueOnce({
+            events: [resolved],
+            log_entries: [logEntry],
+          } as never);
+          // Publication of the settlement fails; the close's own read works; and, in the
+          // second shape, so does the close's attempt to deliver what was owed.
+          const original = mocks.getSnapshot.getMockImplementation()!;
+          mocks.getSnapshot.mockRejectedValueOnce(new Error("worker restarting"));
+          mocks.getSnapshot.mockImplementationOnce(original);
+          if (failures === 2) mocks.getSnapshot.mockRejectedValueOnce(new Error("still restarting"));
+          published.mockClear();
+
+          await guest.simulateData({
+            type: "action",
+            senderPlayerId: 1,
+            action: { type: "PassPriority" },
+          });
+          await settle();
+
+          const sent = (await guest.getSentMessages()) as Array<{ type?: string }>;
+          expect(sent.filter((m) => m.type === "terminal_result")).toHaveLength(1);
+          if (failures === 2) {
+            // The statement unmounts the host's board: it must not overtake the events.
+            expect(resolutionFrames(published)).toHaveLength(0);
+            expect(published.mock.calls.filter(([e]) => e.type === "terminalResult")).toHaveLength(0);
+            await vi.advanceTimersByTimeAsync(1_000);
+            await settle();
+          }
+
+          const types = published.mock.calls.map(([event]) => event.type as string);
+          expect(resolutionFrames(published)).toHaveLength(1);
+          expect(resolutionFrames(published)[0].logEntries).toEqual([logEntry]);
+          expect(types.filter((t) => t === "terminalResult")).toHaveLength(1);
+          const resolutionAt = published.mock.calls.findIndex(
+            ([event]) =>
+              event.type === "stateChanged"
+              && event.events.some((e: { type: string }) => e.type === "PhysicalContestResolved"),
+          );
+          expect(resolutionAt).toBeLessThan(types.indexOf("terminalResult"));
+          expect(retryArmed(adapter)).toBe(false);
+          await vi.advanceTimersByTimeAsync(10_000);
+          expect(resolutionFrames(published)).toHaveLength(1);
+          expect(
+            published.mock.calls.filter(([e]) => e.type === "terminalResult"),
+          ).toHaveLength(1);
+        } finally {
+          mocks.getState.mockImplementation(priorState!);
+          mocks.getViewerSnapshot.mockImplementation(priorViewer!);
+          consoleError.mockRestore();
+          adapter.dispose();
+        }
+      });
+    });
+
     it("leaves an unchanged tick unpublished for the caller", async () => {
       const { adapter } = await hostWithGuest();
       mocks.driveContest.mockResolvedValueOnce(driveResult(RUNNING));

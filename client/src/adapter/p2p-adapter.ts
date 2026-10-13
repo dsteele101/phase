@@ -993,6 +993,14 @@ let sharedEngineHost: symbol | null = null;
 const STATE_REDELIVERY_TICK_MS = 5_000;
 
 /**
+ * Cadence of the host's own publication retry. A host snapshot read that failed after
+ * the engine accepted a transition leaves that transition owed to the host's store;
+ * this bounds how long the host screen can stay behind its engine with nobody else to
+ * deliver it. Short, because the host screen is the one a player is staring at.
+ */
+const HOST_PUBLICATION_RETRY_TICK_MS = 1_000;
+
+/**
  * Fail-loud contract for a disposed host. With a private worker, `dispose()`
  * tore the engine down and every later call threw `assertInitialized`. A shared
  * worker survives disposal, so a use-after-dispose host would silently operate
@@ -1059,6 +1067,18 @@ export class P2PHostAdapter implements EngineAdapter {
   private unpublishedHostTransitions: SubmitResult[] = [];
   /** A settled contest's AI follow-up is owed once its resolution has been published. */
   private aiFollowUpOwedAfterPublication = false;
+  /**
+   * The terminal statement of a game whose retained transitions could not be published
+   * when it closed. The host's `terminalResult` emit unmounts the board, so it waits
+   * until the host's store has seen every accepted transition.
+   */
+  private pendingHostTerminalEmit: P2PTerminalResult | null = null;
+  /** Serializes host publications, so a retry never interleaves with another publisher. */
+  private hostPublicationQueue: Promise<void> = Promise.resolve();
+  /** The in-flight settlement of owed host publications; concurrent callers share it. */
+  private hostSettlement: Promise<boolean> | null = null;
+  /** Owned by the adapter, not by any overlay: armed whenever a publication fails. */
+  private hostPublicationTimer: ReturnType<typeof setInterval> | null = null;
   private sessionLatencies = new WeakMap<PeerSession, number | null>();
   /**
    * A reconnecting transport has proved its token but is not a game session
@@ -2655,20 +2675,19 @@ export class P2PHostAdapter implements EngineAdapter {
     // published after them would never reach the host's store, resolution events included.
     // The adapter owns this commit, so the caller must not repeat it.
     const hostPublished = await this.publishHostSnapshot(transition.result);
+    // The AI's own snapshots would unmount the contest before its resolution was
+    // shown: when the host's store is still behind, hold the follow-up for the
+    // adapter's retry. Recorded in the same turn as the failure, so that retry cannot
+    // see the transition delivered without also seeing the follow-up it owes.
+    if (result.step === "Settled" && !hostPublished) this.aiFollowUpOwedAfterPublication = true;
     await this.broadcastStateUpdate(transition);
-    if (result.step === "Settled") {
-      if (hostPublished) {
-        await this.runAiLoop();
-        void this.persistAuthoritativeState();
-      } else {
-        // The AI's own snapshots would unmount the contest before its resolution was
-        // shown: hold the follow-up until the retained transition has been delivered.
-        this.aiFollowUpOwedAfterPublication = true;
-      }
+    if (result.step === "Settled" && hostPublished) {
+      await this.runAiLoop();
+      void this.persistAuthoritativeState();
     }
     // The adapter owns this commit either way: when the host's snapshot read failed,
-    // the transition is retained and delivered on a later tick, so the caller must
-    // not commit (and so double-deliver) it.
+    // the transition is retained and delivered by the adapter's own retry, so the
+    // caller must not commit (and so double-deliver) it.
     return { ...result, published: true };
   }
 
@@ -2924,6 +2943,14 @@ export class P2PHostAdapter implements EngineAdapter {
       // nominates it, and `redeliverGuestState` re-sends the final state plus a
       // freshly committed, recipient-bound statement on the next sweep.
     }));
+    // The host's `terminalResult` emit unmounts the board, and with it anything that
+    // could still deliver an accepted transition's events and log entries — so they go
+    // out first. While the host's store is still behind, the statement waits for the
+    // adapter's own retry rather than overtaking them.
+    if (!(await this.publishRetainedHostTransitions())) {
+      this.pendingHostTerminalEmit = result;
+      return true;
+    }
     this.emit({ type: "terminalResult", result });
     return true;
   }
@@ -3217,13 +3244,22 @@ export class P2PHostAdapter implements EngineAdapter {
    *
    * A failed publication is not a dropped one: the engine has already accepted
    * the transition, so nothing could recreate its events. It is retained and goes
-   * out, in order and exactly once, with the next successful publication. Resolves
-   * `true` once the host's store has been told, `false` while it is still behind.
+   * out, in order and exactly once, with the next successful publication — which the
+   * adapter's own retry (`armHostPublicationRetry`) guarantees even when nothing else
+   * happens, and which a terminal close waits for before the host's board unmounts.
+   * Resolves `true` once the host's store has been told, `false` while it is still
+   * behind.
    *
    * No-op under `nativeBridge`, which publishes its own revisions.
    */
-  private async publishHostSnapshot(result: SubmitResult): Promise<boolean> {
-    if (this.nativeBridge) return true;
+  private publishHostSnapshot(result: SubmitResult): Promise<boolean> {
+    if (this.nativeBridge) return Promise.resolve(true);
+    const published = this.hostPublicationQueue.then(() => this.publishHostSnapshotInner(result));
+    this.hostPublicationQueue = published.then(() => undefined);
+    return published;
+  }
+
+  private async publishHostSnapshotInner(result: SubmitResult): Promise<boolean> {
     // Anything an earlier failed publication left behind goes out first and in the
     // same frame, so the host's store sees every accepted transition's events once.
     const transitions = [...this.unpublishedHostTransitions, result];
@@ -3241,25 +3277,88 @@ export class P2PHostAdapter implements EngineAdapter {
     } catch (err) {
       console.error("[P2PHost] host snapshot publication failed:", err);
       this.unpublishedHostTransitions = transitions;
+      // Whoever published may be the last thing to touch the host this session (an
+      // AI or guest action that enters a contest, or the action that ends the game),
+      // so the retry cannot be left to a later tick of some mounted component.
+      this.armHostPublicationRetry();
       return false;
     }
   }
 
-  /**
-   * Settle what a failed host publication left owed: deliver the retained
-   * transitions, then run the AI follow-up they were holding back. `false` while the
-   * host screen is still behind the engine.
-   */
-  private async settleOwedHostPublication(): Promise<boolean> {
-    if (this.unpublishedHostTransitions.length > 0) {
-      if (!(await this.publishHostSnapshot({ events: [] }))) return false;
+  /** Whether the host's store or the AI is still owed something from a failed publication. */
+  private hostPublicationOwed(): boolean {
+    return this.unpublishedHostTransitions.length > 0
+      || this.aiFollowUpOwedAfterPublication
+      || this.pendingHostTerminalEmit !== null;
+  }
+
+  private armHostPublicationRetry(): void {
+    if (this.hostPublicationTimer !== null || this.disposed) return;
+    this.hostPublicationTimer = setInterval(
+      () => void this.retryOwedHostPublication(),
+      HOST_PUBLICATION_RETRY_TICK_MS,
+    );
+  }
+
+  private disarmHostPublicationRetry(): void {
+    if (this.hostPublicationTimer === null) return;
+    clearInterval(this.hostPublicationTimer);
+    this.hostPublicationTimer = null;
+  }
+
+  private async retryOwedHostPublication(): Promise<void> {
+    if (this.disposed || !this.ownsAuthority()) {
+      // A superseded or torn-down host has no screen left to catch up.
+      this.unpublishedHostTransitions = [];
+      this.aiFollowUpOwedAfterPublication = false;
+      this.pendingHostTerminalEmit = null;
+      this.disarmHostPublicationRetry();
+      return;
     }
-    if (this.aiFollowUpOwedAfterPublication) {
+    try {
+      await this.settleOwedHostPublication();
+    } catch (err) {
+      console.error("[P2PHost] retrying an owed host publication failed:", err);
+    }
+    if (!this.hostPublicationOwed()) this.disarmHostPublicationRetry();
+  }
+
+  /**
+   * Settle what a failed host publication left owed, in the order it was owed: the
+   * retained transitions, then the terminal statement or the AI follow-up they were
+   * holding back. `false` while the host screen is still behind the engine. Safe to
+   * call from anywhere — concurrent callers share one settlement.
+   */
+  private settleOwedHostPublication(): Promise<boolean> {
+    this.hostSettlement ??= this.settleOwedHostPublicationInner().finally(() => {
+      this.hostSettlement = null;
+    });
+    return this.hostSettlement;
+  }
+
+  private async settleOwedHostPublicationInner(): Promise<boolean> {
+    if (!(await this.publishRetainedHostTransitions())) return false;
+    const terminal = this.pendingHostTerminalEmit;
+    if (terminal !== null) {
+      this.pendingHostTerminalEmit = null;
+      this.emit({ type: "terminalResult", result: terminal });
+    }
+    // A finished game has no AI turn left to give.
+    if (this.terminalResult !== null) this.aiFollowUpOwedAfterPublication = false;
+    // A paused game keeps its follow-up: the engine must not be driven from here, and
+    // nothing else knows the AI is owed a turn.
+    if (this.aiFollowUpOwedAfterPublication && this.gameRunState === "running") {
       this.aiFollowUpOwedAfterPublication = false;
       await this.runAiLoop();
       void this.persistAuthoritativeState();
     }
     return true;
+  }
+
+  /** Deliver the retained transitions, if any, on their own. */
+  private async publishRetainedHostTransitions(): Promise<boolean> {
+    if (this.unpublishedHostTransitions.length === 0) return true;
+    return this.publishHostSnapshot({ events: [] });
   }
 
   async getState(): Promise<GameState> {
@@ -3416,6 +3515,10 @@ export class P2PHostAdapter implements EngineAdapter {
       clearInterval(this.redeliveryTimer);
       this.redeliveryTimer = null;
     }
+    this.disarmHostPublicationRetry();
+    this.unpublishedHostTransitions = [];
+    this.aiFollowUpOwedAfterPublication = false;
+    this.pendingHostTerminalEmit = null;
     try {
       this.hostPeer.destroy();
     } catch {
