@@ -19,7 +19,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
     ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, ThisWayCause, TypedFilter,
+    StaticCondition, StaticDefinition, TargetFilter, ThisWayCause, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::identifiers::TrackedSetId;

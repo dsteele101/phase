@@ -15869,7 +15869,9 @@ mod tests {
         let mut causes = std::collections::HashMap::new();
         causes.insert(destroyed, ThisWayCause::Destroyed);
         causes.insert(tapped, ThisWayCause::Tapped);
-        state.tracked_set_member_causes.insert(set, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set, causes.into_iter().collect());
         state.chain_tracked_set_id = Some(set);
 
         let tapped_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Tapped));
