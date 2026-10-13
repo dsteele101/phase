@@ -29,8 +29,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef, Effect,
-    EffectScope, PlayerChoiceDistinctness, PtValue, QuantityExpr, StaticDefinition,
-    TapStateChange, TargetFilter, TargetSelectionMode, TypedFilter,
+    EffectScope, PlayerChoiceDistinctness, PtValue, QuantityExpr, StaticDefinition, TapStateChange,
+    TargetFilter, TargetSelectionMode, TypedFilter,
 };
 use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;

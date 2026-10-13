@@ -7793,7 +7793,8 @@ mod tests {
             .expect("a legal player-enchanting Aura token must be created");
         let obj = &state.objects[&id];
         assert!(
-            obj.base_keywords.contains(&Keyword::Enchant(TargetFilter::Player)),
+            obj.base_keywords
+                .contains(&Keyword::Enchant(TargetFilter::Player)),
             "the intrinsic Enchant must be a base characteristic of the entrant"
         );
         assert_eq!(obj.attached_to, Some(AttachTarget::Player(PlayerId(1))));
@@ -7813,7 +7814,9 @@ mod tests {
     fn aura_token_without_a_matching_enchant_restriction_is_not_created_for_a_player_host() {
         for statics in [
             Vec::new(),
-            vec![enchant_grant_static(TargetFilter::Typed(TypedFilter::creature()))],
+            vec![enchant_grant_static(TargetFilter::Typed(
+                TypedFilter::creature(),
+            ))],
         ] {
             let mut state = GameState::new_two_player(42);
             let event = curse_aura_token_event(

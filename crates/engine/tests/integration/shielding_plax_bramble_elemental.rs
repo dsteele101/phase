@@ -1099,7 +1099,9 @@ fn gated_attached_targeting_allows_after_the_condition_ceases() {
     // the interactive target prompt, so the exclusion assertions below would
     // never be reached.
     let bystander = scenario.add_creature(P0, "Target Reach Control", 2, 2).id();
-    let second_bystander = scenario.add_creature(P0, "Second Target Reach Control", 2, 2).id();
+    let second_bystander = scenario
+        .add_creature(P0, "Second Target Reach Control", 2, 2)
+        .id();
     let aura = scenario.add_spell_to_hand(P0, "Conditional Targeting Probe", false)
         .as_enchantment().with_subtypes(vec!["Aura"])
         .with_mana_cost(ManaCost::generic(0))
