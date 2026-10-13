@@ -213,7 +213,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * 141 — Resolution-time division (CR 608.2d): WaitingFor.DistributeAmong
  *      gains scope { type: "ResolutionCandidates" }, under which the modal
  *      lets unchosen candidates receive nothing, and serialized abilities can
- *      carry ThisWayCause "Tapped" — see PROTOCOL_VERSION's own `/// 138` entry
+ *      carry ThisWayCause "Tapped" — see PROTOCOL_VERSION's own `/// 141` entry
  *      in crates/lobby-broker/src/protocol.rs. A v140 client would ignore
  *      scope and demand at least one for every candidate, leaving valid
  *      subset divisions unconfirmable; the exact-match version check at
