@@ -1369,7 +1369,7 @@ fn effects_remove_creature(state: &GameState, creature_id: ObjectId, effects: &[
     // effect says the permanent can't be regenerated.
     let regeneration_shield = state.objects.get(&creature_id).is_some_and(|obj| {
         obj.replacement_definitions
-            .iter_all()
+            .iter_unchecked()
             .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration)
     });
     effects.iter().any(|effect| match effect {
