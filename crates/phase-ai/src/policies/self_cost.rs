@@ -49,7 +49,7 @@ use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, ShieldKind, TargetFilter,
+    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
@@ -1365,13 +1365,13 @@ fn effects_remove_creature(state: &GameState, creature_id: ObjectId, effects: &[
         .objects
         .get(&creature_id)
         .is_some_and(|obj| obj.has_keyword(&engine::types::keywords::Keyword::Indestructible));
-    // CR 701.19a: a regeneration shield replaces the destruction unless the
-    // effect says the permanent can't be regenerated.
-    let regeneration_shield = state.objects.get(&creature_id).is_some_and(|obj| {
-        obj.replacement_definitions
-            .iter_unchecked()
-            .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration)
-    });
+    // CR 701.19a: an unused regeneration shield replaces the NEXT destruction
+    // unless the effect says the permanent can't be regenerated; a consumed
+    // shield (retained until cleanup) protects against nothing further.
+    let regeneration_shield = state
+        .objects
+        .get(&creature_id)
+        .is_some_and(super::redundancy_avoidance::object_has_live_regen_shield);
     effects.iter().any(|effect| match effect {
         Effect::Destroy {
             cant_regenerate, ..

@@ -702,6 +702,18 @@ fn a_regeneration_shield_saves_the_source_unless_it_cannot_be_regenerated() {
     state.stack.clear();
     push_opponent_spell(&mut state, destroy(true), pinger);
     assert!(source_is_doomed(&state, AI, pinger));
+
+    // CR 701.19a: the shield covers only the NEXT destruction. A used shield
+    // stays on the object until cleanup but protects against nothing further.
+    state.stack.clear();
+    state
+        .objects
+        .get_mut(&pinger)
+        .unwrap()
+        .replacement_definitions[0]
+        .is_consumed = true;
+    push_opponent_spell(&mut state, destroy(false), pinger);
+    assert!(source_is_doomed(&state, AI, pinger));
 }
 
 #[test]

@@ -927,7 +927,7 @@ fn regenerate_redundancy(
 /// True iff the object carries a regeneration shield that has not been used up.
 /// Mirrors the engine's own read (`combat_damage.rs::combatant_has_regeneration_shield`)
 /// and adds the CR 701.19a "the NEXT time" lifetime check via `is_consumed`.
-fn object_has_live_regen_shield(obj: &engine::game::game_object::GameObject) -> bool {
+pub(crate) fn object_has_live_regen_shield(obj: &engine::game::game_object::GameObject) -> bool {
     obj.replacement_definitions
         .iter_unchecked()
         .any(|replacement| {
