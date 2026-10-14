@@ -408,6 +408,122 @@ fn words_of_wind_each_player_bounces_a_permanent_instead_of_drawing() {
     );
 }
 
+fn on_battlefield(runner: &GameRunner, object: ObjectId) -> bool {
+    runner.state().objects[&object].zone == Zone::Battlefield
+}
+
+fn pending_return_choice(runner: &GameRunner) -> (engine::types::player::PlayerId, Vec<ObjectId>) {
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => (*player, cards.clone()),
+        other => panic!("expected a return choice, got {other:?}"),
+    }
+}
+
+/// CR 101.4: every player announces their return in APNAP order BEFORE any
+/// chosen permanent moves. While a later player is still choosing, the earlier
+/// players' picks must still be on the battlefield — across a multi-candidate
+/// prompt (P0), a sole-candidate seat (P1, no prompt) and a seat with nothing
+/// to return (P2 has no permanents; P3 prompts after it).
+#[test]
+fn words_of_wind_collects_every_choice_before_any_permanent_moves() {
+    let mut scenario = GameScenario::new_n_player(4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let library_top = scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Wind", WORDS_OF_WIND)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Test Drawing Artifact", DRAW_A_CARD)
+        .id();
+    let p1_sole = scenario.add_creature(P1, "P1 Sole", 2, 2).id();
+    let p3 = engine::types::player::PlayerId(3);
+    let p3_a = scenario.add_creature(p3, "P3 A", 1, 1).id();
+    let p3_b = scenario.add_creature(p3, "P3 B", 1, 1).id();
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    draw_one(&mut runner, drawer);
+
+    let (chooser, cards) = pending_return_choice(&runner);
+    assert_eq!(chooser, P0, "the active player announces first");
+    assert!(cards.contains(&words) && cards.contains(&drawer));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![drawer],
+        })
+        .expect("P0's choice is accepted");
+
+    let (chooser, cards) = pending_return_choice(&runner);
+    assert_eq!(
+        chooser, p3,
+        "P1 (sole candidate) and P2 (empty) are skipped"
+    );
+    assert_eq!(cards.len(), 2);
+    assert!(
+        on_battlefield(&runner, drawer),
+        "P0's pick must not move while P3 is still choosing"
+    );
+    assert!(
+        on_battlefield(&runner, p1_sole),
+        "P1's forced pick must not move while P3 is still choosing"
+    );
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![p3_b] })
+        .expect("P3's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(!in_hand(&runner, library_top), "the draw is replaced");
+    assert!(in_hand(&runner, drawer));
+    assert!(in_hand(&runner, p1_sole));
+    assert!(in_hand(&runner, p3_b));
+    assert!(on_battlefield(&runner, words));
+    assert!(on_battlefield(&runner, p3_a), "unchosen permanents stay");
+}
+
+/// CR 101.4: with two prompting players, the first player's chosen permanent
+/// stays on the battlefield while the second player chooses, then both move.
+#[test]
+fn words_of_wind_two_prompting_players_choose_before_either_moves() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Wind", WORDS_OF_WIND)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Test Drawing Artifact", DRAW_A_CARD)
+        .id();
+    let p1_a = scenario.add_creature(P1, "P1 A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 B", 1, 1).id();
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    draw_one(&mut runner, drawer);
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![words] })
+        .expect("P0's choice is accepted");
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, P1);
+    assert!(
+        on_battlefield(&runner, words),
+        "P0's chosen Words stays on the battlefield during P1's prompt"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1_a] })
+        .expect("P1's choice is accepted");
+    resolve_stack(&mut runner);
+    assert!(in_hand(&runner, words) && in_hand(&runner, p1_a));
+    assert!(on_battlefield(&runner, p1_b));
+}
+
 /// Words of Waste: each opponent discards a card instead of the draw.
 #[test]
 fn words_of_waste_each_opponent_discards_instead_of_drawing() {

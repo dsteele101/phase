@@ -15568,6 +15568,19 @@ fn resolve_chain_body(
             return Ok(());
         }
 
+        if bounce::should_collect_player_scope_choices(&scoped_template) {
+            bounce::start_player_scope_choices(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
+                after_scope,
+                events,
+                depth,
+            )?;
+            return Ok(());
+        }
+
         if scoped_search_delivery_is_safe
             && scoped_library_search::supports_simultaneous_delivery(&scoped_template)
         {

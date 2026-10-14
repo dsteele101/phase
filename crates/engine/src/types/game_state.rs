@@ -4731,6 +4731,24 @@ pub struct PendingPlayerScopeSacrificeChoice {
     pub completion: PendingPlayerScopeSacrificeCompletion,
 }
 
+/// CR 101.4: If players make choices for one instruction, they choose in
+/// APNAP order before the simultaneous action happens.
+/// CR 400.3 + CR 701.3: Per-player untargeted return choices for one
+/// simultaneous instruction such as "each player returns a permanent they
+/// control to its owner's hand." No chosen permanent moves until every player
+/// has chosen; the whole selection is then delivered as one batch.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingPlayerScopeBounceChoice {
+    /// The scoped `Effect::Bounce` template. The current chooser is rebound
+    /// onto a clone before each pool is built.
+    pub ability: Box<ResolvedAbility>,
+    /// Players not yet prompted, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Permanents already chosen (or forced by a one-card pool), in APNAP
+    /// order. They stay on the battlefield until the batch is delivered.
+    pub selections: Vec<ObjectId>,
+}
+
 /// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
 /// token instruction whose declining players receive one aggregate token
 /// creation after every payer has answered. Kept independently of the current
@@ -21641,6 +21659,10 @@ declare_game_state! {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 101.4: per-player untargeted return choices paused by the current
+    /// player's `EffectZoneChoice`; nothing has moved yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_bounce_choice: Option<PendingPlayerScopeBounceChoice>,
     /// CR 101.4 + CR 118.12a: player-scoped unless-payment poll retained
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27979,6 +28001,7 @@ impl GameState {
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_player_scope_bounce_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
             pending_exile_from_top_until: None,
@@ -30645,6 +30668,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     value is correctly not a fixed-point repeat and COMPARING it can never suppress a
         //     legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_player_scope_bounce_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_exile_from_top_until: _,
@@ -30881,6 +30905,7 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_player_scope_bounce_choice == other.pending_player_scope_bounce_choice
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
