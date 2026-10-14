@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
@@ -45,6 +46,7 @@ use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
 };
 use super::match_config::{MatchConfig, MatchForfeitResult, MatchPhase, MatchScore};
+use super::object_map::ObjectMap;
 use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
@@ -355,18 +357,13 @@ mod legacy_trigger_definition_ref_map {
 /// have no such proof and are rejected at the state restore boundary.
 fn deserialize_objects_with_trigger_provenance<'de, D>(
     deserializer: D,
-) -> Result<im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>, D::Error>
+) -> Result<ObjectMap, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let mut objects =
-        im::HashMap::<ObjectId, GameObject, rustc_hash::FxBuildHasher>::deserialize(deserializer)?;
-    for (_, object) in objects.iter_mut() {
-        object
-            .migrate_legacy_trigger_definitions()
-            .map_err(serde::de::Error::custom)?;
-    }
-    Ok(objects)
+    ObjectMap::deserialize_with_migration(deserializer, |object| {
+        object.migrate_legacy_trigger_definitions()
+    })
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
@@ -1974,11 +1971,31 @@ pub struct AttachmentSnapshot {
 
 /// CR 603.10a + CR 607.2a: Snapshot of a single card linked as "exiled with"
 /// a source at the instant before that source leaves the battlefield.
+/// Readers that consult the live card gate on [`Self::is_still_exiled`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedExileSnapshot {
     pub exiled_id: ObjectId,
     pub owner: PlayerId,
     pub mana_value: u32,
+    /// CR 400.7: the exiled card's incarnation when the snapshot was captured. A
+    /// card that leaves exile is a new object, even if it is exiled again, so a
+    /// reader that consults the live card matches it only at this incarnation.
+    /// Legacy saves that predate this field decode to `LEGACY_INCARNATION`, which
+    /// no live object has (fail-closed, mirroring `CostPaidObjectSnapshot`).
+    #[serde(default = "crate::types::ability::legacy_incarnation")]
+    pub incarnation: u64,
+}
+
+impl LinkedExileSnapshot {
+    /// CR 607.2a + CR 400.7: Whether this snapshot's card is still the same object
+    /// in exile. Readers that consult the live card gate on this; readers of the
+    /// frozen `owner`/`mana_value` read last known information (CR 608.2h) and do not.
+    pub fn is_still_exiled(&self, state: &GameState) -> bool {
+        state
+            .objects
+            .get(&self.exiled_id)
+            .is_some_and(|obj| obj.zone == Zone::Exile && obj.incarnation == self.incarnation)
+    }
 }
 
 /// CR 400.7 + CR 607.2a + CR 607.2b + CR 113.7a: The linked exiles a source had
@@ -2630,10 +2647,9 @@ impl Clone for CounterAddedRecord {
 }
 
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
-/// When the source leaves the battlefield, the exiled card returns (CR 610.3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExileLinkKind {
-    /// CR 610.3a: Return the exiled object when the source leaves the battlefield.
+    /// CR 610.3: Return the exiled object when the source leaves the battlefield.
     UntilSourceLeaves { return_zone: Zone },
     /// CR 610.3: Return the exiled object immediately after an opponent of
     /// `controller` becomes the monarch.
@@ -2694,8 +2710,8 @@ pub enum ExileLinkKind {
     /// CR 702.167c: Craft material — the card (`exiled_id`) was exiled to pay the
     /// craft activation cost of the permanent (`source_id`) that returns to the
     /// battlefield transformed. "An ability of a permanent may refer to the
-    /// exiled cards used to craft it." Unlike `TrackedBySource`, this link is
-    /// **preserved** when the craft source leaves the battlefield — the source
+    /// exiled cards used to craft it." Unlike `TrackedBySource` and `CastCost`,
+    /// this link is **preserved** when the craft source leaves the battlefield — the source
     /// self-exiles mid-activation (CR 702.167a) and returns with the SAME
     /// ObjectId, so the link must survive its battlefield exit for the returned
     /// permanent to read it. Unlike `UntilSourceLeaves` it triggers NO automatic
@@ -2703,6 +2719,14 @@ pub enum ExileLinkKind {
     /// `ExiledBySource` / `CardsExiledBySource` consumers; pruned only when a
     /// material itself leaves exile (`zones.rs` exile-exit).
     CraftMaterial,
+    /// CR 607.2q: the card (`exiled_id`) was exiled to pay a cost of casting the
+    /// permanent spell (`source_id`). Linked to that spell and to the permanent it
+    /// becomes (CR 400.7d) and to nothing after: it survives only the move onto the
+    /// stack and the stack→battlefield move (CR 608.3a); every other zone exit and a
+    /// cancelled cast (CR 733.1) end it (CR 400.7). Read live like `TrackedBySource`;
+    /// after a battlefield departure only the departed incarnation reads it
+    /// (`zones::record_linked_exile_departure`).
+    CastCost,
 }
 
 /// CR 406.3 + CR 702.75a: whom a face-down exile look link's live rule admits.
@@ -19534,7 +19558,8 @@ pub enum CastingVariant {
     Disturb,
     /// CR 601.2a: Cast from graveyard via a static permission source (e.g. Lurrus).
     /// Stores the granting permanent's ObjectId for per-turn tracking.
-    /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
+    /// CR 400.7: the source's per-turn entry ends when it leaves the battlefield
+    /// (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
     GraveyardPermission {
         source: ObjectId,
         /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot in
@@ -19560,7 +19585,8 @@ pub enum CastingVariant {
     /// per-turn tracking. Omniscience's unconditional silent path does not use
     /// this variant — it short-circuits the mana cost to NoCost while leaving
     /// `casting_variant = Normal`.
-    /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
+    /// CR 400.7: the source's per-turn entry ends when it leaves the battlefield
+    /// (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
     HandPermission {
         source: ObjectId,
         /// CR 601.2b: When `OncePerTurn`, casting consumes this source's slot in
@@ -19575,8 +19601,8 @@ pub enum CastingVariant {
     /// resolution-time routing matches a normal cast — no on-resolve exile
     /// behavior — so this is treated as a casting-context tag, not as an
     /// alternative cost.
-    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
-    /// resetting the per-turn slot when the source leaves and re-enters play.
+    /// CR 400.7: the source's per-turn slot ends when it leaves the battlefield
+    /// (`zones::apply_zone_exit_cleanup`), so an object that returns has its own.
     ExilePermission {
         source: ObjectId,
         /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot
@@ -21066,11 +21092,13 @@ declare_game_state! {
     // the default SipHash RandomState: ObjectId is a thin integer key and this
     // map is looked up millions of times per large-board resolution — profiling
     // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    // Each object sits behind an `Arc` inside `ObjectMap`, so a cloned state
+    // shares every object it does not write.
     #[serde(
         deserialize_with = "deserialize_objects_with_trigger_provenance",
-        serialize_with = "crate::types::deterministic_serde::im_hash_map"
+        serialize_with = "crate::types::object_map::serialize_sorted"
     )]
-    pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+    pub objects: ObjectMap,
     pub next_object_id: u64,
     /// CR 603.7: persisted monotonic delayed-trigger installation allocator.
     #[serde(default)]
@@ -22366,7 +22394,9 @@ declare_game_state! {
     pub ability_resolutions_this_turn: im::HashMap<(ObjectId, usize), u32>,
     /// CR 601.2a: Tracks which graveyard-cast permission sources have been
     /// used this turn. Keyed by the granting permanent's ObjectId.
-    /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub graveyard_cast_permissions_used: HashSet<ObjectId>,
@@ -22378,8 +22408,9 @@ declare_game_state! {
     /// is the canonical user: each permanent type acts as an independent
     /// per-turn slot, so a single source may credit one cast per permanent
     /// type per turn.
-    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
-    /// resetting all slots.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub graveyard_cast_permissions_used_per_type: HashSet<(ObjectId, super::card_type::CoreType)>,
@@ -22391,7 +22422,9 @@ declare_game_state! {
     /// CR 601.2b: Tracks which `CastFromHandFree` once-per-turn permission sources
     /// have been used this turn (Zaffai and the Tempests). Keyed by the granting
     /// permanent's ObjectId. Unlimited sources (Omniscience) never populate this.
-    /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub hand_cast_free_permissions_used: HashSet<ObjectId>,
@@ -22399,8 +22432,9 @@ declare_game_state! {
     /// grant sources (As Foretold) have already had their alternative cost applied
     /// to a spell this turn. Keyed by the granting permanent's ObjectId. Unlimited
     /// grants (Fist of Suns, Rooftop Storm, Jodah) never populate this.
-    /// CR 400.7: Zone change creates a new ObjectId, so the permission naturally
-    /// resets when the source leaves and returns.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub alt_cost_grant_permissions_used: HashSet<ObjectId>,
@@ -22423,6 +22457,9 @@ declare_game_state! {
         Box<HashMap<PlayerId, im::Vector<AbilityActivationRecord>>>,
     /// CR 601.2a: Tracks once-per-turn `PlayFromExile` permission sources
     /// consumed this turn. Keyed by the granting source's ObjectId.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub exile_play_permissions_used: HashSet<ObjectId>,
@@ -22444,8 +22481,9 @@ declare_game_state! {
     /// the granting permanent's ObjectId. `Unlimited` frequency permissions
     /// never populate this set. Cleared at the start of each turn alongside
     /// the other per-turn cast-permission slots.
-    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
-    /// resetting the slot when the source leaves and re-enters play.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub exile_cast_permissions_used: HashSet<ObjectId>,
@@ -22457,8 +22495,9 @@ declare_game_state! {
     /// frequency permissions (Realmwalker, Future Sight, Bolas's Citadel) never
     /// populate this set. Cleared at the start of each turn alongside the other
     /// per-turn cast-permission slots.
-    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
-    /// resetting the slot when the source leaves and re-enters play.
+    /// CR 400.7: a source's entry also ends when that source leaves the
+    /// battlefield (`zones::apply_zone_exit_cleanup`), so an object that
+    /// returns has its own.
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub top_of_library_cast_permissions_used: HashSet<ObjectId>,
@@ -22469,7 +22508,9 @@ declare_game_state! {
     /// `exile_links::push_exiled_with_source_this_turn` whenever a tracked
     /// exile happens; cleared at the start of each turn so "cards exiled with
     /// ~ this turn" cast permissions (Maralen, Fae Ascendant) only see the
-    /// current turn's pool.
+    /// current turn's pool. CR 400.7: a source's entry also ends when that
+    /// source leaves the battlefield (`zones::apply_zone_exit_cleanup`), so an
+    /// object that returns starts with none.
     ///
     /// Distinct from `exile_links`: those persist for the lifetime of the
     /// source-link contract (CR 610.3) and back the open-ended "cards exiled
@@ -23475,8 +23516,9 @@ declare_game_state! {
     /// (CR 400.7), but an ability that sacrifices its own source as a cost and
     /// then refers to "cards exiled with this permanent" (Rod of Absorption)
     /// must still see those cards at resolution. `linked_exile_cards_for_source`
-    /// consults this as its final fallback, filtered to cards still in exile, so
-    /// stale entries (cards that later left exile) contribute nothing.
+    /// consults this as its final fallback, filtered to cards still in exile as
+    /// the object the entry captured (CR 400.7), so a card that left exile
+    /// contributes nothing, even if it was exiled again.
     /// One entry per battlefield departure (a source can leave more than once in
     /// a step), each bounded to that departure's incarnations, so a later
     /// incarnation of the same id never reads it (CR 400.7).
@@ -29049,7 +29091,26 @@ impl GameState {
             (AttackSubject::Source, CombatHistoryScope::ThisCombat) => {
                 self.creature_attacked_player_this_combat(source_id, target)
             }
+            // CR 508.6: one declaration is one combat, so the scope does not
+            // narrow the event's attacked players.
+            (AttackSubject::EventAttackers, _) => {
+                self.event_attacked_players().any(|player| player == target)
+            }
         }
+    }
+
+    /// CR 508.1b + CR 508.6: the players the current trigger event's attackers were
+    /// declared attacking. A planeswalker or battle attack attacks no player
+    /// (CR 506.3). Empty when no attack event is in scope.
+    fn event_attacked_players(&self) -> impl Iterator<Item = PlayerId> + '_ {
+        let attacks = match &self.current_trigger_event {
+            Some(GameEvent::AttackersDeclared { attacks, .. }) => attacks.as_slice(),
+            _ => &[],
+        };
+        attacks.iter().filter_map(|(_, target)| match target {
+            AttackTarget::Player(player) => Some(*player),
+            AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => None,
+        })
     }
 
     /// CR 509.1g + CR 400.7: Did exactly `blocker` block exactly `attacker` within `scope`?
@@ -29109,19 +29170,33 @@ impl GameState {
     }
 
     /// CR 508.6 + CR 702.121a: Defending players the subject attacked in the
-    /// current combat, read from declaration history for Melee-style counts.
+    /// current combat, read from declaration history for Melee-style counts. For
+    /// `EventAttackers`, the players the current trigger event's attackers were
+    /// declared attacking, read from the event rather than the combat ledger.
     pub fn attacked_defenders_this_combat_for(
         &self,
         subject: AttackSubject,
         controller: PlayerId,
         source_id: ObjectId,
-    ) -> Option<&HashSet<PlayerId>> {
-        let combat = self.combat.as_ref()?;
+    ) -> Option<Cow<'_, HashSet<PlayerId>>> {
         match subject {
-            AttackSubject::You => combat.attacked_defenders_this_combat.get(&controller),
-            AttackSubject::Source => combat
+            // CR 508.6: the event's attacked players; read from the trigger event,
+            // not from the combat ledger.
+            AttackSubject::EventAttackers => {
+                Some(Cow::Owned(self.event_attacked_players().collect()))
+            }
+            AttackSubject::You => self
+                .combat
+                .as_ref()?
+                .attacked_defenders_this_combat
+                .get(&controller)
+                .map(Cow::Borrowed),
+            AttackSubject::Source => self
+                .combat
+                .as_ref()?
                 .creature_attacked_defenders_this_combat
-                .get(&source_id),
+                .get(&source_id)
+                .map(Cow::Borrowed),
         }
     }
 
@@ -29149,7 +29224,7 @@ impl GameState {
             active_combat_phase_control: None,
             active_library_searches: ActiveLibrarySearches::default(),
             active_search_decision_controls: ActiveSearchDecisionControls::default(),
-            objects: im::HashMap::default(),
+            objects: ObjectMap::default(),
             next_object_id: 1,
             next_delayed_trigger_token: 1,
             next_delayed_trigger_instance: initial_delayed_trigger_instance_id(),
@@ -32001,10 +32076,7 @@ pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
 /// [`object_content_eq`]'s own doc states and not on immutability — they are not
 /// immutable within a game; only the fields a mandatory action could change are
 /// compared.
-pub(crate) fn objects_content_eq(
-    a: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
-    b: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
-) -> bool {
+pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
     a.len() == b.len()
         && a.iter()
             .all(|(id, x)| b.get(id).is_some_and(|y| object_content_eq(x, y)))

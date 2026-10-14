@@ -60,13 +60,33 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 140 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
+/// 143 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
 ///      PhysicalContest` (serialized `ContestState` inside `GameState`),
 ///      `Effect::PhysicalContest`, `GameEvent::PhysicalContestStarted` /
 ///      `PhysicalContestResolved`, `ClientMessage::ContestClick` and
-///      `ServerMessage::ContestProgress`. A v139 peer cannot parse the new
+///      `ServerMessage::ContestProgress`. A v142 peer cannot parse the new
 ///      `WaitingFor`/`Effect`/`GameEvent` tags or either message. Full-game
-///      peers and P2P move in lockstep; no lobby carrier names it (wire 122).
+///      peers and P2P move in lockstep; no lobby carrier names it (wire 125).
+///
+/// 142 — `LinkedExileSnapshot` gains `incarnation` (CR 400.7), serialized in
+///      `GameState.linked_exile_lki`, `TriggerSourceContext.linked_exile_snapshot`
+///      and `ZoneChangeRecord.linked_exile_snapshot`. A v141 peer re-encoding
+///      state drops the key, and a v142 peer would read a dropped key as the
+///      legacy sentinel and lose the pile. Full-game peers and P2P move in
+///      lockstep (wire 124); no lobby carrier names it.
+///
+/// 141 — `ExileLinkKind` gains `CastCost` (`"CastCost"`, CR 607.2q: a card
+///      exiled to pay a cost of casting a permanent spell, linked to that spell
+///      and to the permanent it becomes), serialized in `GameState.exile_links`.
+///      A v140 peer cannot parse the tag. Full-game peers and P2P move in
+///      lockstep (wire 123); no lobby carrier names it.
+///
+/// 140 — `AttackSubject` gains `EventAttackers` (`"EventAttackers"`, the
+///      players a trigger's attack event's attackers were declared attacking,
+///      CR 508.6), serialized inside `GameState` wherever a resolving or pending
+///      ability carries a `player_scope` (Zurzoth, Chaos Rider). A v139 peer
+///      cannot parse the tag. Full-game peers and P2P move in lockstep (wire
+///      122); no lobby carrier names it.
 ///
 /// 139 — CR 702.122c per-turn crew relation: `GameState` gains
 ///      `crew_history_this_turn` (the Vehicle/crewer incarnation pairs) and
@@ -1048,7 +1068,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 140;
+pub const PROTOCOL_VERSION: u32 = 143;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2305,12 +2325,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 140);
+        assert_eq!(PROTOCOL_VERSION, 143);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 139);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 142);
     }
 
     #[test]

@@ -20,11 +20,12 @@ mod zone_change_reflexive;
 pub(crate) use search::parse_search_name_reference_suffix;
 
 pub(crate) use lower::{
-    capitalize, lower_effect_chain_ir, parse_controls_permanent_object,
-    parse_counter_suffix_body_combinator, parse_countless_counter_element,
-    parse_with_counters_suffix, parse_with_counters_suffix_spanned,
-    player_lookback_relative_clause_owns_suffix, publishes_chain_created_referent,
-    strip_trailing_duration, strip_trailing_where_x,
+    capitalize, convert_terminal_attachment_host_reference, lower_effect_chain_ir,
+    parse_controls_permanent_object, parse_counter_suffix_body_combinator,
+    parse_countless_counter_element, parse_with_counters_suffix,
+    parse_with_counters_suffix_spanned, player_lookback_relative_clause_owns_suffix,
+    publishes_chain_created_referent, strip_trailing_duration, strip_trailing_where_x,
+    PrintedTargetWord,
 };
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
@@ -117,21 +118,22 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, BounceSelection, CardPlayMode, CardTypeSetSource,
-    CastFromZoneDriver, CastMechanism, CastPermissionConstraint, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, Chooser, ChosenGroupId, CombatDamageScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
-    CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
-    IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition,
-    ManaProduction, ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec,
-    NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
+    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
+    CastingPermission, ChoiceType, ChooseFromZoneConstraint, Chooser, ChosenGroupId,
+    CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard, ConjureSource,
+    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject, IntensityScope,
+    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
     SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
     TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource,
@@ -143,7 +145,7 @@ use crate::types::ability::{
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
 // `tests` module still names it through `use super::*`.
 #[cfg(test)]
-use crate::types::ability::{AttackSubject, CombatHistoryScope, DoubleTarget};
+use crate::types::ability::DoubleTarget;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::contest::ContestKind;
 use crate::types::counter::CounterType;
@@ -1101,7 +1103,9 @@ fn parse_when_you_reveal_this_way_head(input: &str) -> OracleResult<'_, &str> {
 /// parent's until-filter (`parse_reveal_until_active_filter_text` +
 /// `build_reveal_until_filter`), so the informational "card" noun is stripped
 /// identically on both sides and the comparison is structural `TargetFilter`
-/// equality. Anything else under this head fails closed.
+/// equality. Anything else under this head fails closed, as does a gate whose
+/// reveal-until is not proven to execute once
+/// ([`demote_unproven_reveal_this_way_gates`], over the finished chain).
 fn strip_reveal_this_way_reflexive_gate(text: &str, clauses: &[ClauseIr]) -> RevealThisWayGate {
     // ASCII lowercasing keeps byte offsets aligned with `text` for the
     // remainder slice below (the head grammar is ASCII).
@@ -1139,6 +1143,86 @@ fn strip_reveal_this_way_reflexive_gate(text: &str, clauses: &[ClauseIr]) -> Rev
     }
     RevealThisWayGate::Reflexive {
         remainder: text[text.len() - after_head.len()..].to_string(),
+    }
+}
+
+/// CR 603.12 + CR 701.20a: the lowered reveal-this-way gate — the CR 603.12
+/// creation gate plus the reveal-until-hit guard.
+fn reveal_this_way_gate_condition() -> AbilityCondition {
+    AbilityCondition::when_you_do_with_guard(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::RevealUntilMatched,
+    })
+}
+
+/// CR 603.12 + CR 608.2c: whether the instructions before a reveal-this-way
+/// gate prove that the guard's verdict source — the reveal-until immediately
+/// before it — is the resolution's only instruction and executes exactly once.
+///
+/// The guard reads one reveal-until's own hit-or-whiff verdict. That is the
+/// whole of the head's event only for a sole, unconditional, unrepeated,
+/// unscoped reveal by the controller. With any earlier instruction, repetition,
+/// player scope, optional or conditional execution, delay, "unless" payment, or
+/// nested instruction, the antecedent and its occurrence set are not proven by
+/// this lowering, so the shape stays explicitly unsupported. Continuation
+/// clauses that only complete the reveal ("Put that card into your hand and the
+/// rest on the bottom …") are part of the one instruction.
+fn reveal_gate_producer_executes_once(preceding: &[ClauseIr]) -> bool {
+    let unrepeated_and_unscoped = |clause: &ClauseIr| {
+        clause.repeat_for.is_none()
+            && clause.player_scope.is_none()
+            && clause.starting_with.is_none()
+    };
+    let mut instructions = preceding
+        .iter()
+        .filter(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }));
+    let (Some(producer), None) = (instructions.next(), instructions.next()) else {
+        return false;
+    };
+    preceding.iter().all(unrepeated_and_unscoped)
+        && matches!(
+            producer.parsed.effect,
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        )
+        && producer.parsed.sub_ability.is_none()
+        && producer.parsed.condition.is_none()
+        && !producer.parsed.optional
+        && producer.parsed.unless_pay.is_none()
+        && producer.parsed.unlowered_guard.is_none()
+        && producer.condition.is_none()
+        && !producer.is_optional
+        && producer.opponent_may_scope.is_none()
+        && producer.delayed_condition.is_none()
+        && producer.prefix_delayed_condition.is_none()
+        && producer.unless_pay.is_none()
+}
+
+/// CR 603.12 + CR 603.12a: fail closed on every reveal-this-way gate whose
+/// verdict source is not proven to execute once (see
+/// [`reveal_gate_producer_executes_once`]). Runs over the finished clause
+/// sequence, so a "repeat this process" directive printed after the gate — or
+/// any other chain-level repetition, which leaves no mark on the clauses
+/// themselves — is accounted for. A gate is recognized by the reveal-until-hit
+/// guard's membership in its root condition (the same classifier the runtime
+/// uses), so extra intervening-if guards composed onto it cannot hide it. A
+/// rejected clause becomes a whole gap: no disposition, condition or other
+/// metadata of the reflexive survives to patch the reveal-until.
+fn demote_unproven_reveal_this_way_gates(clauses: &mut [ClauseIr], repeats_a_process: bool) {
+    for index in 0..clauses.len() {
+        let is_gate = clauses[index]
+            .condition
+            .as_ref()
+            .is_some_and(crate::game::effects::condition_has_reveal_until_matched_guard);
+        if !is_gate {
+            continue;
+        }
+        if !repeats_a_process && reveal_gate_producer_executes_once(&clauses[..index]) {
+            continue;
+        }
+        clauses[index].replace_with_gap("reveal_this_way_reflexive_gate");
     }
 }
 
@@ -1846,7 +1930,8 @@ fn parse_dealt_damage_this_way_dies_trigger(
     let (rest, _) = eof::<_, OracleError<'_>>.parse(rest).ok()?;
     debug_assert!(rest.is_empty());
 
-    let (valid_card, rem) = parse_type_phrase_folding(subject);
+    let (valid_card, rem) =
+        parse_type_phrase_folding_with_ctx(subject, &mut ctx.clone_player_antecedents());
     if !rem.trim().is_empty() || matches!(valid_card, TargetFilter::Any) {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed damage subject".into(),
@@ -2562,7 +2647,8 @@ fn try_parse_lose_control_delayed_trigger(
         .ok()?
     {
         (rest, Some(_)) => {
-            let (host, host_rest) = parse_type_phrase_folding(rest);
+            let (host, host_rest) =
+                parse_type_phrase_folding_with_ctx(rest, &mut ctx.clone_player_antecedents());
             let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(host_rest).ok()?;
             (rest, host)
         }
@@ -13810,7 +13896,8 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
     // Remaining text is the block target: "target creature", "~", "it", etc.
     // May be compound: "~ or enchanted creature" → Or union.
     let target_text = &rest.original[..before_temporal.len()];
-    let (target, remainder) = parse_target(target_text);
+    let (target, remainder) =
+        ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
     let (target, remainder) = refine_damage_target_remainder(target, remainder);
     if !remainder.trim().is_empty() {
         ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
@@ -14084,7 +14171,10 @@ fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEf
     .parse(tp.lower)
     .ok()?;
 
-    let (target, after_target_orig) = super::oracle_target::parse_target(tp.original);
+    let (target, after_target_orig) = super::oracle_target::parse_target_with_ctx(
+        tp.original,
+        &mut ctx.clone_player_antecedents(),
+    );
     let after_target_lower = &tp.lower[tp.lower.len() - after_target_orig.len()..];
     let (after_verb_lower, _) = alt((tag::<_, _, OracleError<'_>>(" skips "), tag(" skip ")))
         .parse(after_target_lower)
@@ -14590,7 +14680,8 @@ fn try_parse_put_on_top_or_bottom(
                 )
             })
             .map(|pair| pair.original)?;
-        let (filter, remainder) = parse_target(target_text);
+        let (filter, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
         if !remainder.trim().is_empty() {
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
@@ -14632,7 +14723,8 @@ fn try_parse_put_on_top_or_bottom(
                     })
             })
             .map(|pair| pair.original)?;
-        let (filter, remainder) = parse_target(target_text);
+        let (filter, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
         if !remainder.trim().is_empty() {
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
@@ -14870,7 +14962,8 @@ fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<Targe
     // Pattern 1: "target [filter]'s owner [verb]s it ..."
     if let Some(idx) = tp.find("'s owner ") {
         let target_text = &tp.original[..idx];
-        let (filter, remainder) = parse_target(target_text);
+        let (filter, remainder) =
+            ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
         if !remainder.trim().is_empty() {
             ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                 text: remainder.trim().into(),
@@ -14891,7 +14984,8 @@ fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<Targe
         for verb in [" shuffles ", " puts ", " draws "] {
             if let Some(idx) = rest.find(verb) {
                 let target_text = &rest.original[..idx];
-                let (filter, remainder) = parse_target(target_text);
+                let (filter, remainder) = ctx
+                    .with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
                 if !remainder.trim().is_empty() {
                     ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                         text: remainder.trim().into(),
@@ -19537,9 +19631,13 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
 ///
 /// The recognizer is the pre-existing authority: it is the runtime rider classifier the
 /// resolver itself consumes.
-fn is_ownership_candidate(reading: GuardReading, effect: &Effect) -> bool {
+fn is_ownership_candidate(reading: GuardReading, clause: &ParsedEffectClause) -> bool {
     reading == GuardReading::Event
-        && crate::game::effects::cast_from_zone::graveyard_destination_rider(effect).is_some()
+        && crate::game::effects::cast_from_zone::graveyard_destination_rider(
+            &clause.effect,
+            clause.condition.as_ref(),
+        )
+        .is_some()
 }
 
 fn refine_put_at_library_position(
@@ -19691,7 +19789,7 @@ fn lower_clause_ast(
                     // A body a typed owner could consume is DEFERRED rather than decided
                     // here: whether an owner carries the guard is a property of the
                     // assembled tree, and this seam cannot see the body's final parent.
-                    if is_ownership_candidate(reading, &result.effect) {
+                    if is_ownership_candidate(reading, &result) {
                         result.unlowered_guard = Some(UnloweredGuard {
                             reading,
                             clause_text,
@@ -21230,7 +21328,8 @@ fn try_parse_reanimate_self_and_target(
     let (_, after_return) = nom_on_lower(text, &lower, |i| value((), tag("return ")).parse(i))?;
 
     // CR 400.7: the first conjunct must be the source object itself.
-    let (first_filter, after_first) = parse_target(after_return);
+    let (first_filter, after_first) =
+        parse_target_with_ctx(after_return, &mut ctx.clone_player_antecedents());
     if first_filter != TargetFilter::SelfRef {
         return None;
     }
@@ -22076,7 +22175,8 @@ fn try_parse_compound_player_object_damage(
     // would borrow a temporary that drops at the end of the statement (E0716),
     // and `rem` is a sub-slice of it.
     let target_text = format!("each {bare_object_phrase}");
-    let (mut object_filter, rem) = parse_target(&target_text);
+    let (mut object_filter, rem) =
+        parse_target_with_ctx(&target_text, &mut ctx.clone_player_antecedents());
     // The object conjunct must be FULLY consumed. This is what rejects a player
     // predicate continuation ("each player draws a card"), whose verb phrase
     // `parse_target` leaves unconsumed.
@@ -22258,7 +22358,8 @@ fn try_parse_compound_object_player_damage(
     // natively. The full lower-case slice is fine because parse_target is
     // case-insensitive and we only use the resulting filter, not the remainder.
     let target_text = format!("each {type_phrase}");
-    let (object_filter, _rem) = parse_target(&target_text);
+    let (object_filter, _rem) =
+        parse_target_with_ctx(&target_text, &mut ctx.clone_player_antecedents());
 
     // Sanity: the parsed filter must reference at least one object type.
     // If parse_target returned an empty filter, bail out so the general
@@ -23633,7 +23734,7 @@ struct CompoundSubjectPrefix {
 /// the clause chunker (`remainder_trimmed_starts_with_compound_subject_each`) so
 /// its no-split guard and this distributor recognize the same forms: "that
 /// player", "that opponent", "target opponent", "the attacking player", "target
-/// player", "that creature" and "[the] defending player".
+/// player", "that creature", "[the] defending player" and "those players".
 fn parse_static_compound_second_subject(lower: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         value(
@@ -23660,6 +23761,18 @@ fn parse_static_compound_second_subject(lower: &str) -> OracleResult<'_, TargetF
         value(
             TargetFilter::DefendingPlayer,
             (opt(tag("the ")), tag("defending player each ")),
+        ),
+        // CR 508.6: "those players" of an attack head — the players the event's
+        // matching attackers attacked (Zurzoth, Chaos Rider). Bound only by the
+        // coordinated channel under the head's `DefendingPlayer` antecedent.
+        value(
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::EventAttackers,
+                    scope: CombatHistoryScope::ThisCombat,
+                }),
+            },
+            tag("those players each "),
         ),
     ))
     .parse(lower)
@@ -23894,7 +24007,9 @@ fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<Pars
 ///   body cloned per conjunct with its recipient rewritten): members no
 ///   `PlayerFilter` names (a vote-body "that player", `EnchantedPlayer`), a
 ///   targeted conjunct after an earlier player-capable slot, a body that already
-///   carries its own `player_scope`, and the object axis ("~ and", "it and").
+///   carries its own `player_scope`, and the object axis ("~ and", "it and"). A
+///   set conjunct ("those players") never takes it: when the channel declines
+///   it, the clause stays the `unbound_subject` gap.
 fn try_parse_compound_subject_each(
     text: &str,
     ctx: &mut ParseContext,
@@ -23965,6 +24080,16 @@ fn try_parse_compound_subject_each(
             text,
             ctx,
         ));
+    }
+
+    // CR 508.6: "those players" names a player SET; only the coordinated channel
+    // carries it. A conjunct the channel declined stays the unbound gap and never
+    // reaches the halves rewrite, which would bind the set as one recipient.
+    if matches!(second_filter, TargetFilter::PlayerMatching { .. }) {
+        return Some(parsed_clause(Effect::unimplemented(
+            subject::UNBOUND_SUBJECT_GAP,
+            text,
+        )));
     }
 
     // CR 109.4 + CR 608.2c (issue #6381): "that player" in "you and that
@@ -27824,6 +27949,13 @@ fn coordinated_player_member(second: &TargetFilter, ctx: &ParseContext) -> Optio
         }
         TargetFilter::TriggeringPlayer => Some(PlayerFilter::TriggeringPlayer),
         TargetFilter::DefendingPlayer => Some(PlayerFilter::DefendingPlayer),
+        // CR 508.6: "those players" names the attacked players only inside an
+        // attack trigger — the head's `DefendingPlayer` antecedent.
+        TargetFilter::PlayerMatching { player } => matches!(
+            ctx.relative_player_scope,
+            Some(ControllerRef::DefendingPlayer)
+        )
+        .then(|| player.as_ref().clone()),
         possessive => player_scope_from_parent_target_subject(possessive),
     }
 }
@@ -31306,7 +31438,10 @@ fn try_parse_up_to_one_target_cast(lower: &str, ctx: &ParseContext) -> Option<Pa
     // leaves behind ("card of the other type" — Gale, Waterdeep Prodigy) or a
     // further slot ("… and/or up to one target sorcery card") would otherwise
     // be dropped from the cast. Only the cast riders may follow it.
-    let (_, after_target) = crate::parser::oracle_target::parse_target(rest);
+    let (_, after_target) = crate::parser::oracle_target::parse_target_with_ctx(
+        rest,
+        &mut ctx.clone_player_antecedents(),
+    );
     preceded(
         multispace0::<_, E>,
         alt((
@@ -31848,8 +31983,13 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // spell ...") since `parse_type_phrase_folding` doesn't handle connectors
         // between bare core-type words. Then fall back to `parse_type_phrase_folding`
         // for single-type forms.
-        let mut typed_filter = parse_cast_type_list(rest)
-            .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(rest).0);
+        let mut typed_filter = parse_cast_type_list(rest).unwrap_or_else(|| {
+            super::oracle_target::parse_type_phrase_folding_with_ctx(
+                rest,
+                &mut ctx.clone_player_antecedents(),
+            )
+            .0
+        });
         let target = match typed_filter {
             TargetFilter::Typed(_) | TargetFilter::Or { .. } => {
                 // CR 406.1: source-linked exiled cards live in the Exile zone.
@@ -31966,8 +32106,13 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // so for inputs of the form "spell from your hand with mana value ..."
     // the mana-value clause is past the type-phrase pos when reached.
     let cast_target_rest = strip_cast_target_prefix(rest);
-    let mut filter = parse_cast_type_list(rest)
-        .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(cast_target_rest).0);
+    let mut filter = parse_cast_type_list(rest).unwrap_or_else(|| {
+        super::oracle_target::parse_type_phrase_folding_with_ctx(
+            cast_target_rest,
+            &mut ctx.clone_player_antecedents(),
+        )
+        .0
+    });
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
         // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
@@ -34370,7 +34515,8 @@ fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
 
     // Try full type phrase parsing first — handles compound patterns like
     // "green or white creature", "nonland permanent", "spirit or arcane"
-    let (phrase_filter, phrase_rem) = parse_type_phrase_folding(cleaned);
+    let (phrase_filter, phrase_rem) =
+        parse_type_phrase_folding_with_ctx(cleaned, &mut ctx.clone_player_antecedents());
     if !matches!(phrase_filter, TargetFilter::Any) && phrase_rem.trim().is_empty() {
         return phrase_filter;
     }
@@ -38829,7 +38975,8 @@ pub(crate) fn parse_each_player_copy_chosen_ir(
     ))
     .parse(i)
     .ok()?;
-    let (choose_filter, noun_rest) = parse_type_phrase_folding(noun);
+    let (choose_filter, noun_rest) =
+        parse_type_phrase_folding_with_ctx(noun, &mut ctx.clone_player_antecedents());
     if !noun_rest.trim().is_empty() {
         return None;
     }
@@ -39673,7 +39820,10 @@ fn parse_exile_pile_shuffle_cloak_ir(
     // "you control" into `ControllerRef::You` and "with disguise" into
     // `FilterProp::HasKeywordKind { Disguise }`. Require a full, non-`None` parse
     // so a partial match falls through to the generic pipeline.
-    let (filter, filter_rem) = parse_type_phrase_folding(filter_tp.original.trim());
+    let (filter, filter_rem) = parse_type_phrase_folding_with_ctx(
+        filter_tp.original.trim(),
+        &mut ctx.clone_player_antecedents(),
+    );
     if matches!(filter, TargetFilter::None) || !filter_rem.trim().is_empty() {
         return None;
     }
@@ -40113,7 +40263,8 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
     .ok()?;
 
     let target_phrase = format!("{} in your graveyard", target_tp.original.trim());
-    let (target, remainder) = parse_target(&target_phrase);
+    let (target, remainder) =
+        parse_target_with_ctx(&target_phrase, &mut ctx.clone_player_antecedents());
     if !remainder.trim().is_empty() {
         return None;
     }
@@ -42368,11 +42519,7 @@ fn parse_effect_chain_ir_body(
                 // reveal-until's until-condition, so its creation gate carries the
                 // reveal-until-hit guard (a generic "When you do" does not).
                 (
-                    Some(AbilityCondition::when_you_do_with_guard(
-                        AbilityCondition::EffectOutcome {
-                            signal: EffectOutcomeSignal::RevealUntilMatched,
-                        },
-                    )),
+                    Some(reveal_this_way_gate_condition()),
                     remainder,
                     None,
                     None,
@@ -45689,6 +45836,11 @@ fn parse_effect_chain_ir_body(
     // sequence than the chunk loop built.
     resolve_delayed_payload_placements(builder.clauses_mut(), kind);
 
+    // CR 603.12 + CR 603.12a: over the finished sequence, so repetition printed
+    // anywhere in the chain is seen.
+    let repeats_a_process = builder.repeats_a_process();
+    demote_unproven_reveal_this_way_gates(builder.clauses_mut(), repeats_a_process);
+
     // CR 113.10 + chunk-splitter normalization: Bronzehide Lion's "and it loses
     // all other abilities" was pre-split by
     // `sequence.rs::starts_bare_and_clause` into a sibling `GenericEffect`
@@ -45969,7 +46121,8 @@ fn try_parse_put_zone_change_parts(
             // existing mass branch below), never the single-object
             // resolution-choice path. When `plural_object_pronoun_ref` is
             // `None` — every card outside the class — behavior is unchanged
-            // (the ctx-free `parse_target` fallback below).
+            // (the `parse_target` fallback below, which reads only the
+            // caller's player antecedents).
             let plural_pool = if is_bare_plural_object_pronoun(&target_text.to_ascii_lowercase()) {
                 ctx.plural_object_pronoun_ref
                     .clone()
@@ -45982,7 +46135,8 @@ fn try_parse_put_zone_change_parts(
             let target = match plural_pool {
                 Some(pool) => pool,
                 None => {
-                    let parsed = parse_target(target_text).0;
+                    let parsed =
+                        parse_target_with_ctx(target_text, &mut ctx.clone_player_antecedents()).0;
                     // CR 608.2c: a definite plural subject ("the nonland cards
                     // revealed this way") restricts the anaphor's set to its named
                     // type. The determiner is not part of the type phrase, so when
@@ -45992,7 +46146,12 @@ fn try_parse_put_zone_change_parts(
                         match nom_on_lower(target_text, &lower, |i| {
                             value((), tag::<_, _, OracleError<'_>>("the ")).parse(i)
                         }) {
-                            Some(((), rest)) => match parse_target(rest).0 {
+                            Some(((), rest)) => match parse_target_with_ctx(
+                                rest,
+                                &mut ctx.clone_player_antecedents(),
+                            )
+                            .0
+                            {
                                 TargetFilter::Any => parsed,
                                 restricted => restricted,
                             },
