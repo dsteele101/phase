@@ -1979,6 +1979,18 @@ fn radiance_fanout_population(effect: &Effect) -> Option<&TypedFilter> {
     (shares_color_with_target && excludes_others).then_some(typed)
 }
 
+/// CR 701.26a/b: a mass tap/untap instruction — its affected population is a
+/// filter, not the chosen target a `ParentTarget` binding would name.
+fn mass_tap_state_population(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState {
+            scope: EffectScope::All,
+            ..
+        }
+    )
+}
+
 /// CR 611.2a + CR 608.2c: the mass counterpart of a "those creatures get +N/+M"
 /// rider bound to the chosen target (`Pump { ParentTarget }`) — a `PumpAll` over
 /// the Radiance fan-out `population`, chained after the target's own `Pump`.
@@ -3638,20 +3650,44 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .fragment()
                 .unwrap_or_default()
                 .to_lowercase();
-            // CR 207.2c + CR 608.2c: "those creatures" after a Radiance fan-out
-            // names the target AND every other object the fan-out reached, so
-            // the rider must fan out over the same population as its antecedent.
+            // CR 608.2c: a plural subject anaphor ("those creatures") names the
+            // population of the clause immediately before it — written order,
+            // not a search of older history. `previous_clause_start` bounds that
+            // antecedent to the defs the previous clause emitted.
             if starts_with_plural_subject_anaphor(&source_text_lower) {
-                if let Some(population) = defs
-                    .iter()
-                    .rev()
-                    .find_map(|d| radiance_fanout_population(&d.effect))
+                let previous_clause = &defs[previous_clause_start.min(defs.len())..];
+                if let Some(population) = chain_nodes(previous_clause)
+                    .find_map(|def| radiance_fanout_population(&def.effect))
                 {
+                    // CR 207.2c: after a Radiance fan-out, "those creatures" is
+                    // the target AND every other object the fan-out reached, so
+                    // the rider fans out over the same population.
                     let fanout_riders: Vec<AbilityDefinition> = current_defs
                         .iter()
                         .filter_map(|current| radiance_fanout_rider(current, population))
                         .collect();
                     current_defs.extend(fanout_riders);
+                } else if chain_nodes(previous_clause)
+                    .any(|def| mass_tap_state_population(&def.effect))
+                {
+                    // CR 608.2c: the antecedent is a mass tap/untap population
+                    // that no `ParentTarget` binding can represent. Pumping only
+                    // the chosen target would silently name the wrong creatures,
+                    // so the rider fails closed.
+                    for current in &mut current_defs {
+                        if matches!(
+                            &*current.effect,
+                            Effect::Pump {
+                                target: TargetFilter::ParentTarget,
+                                ..
+                            }
+                        ) {
+                            *current.effect = Effect::unimplemented(
+                                "plural_rider_after_mass_tap_population",
+                                clause_ir.source.fragment().unwrap_or_default(),
+                            );
+                        }
+                    }
                 }
             }
             // CR 603.7: Scan ALL prior clauses for a tracked-set publisher — an
@@ -5720,6 +5756,67 @@ mod arena_tests {
             node = def.sub_ability.as_deref();
         }
         false
+    }
+
+    /// CR 207.2c + CR 608.2c: "those creatures" binds the clause immediately
+    /// before it. Positive reach guard: Rally's own sentence pair gains the
+    /// fan-out `PumpAll`.
+    #[test]
+    fn plural_rider_after_radiance_fanout_gains_pump_all() {
+        let parsed = crate::parser::parse_oracle_text(
+            RALLY_TEXT,
+            "Rally Probe",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert!(
+            chain_effects(&parsed.abilities[0])
+                .iter()
+                .any(|effect| matches!(effect, Effect::PumpAll { .. })),
+            "reach guard: the Radiance rider must fan out"
+        );
+    }
+
+    /// CR 608.2c: an intervening mass untap clause is the antecedent of "those
+    /// creatures", not the older Radiance population — so the rider must not be
+    /// bound to Rally's color fan-out, and (the referent being a mass population
+    /// `ParentTarget` cannot name) fails closed.
+    #[test]
+    fn plural_rider_after_intervening_population_ignores_older_radiance() {
+        let text = "Untap target creature and each other creature that shares a color with it. Untap all creatures you control. Those creatures get +2/+0 until end of turn.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Intervening Probe",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let effects = chain_effects(&parsed.abilities[0]);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PumpAll { .. })),
+            "the older color fan-out must not be the antecedent: {effects:?}"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect.unimplemented_description().is_some()),
+            "the unrepresentable referent must fail honestly: {effects:?}"
+        );
+    }
+
+    const RALLY_TEXT: &str = "Radiance \u{2014} Untap target creature and each other creature that shares a color with it. Those creatures get +2/+0 until end of turn.";
+
+    fn chain_effects(root: &AbilityDefinition) -> Vec<Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(root);
+        while let Some(def) = node {
+            out.push((*def.effect).clone());
+            node = def.sub_ability.as_deref();
+        }
+        out
     }
 
     /// CR 608.2c: the chain tracked set also holds an earlier producer's object,
