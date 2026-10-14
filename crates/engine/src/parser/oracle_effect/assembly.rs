@@ -27,8 +27,9 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId, Comparator, ControllerRef,
-    DamageChannel, Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReturnResultId,
-    SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    DamageChannel, Effect, EffectScope, FilterProp, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, ReturnResultId, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1942,6 +1943,77 @@ fn declares_published_object_target(effect: &Effect) -> bool {
             .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
 }
 
+/// CR 207.2c + CR 608.2c: the "each other `<X>` that shares a color with it"
+/// population of a Radiance fan-out — a mass effect (Untap-all, `DamageAll`)
+/// whose filter is `SharesQuality { Color, ParentTarget }` and excludes "other"
+/// objects, spelled `DistinctFrom { ParentTarget }` (damage fan-out) or the
+/// generic `Another` (the compound-untap splitter). The chosen target itself is
+/// reached by the head instruction, not by this population.
+fn radiance_fanout_population(effect: &Effect) -> Option<&TypedFilter> {
+    let (Effect::SetTapState {
+        scope: EffectScope::All,
+        target: TargetFilter::Typed(typed),
+        ..
+    }
+    | Effect::DamageAll {
+        target: TargetFilter::Typed(typed),
+        ..
+    }) = effect
+    else {
+        return None;
+    };
+    let shares_color_with_target = typed.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(**reference, TargetFilter::ParentTarget)
+        )
+    });
+    let excludes_others = typed
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Another | FilterProp::DistinctFrom { .. }));
+    (shares_color_with_target && excludes_others).then_some(typed)
+}
+
+/// CR 611.2a + CR 608.2c: the mass counterpart of a "those creatures get +N/+M"
+/// rider bound to the chosen target (`Pump { ParentTarget }`) — a `PumpAll` over
+/// the Radiance fan-out `population`, chained after the target's own `Pump`.
+/// `Another` is "other than the source", which would not exclude the chosen
+/// target (already pumped by its own `Pump`), so it is restated as
+/// `DistinctFrom { ParentTarget }`.
+fn radiance_fanout_rider(
+    rider: &AbilityDefinition,
+    population: &TypedFilter,
+) -> Option<AbilityDefinition> {
+    let Effect::Pump {
+        power,
+        toughness,
+        target: TargetFilter::ParentTarget,
+    } = &*rider.effect
+    else {
+        return None;
+    };
+    let mut filter = population.clone();
+    filter
+        .properties
+        .retain(|prop| !matches!(prop, FilterProp::Another | FilterProp::DistinctFrom { .. }));
+    filter.properties.push(FilterProp::DistinctFrom {
+        reference: Box::new(TargetFilter::ParentTarget),
+    });
+    let mut fanout = rider.clone();
+    fanout.sub_ability = None;
+    *fanout.effect = Effect::PumpAll {
+        power: power.clone(),
+        toughness: toughness.clone(),
+        target: TargetFilter::Typed(filter),
+    };
+    Some(fanout)
+}
+
 /// CR 601.2c: a `Pump` whose target is its own declared target instance
 /// ("[up to one] [other] target creature gets +N/+M"), not an inherited anaphor.
 fn declares_pump_target(effect: &Effect) -> bool {
@@ -3566,6 +3638,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .fragment()
                 .unwrap_or_default()
                 .to_lowercase();
+            // CR 207.2c + CR 608.2c: "those creatures" after a Radiance fan-out
+            // names the target AND every other object the fan-out reached, so
+            // the rider must fan out over the same population as its antecedent.
+            if starts_with_plural_subject_anaphor(&source_text_lower) {
+                if let Some(population) = defs
+                    .iter()
+                    .rev()
+                    .find_map(|d| radiance_fanout_population(&d.effect))
+                {
+                    let fanout_riders: Vec<AbilityDefinition> = current_defs
+                        .iter()
+                        .filter_map(|current| radiance_fanout_rider(current, population))
+                        .collect();
+                    current_defs.extend(fanout_riders);
+                }
+            }
             // CR 603.7: Scan ALL prior clauses for a tracked-set publisher — an
             // intermediate non-publishing clause (e.g. Investigate) must not
             // shadow an earlier exile clause. Example: Disorder in the Court
