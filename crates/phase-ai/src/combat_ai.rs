@@ -1565,7 +1565,14 @@ pub fn choose_blockers(
     player: PlayerId,
     attacker_ids: &[ObjectId],
 ) -> Vec<(ObjectId, ObjectId)> {
-    choose_blockers_with_profile(state, player, attacker_ids, &AiProfile::default(), None)
+    choose_blockers_with_profile(
+        state,
+        player,
+        attacker_ids,
+        &AiProfile::default(),
+        &crate::config::PolicyPenalties::default(),
+        None,
+    )
 }
 
 pub fn choose_blockers_with_profile(
@@ -1573,6 +1580,7 @@ pub fn choose_blockers_with_profile(
     player: PlayerId,
     attacker_ids: &[ObjectId],
     profile: &AiProfile,
+    penalties: &crate::config::PolicyPenalties,
     valid_block_targets: Option<&HashMap<ObjectId, Vec<ObjectId>>>,
 ) -> Vec<(ObjectId, ObjectId)> {
     let mut assignments = Vec::new();
@@ -1628,14 +1636,13 @@ pub fn choose_blockers_with_profile(
     // activates it before damage once it is doomed (CR 117.1b), so a Mogg
     // Fanatic-style chump costs little. Used wherever a blocker is expected to
     // die; ranking the blocks that survive still uses the full value.
-    // `choose_blockers` carries an `AiProfile`, not the full `AiConfig`, so the
-    // salvage payoff is priced at the default policy penalties.
-    let penalties = crate::config::PolicyPenalties::default();
+    // The salvage payoff is priced at the caller's policy penalties, the same
+    // ones the activation verdict will use when the ability is actually paid.
     let blocker_losses: HashMap<ObjectId, f64> = available_blockers
         .iter()
         .map(|&id| {
             let salvage = crate::policies::self_cost::self_sacrifice_salvage_value(
-                state, player, id, &penalties,
+                state, player, id, penalties,
             );
             (id, (blocker_value(&id) - salvage).max(0.0))
         })
@@ -1744,6 +1751,11 @@ pub fn choose_blockers_with_profile(
     // the player that `attacker_id` would otherwise deal, read from the engine's
     // damage authority so trample excess, deathtouch-lethal, marked damage and
     // both strike steps are all accounted for.
+    // The engine helper reads the board as it stands, before block-time triggers
+    // (flanking, bushido) resolve. Those shift kill and survival, which the
+    // exchange models, but not the player's life total: the helper is the one
+    // authority for it, and projecting shifts into it would mean cloning game
+    // state per candidate block.
     let damage_prevented_by = |attacker_id: ObjectId, blocker_id: ObjectId| -> i32 {
         (unblocked_of(attacker_id)
             - engine::game::combat_damage::combat_damage_to_defender(
@@ -1784,6 +1796,8 @@ pub fn choose_blockers_with_profile(
             .min(remaining);
         let life = life_loss_cost(state, player, remaining, profile.stabilize_bias)
             - life_loss_cost(state, player, remaining - prevented, profile.stabilize_bias);
+        // This turn's connect payoff only. The kill credit in `attacker_value`
+        // (the payoff ending for good) is a separate, later stream.
         let denied = if attacker.has_keyword(&Keyword::Trample) {
             0.0
         } else {
@@ -2221,7 +2235,10 @@ pub fn choose_blockers_with_profile(
                     if through >= effective_life {
                         continue;
                     }
-                    // CR 510.1c: a gang that lets nothing through denies the payoff.
+                    // CR 510.1c: a gang that lets nothing through denies this turn's
+                    // connect payoff. That is distinct from the credit already in
+                    // `attacker_value` for killing the attacker, which ends the
+                    // payoff on every later turn, so the two are not a double count.
                     let denied = if through == 0 { connect } else { 0.0 };
                     let prevented = (unblocked_damage - through).clamp(0, remaining_incoming);
                     let life_saved =
@@ -3448,8 +3465,16 @@ pub(crate) fn creature_dies_in_current_combat(state: &GameState, creature_id: Ob
         .get(&creature_id)
         .is_some_and(|attackers| {
             attackers.iter().any(|&attacker_id| {
-                exchange_of(attacker_id)
-                    .is_some_and(|outcome| outcome.killed.contains(&creature_id))
+                // CR 510.1c: with several blockers the attacker's controller
+                // divides the damage, so any one of them can be spared and none
+                // is certain to die. Only a lone blocker, which must take all of
+                // the damage, is doomed by the exchange.
+                combat
+                    .blocker_assignments
+                    .get(&attacker_id)
+                    .is_some_and(|blockers| blockers.len() == 1)
+                    && exchange_of(attacker_id)
+                        .is_some_and(|outcome| outcome.killed.contains(&creature_id))
             })
         })
 }
@@ -6705,6 +6730,7 @@ mod tests {
             PlayerId(1),
             &[a1, a2, a3, a4],
             &easy_profile,
+            &crate::config::PolicyPenalties::default(),
             None,
         );
 

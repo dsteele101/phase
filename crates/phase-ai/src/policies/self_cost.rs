@@ -49,7 +49,7 @@ use engine::game::game_object::GameObject;
 use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
+    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, ShieldKind, TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
@@ -1304,10 +1304,13 @@ fn put_counter_fizzles(
     if !matches!(counter_target, TargetFilter::SelfRef) {
         return false;
     }
-    ability
-        .cost
-        .as_ref()
-        .is_some_and(|cost| sacrifice_must_remove_source(state, ai_player, source_id, cost))
+    let ability_index = engine::game::casting::activated_ability_definitions(state, source_id)
+        .into_iter()
+        .find(|(_, candidate)| candidate == ability)
+        .map(|(index, _)| index);
+    ability.cost.as_ref().is_some_and(|cost| {
+        sacrifice_must_remove_source(state, ai_player, source_id, cost, ability_index)
+    })
 }
 
 /// True when the source is about to leave the battlefield regardless of what
@@ -1362,8 +1365,17 @@ fn effects_remove_creature(state: &GameState, creature_id: ObjectId, effects: &[
         .objects
         .get(&creature_id)
         .is_some_and(|obj| obj.has_keyword(&engine::types::keywords::Keyword::Indestructible));
+    // CR 701.19a: a regeneration shield replaces the destruction unless the
+    // effect says the permanent can't be regenerated.
+    let regeneration_shield = state.objects.get(&creature_id).is_some_and(|obj| {
+        obj.replacement_definitions
+            .iter_all()
+            .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration)
+    });
     effects.iter().any(|effect| match effect {
-        Effect::Destroy { .. } => !indestructible,
+        Effect::Destroy {
+            cant_regenerate, ..
+        } => !indestructible && (*cant_regenerate || !regeneration_shield),
         Effect::Bounce { .. } | Effect::GainControl { .. } => true,
         Effect::ChangeZone { destination, .. } => *destination != Zone::Battlefield,
         _ => false,
@@ -1388,9 +1400,10 @@ pub(crate) fn self_sacrifice_option_premium(
     ai_player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    ability_index: Option<usize>,
     penalties: &PolicyPenalties,
 ) -> f64 {
-    if !sacrifice_must_remove_source(state, ai_player, source_id, cost)
+    if !sacrifice_must_remove_source(state, ai_player, source_id, cost, ability_index)
         || source_is_doomed(state, ai_player, source_id)
     {
         return 0.0;
@@ -1469,18 +1482,19 @@ fn sacrifice_must_remove_source(
     ai_player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    ability_index: Option<usize>,
 ) -> bool {
     if let Some(branches) = find_one_of_cost(cost) {
         let mut payable = branches
             .iter()
             .filter(|branch| {
-                one_of_branch_payable_in(state, ai_player, source_id, cost, branch, None)
+                one_of_branch_payable_in(state, ai_player, source_id, cost, branch, ability_index)
             })
             .filter_map(|branch| cost.resolve_first_one_of(branch))
             .peekable();
         return payable.peek().is_some()
             && payable.all(|resolved| {
-                sacrifice_must_remove_source(state, ai_player, source_id, &resolved)
+                sacrifice_must_remove_source(state, ai_player, source_id, &resolved, ability_index)
             });
     }
     match cost {
@@ -1508,7 +1522,7 @@ fn sacrifice_must_remove_source(
         }
         AbilityCost::Composite { costs } => costs
             .iter()
-            .any(|c| sacrifice_must_remove_source(state, ai_player, source_id, c)),
+            .any(|c| sacrifice_must_remove_source(state, ai_player, source_id, c, ability_index)),
         // A `OneOf` never reaches here: every choice was settled above.
         _ => false,
     }

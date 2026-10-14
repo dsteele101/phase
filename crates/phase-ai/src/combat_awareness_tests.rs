@@ -339,7 +339,7 @@ fn a_blocked_creature_that_dies_in_combat_is_doomed_and_sacrifices_for_free() {
 
     // Outside combat the ability is an option worth holding.
     assert!(!source_is_doomed(&state, AI, pinger));
-    assert!(self_sacrifice_option_premium(&state, AI, pinger, &cost, &penalties) > 0.0);
+    assert!(self_sacrifice_option_premium(&state, AI, pinger, &cost, None, &penalties) > 0.0);
 
     // CR 509.1h + CR 510.1c: blocking the 2/2, the 1/1 dies to combat damage.
     state.phase = engine::types::phase::Phase::DeclareBlockers;
@@ -353,7 +353,7 @@ fn a_blocked_creature_that_dies_in_combat_is_doomed_and_sacrifices_for_free() {
 
     assert!(source_is_doomed(&state, AI, pinger));
     assert_eq!(
-        self_sacrifice_option_premium(&state, AI, pinger, &cost, &penalties),
+        self_sacrifice_option_premium(&state, AI, pinger, &cost, None, &penalties),
         0.0
     );
     // The attacker survives the pinger's 1 damage, so it is not doomed.
@@ -600,11 +600,11 @@ fn a_choice_of_costs_sacrifices_the_source_only_when_every_payable_branch_does()
     };
     // Paying 2 life keeps the source, so no option is surrendered.
     assert_eq!(
-        self_sacrifice_option_premium(&state, AI, pinger, &choice(2), &penalties),
+        self_sacrifice_option_premium(&state, AI, pinger, &choice(2), None, &penalties),
         0.0
     );
     // CR 118.3: 30 life cannot be paid at 20, so the sacrifice is forced.
-    assert!(self_sacrifice_option_premium(&state, AI, pinger, &choice(30), &penalties) > 0.0);
+    assert!(self_sacrifice_option_premium(&state, AI, pinger, &choice(30), None, &penalties) > 0.0);
 
     // CR 118.3: likewise a mana branch with no mana to pay it.
     let mana_or_sacrifice = AbilityCost::OneOf {
@@ -616,7 +616,8 @@ fn a_choice_of_costs_sacrifices_the_source_only_when_every_payable_branch_does()
         ],
     };
     assert!(
-        self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, &penalties) > 0.0
+        self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, None, &penalties)
+            > 0.0
     );
     for _ in 0..2 {
         let _ = state.add_mana_to_pool(
@@ -630,7 +631,7 @@ fn a_choice_of_costs_sacrifices_the_source_only_when_every_payable_branch_does()
         );
     }
     assert_eq!(
-        self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, &penalties),
+        self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, None, &penalties),
         0.0
     );
 }
@@ -672,4 +673,64 @@ fn salvage_counts_only_legal_targets_and_activations_in_the_combat_window() {
         self_sacrifice_salvage_value(&state, AI, pinger, &penalties),
         0.0
     );
+}
+
+#[test]
+fn a_regeneration_shield_saves_the_source_unless_it_cannot_be_regenerated() {
+    use crate::policies::self_cost::source_is_doomed;
+    use engine::types::ability::ReplacementDefinition;
+    use engine::types::replacements::ReplacementEvent;
+
+    let mut state = setup(20);
+    let pinger = creature(&mut state, AI, "Pinger", 1, 1);
+    state
+        .objects
+        .get_mut(&pinger)
+        .unwrap()
+        .replacement_definitions
+        .push(ReplacementDefinition::new(ReplacementEvent::Destroy).regeneration_shield());
+
+    // CR 701.19a: the shield replaces the destruction, so nothing is doomed.
+    let destroy = |cant_regenerate| Effect::Destroy {
+        target: TargetFilter::Any,
+        cant_regenerate,
+    };
+    push_opponent_spell(&mut state, destroy(false), pinger);
+    assert!(!source_is_doomed(&state, AI, pinger));
+
+    // "It can't be regenerated" goes around the shield.
+    state.stack.clear();
+    push_opponent_spell(&mut state, destroy(true), pinger);
+    assert!(source_is_doomed(&state, AI, pinger));
+}
+
+#[test]
+fn only_a_lone_blocker_is_certain_to_die_in_combat() {
+    use crate::combat_ai::creature_dies_in_current_combat;
+    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+    // CR 510.1c: a 4/4 can kill either of two 2/2 blockers, and its controller
+    // chooses the division, so neither is certain to die. Alone, one must.
+    let mut state = setup(20);
+    state.phase = engine::types::phase::Phase::CombatDamage;
+    let attacker = creature(&mut state, OPP, "Ogre", 4, 4);
+    let first = creature(&mut state, AI, "First", 2, 2);
+    let second = creature(&mut state, AI, "Second", 2, 2);
+    let mut combat = CombatState::default();
+    let mut info = AttackerInfo::new(attacker, AttackTarget::Player(AI), AI);
+    info.blocked = true;
+    combat.attackers.push(info);
+    combat
+        .blocker_assignments
+        .insert(attacker, vec![first, second]);
+    combat.blocker_to_attacker.insert(first, vec![attacker]);
+    combat.blocker_to_attacker.insert(second, vec![attacker]);
+    state.combat = Some(combat);
+    assert!(!creature_dies_in_current_combat(&state, first));
+    assert!(!creature_dies_in_current_combat(&state, second));
+
+    let combat = state.combat.as_mut().unwrap();
+    combat.blocker_assignments.insert(attacker, vec![first]);
+    combat.blocker_to_attacker.remove(&second);
+    assert!(creature_dies_in_current_combat(&state, first));
 }

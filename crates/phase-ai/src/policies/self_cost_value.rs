@@ -248,6 +248,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
                     ctx.ai_player,
                     *source_id,
                     cost,
+                    Some(*ability_index),
                     ctx.penalties(),
                 );
                 if premium > 0.0 && net >= 0.0 && net < premium {

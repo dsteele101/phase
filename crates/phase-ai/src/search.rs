@@ -3337,6 +3337,7 @@ fn score_candidates_core(
             state,
             ai_player,
             &effective_profile,
+            &config.policy_penalties,
             Some(session.as_ref()),
             services.context.opponent_threat.as_ref(),
             Some(services.deadline),
@@ -4418,6 +4419,7 @@ pub(crate) fn deterministic_choice(
                 ai_player,
                 &attacker_ids,
                 &config.profile,
+                &config.policy_penalties,
                 Some(valid_block_targets),
             );
             // CR 509.1c: a block tax is an offer the defender may
@@ -4451,6 +4453,7 @@ fn deterministic_combat_choice(
     state: &GameState,
     ai_player: PlayerId,
     profile: &crate::config::AiProfile,
+    penalties: &crate::config::PolicyPenalties,
     session: Option<&AiSession>,
     opponent_threat: Option<&ThreatProfile>,
     comparison_deadline: Option<engine::util::Deadline>,
@@ -4511,6 +4514,7 @@ fn deterministic_combat_choice(
                 ai_player,
                 &attacker_ids,
                 profile,
+                penalties,
                 Some(valid_block_targets),
             );
             // CR 509.1c: a block tax is an offer the defender may
@@ -6311,6 +6315,70 @@ mod tests {
             &create_config(AiDifficulty::VeryHard, Platform::Native),
             &test_contract(state),
         )
+    }
+
+    #[test]
+    fn fallback_pays_the_priced_cost_branch_not_the_first_listed() {
+        // CR 118.3 + CR 601.2h: "{2} or sacrifice this" with the mana to pay it.
+        // The deadline-bail fallback must pick the branch the activation verdict
+        // priced (mana, the source survives), not the first payable one listed
+        // (the sacrifice).
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, SacrificeCost,
+            TargetFilter,
+        };
+        use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        ability.cost = Some(AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+            ],
+        });
+        let source = scenario
+            .add_creature(P0, "Sacrificial Pinger", 2, 2)
+            .with_ability_definition(ability)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            })
+            .expect("activation must be legal");
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ActivationCostOneOfChoice { .. }
+            ),
+            "both branches are payable, so the player is asked; got {:?}",
+            state.waiting_for
+        );
+
+        let action = fallback_action_default(&state).expect("a payable branch exists");
+        assert_eq!(
+            action,
+            GameAction::ChooseActivationCostBranch { index: 1 },
+            "the mana branch was priced; the sacrifice branch is listed first"
+        );
     }
 
     #[test]
