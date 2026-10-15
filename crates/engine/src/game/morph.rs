@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    AbilityDefinition, FaceDownBody, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityCost, AbilityDefinition, FaceDownBody, ReplacementDefinition, StaticDefinition,
+    TriggerDefinition,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -13,6 +14,14 @@ use std::sync::Arc;
 
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
+
+/// CR 702.37a + CR 702.37e: The cost paid to turn a face-down permanent face up.
+/// Can be either a mana cost or a non-mana cost (e.g. Fathom Seer bounce).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TurnFaceUpCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
 
 /// An engine-authored turn-face-up announcement for the Priority preflight.
 /// The permanent identity remains owned by the face-down authority until the
@@ -61,25 +70,36 @@ pub(crate) fn turn_face_up_offer(
     object_id: ObjectId,
 ) -> Option<TurnFaceUpOffer> {
     let (_, cost) = turn_face_up_prepare(state, object_id, player).ok()?;
-    let cost = super::casting::apply_special_action_cost_reduction(
-        state,
-        player,
-        crate::types::mana::SpecialAction::TurnFaceUp,
-        cost,
-    );
-    super::casting::can_pay_special_action_mana_cost_after_auto_tap(
-        state,
-        player,
-        Some(object_id),
-        &cost,
-        crate::types::mana::SpecialAction::TurnFaceUp,
-    )
-    .then_some(())?;
-    Some(if super::casting_costs::cost_has_x(&cost) {
-        TurnFaceUpOffer::RequiresChosenX
-    } else {
-        TurnFaceUpOffer::Ready
-    })
+    match cost {
+        TurnFaceUpCost::Mana(cost) => {
+            let cost = super::casting::apply_special_action_cost_reduction(
+                state,
+                player,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
+            super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+                state,
+                player,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+            )
+            .then_some(())?;
+            Some(if super::casting_costs::cost_has_x(&cost) {
+                TurnFaceUpOffer::RequiresChosenX
+            } else {
+                TurnFaceUpOffer::Ready
+            })
+        }
+        TurnFaceUpCost::NonMana(ability_cost) => {
+            if ability_cost.is_payable_for_activation(state, player, object_id, None) {
+                Some(TurnFaceUpOffer::Ready)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// The shape of an available turn-face-up action. `RequiresChosenX` carries no
@@ -397,7 +417,7 @@ pub(crate) fn turn_face_up_prepare(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
-) -> Result<(TurnUpCostSource, ManaCost), EngineError> {
+) -> Result<(TurnUpCostSource, TurnFaceUpCost), EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -449,10 +469,17 @@ pub(crate) fn turn_face_up_prepare(
         .keywords
         .iter()
         .find_map(|k| match k {
-            Keyword::Morph(c) => Some((TurnUpCostSource::Morph, c.clone())),
-            Keyword::Megamorph(c) => Some((TurnUpCostSource::Megamorph, c.clone())),
+            Keyword::Morph(crate::types::keywords::MorphCost::Mana(c)) => {
+                Some((TurnUpCostSource::Morph, TurnFaceUpCost::Mana(c.clone())))
+            }
+            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(c)) => {
+                Some((TurnUpCostSource::Morph, TurnFaceUpCost::NonMana(c.clone())))
+            }
+            Keyword::Megamorph(c) => {
+                Some((TurnUpCostSource::Megamorph, TurnFaceUpCost::Mana(c.clone())))
+            }
             Keyword::Disguise(crate::types::keywords::DisguiseCost::Mana(c)) => {
-                Some((TurnUpCostSource::Disguise, c.clone()))
+                Some((TurnUpCostSource::Disguise, TurnFaceUpCost::Mana(c.clone())))
             }
             Keyword::Disguise(crate::types::keywords::DisguiseCost::Reduced {
                 cost,
@@ -478,7 +505,7 @@ pub(crate) fn turn_face_up_prepare(
                 if let ManaCost::Cost { generic, .. } = &mut cost {
                     *generic = generic.saturating_sub(reduction.amount_per.saturating_mul(count));
                 }
-                Some((TurnUpCostSource::Disguise, cost))
+                Some((TurnUpCostSource::Disguise, TurnFaceUpCost::Mana(cost)))
             }
             _ => None,
         })
@@ -491,7 +518,7 @@ pub(crate) fn turn_face_up_prepare(
             {
                 Some((
                     TurnUpCostSource::ManifestManaCost,
-                    back_face.mana_cost.clone(),
+                    TurnFaceUpCost::Mana(back_face.mana_cost.clone()),
                 ))
             } else {
                 None
@@ -526,64 +553,175 @@ pub(crate) fn handle_turn_face_up(
     // CR 116.2b: `turn_face_up_prepare` is the single legality and cost
     // authority, shared with the Priority offer enumeration.
     let (cost_source, cost) = turn_face_up_prepare(state, object_id, player)?;
-    let mut cost = super::casting::apply_special_action_cost_reduction(
-        state,
-        player,
-        crate::types::mana::SpecialAction::TurnFaceUp,
-        cost,
-    );
+    match cost {
+        TurnFaceUpCost::Mana(cost) => {
+            let mut cost = super::casting::apply_special_action_cost_reduction(
+                state,
+                player,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost,
+            );
 
-    // CR 107.3d: "If a cost associated with a special action, such as a suspend
-    // cost or a morph cost, has an {X} … in it, the value of X is chosen by the
-    // player taking the special action immediately before they pay that cost."
-    // The announcement happens HERE — inside the action, with no priority window
-    // between choosing X and paying it, exactly as the rule describes.
-    //
-    // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
-    // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
-    let has_x = super::casting_costs::cost_has_x(&cost);
-    if has_x {
-        // CR 118.3: a player can't announce an X they cannot pay for. The cap is
-        // computed with `object_id: None` deliberately — this is a SPECIAL
-        // ACTION, not a cast, so cast-time cost modifiers and floors must not
-        // apply (the special-action reduction was already applied above).
-        let max_x = super::casting_costs::max_x_value(state, player, &cost, None);
-        if announced_x > max_x {
-            return Err(EngineError::InvalidAction(format!(
-                "X={announced_x} exceeds the maximum payable value of {max_x} for this \
-                 turn-face-up cost"
-            )));
-        }
-        // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic,
-        // so Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X
-        // shards reach mana payment unresolved and are dropped — the permanent
-        // flips for its non-X remainder alone.
-        cost.concretize_x(announced_x);
-    } else if announced_x != 0 {
-        // A cost with no {X} admits no choice: CR 107.3d only grants one "if a
-        // cost … has an {X} … in it". Reject rather than silently ignore, so a
-        // client bug cannot masquerade as a legal flip.
-        return Err(EngineError::InvalidAction(
-            "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
-        ));
-    }
+            // CR 107.3d: "If a cost associated with a special action, such as a suspend
+            // cost or a morph cost, has an {X} … in it, the value of X is chosen by the
+            // player taking the special action immediately before they pay that cost."
+            // The announcement happens HERE — inside the action, with no priority window
+            // between choosing X and paying it, exactly as the rule describes.
+            //
+            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
+            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
+            let has_x = super::casting_costs::cost_has_x(&cost);
+            if has_x {
+                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
+                // computed with `object_id: None` deliberately — this is a SPECIAL
+                // ACTION, not a cast, so cast-time cost modifiers and floors must not
+                // apply (the special-action reduction was already applied above).
+                let max_x = super::casting_costs::max_x_value(state, player, &cost, None);
+                if announced_x > max_x {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
+                         turn-face-up cost"
+                    )));
+                }
+                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic,
+                // so Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X
+                // shards reach mana payment unresolved and are dropped — the permanent
+                // flips for its non-X remainder alone.
+                cost.concretize_x(announced_x);
+            } else if announced_x != 0 {
+                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a
+                // cost … has an {X} … in it". Reject rather than silently ignore, so a
+                // client bug cannot masquerade as a legal flip.
+                return Err(EngineError::InvalidAction(
+                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+                ));
+            }
 
-    let announced_x = has_x.then_some(announced_x);
-    match pay_turn_face_up_cost(
-        state,
-        player,
-        object_id,
-        &cost,
-        cost_source,
-        announced_x,
-        events,
-    )? {
-        super::casting::SpecialActionManaPayment::Paid => {
-            finish_paid_turn_face_up(state, player, object_id, cost_source, announced_x, events)
+            let announced_x = has_x.then_some(announced_x);
+            match pay_turn_face_up_cost(
+                state,
+                player,
+                object_id,
+                &cost,
+                cost_source,
+                announced_x,
+                events,
+            )? {
+                super::casting::SpecialActionManaPayment::Paid => finish_paid_turn_face_up(
+                    state,
+                    player,
+                    object_id,
+                    cost_source,
+                    announced_x,
+                    events,
+                ),
+                // The permanent is still face down and nothing has been committed: the
+                // mana source's replacement choice owns the window now.
+                super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+            }
         }
-        // The permanent is still face down and nothing has been committed: the
-        // mana source's replacement choice owns the window now.
-        super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+        TurnFaceUpCost::NonMana(ability_cost) => {
+            if announced_x != 0 {
+                return Err(EngineError::InvalidAction(
+                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+                ));
+            }
+            match ability_cost {
+                AbilityCost::ReturnToHand { count, filter, .. } => {
+                    let eligible = super::casting::find_eligible_return_to_hand_targets(
+                        state,
+                        player,
+                        object_id,
+                        None,
+                        filter.as_ref(),
+                    );
+                    if (eligible.len() as u32) < count {
+                        return Err(EngineError::InvalidAction(
+                            "Not enough eligible permanents to return to hand".to_string(),
+                        ));
+                    }
+                    state.waiting_for = WaitingFor::PayCost {
+                        player,
+                        kind: crate::types::game_state::PayCostKind::ReturnToHand,
+                        choices: eligible,
+                        count: count as usize,
+                        min_count: 0,
+                        resume: crate::types::game_state::CostResume::TurnFaceUp {
+                            object_id,
+                            cost_source,
+                        },
+                    };
+                    Ok(state.waiting_for.clone())
+                }
+                AbilityCost::Discard { count, filter, .. } => {
+                    let eligible = super::casting::find_eligible_discard_targets(
+                        state,
+                        player,
+                        object_id,
+                        None,
+                        filter.as_ref(),
+                    );
+                    let count_num =
+                        crate::game::quantity::resolve_quantity(state, &count, player, object_id)
+                            .max(0) as usize;
+                    if eligible.len() < count_num {
+                        return Err(EngineError::InvalidAction(
+                            "Not enough eligible cards in hand to discard".to_string(),
+                        ));
+                    }
+                    state.waiting_for = WaitingFor::PayCost {
+                        player,
+                        kind: crate::types::game_state::PayCostKind::Discard,
+                        choices: eligible,
+                        count: count_num,
+                        min_count: 0,
+                        resume: crate::types::game_state::CostResume::TurnFaceUp {
+                            object_id,
+                            cost_source,
+                        },
+                    };
+                    Ok(state.waiting_for.clone())
+                }
+                AbilityCost::PayLife { amount } => {
+                    let amount_num =
+                        crate::game::quantity::resolve_quantity(state, &amount, player, object_id)
+                            .max(0) as u32;
+                    let res = super::life_costs::pay_life_as_cast_or_activation_cost(
+                        state, player, amount_num, events,
+                    );
+                    if res.is_paid() {
+                        finish_paid_turn_face_up(
+                            state,
+                            player,
+                            object_id,
+                            cost_source,
+                            None,
+                            events,
+                        )
+                    } else {
+                        match res {
+                            super::life_costs::PayLifeCostResult::DeferredReplacementChoice {
+                                ..
+                            } => Ok(state.waiting_for.clone()),
+                            super::life_costs::PayLifeCostResult::InsufficientLife => {
+                                Err(EngineError::InvalidAction(
+                                    "Not enough life to pay turn-face-up cost".to_string(),
+                                ))
+                            }
+                            super::life_costs::PayLifeCostResult::Prohibited => {
+                                Err(EngineError::InvalidAction(
+                                    "Cannot pay life to turn face up right now".to_string(),
+                                ))
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                _ => Err(EngineError::InvalidAction(
+                    "Unsupported non-mana turn-face-up cost".to_string(),
+                )),
+            }
+        }
     }
 }
 
@@ -958,7 +1096,7 @@ mod tests {
             subtypes: vec!["Beast".to_string()],
         };
         obj.keywords = vec![
-            Keyword::Morph(crate::types::mana::ManaCost::Cost {
+            Keyword::morph(crate::types::mana::ManaCost::Cost {
                 generic: 3,
                 shards: vec![],
             }),
@@ -1129,7 +1267,7 @@ mod tests {
         assert_eq!(source, TurnUpCostSource::Disguise);
         assert!(matches!(
             cost,
-            ManaCost::Cost { generic: 3, shards }
+            TurnFaceUpCost::Mana(ManaCost::Cost { generic: 3, shards })
                 if shards.as_slice() == [ManaCostShard::Red]
         ));
     }
@@ -1335,7 +1473,7 @@ mod tests {
         assert!(obj.keywords.contains(&Keyword::Trample));
         assert!(obj
             .keywords
-            .contains(&Keyword::Morph(crate::types::mana::ManaCost::Cost {
+            .contains(&Keyword::morph(crate::types::mana::ManaCost::Cost {
                 generic: 3,
                 shards: vec![]
             })));

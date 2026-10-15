@@ -10887,6 +10887,12 @@ pub enum CostResume {
     /// CR 118.12: Resume a resolution-time `Effect::PayCost` after the payer
     /// selects objects for an interactive cost such as tapping creatures.
     Resolution,
+    /// CR 702.37e + CR 116.2b: Resumption context after paying a non-mana cost
+    /// (e.g. ReturnToHand, Discard, PayLife) to turn a face-down permanent face up.
+    TurnFaceUp {
+        object_id: ObjectId,
+        cost_source: crate::types::ability::TurnUpCostSource,
+    },
 }
 
 /// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
@@ -18152,7 +18158,9 @@ impl WaitingFor {
                     spell: pending_cast,
                     ..
                 } => Some(pending_cast),
-                CostResume::ManaAbility { .. } | CostResume::Resolution => None,
+                CostResume::ManaAbility { .. }
+                | CostResume::Resolution
+                | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -18188,7 +18196,9 @@ impl WaitingFor {
                     spell: pending_cast,
                     ..
                 } => Some(pending_cast),
-                CostResume::ManaAbility { .. } | CostResume::Resolution => None,
+                CostResume::ManaAbility { .. }
+                | CostResume::Resolution
+                | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
@@ -18435,7 +18445,8 @@ impl WaitingFor {
                 CostResume::ManaAbility { mana_ability } => Some(mana_ability),
                 CostResume::Spell { .. }
                 | CostResume::SpellCost { .. }
-                | CostResume::Resolution => None,
+                | CostResume::Resolution
+                | CostResume::TurnFaceUp { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::ManaAbility {

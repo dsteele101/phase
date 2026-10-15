@@ -2206,23 +2206,32 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     None
 }
 
-/// Parse "return a land you control to its owner's hand" style bounce costs.
+/// CR 118.12: Parse "return a land you control to its owner's hand" /
+/// "return two Islands you control to their owner's hand" style bounce costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
-    // Must end with "to its owner's hand" or "to your hand"
-    if !scan_contains(rest_lower, "to its owner's hand")
-        && !scan_contains(rest_lower, "to your hand")
-    {
-        return None;
-    }
-    // Strip the destination
-    let filter_text = split_once_on(rest_lower, " to its owner's hand")
-        .map(|(_, (before, _))| before)
-        .or_else(|_| split_once_on(rest_lower, " to your hand").map(|(_, (before, _))| before))
-        .ok()?;
-    // Strip article using nom
-    let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
-        .map(|((), rest)| rest)
-        .unwrap_or(filter_text);
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let filter_text = alt((
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to their owners' hands"),
+            pair(tag(" to their owners' hands"), opt(tag("."))),
+        )),
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to their owner's hand"),
+            pair(tag(" to their owner's hand"), opt(tag("."))),
+        )),
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to its owner's hand"),
+            pair(tag(" to its owner's hand"), opt(tag("."))),
+        )),
+        all_consuming(terminated(
+            take_until::<_, _, E<'_>>(" to your hand"),
+            pair(tag(" to your hand"), opt(tag("."))),
+        )),
+    ))
+    .parse(rest_lower.trim())
+    .ok()
+    .map(|(_, before)| before.trim())?;
+
     // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
     // granter placeholder is a granted body's by-name reference to its granting
     // object. Preserve the explicit filter so the runtime does not treat an
@@ -2253,12 +2262,23 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
             });
         }
     }
-    let target_text = format!("target {filter_text}");
+
+    let (count, subject_text) = if let Some((n, rem)) = parse_number(filter_text) {
+        (n, rem.trim_start())
+    } else {
+        // Strip article using nom
+        let rem = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
+            .map(|((), rest)| rest.trim_start())
+            .unwrap_or(filter_text);
+        (1, rem)
+    };
+
+    let target_text = format!("target {subject_text}");
     let (filter, rem) = parse_target(&target_text);
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase_folding(filter_text);
+        let (filter, _) = parse_type_phrase_folding(subject_text);
         filter
     };
     let filter = match filter {
@@ -2281,7 +2301,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         filter => filter,
     };
     Some(AbilityCost::ReturnToHand {
-        count: 1,
+        count,
         filter: Some(filter),
         from_zone: None,
     })

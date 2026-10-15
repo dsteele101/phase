@@ -4140,7 +4140,10 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
                 redact_pending_mana_ability_payment(mana_ability, hidden_ids);
             }
             // The spell resumes are the `pending_cast_mut()` call above.
-            CostResume::Spell { .. } | CostResume::SpellCost { .. } | CostResume::Resolution => {}
+            CostResume::Spell { .. }
+            | CostResume::SpellCost { .. }
+            | CostResume::Resolution
+            | CostResume::TurnFaceUp { .. } => {}
         },
         WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
             CollectEvidenceResume::Effect { pending_ability } => {

@@ -52,7 +52,7 @@ fn face_down_morph_board(controller: PlayerId, mana: &[ManaType]) -> (GameRunner
     scenario.at_phase(Phase::PreCombatMain);
     let id = scenario
         .add_creature_to_hand(controller, "Coral Trickster", 2, 1)
-        .with_keyword(Keyword::Morph(morph_cost()))
+        .with_keyword(Keyword::morph(morph_cost()))
         .id();
     if !mana.is_empty() {
         scenario.with_mana_pool(controller, pool(mana));

@@ -99,6 +99,31 @@ pub enum EchoCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.37a + CR 702.37e: Morph cost — either a mana cost (most morph cards,
+/// e.g. Exalted Angel "{2}{W}{W}") or a non-mana cost (Fathom Seer "Return two
+/// Islands you control to their owner's hand", Gathan Raiders "Discard a card",
+/// Zombie Cutthroat "Pay 5 life", Ruthless Ripper "Reveal a black card in your
+/// hand"). Mirrors `EvokeCost`/`BuybackCost`/`CyclingCost`/`EchoCost` so non-mana
+/// costs compose through the existing `AbilityCost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MorphCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<ManaCost> for MorphCost {
+    fn from(cost: ManaCost) -> Self {
+        Self::Mana(cost)
+    }
+}
+
+impl From<AbilityCost> for MorphCost {
+    fn from(cost: AbilityCost) -> Self {
+        Self::NonMana(cost)
+    }
+}
+
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
 /// card as an Aura. Classic Theros bestow uses a pure mana cost (e.g. Boon Satyr
 /// "Bestow {3}{G}{G}"). Murders at Karlov Manor reprints introduced compound
@@ -799,7 +824,7 @@ pub enum Keyword {
 
     // Additional common keywords with ManaCost
     Prowl(ManaCost),
-    Morph(ManaCost),
+    Morph(MorphCost),
     Megamorph(ManaCost),
     /// CR 702.187b: Mayhem {cost} — cast from graveyard if you discarded this
     /// card this turn, paying the mayhem cost rather than its mana cost.
@@ -1243,6 +1268,11 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// CR 702.37a/e: Construct a Morph keyword from either a ManaCost or AbilityCost.
+    pub fn morph(cost: impl Into<MorphCost>) -> Self {
+        Self::Morph(cost.into())
+    }
+
     /// Whether this keyword should appear in the battlefield card's compact
     /// badge strip. The strip communicates abilities that remain relevant to
     /// the object as a permanent: combat, protection, live characteristics,
@@ -2714,7 +2744,7 @@ impl FromStr for Keyword {
                 }
                 "unearth" => return Ok(Keyword::Unearth(parse_keyword_mana_cost(p))),
                 "prowl" => return Ok(Keyword::Prowl(parse_keyword_mana_cost(p))),
-                "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
+                "morph" => return Ok(Keyword::Morph(MorphCost::Mana(parse_keyword_mana_cost(p)))),
                 "megamorph" => return Ok(Keyword::Megamorph(parse_keyword_mana_cost(p))),
                 "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
@@ -3579,7 +3609,13 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         "Unearth" => Ok(Keyword::Unearth(mana(data)?)),
         "Prowl" => Ok(Keyword::Prowl(mana(data)?)),
-        "Morph" => Ok(Keyword::Morph(mana(data)?)),
+        "Morph" => {
+            if let Ok(morph_cost) = serde_json::from_value::<MorphCost>(data.clone()) {
+                Ok(Keyword::Morph(morph_cost))
+            } else {
+                Ok(Keyword::Morph(MorphCost::Mana(mana(data)?)))
+            }
+        }
         "Megamorph" => Ok(Keyword::Megamorph(mana(data)?)),
         // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
         // overwrites with the real mana cost extracted from reminder text.
@@ -5710,7 +5746,7 @@ mod tests {
             Keyword::Ninjutsu(mc("{2}{R}")),
             Keyword::CommanderNinjutsu(mc("{2}{R}")),
             Keyword::Prowl(mc("{2}{R}")),
-            Keyword::Morph(mc("{2}{R}")),
+            Keyword::morph(mc("{2}{R}")),
             Keyword::Megamorph(mc("{2}{R}")),
             Keyword::Mayhem(mc("{2}{R}")),
             Keyword::Madness(mc("{2}{R}")),

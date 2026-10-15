@@ -12241,9 +12241,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution => {
+            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
-                    "Counter-cost distribution is not valid for resolution costs".to_string(),
+                    "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
             }
         },
@@ -12572,6 +12572,69 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            CostResume::TurnFaceUp {
+                object_id,
+                cost_source,
+            } => match kind {
+                PayCostKind::ReturnToHand => {
+                    if chosen.len() != *count {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Must choose exactly {} permanent(s) to return to hand",
+                            count
+                        )));
+                    }
+                    for &id in chosen.iter() {
+                        if !choices.contains(&id) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected permanent is not an eligible target to return to hand"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    for &id in chosen.iter() {
+                        crate::game::zones::move_to_zone(state, id, Zone::Hand, &mut events);
+                    }
+                    super::morph::finish_paid_turn_face_up(
+                        state,
+                        *player,
+                        *object_id,
+                        *cost_source,
+                        None,
+                        &mut events,
+                    )?
+                }
+                PayCostKind::Discard => {
+                    if chosen.len() != *count {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Must choose exactly {} card(s) to discard",
+                            count
+                        )));
+                    }
+                    for &id in chosen.iter() {
+                        if !choices.contains(&id) {
+                            return Err(EngineError::InvalidAction(
+                                "Selected card is not an eligible card to discard".to_string(),
+                            ));
+                        }
+                    }
+                    for &id in chosen.iter() {
+                        crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+                    }
+                    super::morph::finish_paid_turn_face_up(
+                        state,
+                        *player,
+                        *object_id,
+                        *cost_source,
+                        None,
+                        &mut events,
+                    )?
+                }
+                _ => {
+                    return Err(EngineError::InvalidAction(
+                        "Cost kind cannot resume a turn-face-up PayCost".into(),
+                    ));
+                }
+            },
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
@@ -12590,6 +12653,17 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        (
+            WaitingFor::PayCost {
+                player,
+                resume: CostResume::TurnFaceUp { .. },
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            state.waiting_for = WaitingFor::Priority { player: *player };
+            state.waiting_for.clone()
+        }
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -19664,7 +19738,7 @@ mod priority_principal_tests {
             object.base_card_types = object.card_types.clone();
             object.mana_cost = ManaCost::generic(8);
             object.base_mana_cost = object.mana_cost.clone();
-            object.keywords = vec![Keyword::Morph(ManaCost::generic(5))];
+            object.keywords = vec![Keyword::morph(ManaCost::generic(5))];
             object.base_keywords = object.keywords.clone();
         }
         let sibling_spell = zones::create_object(
