@@ -2652,6 +2652,315 @@ fn collect_matching_triggers_from_context(
     )
 }
 
+/// CR 603.2 + CR 603.3: the battlefield triggered abilities `event` would
+/// trigger, collected without mutating `state` — the read-only mirror of the
+/// battlefield pass in `collect_pending_triggers_with_collection`.
+///
+/// It reuses that pass's per-source arguments exactly (`timestamp`, the
+/// battlefield `zone_filter`, fresh `batched_this_pass` / `registered_this_event`
+/// dedup sets, the active suppressors, `Ordinary` collection and the observer
+/// visit) and its admission gate (`matched_trigger_constraint_allows_admission`).
+/// It omits only the pass's bookkeeping writes (fired-trigger ledgers, the
+/// auto-decline of optional triggers), none of which changes which triggers fire.
+///
+/// CR 603.2: the trigger index is a derived cache. A negative from it is trusted
+/// only while it is `Built`; an `Unbuilt` index (fresh from `Default`, as after
+/// deserialization) yields no candidates, so the battlefield is scanned instead.
+/// "Not built" never means "no triggers".
+pub(crate) fn collect_battlefield_triggers_read_only(
+    state: &GameState,
+    event: &GameEvent,
+) -> Vec<PendingTrigger> {
+    let events = std::slice::from_ref(event);
+    let active_suppress_triggers = active_suppress_trigger_statics(state);
+    let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
+    let mut registered_this_event: HashSet<(ObjectId, usize)> = HashSet::new();
+    let candidates: Vec<ObjectId> = match state.trigger_index.readiness {
+        crate::types::game_state::DerivedIndexReadiness::Built => {
+            crate::game::trigger_index::candidates_for_event(state, event).into_vec()
+        }
+        crate::types::game_state::DerivedIndexReadiness::Unbuilt => {
+            state.battlefield_phased_in_ids()
+        }
+    };
+    let mut collected = Vec::new();
+    for obj_id in candidates {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        let matched = collect_matching_triggers(
+            state,
+            event,
+            events,
+            obj,
+            obj.entered_battlefield_turn.unwrap_or(0),
+            Some(Zone::Battlefield),
+            &mut batched_this_pass,
+            &mut registered_this_event,
+            &active_suppress_triggers,
+            LogicalZoneTriggerCollection::Ordinary,
+            TriggerSourceVisit::Observer,
+        );
+        for matched in matched {
+            if !matched_trigger_constraint_allows_admission(state, &matched, event) {
+                continue;
+            }
+            if matched.batched {
+                batched_this_pass.insert((obj_id, matched.trig_idx));
+            }
+            registered_this_event.insert((obj_id, matched.trig_idx));
+            collected.push(matched.pending);
+        }
+    }
+    collected
+}
+
+/// CR 509.1h + CR 509.3c + CR 509.3d + CR 603.3: the P/T shifts the
+/// block-declaration triggers of `pairs` (each `(blocker, attacker)`) apply
+/// before combat damage. Those triggers resolve in the declare blockers step,
+/// so the exchange is fought at the shifted stats.
+///
+/// `Hypothetical` collects the triggers a declaration of exactly `pairs` would
+/// fire, from every functioning battlefield source (a third permanent's watcher
+/// included), through [`collect_battlefield_triggers_read_only`].
+///
+/// `Declared` folds only the stack entries that are, by their trigger-definition
+/// provenance and event, block-declaration triggers of the declared `pairs`.
+/// Triggers that already resolved are in the objects' characteristics and are
+/// not re-applied. Any other stack object, and any trigger still waiting to be
+/// put on the stack, is `StackObjectNotFoldable`.
+///
+/// Every matched trigger must be fully known (no `Undetermined` condition, no
+/// optional, targeted or otherwise diverted link) and must consist only of
+/// `Effect::Pump` links bound to the trigger source or to the triggering
+/// blocker. Anything else is a barrier: there is no inert-effect allow-list.
+pub(crate) fn project_block_declaration(
+    state: &GameState,
+    pairs: &[(ObjectId, ObjectId)],
+    provenance: crate::game::combat_damage::BlockProvenance,
+) -> Result<crate::game::combat_damage::BlockShifts, crate::game::combat_damage::ProjectionBarrier>
+{
+    use crate::game::combat_damage::{BlockProvenance, BlockShifts, ProjectionBarrier};
+
+    let mut shifts = BlockShifts::default();
+    match provenance {
+        BlockProvenance::Hypothetical => {
+            if pairs.is_empty() {
+                return Ok(shifts);
+            }
+            let event = GameEvent::BlockersDeclared {
+                assignments: pairs.to_vec(),
+            };
+            for pending in collect_battlefield_triggers_read_only(state, &event) {
+                // CR 700.2 + CR 601.2d + CR 603.3d: a mode, division or target
+                // constraint is chosen as the trigger is put on the stack.
+                if pending.modal.is_some()
+                    || !pending.mode_abilities.is_empty()
+                    || pending.distribute.is_some()
+                    || !pending.target_constraints.is_empty()
+                {
+                    return Err(ProjectionBarrier::UnmodelledBlockTrigger {
+                        source: pending.source_id,
+                    });
+                }
+                let ability = resolved_ability_for_pending_trigger(state, &pending);
+                fold_block_trigger(
+                    state,
+                    pending.source_id,
+                    pending.condition.is_some(),
+                    &ability,
+                    pending.trigger_event.as_ref(),
+                    pairs,
+                    &mut shifts,
+                )?;
+            }
+        }
+        BlockProvenance::Declared => {
+            // CR 603.3: a trigger not yet on the stack (an ordering prompt, a
+            // deferred batch) has neither resolved nor become foldable.
+            if state.pending_trigger.is_some()
+                || !state.deferred_triggers.is_empty()
+                || matches!(state.waiting_for, WaitingFor::OrderTriggers { .. })
+            {
+                return Err(ProjectionBarrier::StackObjectNotFoldable);
+            }
+            for entry in state.stack.iter() {
+                let StackEntryKind::TriggeredAbility {
+                    source_id,
+                    ability,
+                    condition,
+                    trigger_event,
+                    ..
+                } = &entry.kind
+                else {
+                    return Err(ProjectionBarrier::StackObjectNotFoldable);
+                };
+                let is_block_declaration_trigger = ability.trigger_definition_ref.is_some()
+                    && trigger_event
+                        .as_ref()
+                        .is_some_and(|event| block_event_names_declared_pair(event, pairs));
+                if !is_block_declaration_trigger {
+                    return Err(ProjectionBarrier::StackObjectNotFoldable);
+                }
+                fold_block_trigger(
+                    state,
+                    *source_id,
+                    condition.is_some(),
+                    ability,
+                    trigger_event.as_ref(),
+                    pairs,
+                    &mut shifts,
+                )?;
+            }
+        }
+    }
+    Ok(shifts)
+}
+
+/// CR 509.1h + CR 509.3c + CR 509.3d: whether `event` is a block-declaration
+/// trigger event whose every `(blocker, attacker)` pair is one of `pairs`.
+fn block_event_names_declared_pair(event: &GameEvent, pairs: &[(ObjectId, ObjectId)]) -> bool {
+    match event {
+        GameEvent::BlockersDeclared { assignments } => {
+            !assignments.is_empty() && assignments.iter().all(|pair| pairs.contains(pair))
+        }
+        GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+            pairs.contains(&(*blocker, *attacker))
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 613.4c: fold one block-declaration trigger's known links
+/// into `shifts`. See [`project_block_declaration`] for the fold rules.
+fn fold_block_trigger(
+    state: &GameState,
+    source_id: ObjectId,
+    has_intervening_if: bool,
+    ability: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+    pairs: &[(ObjectId, ObjectId)],
+    shifts: &mut crate::game::combat_damage::BlockShifts,
+) -> Result<(), crate::game::combat_damage::ProjectionBarrier> {
+    use crate::game::combat_damage::ProjectionBarrier;
+
+    let unmodelled = ProjectionBarrier::UnmodelledBlockTrigger { source: source_id };
+    // CR 603.4: an intervening-if is rechecked on resolution against the game
+    // state then, so it is not settled by the declaration.
+    if has_intervening_if {
+        return Err(ProjectionBarrier::UnsettledBlockTriggerCondition);
+    }
+    // CR 608.2c: every written link must be one the resolution certainly
+    // follows. A conditional link is not settled by a block declaration.
+    let mut written_links = 0usize;
+    let mut link = Some(ability);
+    while let Some(current) = link {
+        if current.condition.is_some() {
+            return Err(ProjectionBarrier::UnsettledBlockTriggerCondition);
+        }
+        if current.else_ability.is_some() {
+            return Err(unmodelled);
+        }
+        written_links += 1;
+        link = current.sub_ability.as_deref();
+    }
+    let known = super::effects::resolution_preview::known_resolution_links(state, ability);
+    // The preview stops at the first diverted link (an optional "may", a
+    // chosen target, a division, ...): such a trigger is not fully known.
+    if known.len() != written_links {
+        return Err(unmodelled);
+    }
+    for link in &known {
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &link.effect
+        else {
+            return Err(unmodelled);
+        };
+        let recipient = match target {
+            TargetFilter::SelfRef => source_id,
+            TargetFilter::TriggeringSource => {
+                let event = trigger_event.ok_or(unmodelled)?;
+                // CR 509.3c: the bare "becomes blocked" form fires once for the
+                // attacker however many creatures block it; "the blocking
+                // creature" names no single creature when more than one does.
+                if let GameEvent::BlockersDeclared { assignments } = event {
+                    if let [(_, attacker)] = assignments.as_slice() {
+                        let blockers_of_attacker =
+                            pairs.iter().filter(|(_, a)| a == attacker).count();
+                        if *attacker == source_id && blockers_of_attacker > 1 {
+                            return Err(ProjectionBarrier::AmbiguousTriggeringBlocker);
+                        }
+                    }
+                }
+                super::targeting::extract_source_from_event(event).ok_or(unmodelled)?
+            }
+            _ => return Err(unmodelled),
+        };
+        // CR 702.23a: "for each creature blocking it" counts the creatures
+        // blocking the trigger source, which a declaration fixes exactly.
+        let blocking_source_count = (recipient == source_id)
+            .then(|| pairs.iter().filter(|(_, a)| *a == source_id).count() as i32);
+        let (Some(dp), Some(dt)) = (
+            block_pump_amount(power, blocking_source_count),
+            block_pump_amount(toughness, blocking_source_count),
+        ) else {
+            return Err(unmodelled);
+        };
+        shifts.add(recipient, dp, dt);
+    }
+    Ok(())
+}
+
+/// A pump amount fixed by a block declaration: a constant, or an arithmetic
+/// expression over the number of creatures blocking the trigger source
+/// (`blocking_source_count`, known only when the pump lands on that source).
+/// Every other quantity is not fixed by the declaration.
+fn block_pump_amount(value: &PtValue, blocking_source_count: Option<i32>) -> Option<i32> {
+    match value {
+        PtValue::Fixed(n) => Some(*n),
+        PtValue::Quantity(expr) => block_pump_quantity(expr, blocking_source_count),
+        PtValue::Variable(_) => None,
+    }
+}
+
+fn block_pump_quantity(expr: &QuantityExpr, blocking_source_count: Option<i32>) -> Option<i32> {
+    match expr {
+        QuantityExpr::Fixed { value } => Some(*value),
+        QuantityExpr::Offset { inner, offset } => {
+            Some(block_pump_quantity(inner, blocking_source_count)? + offset)
+        }
+        // CR 107.1b: a negative result is replaced by the clamp floor.
+        QuantityExpr::ClampMin { inner, minimum } => {
+            Some(block_pump_quantity(inner, blocking_source_count)?.max(*minimum))
+        }
+        QuantityExpr::Multiply { factor, inner } => {
+            Some(factor * block_pump_quantity(inner, blocking_source_count)?)
+        }
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .map(|expr| block_pump_quantity(expr, blocking_source_count))
+            .sum(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } if matches!(
+            filter,
+            TargetFilter::Typed(typed) if typed.properties.contains(&FilterProp::BlockingSource)
+        ) =>
+        {
+            blocking_source_count
+        }
+        QuantityExpr::Ref { .. }
+        | QuantityExpr::DivideRounded { .. }
+        | QuantityExpr::UpTo { .. }
+        | QuantityExpr::Power { .. }
+        | QuantityExpr::Difference { .. }
+        | QuantityExpr::Max { .. } => None,
+    }
+}
+
 /// CR 303.4b + CR 603.10a + CR 603.10f: Collect an off-battlefield observer's
 /// triggers with its last-known `attached_to` temporarily restored.
 ///
@@ -8758,6 +9067,51 @@ fn push_pending_trigger_to_stack_with_firing(
     )
 }
 
+/// CR 603.3 + CR 603.7c: the read-only half of putting a triggered ability on
+/// the stack — the bindings fixed from the trigger event and the trigger's
+/// definition provenance at stack placement. Shared by the stack-placement path
+/// and [`resolved_ability_for_pending_trigger`], so a projection reads exactly
+/// the ability the stack would hold.
+fn bind_pending_trigger_ability(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    may_trigger_origin: Option<MayTriggerOrigin>,
+    trigger_event: Option<&GameEvent>,
+) {
+    if let Some(origin) = may_trigger_origin {
+        ability.set_may_trigger_origin_recursive(origin);
+    }
+    // CR 400.7 + CR 509.1c: Bind either grammatical named-attacker form at
+    // stack creation. In particular, "that Wolf" is the exact object from the
+    // narrowed attack-trigger event, not the triggered ability's source.
+    let event_attacker = event_attacker_from_trigger_event(state, trigger_event);
+    ability.bind_force_block_attacker_recursive(event_attacker);
+    ability.context.triggering_spell = triggering_spell_pin(state, trigger_event);
+    seed_batched_attack_parent_targets(ability, trigger_event);
+    seed_event_context_parent_targets(
+        state,
+        ability,
+        trigger_event,
+        EventContextSeedTiming::StackPush,
+    );
+}
+
+/// CR 603.3: the `ResolvedAbility` a pending trigger would carry on the stack,
+/// built without placing it there. Pure: reads `state` only.
+pub(crate) fn resolved_ability_for_pending_trigger(
+    state: &GameState,
+    trigger: &PendingTrigger,
+) -> ResolvedAbility {
+    let mut ability = (*trigger.ability).clone();
+    bind_pending_trigger_ability(
+        state,
+        &mut ability,
+        trigger.may_trigger_origin.clone(),
+        trigger.trigger_event.as_ref(),
+    );
+    ability
+}
+
 fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     state: &mut GameState,
     mut trigger: PendingTrigger,
@@ -8785,21 +9139,11 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         ..
     } = trigger;
 
-    if let Some(origin) = may_trigger_origin {
-        ability.set_may_trigger_origin_recursive(origin);
-    }
-    // CR 400.7 + CR 509.1c: Bind either grammatical named-attacker form at
-    // stack creation. In particular, "that Wolf" is the exact object from the
-    // narrowed attack-trigger event, not the triggered ability's source.
-    let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
-    ability.bind_force_block_attacker_recursive(event_attacker);
-    ability.context.triggering_spell = triggering_spell_pin(state, trigger_event.as_ref());
-    seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
-    seed_event_context_parent_targets(
+    bind_pending_trigger_ability(
         state,
         &mut ability,
+        may_trigger_origin,
         trigger_event.as_ref(),
-        EventContextSeedTiming::StackPush,
     );
 
     let entry_id = ObjectId(state.next_object_id);
