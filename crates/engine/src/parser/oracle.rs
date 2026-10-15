@@ -49,8 +49,9 @@ use super::oracle_nom::primitives::{
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
-    extract_spend_only_on_x_prefix, parse_additional_cost_line, parse_casting_restriction_line,
-    parse_spell_casting_option_line, split_additional_cost_trailing_spell_reduction,
+    additional_cost_line_text, extract_spend_only_on_x_prefix, parse_additional_cost_line,
+    parse_casting_restriction_line, parse_spell_casting_option_line,
+    split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
@@ -101,7 +102,7 @@ use super::oracle_ir::trace::{
     document_candidate, parsed_candidate, OuterRoute, ParseObserver, ParserTrace,
     PayloadVisibility, TraceStage,
 };
-use super::oracle_ir::trigger::{TriggerIr, TriggerNodeIr};
+use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerNodeIr};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -3665,7 +3666,9 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if is_opening_hand_begin_game(&lower) || lower_starts_with(&lower, "as an additional cost") {
+    // CR 207.2d: one recognizer with the 8b gate, so a labeled additional-cost line ends a spell
+    // body exactly as an unlabeled one does.
+    if is_opening_hand_begin_game(&lower) || additional_cost_line_text(line).is_some() {
         return false;
     }
 
@@ -4122,10 +4125,36 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // The match stays EXHAUSTIVE over `OracleNodeIr` (no `_` arm): it is now the
     // single place a new node variant must declare whether it consumes a printed
     // slot, an obligation `finish()` used to carry.
+    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for a lone "enchanted/
+    // equipped X" instruction that names its host without targeting it. Only the
+    // card's own spell/activated items and parsed effect-chain triggers are
+    // candidates; each records its printed-clause evidence here, and the
+    // conversion itself runs after every document relation has composed the
+    // final abilities (`convert_terminal_attachment_host_references` below), so a
+    // candidate that composition gives a follower, or folds into another
+    // ability, keeps its target.
+    //
+    // CR 700.2: conservatively, a document that carries a modal choice
+    // contributes no spell candidates at all — its `Spell` items are that
+    // choice's modes (the item does not record its route), so none is treated as
+    // a whole ability.
+    let owns_modal_modes = ir
+        .items
+        .iter()
+        .any(|item| matches!(item.node, OracleNodeIr::Modal(_)));
+    let mut host_reference_candidates = HostReferenceCandidates::default();
     for item in &ir.items {
         match &item.node {
             OracleNodeIr::Spell(ability_ir) => {
                 let mut def = lower_ability_ir(ability_ir);
+                if !owns_modal_modes {
+                    host_reference_candidates.abilities.push((
+                        item.id,
+                        crate::parser::oracle_effect::PrintedTargetWord::from_clauses(
+                            &ability_ir.body.clauses,
+                        ),
+                    ));
+                }
                 stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
@@ -4165,6 +4194,20 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
             }
             OracleNodeIr::Trigger(trigger_node) => {
                 let mut def = lower_trigger_node_ir(trigger_node);
+                // The card's own parsed effect-chain trigger is a candidate.
+                // Recorded here, not in `lower_trigger_ir`, which also lowers
+                // triggers quoted inside a grant ("… has 'When …'"); those keep
+                // their targets.
+                if let TriggerNodeIr::Parsed(trigger_ir) = trigger_node {
+                    if let Some(TriggerBody::EffectChain(chain_ir)) = &trigger_ir.body {
+                        host_reference_candidates.triggers.push((
+                            item.id,
+                            crate::parser::oracle_effect::PrintedTargetWord::from_clauses(
+                                &chain_ir.clauses,
+                            ),
+                        ));
+                    }
+                }
                 stamp_printed_trigger_slot(&mut def, result.triggers.len());
                 result.triggers.push(def);
                 trigger_ids.push(item.id);
@@ -4321,6 +4364,18 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // former `synthesize`/`bind` passes ran (the audit reads `result` first).
     apply_etb_exile_ltb_return(&mut result, &ir.relations, &trigger_ids);
     apply_active_player_punisher(&mut result, &ir.relations, &ability_ids);
+
+    // PLACEMENT PIN: after every document relation has composed the final
+    // abilities and triggers, so the converter judges the composed tree; and
+    // before `demote_refused_granter_names`, the first pass that moves
+    // definitions between categories without their id tracks (a demoted
+    // definition is a residual, so its timing is moot).
+    convert_terminal_attachment_host_references(
+        &mut result,
+        &host_reference_candidates,
+        &ability_ids,
+        &trigger_ids,
+    );
     demote_refused_granter_names(&mut result, ir, &tracks);
 
     // The doc IR's diagnostics channel is the single source of parse warnings.
@@ -4330,6 +4385,58 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // equivalent to assigning before them.
     result.parse_warnings = ir.diagnostics.clone();
     result
+}
+
+// --- CR 115.10a + CR 303.4b: lone host instruction → resolution-bound host ---
+
+/// The card's own abilities and triggers that may be a lone host instruction,
+/// by document item, with each one's printed-clause evidence.
+#[derive(Default)]
+struct HostReferenceCandidates {
+    abilities: Vec<(
+        OracleItemId,
+        crate::parser::oracle_effect::PrintedTargetWord,
+    )>,
+    triggers: Vec<(
+        OracleItemId,
+        crate::parser::oracle_effect::PrintedTargetWord,
+    )>,
+}
+
+/// CR 115.10a + CR 303.4b + CR 301.5f: convert each candidate that is still a
+/// whole ability of the card after document composition. A candidate is
+/// resolved through its own category's id track only: one that a relation
+/// folded into another ability (a CR 614.15 self-replacement override) or moved
+/// elsewhere is no longer there and keeps its target, and one that composition
+/// gave a follower is refused by the converter.
+fn convert_terminal_attachment_host_references(
+    result: &mut ParsedAbilities,
+    candidates: &HostReferenceCandidates,
+    ability_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+) {
+    use crate::parser::oracle_effect::convert_terminal_attachment_host_reference;
+    debug_assert_eq!(
+        ability_ids.len(),
+        result.abilities.len(),
+        "ability id track"
+    );
+    debug_assert_eq!(trigger_ids.len(), result.triggers.len(), "trigger id track");
+    for (id, printed) in &candidates.abilities {
+        if let Some(def) =
+            position_of(ability_ids, *id).and_then(|pos| result.abilities.get_mut(pos))
+        {
+            convert_terminal_attachment_host_reference(def, *printed);
+        }
+    }
+    for (id, printed) in &candidates.triggers {
+        if let Some(execute) = position_of(trigger_ids, *id)
+            .and_then(|pos| result.triggers.get_mut(pos))
+            .and_then(|trigger| trigger.execute.as_deref_mut())
+        {
+            convert_terminal_attachment_host_reference(execute, *printed);
+        }
+    }
 }
 
 // --- CR 102.1 + CR 608.2c: active-player coerce → delayed punisher --
@@ -5711,9 +5818,16 @@ fn parse_normalized_oracle_ir(
         // "This spell costs {N} less..." tails on combined lines (Rottenmouth
         // Viper class). Defiler cycle lines share the prefix but route at
         // Priority 6c-defiler instead.
-        if lower_starts_with(&lower, "as an additional cost") && !is_defiler_cost_pattern(&lower) {
+        //
+        // CR 207.2c + CR 207.2d: a leading ability word or flavor word
+        // ("Fallen Warrior —") has no rules meaning; `additional_cost_line_text`
+        // reads the cost after it, and the Defiler exclusion applies to that text.
+        if let Some((cost_text, cost_text_lower)) = additional_cost_line_text(&line)
+            .map(|text| (text, text.to_lowercase()))
+            .filter(|(_, text_lower)| !is_defiler_cost_pattern(text_lower))
+        {
             let (cost_line, trailing_reduction) =
-                split_additional_cost_trailing_spell_reduction(&line, &lower);
+                split_additional_cost_trailing_spell_reduction(cost_text, &cost_text_lower);
             let cost_lower = cost_line.to_lowercase();
             result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
             if result.additional_cost.is_some() {
@@ -5721,20 +5835,47 @@ fn parse_normalized_oracle_ir(
             }
             if let Some(reduction_text) = trailing_reduction {
                 if let Some(mut def) = parse_static_line(reduction_text) {
-                    // CR 702.166a analogue: reduction only applies when the optional
-                    // additional cost is declared, not when the player declines it.
-                    def.condition = Some(match def.condition {
-                        // CR 701.59c + CR 702.166a: the reduction's own gate already names the
-                        // linked optional additional cost ("if evidence was collected"); wrapping
-                        // it again would only duplicate the same conjunct.
-                        None | Some(StaticCondition::AdditionalCostPaid) => {
-                            StaticCondition::AdditionalCostPaid
+                    // CR 601.2f + CR 608.2c: a reduction linked to this spell's additional cost
+                    // counts what that cost did "this way". `PreviousEffectAmount` is the
+                    // look-back at the preceding instruction of a resolving ability; while the
+                    // spell is being cast no instruction has been followed, so it cannot be the
+                    // count of counters removed to pay the cost (Hierophant Bio-Titan). Surface
+                    // the reduction instead of lowering a static that reads the wrong authority.
+                    if matches!(
+                        &def.mode,
+                        StaticMode::ModifyCost {
+                            dynamic_count: Some(QuantityRef::PreviousEffectAmount { .. }),
+                            ..
                         }
-                        Some(existing) => StaticCondition::And {
-                            conditions: vec![existing, StaticCondition::AdditionalCostPaid],
-                        },
-                    });
-                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
+                    ) {
+                        emitter.unsupported_ir_at(
+                            item_line,
+                            UnsupportedAbilityIr::new(
+                                UnsupportedAbilityCategory::StaticStructure,
+                                reduction_text,
+                                reduction_text,
+                            ),
+                            min_x_value,
+                        );
+                    } else {
+                        // CR 702.166a analogue: reduction only applies when the optional
+                        // additional cost is declared, not when the player declines it.
+                        def.condition = Some(match def.condition {
+                            // CR 701.59c + CR 702.166a: the reduction's own gate already names
+                            // the linked optional additional cost ("if evidence was collected");
+                            // wrapping it again would only duplicate the same conjunct.
+                            None | Some(StaticCondition::AdditionalCostPaid) => {
+                                StaticCondition::AdditionalCostPaid
+                            }
+                            Some(existing) => StaticCondition::And {
+                                conditions: vec![existing, StaticCondition::AdditionalCostPaid],
+                            },
+                        });
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(reduction_text, def),
+                        );
+                    }
                 }
             }
             i += 1;
@@ -8623,21 +8764,25 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
 
 /// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b): does the assembled tree
 /// place this body under a typed owner that consumes it in the dropped guard's stead?
-/// Reads the owner head's `Effect` variant and the body's `Effect` shape — no card names,
-/// no Oracle text.
+/// Reads the owner head's `Effect` variant and the body link's `Effect` shape and outcome
+/// gate — no card names, no Oracle text.
 ///
 /// The guard's READING is deliberately not a parameter. The sole caller settles a verdict
 /// only for `GuardReading::Event`, so a `reading == Event` conjunct in any arm here would
 /// be tautological; the Event gating is stated once, at that call site.
-fn guard_owner(body: &Effect, parent: Option<&Effect>) -> bool {
+fn guard_owner(body: &AbilityDefinition, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            cast_from_zone::graveyard_destination_rider(body).is_some()
+            cast_from_zone::graveyard_destination_rider(&body.effect, body.condition.as_ref())
+                .is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
-        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(body),
+        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(
+            &body.effect,
+            body.condition.as_ref(),
+        ),
         // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
         // clause's unsupportedness, and a second gap over the same defect double-counts it
         // — the same per-unit suppression rule `swallow_check` applies via its
@@ -8777,7 +8922,7 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
              reading,
              clause_text,
          }| {
-            (reading == GuardReading::Event && !guard_owner(&def.effect, parent)).then(|| {
+            (reading == GuardReading::Event && !guard_owner(def, parent)).then(|| {
                 // Before gapping, attempt the whole-body graveyard-redirect
                 // authority (`parse_windowed_graveyard_redirect_install`): a
                 // chain-position "If <subject> would be put into <graveyard>

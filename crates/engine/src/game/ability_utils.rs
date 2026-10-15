@@ -20,7 +20,7 @@ use crate::types::game_state::{
     ChainStep, GameState, PtDirection, RetargetSlotAddress, TargetEffectDetail,
     TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use rand::seq::IndexedRandom;
@@ -1033,11 +1033,29 @@ fn modal_selection_condition_matches(
     }
 }
 
-/// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
-/// CR 700.2: Checks per-turn and per-game tracking maps for previously chosen modes.
-pub fn compute_unavailable_modes(
+/// CR 400.7 + CR 700.2: the modal no-repeat history key for a source whose mode
+/// choice is made while it is a live object — an activated ability (CR 602.2b:
+/// modes are chosen before costs, so the source has not yet moved) or a spell.
+/// A source with no live object cannot prove its incarnation and binds
+/// `LEGACY_INCARNATION`, which matches no live object's history.
+pub(crate) fn live_modal_history_source(
     state: &GameState,
     source_id: ObjectId,
+) -> ObjectIncarnationRef {
+    state.objects.get(&source_id).map_or(
+        ObjectIncarnationRef::of(source_id, LEGACY_INCARNATION),
+        ObjectIncarnationRef::from_object,
+    )
+}
+
+/// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.
+/// CR 700.2: Checks per-turn and per-game tracking maps for previously chosen modes.
+/// CR 400.7: history belongs to the exact `source` incarnation; a triggered
+/// ability passes its captured source (CR 603.10a look-back), every other
+/// caller passes `live_modal_history_source`.
+pub fn compute_unavailable_modes(
+    state: &GameState,
+    source: ObjectIncarnationRef,
     modal: &ModalChoice,
 ) -> Vec<usize> {
     let mut unavailable = Vec::new();
@@ -1047,7 +1065,7 @@ pub fn compute_unavailable_modes(
                 for mode_idx in 0..modal.mode_count {
                     if state
                         .modal_modes_chosen_this_turn
-                        .contains(&(source_id, mode_idx))
+                        .contains(&(source, mode_idx))
                     {
                         unavailable.push(mode_idx);
                     }
@@ -1057,7 +1075,7 @@ pub fn compute_unavailable_modes(
                 for mode_idx in 0..modal.mode_count {
                     if state
                         .modal_modes_chosen_this_game
-                        .contains(&(source_id, mode_idx))
+                        .contains(&(source, mode_idx))
                     {
                         unavailable.push(mode_idx);
                     }
@@ -1110,7 +1128,8 @@ pub fn spell_modal_unavailable_modes(
     modal: &ModalChoice,
     mode_abilities: &[AbilityDefinition],
 ) -> Vec<usize> {
-    let mut unavailable_modes = compute_unavailable_modes(state, source_id, modal);
+    let mut unavailable_modes =
+        compute_unavailable_modes(state, live_modal_history_source(state, source_id), modal);
     let x_dependent_modal_targets = state
         .objects
         .get(&source_id)
@@ -1134,6 +1153,88 @@ pub fn spell_modal_unavailable_modes(
         );
     }
     unavailable_modes
+}
+
+/// CR 700.2a + CR 601.2b-c: Whether a mode selection the rules accept exists
+/// once `unavailable_modes` (repeat constraints and modes with no legal target
+/// assignment) are excluded. A mode that requires a target with no legal
+/// choice can't be chosen; when the spell's minimum number of modes can't be
+/// met from the modes that can, the spell can't be cast at all.
+///
+/// - CR 700.2d: Without repeats, at least `min_choices` distinct choosable
+///   modes are needed ("choose two" with one choosable mode has no legal
+///   selection); with repeats, one choosable mode can fill every pick.
+/// - CR 700.2 + CR 601.2b: For a count-capped modal the maximum number of
+///   modes must not be below the minimum; the announced selection has to
+///   satisfy both, so an inverted range admits no selection.
+/// - CR 700.2i: For a pawprint points-budget modal, the cheapest
+///   `min_choices` choosable modes must fit within the point budget.
+/// - CR 700.2a + CR 115.1: Modal target constraints (each mode targets a
+///   different player) must admit a legal assignment for a selection the
+///   modal allows: at least `min_choices` modes, within the mode-count cap or
+///   the pawprint budget (`modal_choice_with_target_assignment_limit`, the
+///   authority the activated and triggered mode prompts also apply).
+///
+/// `modal` is the effective choice the prompt would present (conditional and
+/// dynamic maxima already resolved).
+pub fn modal_has_legal_mode_selection(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    modal: &ModalChoice,
+    mode_abilities: &[AbilityDefinition],
+    unavailable_modes: &[usize],
+) -> bool {
+    // CR 700.2: the instruction sets how many modes are chosen; "choose up to
+    // N" admits choosing none.
+    if modal.min_choices == 0 {
+        return true;
+    }
+    let available: Vec<usize> = (0..modal.mode_count)
+        .filter(|idx| !unavailable_modes.contains(idx))
+        .collect();
+    let enough_modes = if modal.mode_pawprints.is_empty() {
+        // CR 700.2 + CR 601.2b: the instruction fixes how many modes are
+        // announced, and `max_choices` is that count here; a maximum below the
+        // minimum admits no selection (`validate_modal_indices` rejects every
+        // length).
+        modal.min_choices <= modal.max_choices
+            && if modal.allow_repeat_modes {
+                !available.is_empty()
+            } else {
+                available.len() >= modal.min_choices
+            }
+    } else {
+        let mut weights: Vec<u32> = available
+            .iter()
+            .filter_map(|&idx| modal.mode_pawprints.get(idx).copied().map(u32::from))
+            .collect();
+        weights.sort_unstable();
+        let cheapest = if modal.allow_repeat_modes {
+            weights
+                .first()
+                .map(|&weight| weight.saturating_mul(modal.min_choices as u32))
+        } else {
+            weights
+                .get(..modal.min_choices)
+                .map(|cheapest| cheapest.iter().sum::<u32>())
+        };
+        cheapest.is_some_and(|spent| spent <= modal.max_choices as u32)
+    };
+    // CR 700.2a + CR 700.2d + CR 700.2i: `modal_choice_with_target_assignment_limit`
+    // weighs only the selections the modal allows (`min_choices` or more modes
+    // within the count cap or the pawprint budget), so `Some` means such a
+    // selection has a legal combined target assignment, and `None` that none does.
+    enough_modes
+        && modal_choice_with_target_assignment_limit(
+            state,
+            source_id,
+            controller,
+            modal,
+            mode_abilities,
+            unavailable_modes,
+        )
+        .is_some()
 }
 
 /// Spell-kind abilities on a modal spell object — one entry per printed mode.
@@ -1215,6 +1316,11 @@ pub fn filter_modes_by_target_legality(
 /// Per-mode filtering only proves each mode is individually legal. Modal
 /// constraints such as `DifferentTargetPlayers` can make a larger selected set
 /// impossible even when every selected mode is legal on its own.
+///
+/// CR 700.2i: A pawprint modal's `max_choices` is a point budget, not a mode
+/// count, so it is never reduced to a selection size; the result is `Some`
+/// when one budget-legal selection of at least `min_choices` modes has a legal
+/// combined target assignment, and `None` when none does.
 pub fn modal_choice_with_target_assignment_limit(
     state: &GameState,
     source_id: ObjectId,
@@ -1224,29 +1330,55 @@ pub fn modal_choice_with_target_assignment_limit(
     unavailable_modes: &[usize],
 ) -> Option<ModalChoice> {
     let target_constraints = target_constraints_from_modal(modal);
-    if target_constraints.is_empty() || !modal.mode_pawprints.is_empty() {
+    if target_constraints.is_empty() {
         return Some(modal.clone());
     }
 
-    let max_legal_choices = generate_modal_index_sequences(modal)
+    let mut witnesses = assignable_modal_index_sequences(
+        state,
+        source_id,
+        controller,
+        modal,
+        mode_abilities,
+        unavailable_modes,
+        &target_constraints,
+    );
+    if modal.mode_pawprints.is_empty() {
+        let max_legal_choices = witnesses.map(|indices| indices.len()).max()?;
+        let mut effective = modal.clone();
+        effective.max_choices = effective.max_choices.min(max_legal_choices);
+        Some(effective)
+    } else {
+        witnesses.next().map(|_| modal.clone())
+    }
+}
+
+/// CR 700.2a + CR 700.2i + CR 115.1: The selections
+/// `generate_modal_index_sequences` allows (mode-count range, or pawprint
+/// budget with at least `min_choices` modes), none using an unavailable mode,
+/// whose combined targets have a legal assignment under `target_constraints`.
+fn assignable_modal_index_sequences<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    modal: &ModalChoice,
+    mode_abilities: &'a [AbilityDefinition],
+    unavailable_modes: &'a [usize],
+    target_constraints: &'a [TargetSelectionConstraint],
+) -> impl Iterator<Item = Vec<usize>> + 'a {
+    generate_modal_index_sequences(modal)
         .into_iter()
-        .filter(|indices| indices.iter().all(|idx| !unavailable_modes.contains(idx)))
-        .filter(|indices| {
+        .filter(move |indices| indices.iter().all(|idx| !unavailable_modes.contains(idx)))
+        .filter(move |indices| {
             modal_indices_have_legal_target_assignment(
                 state,
                 source_id,
                 controller,
                 mode_abilities,
                 indices,
-                &target_constraints,
+                target_constraints,
             )
         })
-        .map(|indices| indices.len())
-        .max()?;
-
-    let mut effective = modal.clone();
-    effective.max_choices = effective.max_choices.min(max_legal_choices);
-    Some(effective)
 }
 
 fn modal_indices_have_legal_target_assignment(
@@ -1272,9 +1404,11 @@ fn modal_indices_have_legal_target_assignment(
 
 /// Records chosen mode indices for NoRepeat constraint enforcement.
 /// CR 700.2: Inserts into per-turn and/or per-game tracking maps.
+/// CR 400.7: `source` must be the same incarnation key the matching
+/// `compute_unavailable_modes` call read for this choice.
 pub fn record_modal_mode_choices(
     state: &mut GameState,
-    source_id: ObjectId,
+    source: ObjectIncarnationRef,
     modal: &ModalChoice,
     indices: &[usize],
 ) {
@@ -1282,12 +1416,12 @@ pub fn record_modal_mode_choices(
         match constraint {
             ModalSelectionConstraint::NoRepeatThisTurn => {
                 for &idx in indices {
-                    state.modal_modes_chosen_this_turn.insert((source_id, idx));
+                    state.modal_modes_chosen_this_turn.insert((source, idx));
                 }
             }
             ModalSelectionConstraint::NoRepeatThisGame => {
                 for &idx in indices {
-                    state.modal_modes_chosen_this_game.insert((source_id, idx));
+                    state.modal_modes_chosen_this_game.insert((source, idx));
                 }
             }
             _ => {}
@@ -17970,10 +18104,504 @@ mod tests {
         assert!(validate_modal_indices(&modal, &[0], &[1]).is_ok());
     }
 
+    /// Two "target opponent" modes under "each mode must target a different
+    /// player", in a two-player game: either mode alone has a legal target,
+    /// but no two modes can be chosen together.
+    fn different_opponents_modal(min_choices: usize) -> (ModalChoice, Vec<AbilityDefinition>) {
+        let modal = ModalChoice {
+            min_choices,
+            max_choices: 2,
+            mode_count: 2,
+            constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+            ..Default::default()
+        };
+        let target_opponent_mode = |value| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value },
+                    target: Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    )),
+                },
+            )
+        };
+        (
+            modal,
+            vec![target_opponent_mode(2), target_opponent_mode(3)],
+        )
+    }
+
+    #[test]
+    fn modal_selection_needs_its_minimum_under_target_constraints() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Modal Spell".to_string(),
+            Zone::Hand,
+        );
+
+        // Reach guard: each mode alone has a legal target assignment, so
+        // "choose one or both" is satisfiable and its cap drops to one mode.
+        let (one_or_both, modes) = different_opponents_modal(1);
+        let capped = modal_choice_with_target_assignment_limit(
+            &state,
+            source,
+            PlayerId(0),
+            &one_or_both,
+            &modes,
+            &[],
+        )
+        .expect("a one-mode selection has a legal target assignment");
+        assert_eq!(capped.max_choices, 1);
+        assert!(modal_has_legal_mode_selection(
+            &state,
+            source,
+            PlayerId(0),
+            &one_or_both,
+            &modes,
+            &[],
+        ));
+
+        // CR 700.2a + CR 700.2d: "choose two" needs both modes, which would
+        // have to target two different opponents — there is only one.
+        let (choose_two, modes) = different_opponents_modal(2);
+        assert!(!modal_has_legal_mode_selection(
+            &state,
+            source,
+            PlayerId(0),
+            &choose_two,
+            &modes,
+            &[],
+        ));
+    }
+
+    /// Untargeted spell modes, so `modal_choice_with_target_assignment_limit`
+    /// returns `Some` and the verdict isolates the count and budget arithmetic.
+    fn untargeted_spell_modes(count: usize) -> Vec<AbilityDefinition> {
+        (0..count)
+            .map(|_| {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn modal_selection_minimum_zero_and_pawprint_budget() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Modal Spell".to_string(),
+            Zone::Hand,
+        );
+        let verdict = |modal: &ModalChoice, unavailable: &[usize]| {
+            modal_has_legal_mode_selection(
+                &state,
+                source,
+                PlayerId(0),
+                modal,
+                &untargeted_spell_modes(modal.mode_count),
+                unavailable,
+            )
+        };
+
+        // (i-a) CR 700.2 + CR 700.2d: "choose up to two" with repeats allowed
+        // (the Moment of Reckoning shape) admits choosing no modes, so it has
+        // a legal selection even when every mode is unavailable.
+        let up_to_two_repeatable = ModalChoice {
+            min_choices: 0,
+            max_choices: 2,
+            mode_count: 2,
+            allow_repeat_modes: true,
+            ..Default::default()
+        };
+        assert!(verdict(&up_to_two_repeatable, &[0, 1]));
+
+        // (i-b) CR 700.2: the same without repeats (the Call Damage Control
+        // shape) — zero modes still meets "choose up to two".
+        let up_to_two = ModalChoice {
+            allow_repeat_modes: false,
+            ..up_to_two_repeatable
+        };
+        assert!(verdict(&up_to_two, &[0, 1]));
+
+        // (ii) CR 700.2i: a pawprint modal's `max_choices` is its point
+        // budget. With a budget of 1 and the 1-point mode unavailable, no
+        // choosable mode fits, though two modes remain choosable by count.
+        let one_point_budget = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 3,
+            mode_pawprints: vec![1, 2, 3],
+            ..Default::default()
+        };
+        assert!(!verdict(&one_point_budget, &[0]));
+
+        // (iii) CR 700.2i: reach guard for (ii) — with the 1-point mode
+        // choosable, it fits the budget.
+        assert!(verdict(&one_point_budget, &[]));
+
+        // (iv) CR 700.2d + CR 700.2i: with repeats, the one choosable 1-point
+        // mode fills both required picks within the 2-point budget (1+1 <= 2).
+        let two_point_budget_repeatable = ModalChoice {
+            min_choices: 2,
+            max_choices: 2,
+            mode_count: 3,
+            allow_repeat_modes: true,
+            mode_pawprints: vec![1, 2, 3],
+            ..Default::default()
+        };
+        assert!(verdict(&two_point_budget_repeatable, &[1, 2]));
+    }
+
+    /// Whether any choice of up to three modes passes `validate_modal_indices`,
+    /// the validation every real mode answer goes through. Ignores target
+    /// constraints, so it is only a reference for unconstrained modals.
+    fn some_selection_passes_validation(modal: &ModalChoice, unavailable: &[usize]) -> bool {
+        let mut sequences: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut frontier = sequences.clone();
+        for _ in 0..3 {
+            frontier = frontier
+                .iter()
+                .flat_map(|prefix| {
+                    (0..modal.mode_count).map(move |idx| {
+                        let mut next = prefix.clone();
+                        next.push(idx);
+                        next
+                    })
+                })
+                .collect();
+            sequences.extend(frontier.iter().cloned());
+        }
+        sequences
+            .iter()
+            .any(|indices| validate_modal_indices(modal, indices, unavailable).is_ok())
+    }
+
+    #[test]
+    fn modal_selection_maximum_below_minimum_has_no_selection() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Modal Spell".to_string(),
+            Zone::Hand,
+        );
+        let verdict = |modal: &ModalChoice| {
+            modal_has_legal_mode_selection(
+                &state,
+                source,
+                PlayerId(0),
+                modal,
+                &untargeted_spell_modes(modal.mode_count),
+                &[],
+            )
+        };
+        let modal = |min_choices, max_choices, mode_count, allow_repeat_modes| ModalChoice {
+            min_choices,
+            max_choices,
+            mode_count,
+            allow_repeat_modes,
+            ..Default::default()
+        };
+
+        // CR 700.2 + CR 601.2b: a maximum below the minimum admits no
+        // selection, however many modes are choosable. Each negative is paired
+        // with a control that differs only in `max_choices`.
+        let rows = [
+            (modal(1, 0, 1, false), false),
+            (modal(1, 1, 1, false), true),
+            (modal(1, 0, 1, true), false),
+            (modal(1, 1, 1, true), true),
+            (modal(2, 1, 2, false), false),
+            (modal(2, 2, 2, false), true),
+            // "choose up to N" with N = 0 is the empty selection.
+            (modal(0, 0, 1, false), true),
+        ];
+        for (modal, expected) in &rows {
+            assert_eq!(verdict(modal), *expected, "predicate verdict for {modal:?}");
+            // The predicate must agree with what `validate_modal_indices`
+            // accepts, which also proves each negative reached the arithmetic
+            // (the controls find a passing sequence, the negatives none).
+            assert_eq!(
+                some_selection_passes_validation(modal, &[]),
+                *expected,
+                "validate_modal_indices reference for {modal:?}"
+            );
+        }
+
+        // Constrained pair (CR 700.2a): the same board and constraint, only
+        // `max_choices` differs. Already false at base through the empty
+        // `min..=max` range; a consistency pin, not a revert-failing row.
+        let (one_or_both, modes) = different_opponents_modal(1);
+        let verdict_constrained = |modal: &ModalChoice| {
+            modal_has_legal_mode_selection(&state, source, PlayerId(0), modal, &modes, &[])
+        };
+        assert!(verdict_constrained(&one_or_both));
+        let inverted = ModalChoice {
+            max_choices: 0,
+            ..one_or_both
+        };
+        assert!(!verdict_constrained(&inverted));
+    }
+
+    /// Two `target opponent` modes weighing one pawprint each, under "each mode
+    /// must target a different player".
+    fn different_opponents_pawprint_modal(
+        min_choices: usize,
+        budget: usize,
+    ) -> (ModalChoice, Vec<AbilityDefinition>) {
+        let (_, modes) = different_opponents_modal(1);
+        (
+            ModalChoice {
+                min_choices,
+                max_choices: budget,
+                mode_count: 2,
+                mode_pawprints: vec![1, 1],
+                constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+                ..Default::default()
+            },
+            modes,
+        )
+    }
+
+    #[test]
+    fn pawprint_selection_needs_a_combined_target_assignment() {
+        let mut two_player = GameState::new_two_player(42);
+        let source_two = create_object(
+            &mut two_player,
+            CardId(1),
+            PlayerId(0),
+            "Modal Spell".to_string(),
+            Zone::Hand,
+        );
+        let mut three_player = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_three = create_object(
+            &mut three_player,
+            CardId(1),
+            PlayerId(0),
+            "Modal Spell".to_string(),
+            Zone::Hand,
+        );
+        let predicate = |state: &GameState,
+                         source: ObjectId,
+                         modal: &ModalChoice,
+                         modes: &[AbilityDefinition],
+                         unavailable: &[usize]| {
+            modal_has_legal_mode_selection(state, source, PlayerId(0), modal, modes, unavailable)
+        };
+        let helper = |state: &GameState,
+                      source: ObjectId,
+                      modal: &ModalChoice,
+                      modes: &[AbilityDefinition],
+                      unavailable: &[usize]| {
+            modal_choice_with_target_assignment_limit(
+                state,
+                source,
+                PlayerId(0),
+                modal,
+                modes,
+                unavailable,
+            )
+        };
+
+        // CR 700.2a + CR 700.2i: two required one-point modes with a two-point
+        // budget fit by weight, but their combined targets need two different
+        // opponents and a two-player game has one.
+        let (choose_two, modes) = different_opponents_pawprint_modal(2, 2);
+        assert!(!predicate(
+            &two_player,
+            source_two,
+            &choose_two,
+            &modes,
+            &[]
+        ));
+        assert!(helper(&two_player, source_two, &choose_two, &modes, &[]).is_none());
+        // Reach guard: without the constraint the same modal passes the weight
+        // precheck and the helper, so the constraint alone refuses.
+        let unconstrained = ModalChoice {
+            constraints: vec![],
+            ..choose_two.clone()
+        };
+        assert!(predicate(
+            &two_player,
+            source_two,
+            &unconstrained,
+            &modes,
+            &[]
+        ));
+        // Control (b): three players give two distinct opponents. `max_choices`
+        // stays the point budget and `min_choices` the mode minimum.
+        assert!(predicate(
+            &three_player,
+            source_three,
+            &choose_two,
+            &modes,
+            &[]
+        ));
+        let kept = helper(&three_player, source_three, &choose_two, &modes, &[])
+            .expect("two distinct opponents admit both modes");
+        assert_eq!((kept.min_choices, kept.max_choices), (2, 2));
+
+        // Control (a): one required mode fits; CR 700.2i the budget is not
+        // capped to the selected count of one.
+        let (one_required, modes) = different_opponents_pawprint_modal(1, 2);
+        assert!(predicate(
+            &two_player,
+            source_two,
+            &one_required,
+            &modes,
+            &[]
+        ));
+        let kept = helper(&two_player, source_two, &one_required, &modes, &[])
+            .expect("a single mode has a legal target");
+        assert_eq!(kept.max_choices, 2, "the point budget is not a mode count");
+
+        // Budget stays a budget with unequal weights: the 2-point mode alone
+        // spends the whole budget.
+        let weighted = ModalChoice {
+            mode_pawprints: vec![1, 2],
+            ..one_required.clone()
+        };
+        assert!(predicate(&two_player, source_two, &weighted, &modes, &[]));
+        assert_eq!(
+            helper(&two_player, source_two, &weighted, &modes, &[])
+                .expect("one mode fits the budget")
+                .max_choices,
+            2
+        );
+
+        // Unavailable modes: the witness uses only mode 1; with both
+        // unavailable there is none.
+        assert!(predicate(
+            &two_player,
+            source_two,
+            &one_required,
+            &modes,
+            &[0]
+        ));
+        assert!(!predicate(
+            &two_player,
+            source_two,
+            &one_required,
+            &modes,
+            &[0, 1]
+        ));
+
+        // "Up to" pawprint (min 0): the empty selection is a witness, so the
+        // helper does not newly refuse it.
+        let up_to = ModalChoice {
+            min_choices: 0,
+            ..choose_two.clone()
+        };
+        assert!(predicate(&two_player, source_two, &up_to, &modes, &[]));
+        assert!(helper(&two_player, source_two, &up_to, &modes, &[]).is_some());
+
+        // Repeat branch (`allow_repeat_modes` enumerates a different sequence
+        // set): with mode 1 unavailable only [0, 0] fits the budget, and two
+        // `target opponent` slots of one mode cannot be filled with two
+        // opponents in a two-player game.
+        let repeatable = ModalChoice {
+            allow_repeat_modes: true,
+            mode_pawprints: vec![1, 2],
+            ..choose_two.clone()
+        };
+        assert!(!predicate(
+            &two_player,
+            source_two,
+            &repeatable,
+            &modes,
+            &[1]
+        ));
+        assert!(helper(&two_player, source_two, &repeatable, &modes, &[1]).is_none());
+        let repeatable_unconstrained = ModalChoice {
+            constraints: vec![],
+            ..repeatable.clone()
+        };
+        assert!(predicate(
+            &two_player,
+            source_two,
+            &repeatable_unconstrained,
+            &modes,
+            &[1]
+        ));
+        assert!(predicate(
+            &three_player,
+            source_three,
+            &repeatable,
+            &modes,
+            &[1]
+        ));
+        assert_eq!(
+            helper(&three_player, source_three, &repeatable, &modes, &[1])
+                .expect("two opponents fill both picks of mode 0")
+                .max_choices,
+            2
+        );
+    }
+
+    #[test]
+    fn execute_targets_satisfiable_needs_a_combined_pawprint_assignment() {
+        let (choose_two, modes) = different_opponents_pawprint_modal(2, 2);
+        let execute_with = |modal: ModalChoice| {
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            execute.modal = Some(modal);
+            execute.mode_abilities = modes.clone();
+            execute
+        };
+        let satisfiable = |mut state: GameState, modal: ModalChoice| {
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Modal Trigger Source".to_string(),
+                Zone::Battlefield,
+            );
+            let source = state.objects.get(&source_id).unwrap();
+            execute_targets_satisfiable(&state, source, &execute_with(modal))
+        };
+
+        // CR 603.3c + CR 700.2b + CR 700.2i: no budget-legal selection has a
+        // combined assignment in a two-player game.
+        assert!(!satisfiable(
+            GameState::new_two_player(42),
+            choose_two.clone()
+        ));
+        // Reach guard: the same execute without the constraint is satisfiable,
+        // so neither the per-mode filter nor the all-unavailable exit decided.
+        let unconstrained = ModalChoice {
+            constraints: vec![],
+            ..choose_two.clone()
+        };
+        assert!(satisfiable(GameState::new_two_player(42), unconstrained));
+        // Control: three players supply two distinct opponents.
+        assert!(satisfiable(
+            GameState::new(FormatConfig::standard(), 3, 42),
+            choose_two
+        ));
+    }
+
     #[test]
     fn compute_unavailable_modes_returns_previously_chosen() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(100);
+        let source = ObjectIncarnationRef::of(ObjectId(100), 0);
 
         let modal = ModalChoice {
             min_choices: 1,
@@ -17984,23 +18612,32 @@ mod tests {
         };
 
         // No modes chosen yet.
-        assert!(compute_unavailable_modes(&state, source_id, &modal).is_empty());
+        assert!(compute_unavailable_modes(&state, source, &modal).is_empty());
 
         // Record mode 1 chosen.
-        record_modal_mode_choices(&mut state, source_id, &modal, &[1]);
-        assert_eq!(
-            compute_unavailable_modes(&state, source_id, &modal),
-            vec![1]
-        );
+        record_modal_mode_choices(&mut state, source, &modal, &[1]);
+        assert_eq!(compute_unavailable_modes(&state, source, &modal), vec![1]);
 
-        // Different source_id is unaffected.
-        assert!(compute_unavailable_modes(&state, ObjectId(200), &modal).is_empty());
+        // CR 400.7: a later incarnation of the same storage id is a new object.
+        assert!(compute_unavailable_modes(
+            &state,
+            ObjectIncarnationRef::of(ObjectId(100), 1),
+            &modal
+        )
+        .is_empty());
+        // Different source is unaffected.
+        assert!(compute_unavailable_modes(
+            &state,
+            ObjectIncarnationRef::of(ObjectId(200), 0),
+            &modal
+        )
+        .is_empty());
     }
 
     #[test]
     fn record_modal_mode_choices_tracks_game_scoped() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(100);
+        let source = ObjectIncarnationRef::of(ObjectId(100), 0);
 
         let modal = ModalChoice {
             min_choices: 1,
@@ -18010,10 +18647,18 @@ mod tests {
             ..Default::default()
         };
 
-        record_modal_mode_choices(&mut state, source_id, &modal, &[2]);
-        assert!(state.modal_modes_chosen_this_game.contains(&(source_id, 2)));
+        record_modal_mode_choices(&mut state, source, &modal, &[2]);
+        assert!(state.modal_modes_chosen_this_game.contains(&(source, 2)));
         // Turn-scoped map should NOT be populated for game-scoped constraint.
-        assert!(!state.modal_modes_chosen_this_turn.contains(&(source_id, 2)));
+        assert!(!state.modal_modes_chosen_this_turn.contains(&(source, 2)));
+        assert_eq!(compute_unavailable_modes(&state, source, &modal), vec![2]);
+        // CR 400.7: the game-scoped history is per incarnation too.
+        assert!(compute_unavailable_modes(
+            &state,
+            ObjectIncarnationRef::of(ObjectId(100), 1),
+            &modal
+        )
+        .is_empty());
     }
 
     #[test]

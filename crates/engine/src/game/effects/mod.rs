@@ -4835,7 +4835,11 @@ pub(crate) fn optional_decline_branch(
         || (sub.sub_link == SubAbilityLink::SequentialSibling
             && !sub_ability_is_reflexive(sub)
             && !(matches!(&ability.effect, Effect::CastFromZone { .. })
-                && (cast_from_zone::graveyard_destination_rider(&sub.effect).is_some()
+                && (cast_from_zone::graveyard_destination_rider(
+                    &sub.effect,
+                    sub.condition.as_ref(),
+                )
+                .is_some()
                     || cast_from_zone::is_enters_with_counter_rider_subability(sub))));
     if !selected {
         // CR 608.2c: a declined "you may" fails the "if you do" gate `sub`,
@@ -15498,6 +15502,25 @@ fn resolve_chain_body(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
+    // CR 115.10a + CR 301.5f + CR 303.4b: an untargeted "enchanted/equipped X"
+    // recipient is bound to the source's host as this instruction begins to
+    // resolve, before its conditions and effect read it. With no provable host
+    // the instruction itself does nothing (`host_effect_impossible`).
+    let host_binding = crate::game::targeting::bind_resolution_attachment_hosts(state, ability);
+    let host_effect_impossible = match &host_binding {
+        crate::game::targeting::ResolutionHostBinding::Absent => true,
+        crate::game::targeting::ResolutionHostBinding::NotApplicable
+        | crate::game::targeting::ResolutionHostBinding::Bound(_) => false,
+    };
+    let host_bound;
+    let ability = match host_binding {
+        crate::game::targeting::ResolutionHostBinding::Bound(bound) => {
+            host_bound = *bound;
+            &host_bound
+        }
+        crate::game::targeting::ResolutionHostBinding::NotApplicable
+        | crate::game::targeting::ResolutionHostBinding::Absent => ability,
+    };
     // CR 608.2c: Snapshot the `pending_continuation` *value* at chain-body
     // entry so the sub_ability guard further down can compare by IDENTITY, not
     // mere presence. An unrelated outer continuation (e.g. a `player_scope`
@@ -17020,7 +17043,12 @@ fn resolve_chain_body(
         // If targets don't share the required quality, skip the effect.
         let shares_quality_failed = fails_shared_quality(state, effective);
 
-        if shares_quality_failed {
+        // CR 115.10a + CR 303.4b + CR 301.5f: an instruction naming its
+        // source's host when there is no provable host does nothing —
+        // skipped here like a failed group constraint,
+        // so no resolver can re-read the description as a scan or act on a new
+        // object under a departed host's storage id.
+        if shares_quality_failed || host_effect_impossible {
             // Group constraint not met — emit EffectResolved but skip execution.
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::from(&ability.effect),
@@ -18005,7 +18033,8 @@ fn resolve_chain_body(
         // last slot itself when no rider is printed.
         let cast_slots = cast_from_zone::cast_slot_group(ability);
         let is_rider = |link: &ResolvedAbility| {
-            cast_from_zone::graveyard_destination_rider(&link.effect).is_some()
+            cast_from_zone::graveyard_destination_rider(&link.effect, link.condition.as_ref())
+                .is_some()
         };
         let tail_parent: Option<&ResolvedAbility> = match cast_slots.last() {
             Some(last) => Some(
@@ -18266,7 +18295,10 @@ fn resolve_chain_body(
         // its condition reads none and grants nothing, while the spell stays
         // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(&sub.effect)
+            && cast_from_zone::is_graveyard_exile_rider_subability(
+                &sub.effect,
+                sub.condition.as_ref(),
+            )
         {
             // Not pinned by a test: no printed card reaches this state
             // (measured above), and returning here preserves `main`'s
@@ -38033,16 +38065,19 @@ mod tests {
                         exiled_id: exiled_a,
                         owner: PlayerId(0),
                         mana_value: 2,
+                        incarnation: state.objects[&exiled_a].incarnation,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_b,
                         owner: PlayerId(0),
                         mana_value: 3,
+                        incarnation: state.objects[&exiled_b].incarnation,
                     },
                     LinkedExileSnapshot {
                         exiled_id: exiled_c,
                         owner: PlayerId(1),
                         mana_value: 4,
+                        incarnation: state.objects[&exiled_c].incarnation,
                     },
                 ],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
