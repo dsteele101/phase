@@ -1319,14 +1319,21 @@ fn put_counter_fizzles(
 /// - CR 509.1h + CR 510.1c: blockers are declared and the combat damage still
 ///   to come kills it (a blocked Mogg Fanatic, a chump blocker).
 /// - CR 115.1 + CR 117.1b: an opponent's spell or ability on the stack
-///   targets it with an unconditional effect that removes it from the battlefield or is
+///   targets it with an effect that removes it from the battlefield or is
 ///   provably lethal to it. Sacrificing in response is the classic answer to
 ///   removal; a harmless or beneficial targeted effect dooms nothing.
+///
+/// CR 608.2c: which of that spell's links will act is the engine's call —
+/// `known_resolution_links` follows the branch the paid casting choices
+/// already settle (a kicked Shivan Fire deals 4, not 2) and reports nothing
+/// past a condition that is only decided at resolution, so a link that might
+/// be skipped never counts as doom.
 pub(crate) fn source_is_doomed(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    use engine::game::effects::resolution_preview::known_resolution_links;
     use engine::types::ability::TargetRef;
     if crate::combat_ai::creature_dies_in_current_combat(state, source_id) {
         return true;
@@ -1335,21 +1342,16 @@ pub(crate) fn source_is_doomed(
         entry.controller != ai_player
             && entry.ability().is_some_and(|ability| {
                 // Only the links of the chain that target the source act on it.
-                // CR 608.2c: a link with a condition is skipped at resolution
-                // when the condition is false, and whether it holds is decided
-                // then, not now — so only unconditional links count as doom.
-                let mut aimed: Vec<&Effect> = Vec::new();
-                let mut link = Some(ability);
-                while let Some(current) = link {
-                    if current.condition.is_none()
-                        && current.targets.iter().any(
+                let links = known_resolution_links(state, ability);
+                let aimed: Vec<&Effect> = links
+                    .iter()
+                    .filter(|link| {
+                        link.targets.iter().any(
                             |target| matches!(target, TargetRef::Object(id) if *id == source_id),
                         )
-                    {
-                        aimed.push(&current.effect);
-                    }
-                    link = current.sub_ability.as_deref();
-                }
+                    })
+                    .map(|link| &link.effect)
+                    .collect();
                 !aimed.is_empty() && effects_remove_creature(state, source_id, &aimed)
             })
     })

@@ -746,3 +746,410 @@ fn only_a_lone_blocker_is_certain_to_die_in_combat() {
     combat.blocker_to_attacker.remove(&second);
     assert!(creature_dies_in_current_combat(&state, first));
 }
+
+// --- Removal whose path a paid casting choice settles ----------------------
+
+mod settled_removal {
+    //! CR 608.2c + CR 702.33d: a kicked Shivan Fire deals 4 damage instead of
+    //! 2 — whether it was kicked is settled when it is cast, so a 3-toughness
+    //! creature it targets is doomed by the kicked spell and not by the
+    //! unkicked one. Every Fire here is really cast by the opponent; the AI
+    //! answers through the production policy registry and the engine resolves
+    //! the result.
+
+    use super::{AI, OPP};
+    use crate::config::{AiConfig, PolicyPenalties};
+    use crate::context::AiContext;
+    use crate::features::DeckFeatures;
+    use crate::policies::registry::{PolicyId, PolicyRegistry, PolicyVerdict};
+    use crate::policies::self_cost::{self_sacrifice_option_premium, source_is_doomed};
+    use crate::session::AiSession;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::scenario::{GameRunner, GameScenario};
+    use engine::types::ability::{
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        ResolvedAbility, SacrificeCost, SubAbilityLink, TargetFilter, TargetRef,
+    };
+    use engine::types::actions::GameAction;
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::{CastPaymentMode, StackEntry, StackEntryKind, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+    use std::sync::Arc;
+
+    const SHIVAN_FIRE: &str = "Kicker {4} (You may pay an additional {4} as you cast this spell.)\n\
+Shivan Fire deals 2 damage to target creature. If this spell was kicked, it deals 4 damage instead.";
+
+    struct Table {
+        runner: GameRunner,
+        fire: ObjectId,
+        /// The AI's 1/3 with "Sacrifice this creature: it deals 2 damage to
+        /// any target" — the self-sacrificing payoff under test.
+        bombardier: ObjectId,
+        /// The opponent's 2/2, the payoff's near-even trade.
+        bear: ObjectId,
+    }
+
+    /// The opponent (active, main phase) holds Shivan Fire with mana for the
+    /// kicker; the AI holds the self-sacrificing 1/3; the opponent controls a
+    /// vanilla 2/2.
+    fn table() -> Table {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let fire = scenario
+            .add_spell_to_hand(OPP, "Shivan Fire", true)
+            .from_oracle_text_with_keywords(&["Kicker"], SHIVAN_FIRE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let mut payoff = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        payoff.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        )));
+        let bombardier = scenario
+            .add_creature(AI, "Bombardier", 1, 3)
+            .with_ability_definition(payoff)
+            .id();
+        let bear = scenario.add_creature(OPP, "Bear", 2, 2).id();
+        let mut mana = vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])];
+        mana.extend((0..4).map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])));
+        scenario.with_mana_pool(OPP, mana);
+        Table {
+            runner: scenario.build(),
+            fire,
+            bombardier,
+            bear,
+        }
+    }
+
+    /// The opponent casts Shivan Fire at `target`, kicking it when `kick`.
+    fn cast_fire(table: &mut Table, kick: bool) {
+        let target = table.bombardier;
+        let runner = &mut table.runner;
+        let card_id = runner.state().objects[&table.fire].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: table.fire,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Shivan Fire is castable");
+        loop {
+            let action = match &runner.state().waiting_for {
+                WaitingFor::OptionalCostChoice { .. } => {
+                    GameAction::DecideOptionalCost { pay: kick }
+                }
+                WaitingFor::TargetSelection { .. } => GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(target)],
+                },
+                WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+                WaitingFor::Priority { .. } => break,
+                other => panic!("unexpected prompt while casting: {other:?}"),
+            };
+            runner.act(action).expect("the cast advances");
+        }
+        assert!(runner.state().stack.iter().any(|e| e.id == table.fire));
+    }
+
+    /// The production registry's `SelfCostValue` verdict on the AI activating
+    /// the bombardier's sacrifice now.
+    fn sacrifice_verdict(
+        state: &engine::types::game_state::GameState,
+        bombardier: ObjectId,
+    ) -> PolicyVerdict {
+        let config = AiConfig::default();
+        let mut session = AiSession::empty();
+        session.features.insert(AI, DeckFeatures::default());
+        let mut context = AiContext::empty(&config.weights);
+        context.session = Arc::new(session);
+        context.player = AI;
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: bombardier,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let ctx = crate::policies::context::PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        PolicyRegistry::shared()
+            .verdicts(&ctx)
+            .into_iter()
+            .find_map(|(id, verdict)| (id == PolicyId::SelfCostValue).then_some(verdict))
+            .expect("the self-cost policy judges a self-sacrifice activation")
+    }
+
+    fn verdict_kind(verdict: &PolicyVerdict) -> (&'static str, bool) {
+        match verdict {
+            PolicyVerdict::Reject { reason } => (reason.kind, true),
+            PolicyVerdict::Score { reason, .. } => (reason.kind, false),
+        }
+    }
+
+    fn premium(state: &engine::types::game_state::GameState, bombardier: ObjectId) -> f64 {
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+        self_sacrifice_option_premium(
+            state,
+            AI,
+            bombardier,
+            &cost,
+            Some(0),
+            &PolicyPenalties::default(),
+        )
+    }
+
+    /// Passes priority (answering nothing else) until the stack is empty.
+    fn resolve(runner: &mut GameRunner) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        for _ in 0..40 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).expect("passes").events);
+        }
+        assert!(runner.state().stack.is_empty(), "the stack resolved");
+        events
+    }
+
+    #[test]
+    fn with_nothing_on_the_stack_the_even_trade_holds_the_option() {
+        let table = table();
+        let state = table.runner.state();
+        assert!(!source_is_doomed(state, AI, table.bombardier));
+        assert!(premium(state, table.bombardier) > 0.0);
+        assert_eq!(
+            verdict_kind(&sacrifice_verdict(state, table.bombardier)),
+            ("self_cost_hold_sacrifice_option", true)
+        );
+    }
+
+    /// CR 702.33d + CR 608.2b: the kicked Fire will deal 4 to the 1/3, so it
+    /// is doomed and the near-even trade is free. The AI sacrifices in
+    /// response: the Fire's only target is gone and it does nothing, and the
+    /// payoff kills the opposing 2/2.
+    #[test]
+    fn kicked_shivan_fire_dooms_the_source_and_the_ai_cashes_it_in() {
+        let mut table = table();
+        cast_fire(&mut table, true);
+        let state = table.runner.state();
+        assert!(source_is_doomed(state, AI, table.bombardier));
+        assert_eq!(premium(state, table.bombardier), 0.0);
+        let (kind, rejected) = verdict_kind(&sacrifice_verdict(state, table.bombardier));
+        assert!(!rejected, "the doomed sacrifice is not vetoed: {kind}");
+        assert_eq!(kind, "self_cost_benefit_covers_cost");
+
+        // The opponent passes; the AI activates the payoff at the bear.
+        table
+            .runner
+            .act(GameAction::PassPriority)
+            .expect("opponent passes");
+        assert_eq!(
+            table.runner.state().waiting_for,
+            WaitingFor::Priority { player: AI }
+        );
+        table
+            .runner
+            .act(GameAction::ActivateAbility {
+                source_id: table.bombardier,
+                ability_index: 0,
+            })
+            .expect("the AI activates the sacrifice");
+        while let WaitingFor::TargetSelection { .. } = table.runner.state().waiting_for {
+            table
+                .runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(table.bear)],
+                })
+                .expect("the payoff targets the bear");
+        }
+        let events = resolve(&mut table.runner);
+
+        let state = table.runner.state();
+        assert_eq!(state.objects[&table.bombardier].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&table.bear].zone, Zone::Graveyard, "payoff");
+        assert_eq!(state.objects[&table.fire].zone, Zone::Graveyard);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt { source_id, .. } if *source_id == table.fire
+            )),
+            "CR 608.2b: the Fire's only target is gone, so it deals no damage"
+        );
+    }
+
+    /// Unkicked, the Fire deals 2 to a 1/3: nothing is doomed, the option is
+    /// still worth holding, and the creature survives with 2 damage.
+    #[test]
+    fn unkicked_shivan_fire_dooms_nothing_and_the_ai_holds() {
+        let mut table = table();
+        cast_fire(&mut table, false);
+        let state = table.runner.state();
+        assert!(!source_is_doomed(state, AI, table.bombardier));
+        assert!(premium(state, table.bombardier) > 0.0);
+        assert_eq!(
+            verdict_kind(&sacrifice_verdict(state, table.bombardier)),
+            ("self_cost_hold_sacrifice_option", true)
+        );
+
+        resolve(&mut table.runner);
+        let bombardier = &table.runner.state().objects[&table.bombardier];
+        assert_eq!(bombardier.zone, Zone::Battlefield);
+        assert_eq!(bombardier.damage_marked, 2);
+    }
+
+    fn push_entry(
+        table: &mut Table,
+        id: u64,
+        controller: engine::types::player::PlayerId,
+        ability: ResolvedAbility,
+    ) {
+        table.runner.state_mut().stack.push_back(StackEntry {
+            id: ObjectId(id),
+            source_id: ability.source_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                ability: Some(Box::new(ability)),
+                card_id: CardId(id),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+    }
+
+    fn kicked_fire_ability(table: &mut Table) -> ResolvedAbility {
+        cast_fire(table, true);
+        let entry = table
+            .runner
+            .state_mut()
+            .stack
+            .pop_back()
+            .expect("the kicked Fire is on top");
+        entry.ability().expect("the Fire's ability").clone()
+    }
+
+    /// CR 707.10: a copy of a kicked spell is kicked too, so the opponent's
+    /// copy dooms the source on its own. Only the controller matters: the same
+    /// spell under the AI's control threatens nothing it would answer.
+    #[test]
+    fn an_opponents_copy_dooms_and_a_spell_the_ai_controls_does_not() {
+        let mut table = table();
+        let kicked = kicked_fire_ability(&mut table);
+
+        push_entry(&mut table, 950, AI, kicked.clone());
+        assert!(!source_is_doomed(
+            table.runner.state(),
+            AI,
+            table.bombardier
+        ));
+
+        table.runner.state_mut().stack.clear();
+        push_entry(&mut table, 951, OPP, kicked);
+        assert!(source_is_doomed(table.runner.state(), AI, table.bombardier));
+    }
+
+    /// A two-instruction spell whose second instruction targets the source:
+    /// that link alone dooms it.
+    #[test]
+    fn the_source_as_the_second_target_is_doomed_by_its_own_link() {
+        let mut table = table();
+        let destroy = |target| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Any,
+                    cant_regenerate: false,
+                },
+                vec![TargetRef::Object(target)],
+                ObjectId(960),
+                OPP,
+            )
+        };
+        let chain = |second_target| {
+            let mut chain = destroy(table.bear);
+            let mut second = destroy(second_target);
+            second.sub_link = SubAbilityLink::SequentialSibling;
+            chain.sub_ability = Some(Box::new(second));
+            chain
+        };
+        // Reach guard: a chain aimed only at the bear leaves the source alone.
+        let aimed_elsewhere = chain(table.bear);
+        let aimed_second = chain(table.bombardier);
+        push_entry(&mut table, 960, OPP, aimed_elsewhere);
+        assert!(!source_is_doomed(
+            table.runner.state(),
+            AI,
+            table.bombardier
+        ));
+
+        table.runner.state_mut().stack.clear();
+        push_entry(&mut table, 960, OPP, aimed_second);
+        assert!(source_is_doomed(table.runner.state(), AI, table.bombardier));
+    }
+
+    /// CR 608.2c: removal with an "instead" override that is decided by the
+    /// board at resolution may be replaced by something harmless, so it dooms
+    /// nothing. Reach guard: the same removal without the override dooms.
+    #[test]
+    fn removal_with_an_unsettled_override_dooms_nothing() {
+        let mut table = table();
+        let removal = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(table.bombardier)],
+            ObjectId(970),
+            OPP,
+        );
+        push_entry(&mut table, 970, OPP, removal.clone());
+        assert!(source_is_doomed(table.runner.state(), AI, table.bombardier));
+
+        table.runner.state_mut().stack.clear();
+        let mut gated = removal;
+        let mut harmless = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(970),
+            OPP,
+        );
+        harmless.condition = Some(AbilityCondition::TargetHasKeywordInstead {
+            keyword: Keyword::Flying,
+        });
+        gated.sub_ability = Some(Box::new(harmless));
+        push_entry(&mut table, 970, OPP, gated);
+        assert!(!source_is_doomed(
+            table.runner.state(),
+            AI,
+            table.bombardier
+        ));
+    }
+}

@@ -198,6 +198,7 @@ pub mod remember_card;
 pub mod remove_all_damage;
 pub mod remove_from_combat;
 pub mod renown;
+pub mod resolution_preview;
 pub mod return_as_aura;
 pub mod reveal;
 pub mod reveal_chosen_numbers;
@@ -4279,6 +4280,35 @@ pub(crate) fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
     state: &mut GameState,
 ) {
+    inherit_parent_chain_context(child, parent, effect_context_object);
+    // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
+    // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
+    // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice/
+    // ExileTop coming up with nothing and the very next parent->child hand-off — this
+    // IS that hand-off, so stamp the typed, per-ability signal onto `child`
+    // and consume (take) the transient global flag immediately. Consuming
+    // here (rather than where `child` is later resolved) means the signal can
+    // never reach a second, unrelated hand-off later in the same resolution,
+    // and a child that was never handed off this way (e.g. a freshly-built
+    // ability in a test) simply keeps the default `None` regardless of stray
+    // global state. The handed-off reason takes precedence over the one
+    // `inherit_parent_chain_context` passed down from the parent.
+    if let Some(reason) = state.last_parent_target_missing_reason.take() {
+        child.parent_target_missing_reason = Some(reason);
+    }
+}
+
+/// CR 608.2c: the state-free part of a parent->child chain hand-off — every
+/// casting-time and resolution-scoped fact the child inherits from its parent.
+/// [`apply_parent_chain_context`] is this plus the consumption of the
+/// transient `state.last_parent_target_missing_reason` signal; the resolution
+/// preview (`resolution_preview`) uses this part alone because it never
+/// mutates the game.
+fn inherit_parent_chain_context(
+    child: &mut ResolvedAbility,
+    parent: &ResolvedAbility,
+    effect_context_object: Option<&CostPaidObjectSnapshot>,
+) {
     // The face-down Exile marker is authored on the exact ChangeZone node by
     // the parser.  Ordinary chain context handoff replaces the child's
     // context wholesale, so preserve the node-local intent while inheriting
@@ -4340,24 +4370,12 @@ pub(crate) fn apply_parent_chain_context(
     ) {
         child.context.direct_discard_result = None;
     }
-    // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
-    // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
-    // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice/
-    // ExileTop coming up with nothing and the very next parent->child hand-off — this
-    // IS that hand-off, so stamp the typed, per-ability signal onto `child`
-    // and consume (take) the transient global flag immediately. Consuming
-    // here (rather than where `child` is later resolved) means the signal can
-    // never reach a second, unrelated hand-off later in the same resolution,
-    // and a child that was never handed off this way (e.g. a freshly-built
-    // ability in a test) simply keeps the default `None` regardless of stray
-    // global state.
-    let handed = state.last_parent_target_missing_reason.take();
     // CR 608.2c + CR 609.3: a referent never produced is absent for every dependent anaphor,
     // so the verdict travels down target-less hops as the targets do.
-    let passed_down = parent
+    if let Some(reason) = parent
         .parent_target_missing_reason
-        .filter(|_| child.targets.is_empty());
-    if let Some(reason) = handed.or(passed_down) {
+        .filter(|_| child.targets.is_empty())
+    {
         child.parent_target_missing_reason = Some(reason);
     }
     // CR 608.2c: A sub-ability is part of the same printed ability instance as
