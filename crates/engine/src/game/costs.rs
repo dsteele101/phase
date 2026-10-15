@@ -2087,6 +2087,143 @@ pub(crate) fn can_pay(
     }
 }
 
+/// Most `OneOf`-free costs [`payable_cost_routes`] evaluates before it gives up.
+///
+/// Printed cards carry at most one choice between costs per activation cost
+/// (Forage, the Crystal Shard cycle), so a real enumeration reaches a handful
+/// of leaves; the bound only stops a pathological hand-built cost from making
+/// a decision-time query unbounded.
+pub const MAX_COST_ROUTE_LEAVES: usize = 64;
+
+/// One settled choice along a [`PayableCostRoute`].
+///
+/// This is choice provenance, not a prompt index: `branch_index` is the
+/// branch's position in the UNFILTERED branch list of the first unresolved
+/// `OneOf` at that step, while `WaitingFor::ActivationCostOneOfChoice::costs`
+/// is the payable-filtered subsequence of that list. A consumer answering the
+/// prompt maps a leg onto it with `costs.iter().position(|c| *c == leg.branch)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostRouteLeg {
+    pub branch_index: usize,
+    pub branch: AbilityCost,
+}
+
+/// A complete way to pay an activation cost: one branch for every choice
+/// between costs, in the order the activation prompts for them, and the
+/// `OneOf`-free cost those choices settle the whole cost to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayableCostRoute {
+    pub legs: Vec<CostRouteLeg>,
+    pub resolved: AbilityCost,
+}
+
+/// [`payable_cost_routes`] reached more than [`MAX_COST_ROUTE_LEAVES`]
+/// `OneOf`-free costs. The enumeration is never truncated: a caller receives
+/// every route or this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CostRouteBudgetExceeded;
+
+/// CR 601.2h + CR 602.2b + CR 118.3: every complete, payable way to settle the
+/// choices between costs in an activation cost.
+///
+/// An activation prompts for its choices one at a time, first unresolved
+/// `OneOf` first (`casting::find_one_of_cost` /
+/// `AbilityCost::resolve_first_one_of`), but the total cost is paid at once
+/// and partial payments are not allowed — so whether an early choice can be
+/// completed depends on every later one. A route is kept iff its fully settled
+/// cost passes the activation payability authority
+/// (`casting::can_pay_ability_cost_now`), whose payment scope (the mana sources
+/// a `{T}` leg excludes) is recomputed for that settled cost. Resources the legs
+/// share are therefore judged jointly: CR 601.2g + CR 119.4 — one unit of mana
+/// pays one mana leg, and life pays only up to the life total.
+///
+/// Routes are produced depth-first in prompt order with no pruning at
+/// intermediate nodes, so the first legs of the returned routes are a superset
+/// of the branches the activation prompt offers. They are equal except where
+/// the payability authority's own checks on a still-unsettled cost (its
+/// root/intermediate precheck) reject a choice that some settled route passes.
+/// A cost with no `OneOf` yields one route with no legs when payable; an empty
+/// `OneOf` yields none.
+///
+/// `ability_index` is passed through unchanged to the payability authority (it
+/// identifies granted abilities and tag-scoped mana); `None` is never coerced.
+///
+/// This is a decision-time query: it is not used by `can_pay` or by candidate
+/// generation.
+pub fn payable_cost_routes(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+) -> Result<Vec<PayableCostRoute>, CostRouteBudgetExceeded> {
+    let mut walk = CostRouteWalk {
+        state,
+        payer,
+        source_id,
+        ability_index,
+        leaves_visited: 0,
+        legs: Vec::new(),
+        routes: Vec::new(),
+    };
+    walk.descend(cost)?;
+    Ok(walk.routes)
+}
+
+/// Depth-first walk state for [`payable_cost_routes`].
+struct CostRouteWalk<'a> {
+    state: &'a GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    ability_index: Option<usize>,
+    leaves_visited: usize,
+    legs: Vec<CostRouteLeg>,
+    routes: Vec<PayableCostRoute>,
+}
+
+impl CostRouteWalk<'_> {
+    fn descend(&mut self, node: &AbilityCost) -> Result<(), CostRouteBudgetExceeded> {
+        let Some(branches) = super::casting::find_one_of_cost(node) else {
+            return self.visit_leaf(node);
+        };
+        for (branch_index, branch) in branches.iter().enumerate() {
+            // `find_one_of_cost` and `resolve_first_one_of` walk the same
+            // first-`OneOf` depth-first order, so a found choice always resolves.
+            let Some(settled) = node.resolve_first_one_of(branch) else {
+                continue;
+            };
+            self.legs.push(CostRouteLeg {
+                branch_index,
+                branch: branch.clone(),
+            });
+            let outcome = self.descend(&settled);
+            self.legs.pop();
+            outcome?;
+        }
+        Ok(())
+    }
+
+    fn visit_leaf(&mut self, leaf: &AbilityCost) -> Result<(), CostRouteBudgetExceeded> {
+        if self.leaves_visited + 1 > MAX_COST_ROUTE_LEAVES {
+            return Err(CostRouteBudgetExceeded);
+        }
+        self.leaves_visited += 1;
+        if super::casting::can_pay_ability_cost_now(
+            self.state,
+            self.payer,
+            self.source_id,
+            leaf,
+            self.ability_index,
+        ) {
+            self.routes.push(PayableCostRoute {
+                legs: self.legs.clone(),
+                resolved: leaf.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// CR 608.2d: choices made while applying an effect must be legal; CR 118.12:
 /// an optional resolution-time cost is offered only when its exact payment
 /// shape is supported.

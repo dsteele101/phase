@@ -634,6 +634,82 @@ fn a_choice_of_costs_sacrifices_the_source_only_when_every_payable_branch_does()
         self_sacrifice_option_premium(&state, AI, pinger, &mana_or_sacrifice, None, &penalties),
         0.0
     );
+
+    // CR 601.2h + CR 119.4: two choices settled together (a synthetic cost —
+    // printed cards carry one choice). "{1} or 2 life, and {1} or sacrifice
+    // this" with one mana: paying life first keeps the source, so nothing is
+    // surrendered; at 1 life the only complete route sacrifices it.
+    let one = || AbilityCost::Mana {
+        cost: engine::types::mana::ManaCost::generic(1),
+    };
+    let coupled = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::OneOf {
+                costs: vec![
+                    one(),
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                ],
+            },
+            AbilityCost::OneOf {
+                costs: vec![
+                    one(),
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            },
+        ],
+    };
+    let mut coupled_state = setup(20);
+    let grower = creature(&mut coupled_state, AI, "Grower", 1, 1);
+    let _ = coupled_state.add_mana_to_pool(
+        AI,
+        engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Colorless,
+            grower,
+            false,
+            vec![],
+        ),
+    );
+    assert_eq!(
+        self_sacrifice_option_premium(&coupled_state, AI, grower, &coupled, None, &penalties),
+        0.0
+    );
+    coupled_state.players[AI.0 as usize].life = 1;
+    assert!(
+        self_sacrifice_option_premium(&coupled_state, AI, grower, &coupled, None, &penalties) > 0.0
+    );
+
+    // Routes past the enumeration bound cannot all be shown to sacrifice, so
+    // they do not — even though every one of them would here.
+    let max = engine::game::casting::MAX_COST_ROUTE_LEAVES;
+    let free_choice = |branches: usize| AbilityCost::OneOf {
+        costs: vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+            };
+            branches
+        ],
+    };
+    let sacrificing = |last: usize| AbilityCost::Composite {
+        costs: vec![
+            free_choice(4),
+            free_choice(4),
+            free_choice(last),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+        ],
+    };
+    assert_eq!(max % 16, 0, "fixture divides the cap");
+    // Reach guard: exactly the cap is enumerated, and every route sacrifices.
+    assert!(
+        self_sacrifice_option_premium(&state, AI, pinger, &sacrificing(max / 16), None, &penalties)
+            > 0.0
+    );
+    let unbounded = sacrificing(max / 16 + 1);
+    assert_eq!(
+        self_sacrifice_option_premium(&state, AI, pinger, &unbounded, None, &penalties),
+        0.0
+    );
 }
 
 #[test]

@@ -23645,6 +23645,10 @@ fn apply_mana_spell_grants(
 // unchanged while the implementation lives in `game/costs.rs`.
 pub use super::costs::pay_ability_cost_for_activation;
 pub(crate) use super::costs::{pause_cost_payment_for_replacement_choice, PaymentOutcome};
+pub use super::costs::{
+    payable_cost_routes, CostRouteBudgetExceeded, CostRouteLeg, PayableCostRoute,
+    MAX_COST_ROUTE_LEAVES,
+};
 
 fn pending_activation_after_cost_pause(
     source_id: ObjectId,

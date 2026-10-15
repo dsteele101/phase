@@ -41,7 +41,9 @@
 //! (`self_cost_value.rs`) fetches the activated ability and turns these
 //! predicates into a `PolicyVerdict`.
 
-use engine::game::casting::{find_one_of_cost, one_of_branch_payable_in};
+use engine::game::casting::{
+    find_one_of_cost, payable_cost_routes, CostRouteBudgetExceeded, PayableCostRoute,
+};
 use engine::game::effects::counters::{preview_counter_addition, CounterAdditionPreview};
 use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::filter::{matches_target_filter, FilterContext};
@@ -192,157 +194,182 @@ fn self_counter_removal_cost(cost: &AbilityCost) -> Option<(u32, &CounterType)> 
     }
 }
 
-/// CR 118.3 + CR 601.2h + CR 602.2b: `cost` with each choice between costs
-/// settled on the cheapest branch (by [`real_self_cost`]) that the player can
-/// actually pay. Payability is the engine's activation authority, judged inside
-/// the whole cost and including mana, so a `{2}` branch without the mana to
-/// pay it is not an option. A choice with no payable branch stays unresolved.
+/// A complete payable route through an activation cost's choices, priced by
+/// [`real_self_cost`] on the cost it settles to.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PricedRoute {
+    pub(crate) route: PayableCostRoute,
+    pub(crate) price: f64,
+}
+
+/// What the AI would pay for an activation cost.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RoutePlan {
+    /// The cheapest complete payable route, the first of equals in prompt
+    /// order. A cost with no choice between costs is its own single route,
+    /// priced directly.
+    Cheapest(PricedRoute),
+    /// No combination of choices can be paid in full.
+    NoPayableRoute,
+    /// The engine stopped enumerating at `MAX_COST_ROUTE_LEAVES`, so no
+    /// cheapest route can be named.
+    Unbounded,
+}
+
+/// Every complete payable route of `whole`, each priced by [`real_self_cost`]
+/// on its settled cost. The enumeration and joint feasibility are the engine's
+/// (`payable_cost_routes`); only the price is the AI's.
+fn priced_routes(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    whole: &AbilityCost,
+    ability_index: Option<usize>,
+    penalties: &PolicyPenalties,
+) -> Result<Vec<PricedRoute>, CostRouteBudgetExceeded> {
+    Ok(
+        payable_cost_routes(state, ai_player, source_id, whole, ability_index)?
+            .into_iter()
+            .map(|route| {
+                let price = real_self_cost(state, ai_player, source_id, &route.resolved, penalties);
+                PricedRoute { route, price }
+            })
+            .collect(),
+    )
+}
+
+/// CR 118.3 + CR 601.2h + CR 602.2b: the single authority for what the AI pays
+/// for an activation cost — the complete payable route cheapest by
+/// [`real_self_cost`], the first of equals in prompt order.
 ///
-/// Callers that price an activation and then ask what paying it gives up (the
-/// option premium, materiality) read this one resolved cost, so every question
-/// is answered about the branch the AI would actually pay.
-pub(crate) fn resolve_payable_cost(
+/// Choices between costs are settled together, never one at a time: an early
+/// branch that only looks free can leave a later choice payable solely by
+/// sacrificing the source, so each candidate is priced as the whole cost it
+/// completes to. The activation verdict prices this route, and the later
+/// branch prompts ([`branch_is_dearer_than_payable_alternative`],
+/// [`cheapest_payable_branch_index`]) steer to the same continuation, so the
+/// cost that was priced is the cost that gets paid.
+pub(crate) fn plan_routes(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
-    cost: &AbilityCost,
+    whole: &AbilityCost,
     ability_index: Option<usize>,
     penalties: &PolicyPenalties,
-) -> AbilityCost {
-    let mut resolved = cost.clone();
-    while let Some(branches) = find_one_of_cost(&resolved) {
-        match cheapest_payable_branch(
-            state,
-            ai_player,
-            source_id,
-            &resolved,
-            branches,
-            ability_index,
-            penalties,
-        ) {
-            Some((_, candidate)) => resolved = candidate,
-            None => break,
-        }
+) -> RoutePlan {
+    if find_one_of_cost(whole).is_none() {
+        let price = real_self_cost(state, ai_player, source_id, whole, penalties);
+        return RoutePlan::Cheapest(PricedRoute {
+            route: PayableCostRoute {
+                legs: Vec::new(),
+                resolved: whole.clone(),
+            },
+            price,
+        });
     }
-    resolved
+    match priced_routes(state, ai_player, source_id, whole, ability_index, penalties) {
+        Ok(routes) => routes
+            .into_iter()
+            .min_by(|a, b| a.price.total_cmp(&b.price))
+            .map_or(RoutePlan::NoPayableRoute, RoutePlan::Cheapest),
+        Err(CostRouteBudgetExceeded) => RoutePlan::Unbounded,
+    }
 }
 
-/// Every branch of a cost choice payable inside `whole`, with its index in
-/// `branches`, its price by [`real_self_cost`], and `whole` settled on it.
-fn priced_payable_branches(
+/// The routes of a pending activation's remaining cost that the current
+/// branch prompt can start, as `(index in costs, route price)` in prompt order.
+/// `None` when the pending activation carries no cost or the enumeration is
+/// unbounded.
+///
+/// `costs` is the prompt's payable-filtered branch list, so a route's
+/// provenance (`branch_index`, an index into the unfiltered list) is mapped by
+/// equality of the branch itself.
+fn prompt_route_prices(
     state: &GameState,
     ai_player: PlayerId,
-    source_id: ObjectId,
-    whole: &AbilityCost,
-    branches: &[AbilityCost],
-    ability_index: Option<usize>,
+    pending: &PendingCast,
+    costs: &[AbilityCost],
     penalties: &PolicyPenalties,
-) -> Vec<(usize, f64, AbilityCost)> {
-    branches
-        .iter()
-        .enumerate()
-        .filter(|(_, branch)| {
-            one_of_branch_payable_in(state, ai_player, source_id, whole, branch, ability_index)
-        })
-        .filter_map(|(index, branch)| Some((index, whole.resolve_first_one_of(branch)?)))
-        .map(|(index, candidate)| {
-            let price = real_self_cost(state, ai_player, source_id, &candidate, penalties);
-            (index, price, candidate)
-        })
-        .collect()
-}
-
-/// The single authority for which branch of a cost choice the AI pays: the
-/// cheapest by [`real_self_cost`] among those payable inside `whole`, the first
-/// of equals. Returns that branch's index in `branches` and `whole` settled on
-/// it. The activation verdict ([`resolve_payable_cost`]) and the later branch
-/// prompt ([`branch_is_dearer_than_payable_alternative`],
-/// [`cheapest_payable_branch_index`]) all choose through here, so the branch
-/// that was priced is the branch that gets paid.
-fn cheapest_payable_branch(
-    state: &GameState,
-    ai_player: PlayerId,
-    source_id: ObjectId,
-    whole: &AbilityCost,
-    branches: &[AbilityCost],
-    ability_index: Option<usize>,
-    penalties: &PolicyPenalties,
-) -> Option<(usize, AbilityCost)> {
-    priced_payable_branches(
+) -> Option<Vec<(usize, f64)>> {
+    let whole = pending.activation_cost.as_ref()?;
+    let routes = priced_routes(
         state,
         ai_player,
-        source_id,
+        pending.object_id,
         whole,
-        branches,
-        ability_index,
+        pending.activation_ability_index,
         penalties,
     )
-    .into_iter()
-    .min_by(|a, b| a.1.total_cmp(&b.1))
-    .map(|(index, _, candidate)| (index, candidate))
+    .ok()?;
+    Some(
+        routes
+            .iter()
+            .filter_map(|priced| {
+                let first = priced.route.legs.first()?;
+                let index = costs.iter().position(|cost| *cost == first.branch)?;
+                Some((index, priced.price))
+            })
+            .collect(),
+    )
 }
 
-/// CR 118.3 + CR 601.2h: the index in `choices` (the prompt's payable branches)
-/// of the branch [`resolve_payable_cost`] priced for this activation, so the
-/// branch prompt pays what the activation verdict assumed — never a cheaper-
-/// looking earlier branch that, say, sacrifices the source.
+/// CR 118.3 + CR 601.2h: the index in `costs` (the prompt's payable branches)
+/// that starts the cheapest complete route of the pending activation's
+/// remaining cost, the first of equals — the continuation of the route the
+/// activation verdict priced. `None` when no route starts at an offered branch
+/// or the routes are unbounded; the caller then answers from the engine-issued
+/// candidates rather than inventing a branch.
 pub(crate) fn cheapest_payable_branch_index(
     state: &GameState,
     ai_player: PlayerId,
     pending: &PendingCast,
-    choices: &[AbilityCost],
+    costs: &[AbilityCost],
     penalties: &PolicyPenalties,
 ) -> Option<usize> {
-    let whole = pending.activation_cost.as_ref()?;
-    cheapest_payable_branch(
-        state,
-        ai_player,
-        pending.object_id,
-        whole,
-        choices,
-        pending.activation_ability_index,
-        penalties,
-    )
-    .map(|(index, _)| index)
+    prompt_route_prices(state, ai_player, pending, costs, penalties)?
+        .into_iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
 }
 
 /// CR 118.3 + CR 601.2h: is branch `index` of the prompt strictly dearer than
-/// another payable branch? Equal prices are not dearer, so a tie is the
-/// player's free choice; a branch the activation verdict never priced (the
-/// source sacrificed when mana would do) is.
+/// the cheapest complete route an offered branch starts? Branch `index` is
+/// priced at the cheapest route it starts; a tie is not dearer, so equal
+/// prices stay the player's free choice. A branch no route starts, a prompt no
+/// route starts, and unbounded routes are never dearer.
 pub(crate) fn branch_is_dearer_than_payable_alternative(
     state: &GameState,
     ai_player: PlayerId,
     pending: &PendingCast,
-    choices: &[AbilityCost],
+    costs: &[AbilityCost],
     index: usize,
     penalties: &PolicyPenalties,
 ) -> bool {
-    let Some(whole) = pending.activation_cost.as_ref() else {
+    let Some(kept) = prompt_route_prices(state, ai_player, pending, costs, penalties) else {
         return false;
     };
-    let priced = priced_payable_branches(
-        state,
-        ai_player,
-        pending.object_id,
-        whole,
-        choices,
-        pending.activation_ability_index,
-        penalties,
-    );
-    let Some(chosen) = priced.iter().find(|(i, ..)| *i == index).map(|p| p.1) else {
-        return false;
-    };
-    priced
+    let Some(chosen) = kept
         .iter()
-        .any(|(_, price, _)| chosen - price > f64::EPSILON)
+        .filter(|(start, _)| *start == index)
+        .map(|(_, price)| *price)
+        .min_by(f64::total_cmp)
+    else {
+        return false;
+    };
+    let Some(best) = kept.iter().map(|(_, price)| *price).min_by(f64::total_cmp) else {
+        return false;
+    };
+    chosen - best > f64::EPSILON
 }
 
 /// Price the self-inflicted portion of `cost` in card-equivalent units.
 /// `Composite` sums its sub-costs (you pay them all); `OneOf` takes the minimum
 /// (the payer chooses the cheapest). Out-of-scope sub-costs (mana, tap) price 0.
-/// This `OneOf` reading ignores payability; settle choices first with
-/// [`resolve_payable_cost`] when pricing a real activation.
+///
+/// The `OneOf` minimum is not a payable price: it ignores payability and takes
+/// each choice independently of the others, so it serves unresolved callers
+/// only. An activation decision prices a complete payable route through
+/// [`plan_routes`], whose settled costs carry no `OneOf`.
 pub(crate) fn real_self_cost(
     state: &GameState,
     ai_player: PlayerId,
@@ -1478,13 +1505,14 @@ fn cost_sacrifices_only_self(cost: &AbilityCost) -> bool {
 /// True when paying `cost` necessarily sacrifices the ability's source — either
 /// a `SelfRef` sacrifice, or a filtered sacrifice whose only legal AI-controlled
 /// target is the source itself. A composite cost does so when any component
-/// does; a choice between costs only when every branch the
-/// player can pay does, since a payable branch that spares the source is a way
+/// does; a cost with choices between costs only when every complete route the
+/// player can pay does, since a payable route that spares the source is a way
 /// to activate without losing it.
 ///
-/// CR 118.3 + CR 601.2h: which branches are payable is the engine's activation
-/// authority, judged inside the whole cost and including mana — a
-/// `{2}` branch with no mana available leaves only the sacrifice.
+/// CR 118.3 + CR 601.2h: which routes are payable is the engine's activation
+/// authority (`payable_cost_routes`), judged on the whole settled cost and
+/// including mana — a `{2}` branch with no mana available leaves only the
+/// sacrifice. Unbounded routes cannot be shown to all sacrifice, so they do not.
 fn sacrifice_must_remove_source(
     state: &GameState,
     ai_player: PlayerId,
@@ -1492,18 +1520,22 @@ fn sacrifice_must_remove_source(
     cost: &AbilityCost,
     ability_index: Option<usize>,
 ) -> bool {
-    if let Some(branches) = find_one_of_cost(cost) {
-        let mut payable = branches
-            .iter()
-            .filter(|branch| {
-                one_of_branch_payable_in(state, ai_player, source_id, cost, branch, ability_index)
-            })
-            .filter_map(|branch| cost.resolve_first_one_of(branch))
-            .peekable();
-        return payable.peek().is_some()
-            && payable.all(|resolved| {
-                sacrifice_must_remove_source(state, ai_player, source_id, &resolved, ability_index)
-            });
+    if find_one_of_cost(cost).is_some() {
+        return match payable_cost_routes(state, ai_player, source_id, cost, ability_index) {
+            Ok(routes) => {
+                !routes.is_empty()
+                    && routes.iter().all(|route| {
+                        sacrifice_must_remove_source(
+                            state,
+                            ai_player,
+                            source_id,
+                            &route.resolved,
+                            ability_index,
+                        )
+                    })
+            }
+            Err(CostRouteBudgetExceeded) => false,
+        };
     }
     match cost {
         AbilityCost::Sacrifice(sacrifice) => {

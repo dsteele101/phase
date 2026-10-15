@@ -73,10 +73,9 @@ use engine::types::player::PlayerId;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::self_cost::{
-    appraise_benefit, branch_is_dearer_than_payable_alternative, cost_is_material, real_self_cost,
-    resolve_payable_cost, self_cost_in_scope, self_counter_cost_preview,
-    self_sacrifice_option_premium, synergy_justifies_self_cost, BenefitAppraisal,
-    SelfCounterCostPreview,
+    appraise_benefit, branch_is_dearer_than_payable_alternative, cost_is_material, plan_routes,
+    self_cost_in_scope, self_counter_cost_preview, self_sacrifice_option_premium,
+    synergy_justifies_self_cost, BenefitAppraisal, RoutePlan, SelfCounterCostPreview,
 };
 use crate::features::DeckFeatures;
 
@@ -177,18 +176,27 @@ impl TacticalPolicy for SelfCostValuePolicy {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_synergy_justified"));
         }
 
-        // CR 118.3 + CR 601.2h: price, materiality and the option premium all
-        // read the branch of each cost choice the AI can actually pay.
-        let cost = &resolve_payable_cost(
+        // CR 118.3 + CR 601.2h + CR 602.2b: price, materiality and the option
+        // premium all read the complete payable route the AI would pay. With no
+        // such route there is no payment to weigh, so the comparison stands down.
+        let priced = match plan_routes(
             ctx.state,
             ctx.ai_player,
             *source_id,
             cost,
             Some(*ability_index),
             ctx.penalties(),
-        );
-        let cost_value =
-            real_self_cost(ctx.state, ctx.ai_player, *source_id, cost, ctx.penalties());
+        ) {
+            RoutePlan::Cheapest(priced) => priced,
+            RoutePlan::NoPayableRoute => {
+                return PolicyVerdict::neutral(PolicyReason::new("self_cost_no_payable_route"));
+            }
+            RoutePlan::Unbounded => {
+                return PolicyVerdict::neutral(PolicyReason::new("self_cost_routes_unbounded"));
+            }
+        };
+        let cost = &priced.route.resolved;
+        let cost_value = priced.price;
 
         let cost_milli = (cost_value * 1000.0) as i64;
 
@@ -356,7 +364,9 @@ mod tests {
     use crate::features::lifegain::LifegainFeature;
     use crate::features::reanimator::ReanimatorFeature;
     use crate::features::DeckFeatures;
-    use crate::policies::self_cost::{chain_effect_trivialities, EffectTriviality};
+    use crate::policies::self_cost::{
+        chain_effect_trivialities, cheapest_payable_branch_index, real_self_cost, EffectTriviality,
+    };
     use crate::session::AiSession;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::bracket_estimate::CommanderBracketTier;
@@ -1188,82 +1198,142 @@ mod tests {
             });
         let verdict = verdict_for(&state, source, plain_features());
         assert_reject(&verdict, "self_cost_hold_sacrifice_option");
+        let penalties = AiConfig::default().policy_penalties;
+        let cost = state.objects[&source].abilities[0].cost.clone().unwrap();
+        let RoutePlan::Cheapest(priced) =
+            plan_routes(&state, AI, source, &cost, Some(0), &penalties)
+        else {
+            panic!("the sacrifice is payable");
+        };
+        assert_eq!(
+            priced.route.resolved,
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            "without mana the only route sacrifices the source"
+        );
+        assert_eq!(priced.route.legs[0].branch_index, 0);
 
         fund_generic_mana(&mut state, source, 2);
         assert_neutral(
             &verdict_for(&state, source, plain_features()),
             "self_cost_benefit_covers_cost",
         );
+        let RoutePlan::Cheapest(priced) =
+            plan_routes(&state, AI, source, &cost, Some(0), &penalties)
+        else {
+            panic!("both branches are payable");
+        };
+        assert_eq!(
+            priced.route.resolved,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(2)
+            },
+            "with the mana the cheapest route keeps the source"
+        );
+        assert_eq!(priced.route.legs[0].branch_index, 1);
     }
 
-    #[test]
-    fn activation_through_the_branch_prompt_pays_the_priced_branch() {
-        // CR 118.3 + CR 601.2h + CR 602.2b: "{2} or sacrifice this" with the mana
-        // to pay it. The activation verdict prices the mana branch (the source
-        // survives); the branch prompt must steer to that same branch, so the
-        // payment actually made is the one that was priced.
-        use engine::ai_support::candidate_actions;
-        use engine::game::scenario::{GameScenario, P0};
-        use engine::types::ability::SacrificeCost;
-        use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    // --- Complete payable routes through choices between costs ---------------
+    //
+    // CR 601.2h + CR 602.2b + CR 118.3: an activation prompts for each choice
+    // between costs in turn but pays the total cost at once, so a branch is
+    // priced as the complete route it starts. No printed card carries two
+    // choices between costs in one activation cost; the two-choice costs below
+    // are SYNTHETIC hand-built abilities that exercise the joint-route contract.
 
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let source = scenario
-            .add_creature(P0, "Sacrificial Pinger", 2, 2)
-            .with_ability_definition(activated(
-                // Untargeted, so the branch prompt is the first activation prompt.
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player: TargetFilter::Controller,
+    fn generic_mana(amount: u32) -> AbilityCost {
+        AbilityCost::Mana {
+            cost: engine::types::mana::ManaCost::generic(amount),
+        }
+    }
+
+    fn sacrifice_self() -> AbilityCost {
+        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+    }
+
+    /// "{1} or pay 2 life, and {1} or sacrifice this" (synthetic). With one
+    /// mana, paying {1} first looks free but completes only by sacrificing the
+    /// source; paying life first keeps the mana for the second choice.
+    fn coupled_cost() -> AbilityCost {
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::OneOf {
+                    costs: vec![generic_mana(1), pay_life_cost(2)],
                 },
                 AbilityCost::OneOf {
-                    costs: vec![
-                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
-                        AbilityCost::Mana {
-                            cost: ManaCost::generic(2),
-                        },
-                    ],
+                    costs: vec![generic_mana(1), sacrifice_self()],
                 },
-            ))
-            .id();
-        scenario.with_mana_pool(
-            P0,
-            (0..2)
-                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
-                .collect(),
-        );
-        let mut runner = scenario.build();
-        runner
-            .act(GameAction::ActivateAbility {
-                source_id: source,
-                ability_index: 0,
-            })
-            .expect("activation must be legal");
-        let state = runner.state().clone();
-        let WaitingFor::ActivationCostOneOfChoice { costs, .. } = &state.waiting_for else {
-            panic!(
-                "both branches are payable, so the player must be asked; got {:?}",
-                state.waiting_for
-            );
-        };
-        assert_eq!(costs.len(), 2);
+            ],
+        }
+    }
 
+    fn grow_self_twice() -> Effect {
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::SelfRef,
+        }
+    }
+
+    fn colorless_pool(amount: usize) -> Vec<engine::types::mana::ManaUnit> {
+        use engine::types::mana::{ManaType, ManaUnit};
+        (0..amount)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect()
+    }
+
+    /// P0's 2/2 carrying `ability` at index 0, `mana` colorless floating, in
+    /// P0's precombat main phase with priority.
+    fn scenario_with(ability: AbilityDefinition, mana: usize, life: i32) -> (GameState, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, life);
+        let source = scenario
+            .add_creature(P0, "Route Source", 2, 2)
+            .with_ability_definition(ability)
+            .id();
+        scenario.with_mana_pool(P0, colorless_pool(mana));
+        (scenario.build().state().clone(), source)
+    }
+
+    fn plus_one_counters(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Every `SelfCostValuePolicy` verdict on the branch candidates of the
+    /// current `ActivationCostOneOfChoice`, keyed by the branch offered.
+    fn branch_verdicts(state: &GameState) -> Vec<(AbilityCost, PolicyVerdict)> {
+        use engine::ai_support::candidate_actions;
+        let WaitingFor::ActivationCostOneOfChoice { costs, .. } = &state.waiting_for else {
+            panic!("expected a branch prompt, got {:?}", state.waiting_for);
+        };
         let config = AiConfig::default();
         let context = context_for(&config, plain_features());
-        let candidates: Vec<_> = candidate_actions(&state)
+        let candidates: Vec<_> = candidate_actions(state)
             .into_iter()
             .filter(|c| matches!(c.action, GameAction::ChooseActivationCostBranch { .. }))
             .collect();
+        assert_eq!(
+            candidates.len(),
+            costs.len(),
+            "one issued candidate per offered branch"
+        );
         let decision = AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
             candidates: candidates.clone(),
         };
-        let verdicts: Vec<_> = candidates
+        candidates
             .iter()
             .map(|candidate| {
+                let GameAction::ChooseActivationCostBranch { index } = candidate.action else {
+                    unreachable!("filtered to branch choices");
+                };
                 let ctx = PolicyContext {
-                    state: &state,
+                    state,
                     decision: &decision,
                     candidate,
                     ai_player: AI,
@@ -1272,36 +1342,387 @@ mod tests {
                     cast_facts: None,
                     search_depth: crate::policies::context::SearchDepth::Root,
                 };
-                (candidate.action.clone(), SelfCostValuePolicy.verdict(&ctx))
+                (costs[index].clone(), SelfCostValuePolicy.verdict(&ctx))
             })
-            .collect();
+            .collect()
+    }
 
-        let chosen = verdicts
+    fn verdict_on(
+        verdicts: &[(AbilityCost, PolicyVerdict)],
+        branch: &AbilityCost,
+    ) -> PolicyVerdict {
+        verdicts
             .iter()
-            .find(|(_, verdict)| !matches!(verdict, PolicyVerdict::Reject { .. }))
-            .map(|(action, _)| action.clone())
-            .expect("the priced branch must stay available");
+            .find(|(offered, _)| offered == branch)
+            .map(|(_, verdict)| verdict.clone())
+            .unwrap_or_else(|| panic!("{branch:?} is not offered: {verdicts:?}"))
+    }
+
+    fn activate_first_ability(state: &mut GameState, source: ObjectId) {
+        engine::game::engine::apply(
+            state,
+            AI,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect("activation must be legal");
+    }
+
+    /// What one AI-driven run of the coupled activation did.
+    struct CoupledRun {
+        activated: bool,
+        branches_paid: Vec<AbilityCost>,
+        state: GameState,
+    }
+
+    /// Drive the coupled scenario with production `choose_action` for whoever
+    /// acts, applying each answer through `engine::apply`, until the ability
+    /// has resolved or its source has left the battlefield.
+    fn drive_coupled_activation(difficulty: crate::config::AiDifficulty, seed: u64) -> CoupledRun {
+        use crate::config::{create_config, Platform};
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::mana::ManaColor;
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+        const STEP_LIMIT: usize = 80;
+
+        // The one mana comes from a land rather than a floating pool, so the
+        // activation stays available across priority windows: the reach guard
+        // asks only that the AI activates in one of them, whichever it picks.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        let source = scenario
+            .add_creature(P0, "Route Source", 2, 2)
+            .with_ability_definition(activated(grow_self_twice(), coupled_cost()))
+            .id();
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let library = ["Library Card"; 8];
+        scenario.with_library_top(P0, &library);
+        scenario.with_library_top(P1, &library);
+        let mut state = scenario.build().state().clone();
+        let config = create_config(difficulty, Platform::Native).into_measurement(seed);
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut activated = false;
+        let mut branches_paid = Vec::new();
+        for _ in 0..STEP_LIMIT {
+            let resolved = plus_one_counters(&state, source) > 0;
+            let source_gone = state.objects[&source].zone != Zone::Battlefield;
+            if activated && (resolved || source_gone) && state.stack.is_empty() {
+                break;
+            }
+            let actor = state
+                .waiting_for
+                .acting_player()
+                .unwrap_or_else(|| panic!("a player acts in this window: {:?}", state.waiting_for));
+            let action = crate::search::choose_action(&state, actor, &config, &mut rng)
+                .expect("the AI answers every window");
+            if actor == AI {
+                match (&state.waiting_for, &action) {
+                    (_, GameAction::ActivateAbility { source_id, .. }) if *source_id == source => {
+                        activated = true;
+                    }
+                    (
+                        WaitingFor::ActivationCostOneOfChoice { costs, .. },
+                        GameAction::ChooseActivationCostBranch { index },
+                    ) => branches_paid.push(costs[*index].clone()),
+                    _ => {}
+                }
+            }
+            engine::game::engine::apply(&mut state, actor, action)
+                .expect("the AI's answer is legal");
+        }
+        CoupledRun {
+            activated,
+            branches_paid,
+            state,
+        }
+    }
+
+    /// The production path end to end: with one land's mana and 20 life, the
+    /// AI activates the coupled ability, answers both branch prompts, pays, and
+    /// the ability resolves. It must pay 2 life and then the mana — the
+    /// cheapest complete route — never the mana first, which strands the
+    /// second choice on sacrificing the source. Fails when the first branch is
+    /// priced with the later choice unsettled (measured: the mana-then-sacrifice
+    /// route is paid instead).
+    #[test]
+    fn ai_pays_the_cheapest_complete_route_through_two_cost_choices() {
+        use crate::config::AiDifficulty;
+        use engine::game::scenario::P0;
+        for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Medium] {
+            for seed in 1..=8 {
+                let CoupledRun {
+                    activated,
+                    branches_paid,
+                    state,
+                } = drive_coupled_activation(difficulty, seed);
+                let label = format!("{difficulty:?} seed {seed}");
+                assert!(activated, "{label}: reach guard — the AI must activate");
+                assert_eq!(
+                    branches_paid,
+                    vec![pay_life_cost(2), generic_mana(1)],
+                    "{label}: life first, then the mana"
+                );
+                let source = state
+                    .battlefield
+                    .iter()
+                    .copied()
+                    .find(|id| state.objects[id].name == "Route Source")
+                    .unwrap_or_else(|| panic!("{label}: the source must survive"));
+                assert_eq!(state.players[P0.0 as usize].life, 18, "{label}");
+                assert_eq!(state.players[P0.0 as usize].mana_pool.total(), 0, "{label}");
+                assert_eq!(plus_one_counters(&state, source), 2, "{label}");
+            }
+        }
+    }
+
+    /// At the first branch prompt of the coupled activation, the mana branch
+    /// is priced at the only route it starts (it sacrifices the source) and is
+    /// rejected; the life branch starts the cheapest route and stays.
+    #[test]
+    fn first_branch_prompt_rejects_the_branch_that_strands_a_sacrifice() {
+        let (mut state, source) =
+            scenario_with(activated(grow_self_twice(), coupled_cost()), 1, 20);
+        activate_first_ability(&mut state, source);
+        let verdicts = branch_verdicts(&state);
+        assert_eq!(verdicts.len(), 2, "both branches are offered");
+        assert_reject(
+            &verdict_on(&verdicts, &generic_mana(1)),
+            "self_cost_branch_dearer",
+        );
+        assert_neutral(
+            &verdict_on(&verdicts, &pay_life_cost(2)),
+            "self_cost_branch_cheapest",
+        );
+    }
+
+    /// CR 118.3: two branches whose cheapest routes price the same are a free
+    /// choice — neither is dearer.
+    #[test]
+    fn tied_branches_are_not_dearer() {
+        let tied = AbilityCost::OneOf {
+            costs: vec![generic_mana(1), generic_mana(2)],
+        };
+        let (mut state, source) = scenario_with(activated(gain_life(1), tied), 2, 20);
+        activate_first_ability(&mut state, source);
+        let verdicts = branch_verdicts(&state);
+        assert_eq!(verdicts.len(), 2);
+        for (branch, verdict) in &verdicts {
+            assert!(
+                matches!(verdict, PolicyVerdict::Score { reason, .. } if reason.kind == "self_cost_branch_cheapest"),
+                "{branch:?}: {verdict:?}"
+            );
+        }
+    }
+
+    /// "{2} or sacrifice this" with the mana to pay it, answered by production
+    /// `choose_action` at the branch prompt: the mana branch is paid and the
+    /// source survives.
+    #[test]
+    fn ai_answers_a_single_cost_choice_with_the_priced_branch() {
+        use crate::config::{create_config, AiDifficulty, Platform};
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+        let choice = AbilityCost::OneOf {
+            costs: vec![sacrifice_self(), generic_mana(2)],
+        };
+        for seed in 1..=8 {
+            let (mut state, source) = scenario_with(activated(gain_life(1), choice.clone()), 2, 20);
+            activate_first_ability(&mut state, source);
+            let WaitingFor::ActivationCostOneOfChoice { costs, .. } = state.waiting_for.clone()
+            else {
+                panic!("both branches are payable, so the player is asked");
+            };
+            assert_eq!(costs.len(), 2);
+            let config =
+                create_config(AiDifficulty::Medium, Platform::Native).into_measurement(seed);
+            let action = crate::search::choose_action(
+                &state,
+                AI,
+                &config,
+                &mut SmallRng::seed_from_u64(seed),
+            )
+            .expect("the AI answers the branch prompt");
+            let GameAction::ChooseActivationCostBranch { index } = action else {
+                panic!("seed {seed}: expected a branch choice, got {action:?}");
+            };
+            assert_eq!(costs[index], generic_mana(2), "seed {seed}");
+            engine::game::engine::apply(&mut state, AI, action).expect("the branch is payable");
+            assert_eq!(
+                state.objects[&source].zone,
+                Zone::Battlefield,
+                "seed {seed}"
+            );
+            assert_eq!(state.players[0].mana_pool.total(), 0, "seed {seed}");
+        }
+    }
+
+    /// SIBLING GUARD (not revert-failing — the per-choice pricing reached the
+    /// same answer here): at 1 life the coupled cost's only route spends the
+    /// mana and sacrifices the source, so a trivial ping is rejected; a second
+    /// mana opens the mana-then-mana route and the veto lifts.
+    #[test]
+    fn coupled_cost_without_life_prices_the_forced_sacrifice() {
+        let (state, source) = scenario_with(activated(deal_fixed(1), coupled_cost()), 1, 1);
+        let penalties = AiConfig::default().policy_penalties;
+        let RoutePlan::Cheapest(priced) =
+            plan_routes(&state, AI, source, &coupled_cost(), Some(0), &penalties)
+        else {
+            panic!("one route remains");
+        };
         assert!(
-            verdicts.iter().any(|(action, verdict)| {
-                matches!(action, GameAction::ChooseActivationCostBranch { index: 0 })
-                    && matches!(verdict, PolicyVerdict::Reject { .. })
-            }),
-            "the sacrifice branch is dearer than the payable mana branch"
+            matches!(&priced.route.resolved, AbilityCost::Composite { costs } if costs.contains(&sacrifice_self())),
+            "the only route sacrifices the source: {:?}",
+            priced.route.resolved
+        );
+        assert_reject(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_trivial_benefit",
         );
 
-        let mut applied = state;
-        engine::game::engine::apply_as_current(&mut applied, chosen)
-            .expect("the chosen branch must complete the activation");
-        assert_eq!(
-            applied.objects[&source].zone,
-            Zone::Battlefield,
-            "paying the priced branch must not sacrifice the source"
+        let (state, source) = scenario_with(activated(deal_fixed(1), coupled_cost()), 2, 1);
+        assert!(
+            !matches!(
+                verdict_for(&state, source, plain_features()),
+                PolicyVerdict::Reject { .. }
+            ),
+            "with two mana the source need not be sacrificed"
         );
+    }
+
+    /// A cost too large to enumerate is never priced off a partial list: the
+    /// activation verdict stands down and no branch is called dearer. Exactly
+    /// the cap is still priced.
+    #[test]
+    fn unbounded_routes_stand_down() {
+        use engine::game::casting::MAX_COST_ROUTE_LEAVES;
+        let free_choice = |branches: usize| AbilityCost::OneOf {
+            costs: vec![pay_life_cost(0); branches],
+        };
+        let cost_with = |last: usize| AbilityCost::Composite {
+            costs: vec![free_choice(4), free_choice(4), free_choice(last)],
+        };
+        assert_eq!(MAX_COST_ROUTE_LEAVES % 16, 0, "fixture divides the cap");
+        let penalties = AiConfig::default().policy_penalties;
+
+        let at_cap = cost_with(MAX_COST_ROUTE_LEAVES / 16);
+        let (state, source) = scenario_with(activated(gain_life(1), at_cap.clone()), 0, 20);
+        assert!(matches!(
+            plan_routes(&state, AI, source, &at_cap, Some(0), &penalties),
+            RoutePlan::Cheapest(_)
+        ));
+
+        let beyond = cost_with(MAX_COST_ROUTE_LEAVES / 16 + 1);
+        let (mut state, source) = scenario_with(activated(gain_life(1), beyond.clone()), 0, 20);
         assert_eq!(
-            applied.players[0].mana_pool.total(),
+            plan_routes(&state, AI, source, &beyond, Some(0), &penalties),
+            RoutePlan::Unbounded
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_routes_unbounded",
+        );
+
+        activate_first_ability(&mut state, source);
+        let WaitingFor::ActivationCostOneOfChoice {
+            costs,
+            pending_cast,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected the branch prompt, got {:?}", state.waiting_for);
+        };
+        for index in 0..costs.len() {
+            assert!(!branch_is_dearer_than_payable_alternative(
+                &state,
+                AI,
+                pending_cast,
+                costs,
+                index,
+                &penalties,
+            ));
+        }
+        assert_eq!(
+            cheapest_payable_branch_index(&state, AI, pending_cast, costs, &penalties),
+            None
+        );
+    }
+
+    /// With no complete payable route there is no payment to weigh. A cost
+    /// with no choice between costs is its own single route, priced directly.
+    #[test]
+    fn no_payable_route_stands_down() {
+        let penalties = AiConfig::default().policy_penalties;
+        let (state, source) = scenario_with(activated(deal_fixed(1), coupled_cost()), 0, 1);
+        assert_eq!(
+            plan_routes(&state, AI, source, &coupled_cost(), Some(0), &penalties),
+            RoutePlan::NoPayableRoute
+        );
+        assert_neutral(
+            &verdict_for(&state, source, plain_features()),
+            "self_cost_no_payable_route",
+        );
+
+        let RoutePlan::Cheapest(priced) =
+            plan_routes(&state, AI, source, &sacrifice_self(), Some(0), &penalties)
+        else {
+            panic!("a choice-free cost is its own route");
+        };
+        assert!(priced.route.legs.is_empty());
+        assert_eq!(priced.route.resolved, sacrifice_self());
+        assert_eq!(
+            priced.price,
+            real_self_cost(&state, AI, source, &sacrifice_self(), &penalties)
+        );
+    }
+
+    /// The prompt answer follows only routes an offered branch starts, and the
+    /// pending activation's ability index (even `None`) is passed through.
+    #[test]
+    fn prompt_answer_considers_only_offered_branches() {
+        let penalties = AiConfig::default().policy_penalties;
+        let (mut state, source) =
+            scenario_with(activated(grow_self_twice(), coupled_cost()), 1, 20);
+        activate_first_ability(&mut state, source);
+        let WaitingFor::ActivationCostOneOfChoice {
+            costs,
+            pending_cast,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected the branch prompt, got {:?}", state.waiting_for);
+        };
+        let life_index = costs.iter().position(|c| *c == pay_life_cost(2)).unwrap();
+        assert_eq!(
+            cheapest_payable_branch_index(&state, AI, pending_cast, costs, &penalties),
+            Some(life_index)
+        );
+
+        let mut unindexed = (**pending_cast).clone();
+        unindexed.activation_ability_index = None;
+        assert_eq!(
+            cheapest_payable_branch_index(&state, AI, &unindexed, costs, &penalties),
+            Some(life_index)
+        );
+
+        // The cheapest route's first branch is not offered: answer among the
+        // offered branch's routes, and nothing offered is dearer than itself.
+        let mana_only = [generic_mana(1)];
+        assert_eq!(
+            cheapest_payable_branch_index(&state, AI, pending_cast, &mana_only, &penalties),
+            Some(0)
+        );
+        assert!(!branch_is_dearer_than_payable_alternative(
+            &state,
+            AI,
+            pending_cast,
+            &mana_only,
             0,
-            "the {{2}} branch spent the mana"
-        );
+            &penalties,
+        ));
     }
 
     // --- Row 2: Fling-class dynamic damage NOT rejected -------------------

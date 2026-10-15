@@ -1237,6 +1237,7 @@ mod omniscience_free_cast_chalice_x;
 mod omniscience_free_cast_vexing_bauble;
 mod omo_queen_of_vesuva;
 mod onakke_oathkeeper;
+mod one_of_cost_routes;
 mod one_sided_fight_illegal_damage_source;
 mod optional_replacement_decline_keeps_resident_drain;
 mod oracle_of_the_alpha_conjure_power_nine;
