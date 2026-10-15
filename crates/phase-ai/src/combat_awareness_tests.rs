@@ -1112,11 +1112,12 @@ Shivan Fire deals 2 damage to target creature. If this spell was kicked, it deal
         assert!(source_is_doomed(table.runner.state(), AI, table.bombardier));
     }
 
-    /// CR 608.2c: removal with an "instead" override that is decided by the
-    /// board at resolution may be replaced by something harmless, so it dooms
-    /// nothing. Reach guard: the same removal without the override dooms.
+    /// CR 608.2c + CR 614.15: removal with an "instead" override decided by
+    /// the board at resolution dooms the source only if the override would
+    /// remove it too — every way the spell can resolve must remove it. Reach
+    /// guard: the same removal without the override dooms.
     #[test]
-    fn removal_with_an_unsettled_override_dooms_nothing() {
+    fn removal_with_an_unsettled_override_dooms_only_if_both_branches_remove() {
         let mut table = table();
         let removal = ResolvedAbility::new(
             Effect::Destroy {
@@ -1130,26 +1131,37 @@ Shivan Fire deals 2 damage to target creature. If this spell was kicked, it deal
         push_entry(&mut table, 970, OPP, removal.clone());
         assert!(source_is_doomed(table.runner.state(), AI, table.bombardier));
 
+        let gated_by = |override_effect: Effect| {
+            let mut gated = removal.clone();
+            let mut instead = ResolvedAbility::new(override_effect, vec![], ObjectId(970), OPP);
+            instead.condition = Some(AbilityCondition::TargetHasKeywordInstead {
+                keyword: Keyword::Flying,
+            });
+            gated.sub_ability = Some(Box::new(instead));
+            gated
+        };
+
+        // The override may replace the destroy with a draw: not doomed.
         table.runner.state_mut().stack.clear();
-        let mut gated = removal;
-        let mut harmless = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-            vec![],
-            ObjectId(970),
-            OPP,
-        );
-        harmless.condition = Some(AbilityCondition::TargetHasKeywordInstead {
-            keyword: Keyword::Flying,
+        let harmless = gated_by(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
         });
-        gated.sub_ability = Some(Box::new(harmless));
-        push_entry(&mut table, 970, OPP, gated);
+        push_entry(&mut table, 970, OPP, harmless);
         assert!(!source_is_doomed(
             table.runner.state(),
             AI,
             table.bombardier
         ));
+
+        // The override bounces the same creature instead: removed either way.
+        table.runner.state_mut().stack.clear();
+        let also_removal = gated_by(Effect::Bounce {
+            target: TargetFilter::ParentTarget,
+            destination: None,
+            selection: Default::default(),
+        });
+        push_entry(&mut table, 970, OPP, also_removal);
+        assert!(source_is_doomed(table.runner.state(), AI, table.bombardier));
     }
 }

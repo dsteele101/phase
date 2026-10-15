@@ -1324,16 +1324,18 @@ fn put_counter_fizzles(
 ///   removal; a harmless or beneficial targeted effect dooms nothing.
 ///
 /// CR 608.2c: which of that spell's links will act is the engine's call —
-/// `known_resolution_links` follows the branch the paid casting choices
-/// already settle (a kicked Shivan Fire deals 4, not 2) and reports nothing
-/// past a condition that is only decided at resolution, so a link that might
-/// be skipped never counts as doom.
+/// `known_resolution_branches` follows the branch the paid casting choices
+/// already settle (a kicked Shivan Fire deals 4, not 2), forks where an
+/// "instead" override is decided only at resolution, and reports nothing past
+/// any other unsettled condition. The source is doomed only when the links
+/// aimed at it remove it in every branch, so a link that might be skipped or
+/// replaced never counts as doom.
 pub(crate) fn source_is_doomed(
     state: &GameState,
     ai_player: PlayerId,
     source_id: ObjectId,
 ) -> bool {
-    use engine::game::effects::resolution_preview::known_resolution_links;
+    use engine::game::effects::resolution_preview::known_resolution_branches;
     use engine::types::ability::TargetRef;
     if crate::combat_ai::creature_dies_in_current_combat(state, source_id) {
         return true;
@@ -1341,18 +1343,22 @@ pub(crate) fn source_is_doomed(
     state.stack.iter().any(|entry| {
         entry.controller != ai_player
             && entry.ability().is_some_and(|ability| {
-                // Only the links of the chain that target the source act on it.
-                let links = known_resolution_links(state, ability);
-                let aimed: Vec<&Effect> = links
+                known_resolution_branches(state, ability)
                     .iter()
-                    .filter(|link| {
-                        link.targets.iter().any(
-                            |target| matches!(target, TargetRef::Object(id) if *id == source_id),
-                        )
+                    .all(|links| {
+                        // Only the links of the branch that target the source
+                        // act on it.
+                        let aimed: Vec<&Effect> = links
+                            .iter()
+                            .filter(|link| {
+                                link.targets.iter().any(|target| {
+                                    matches!(target, TargetRef::Object(id) if *id == source_id)
+                                })
+                            })
+                            .map(|link| &link.effect)
+                            .collect();
+                        !aimed.is_empty() && effects_remove_creature(state, source_id, &aimed)
                     })
-                    .map(|link| &link.effect)
-                    .collect();
-                !aimed.is_empty() && effects_remove_creature(state, source_id, &aimed)
             })
     })
 }

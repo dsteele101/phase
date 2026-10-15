@@ -22,7 +22,8 @@
 
 use crate::game::ability_utils::apply_instead_swap;
 use crate::types::ability::{
-    AbilityCondition, Effect, ObjectScope, ResolvedAbility, SubAbilityLink, TargetSelectionMode,
+    AbilityCondition, Effect, ObjectScope, ResolvedAbility, SubAbilityLink, TargetChoiceTiming,
+    TargetSelectionMode,
 };
 use crate::types::game_state::GameState;
 
@@ -260,8 +261,9 @@ fn instead_override<'a>(
 
 /// Whether `link`'s effect can turn out other than as printed for reasons the
 /// preview does not model: a choice made at resolution (CR 608.2d — "you
-/// may", "unless", a random or per-player selection, a division), a repeat, an
-/// unimplemented effect, or a damage source rebound at resolution. The walk
+/// may", "unless", a random or per-player selection, a division, an optional
+/// or resolution-timed target choice), a repeat, an unimplemented effect, or a
+/// damage source rebound at resolution. The walk
 /// reports nothing from such a link onward.
 fn diverts(link: &ResolvedAbility) -> bool {
     link.optional
@@ -274,6 +276,10 @@ fn diverts(link: &ResolvedAbility) -> bool {
         || link.distribution.is_some()
         || link.distribute.is_some()
         || link.target_selection_mode == TargetSelectionMode::Random
+        // CR 601.2c + CR 608.2d: "up to" targets may be left unchosen, and a
+        // resolution-timed choice is made only while the effect resolves.
+        || link.optional_targeting
+        || link.target_choice_timing == TargetChoiceTiming::Resolution
         || matches!(
             link.effect,
             Effect::Unimplemented { .. }
@@ -317,6 +323,8 @@ fn else_hand_off(head: &ResolvedAbility, else_branch: &ResolvedAbility) -> Resol
 /// depends on something not yet settled (see [`known_condition_outcome`]) or
 /// whose effect can still be diverted at resolution. A link that is reported
 /// is therefore a fact; a link that is not reported may or may not happen.
+/// An unsettled "instead" override stops the walk before the head it may
+/// replace; [`known_resolution_branches`] follows both of its outcomes.
 pub fn known_resolution_links(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -324,28 +332,92 @@ pub fn known_resolution_links(
     let mut links = Vec::new();
     let mut next = Some(ability.clone());
     while let Some(head) = next.take() {
-        next = follow_head(state, head, &mut links);
+        match follow_head(state, head, &mut links) {
+            Step::Next(following) => next = following.map(|head| *head),
+            Step::Fork { .. } => break,
+        }
     }
     links
 }
 
+/// CR 608.2c + CR 614.15: one list of certain links per way the chain can
+/// still resolve. Where an "instead" override is not yet settled the chain
+/// forks — one branch with the override swapped in, one with the head it
+/// would replace — and each branch is walked on exactly as
+/// [`known_resolution_links`] walks the whole chain. With nothing to fork on
+/// there is a single branch, equal to [`known_resolution_links`].
+///
+/// A fact about the resolution holds only if it holds in every branch. The
+/// result is never empty.
+pub fn known_resolution_branches(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<Vec<ResolvedAbility>> {
+    let mut branches = Vec::new();
+    extend_branches(state, Some(ability.clone()), Vec::new(), &mut branches);
+    branches
+}
+
+fn extend_branches(
+    state: &GameState,
+    mut next: Option<ResolvedAbility>,
+    mut links: Vec<ResolvedAbility>,
+    branches: &mut Vec<Vec<ResolvedAbility>>,
+) {
+    while let Some(head) = next.take() {
+        match follow_head(state, head, &mut links) {
+            Step::Next(following) => next = following.map(|head| *head),
+            Step::Fork { swapped, kept } => {
+                let mut swapped_links = links.clone();
+                let after_swap = run_head(state, *swapped, &mut swapped_links);
+                extend_branches(state, after_swap, swapped_links, branches);
+                next = run_head(state, *kept, &mut links);
+            }
+        }
+    }
+    branches.push(links);
+}
+
+/// What follows one head of the walk.
+enum Step {
+    /// The chain continues determinately with this head, or ends.
+    Next(Option<Box<ResolvedAbility>>),
+    /// An unsettled "instead" override: the head resolves either as
+    /// `swapped` (the override applied) or as `kept` (it did not).
+    Fork {
+        swapped: Box<ResolvedAbility>,
+        kept: Box<ResolvedAbility>,
+    },
+}
+
 /// Resolves one head the way `resolve_chain_body` does — the "instead" swap
-/// before the head's own condition — pushing the links that will be followed
-/// and returning the next head, if the chain continues determinately.
-fn follow_head(
+/// before the head's own condition.
+fn follow_head(state: &GameState, head: ResolvedAbility, links: &mut Vec<ResolvedAbility>) -> Step {
+    // CR 614.15: an override settled to apply replaces the head before the
+    // head's own condition is considered; the swapped head carries no
+    // condition, and the override's own sub-ability continues the chain.
+    match instead_override(state, &head) {
+        Some((sub, ConditionOutcome::Holds)) => {
+            let swapped = apply_instead_swap(&head, sub);
+            Step::Next(run_head(state, swapped, links).map(Box::new))
+        }
+        Some((sub, ConditionOutcome::Undetermined)) => Step::Fork {
+            swapped: Box::new(apply_instead_swap(&head, sub)),
+            kept: Box::new(head),
+        },
+        Some((_, ConditionOutcome::Fails)) | None => {
+            Step::Next(run_head(state, head, links).map(Box::new))
+        }
+    }
+}
+
+/// A head whose override, if any, is decided: the shape guard, then its own
+/// condition. Pushes the head when it runs and returns the next head.
+fn run_head(
     state: &GameState,
     head: ResolvedAbility,
     links: &mut Vec<ResolvedAbility>,
 ) -> Option<ResolvedAbility> {
-    // CR 614.15: an override settled to apply replaces the head before the
-    // head's own condition is considered; the swapped head carries no
-    // condition, and the override's own sub-ability continues the chain.
-    // An unsettled override leaves even the head's effect unknown.
-    let head = match instead_override(state, &head) {
-        Some((sub, ConditionOutcome::Holds)) => apply_instead_swap(&head, sub),
-        Some((_, ConditionOutcome::Undetermined)) => return None,
-        Some((_, ConditionOutcome::Fails)) | None => head,
-    };
     if diverts(&head) {
         return None;
     }

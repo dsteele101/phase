@@ -16,13 +16,13 @@
 //! expected value is derived from the resolver arm named on the row.
 
 use engine::game::effects::resolution_preview::{
-    known_condition_outcome, known_resolution_links, ConditionOutcome,
+    known_condition_outcome, known_resolution_branches, known_resolution_links, ConditionOutcome,
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCondition, Comparator, DamageSource, Effect, MultiTargetSpec, ObjectScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
-    TargetSelectionMode, UnlessPayModifier,
+    QuantityExpr, QuantityRef, ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetRef, TargetSelectionMode, UnlessPayModifier,
 };
 use engine::types::ability::{AbilityCost, OpponentMayScope, PlayerScope};
 use engine::types::actions::GameAction;
@@ -479,23 +479,40 @@ fn from_father_to_son_cast_from_hand_previews_search_then_base_chain() {
         "reach guard: the override carries the base chain as its else branch"
     );
     let links = known_resolution_links(runner.state(), &ability);
-    assert!(
-        matches!(
-            links.first().map(|link| &link.effect),
-            Some(Effect::SearchLibrary { .. })
-        ),
-        "{links:?}"
+    // The full sequence is the search, then the override's else chain. The
+    // card data lowers that else chain as `ChangeZone { Library → Battlefield,
+    // target: Any }` followed by `ChangeZone { → Hand, TrackedSet }`: the first
+    // node is a parser artifact with no targets (it moves nothing — the
+    // resolution below ends with the Vehicle in hand), and the "Then shuffle."
+    // sibling is not run on this branch (the resolver's else path does not
+    // reach it; the search's own shuffle covers it). Asserted as the data
+    // actually yields it.
+    let override_sub = ability.sub_ability.as_deref().expect("the override");
+    let base_chain = override_sub.else_ability.as_deref().expect("base chain");
+    let base_tail = base_chain.sub_ability.as_deref().expect("base chain tail");
+    assert_eq!(
+        effects(&links),
+        vec![&ability.effect, &base_chain.effect, &base_tail.effect]
     );
+    assert!(matches!(links[0].effect, Effect::SearchLibrary { .. }));
     assert!(
         matches!(
-            links.last().map(|link| &link.effect),
-            Some(Effect::ChangeZone {
-                destination: Zone::Hand,
+            links[1].effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
                 ..
-            })
-        ),
-        "{links:?}"
+            }
+        ) && links[1].targets.is_empty(),
+        "the target-less artifact node: {links:?}"
     );
+    assert!(matches!(
+        links[2].effect,
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
 
     resolve(&mut runner);
     assert_eq!(runner.state().objects[&vehicle].zone, Zone::Hand);
@@ -743,6 +760,60 @@ fn unsettled_override_reports_nothing_settled_false_reports_the_root() {
     });
     let links = known_resolution_links(runner.state(), &settled_false);
     assert_eq!(effects(&links), vec![&destroy()]);
+}
+
+/// (7b) Engine-parity only — `known_resolution_branches` forks on the
+/// unsettled override: one branch with the override swapped in, one with the
+/// root kept. Removal in both branches is a fact about the resolution;
+/// removal in only one is not. The single certain view stays empty.
+#[test]
+fn unsettled_override_forks_into_swapped_and_kept_branches() {
+    let (runner, source, victim) = board();
+    let chain = |override_effect: Effect| {
+        with_sub(
+            link(destroy(), vec![TargetRef::Object(victim)], source),
+            link(override_effect, vec![], source),
+            Some(AbilityCondition::TargetHasKeywordInstead {
+                keyword: Keyword::Flying,
+            }),
+            SubAbilityLink::SequentialSibling,
+        )
+    };
+    let bounce = Effect::Bounce {
+        target: TargetFilter::ParentTarget,
+        destination: None,
+        selection: Default::default(),
+    };
+
+    let both_remove = chain(bounce.clone());
+    assert!(known_resolution_links(runner.state(), &both_remove).is_empty());
+    let branches = known_resolution_branches(runner.state(), &both_remove);
+    assert_eq!(branches.len(), 2, "{branches:?}");
+    assert_eq!(effects(&branches[0]), vec![&bounce], "swapped branch");
+    assert_eq!(effects(&branches[1]), vec![&destroy()], "kept branch");
+    for branch in &branches {
+        assert_eq!(object_targets(&branch[0]), vec![victim]);
+    }
+
+    let one_removes = chain(draw());
+    let branches = known_resolution_branches(runner.state(), &one_removes);
+    assert_eq!(
+        branches.iter().map(|b| effects(b)).collect::<Vec<_>>(),
+        vec![vec![&draw()], vec![&destroy()]]
+    );
+
+    // Reach guard: with nothing unsettled there is exactly one branch, the
+    // certain view.
+    let settled = with_sub(
+        link(destroy(), vec![TargetRef::Object(victim)], source),
+        link(draw(), vec![], source),
+        Some(AbilityCondition::AdditionalCostPaidInstead),
+        SubAbilityLink::SequentialSibling,
+    );
+    assert_eq!(
+        known_resolution_branches(runner.state(), &settled),
+        vec![known_resolution_links(runner.state(), &settled)]
+    );
 }
 
 /// (8) Engine-parity only — a plain sub gated on the board at resolution: the
@@ -1029,6 +1100,16 @@ fn diverting_heads_report_nothing() {
         ("distribute", {
             let mut head = base();
             head.distribute = Some(DistributionUnit::Damage);
+            head
+        }),
+        ("optional targeting", {
+            let mut head = base();
+            head.optional_targeting = true;
+            head
+        }),
+        ("resolution-timed target choice", {
+            let mut head = base();
+            head.target_choice_timing = TargetChoiceTiming::Resolution;
             head
         }),
         ("random selection", {
