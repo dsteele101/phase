@@ -29599,6 +29599,31 @@ impl AbilityCondition {
         }
     }
 
+    /// CR 207.2c + CR 601.2: Whether this condition is a spell-casting condition
+    /// (e.g. Addendum "if you cast this spell during your main phase", kicker,
+    /// alternative cost, mana spent).
+    ///
+    /// These conditions govern how or when the whole spell/ability was cast,
+    /// so they apply to the entire ability chain rather than creating an
+    /// intervening resolution-time alternative branch.
+    pub fn is_casting_condition(&self) -> bool {
+        match self {
+            AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::ManaColorSpent { .. } => true,
+            AbilityCondition::And { conditions } => {
+                conditions.iter().all(|c| c.is_casting_condition())
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_optional_effect_performed(&self) -> bool {
         matches!(
             self,
