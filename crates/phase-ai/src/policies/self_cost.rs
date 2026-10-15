@@ -283,7 +283,13 @@ pub(crate) fn plan_routes(
 ///
 /// `costs` is the prompt's payable-filtered branch list, so a route's
 /// provenance (`branch_index`, an index into the unfiltered list) is mapped by
-/// equality of the branch itself.
+/// equality of the branch itself. The prompt filters the printed branch list
+/// without deduplicating it (`payable_one_of_activation_branches`), so equal
+/// branches can both be offered; every route then maps to the first of them.
+/// That loses nothing: the engine settles a choice by the branch's value
+/// (`handle_activation_cost_one_of_choice` -> `resolve_first_one_of`), so equal
+/// branches are the same choice, and callers asking about a later twin look up
+/// the first one (see [`branch_is_dearer_than_payable_alternative`]).
 fn prompt_route_prices(
     state: &GameState,
     ai_player: PlayerId,
@@ -346,6 +352,13 @@ pub(crate) fn branch_is_dearer_than_payable_alternative(
     penalties: &PolicyPenalties,
 ) -> bool {
     let Some(kept) = prompt_route_prices(state, ai_player, pending, costs, penalties) else {
+        return false;
+    };
+    // Equal offered branches are one choice; routes are keyed by the first.
+    let Some(index) = costs
+        .get(index)
+        .and_then(|branch| costs.iter().position(|cost| cost == branch))
+    else {
         return false;
     };
     let Some(chosen) = kept

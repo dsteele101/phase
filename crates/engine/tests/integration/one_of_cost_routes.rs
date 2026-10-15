@@ -704,10 +704,58 @@ fn route_bound_counts_nested_choices() {
             graveyard: 0,
         },
     );
-    assert!(2 < MAX_COST_ROUTE_LEAVES, "the top level alone is in bound");
+    const { assert!(2 < MAX_COST_ROUTE_LEAVES, "the top level alone is in bound") };
     assert_eq!(
         payable_cost_routes(runner.state(), P0, source, &cost, Some(0)),
         Err(CostRouteBudgetExceeded)
+    );
+}
+
+fn mana_choice(branches: usize) -> AbilityCost {
+    one_of(vec![mana(1); branches])
+}
+
+/// Every settled cost reached counts toward the bound, payable or not. Three
+/// one-mana legs per settled cost: with three mana each settled cost is a
+/// route (the reach guard), with none no settled cost is. Exactly the cap of
+/// unpayable settled costs is an empty answer; one more set of branches is
+/// refused although none of them would be kept.
+#[test]
+fn route_bound_counts_unpayable_settled_costs() {
+    assert_eq!(
+        MAX_COST_ROUTE_LEAVES % 16,
+        0,
+        "fixture divides the cap into 4 x 4 x n"
+    );
+    let cost_with = |last: usize| all_of(vec![mana_choice(4), mana_choice(4), mana_choice(last)]);
+    let at_cap = cost_with(MAX_COST_ROUTE_LEAVES / 16);
+    let beyond = cost_with(MAX_COST_ROUTE_LEAVES / 16 + 1);
+    let spec = |mana| Spec {
+        mana,
+        life: 20,
+        own_food: false,
+        graveyard: 0,
+    };
+
+    let (runner, source) = board(&at_cap, spec(3));
+    assert_eq!(
+        payable_cost_routes(runner.state(), P0, source, &at_cap, Some(0))
+            .expect("exactly the cap is within the bound")
+            .len(),
+        MAX_COST_ROUTE_LEAVES,
+        "reach guard: with three mana every settled cost is a route"
+    );
+
+    let (runner, source) = board(&at_cap, spec(0));
+    assert_eq!(
+        payable_cost_routes(runner.state(), P0, source, &at_cap, Some(0)),
+        Ok(Vec::new()),
+        "the cap of unpayable settled costs is within the bound and keeps none"
+    );
+    assert_eq!(
+        payable_cost_routes(runner.state(), P0, source, &beyond, Some(0)),
+        Err(CostRouteBudgetExceeded),
+        "unpayable settled costs count toward the bound"
     );
 }
 

@@ -1499,6 +1499,32 @@ mod tests {
         );
     }
 
+    /// CR 118.3: equal branches are one choice. The prompt offers both copies
+    /// of a duplicated "sacrifice this" branch, and each is as dear as the
+    /// other — not only the first, which every route is keyed by.
+    #[test]
+    fn equal_offered_branches_share_one_verdict() {
+        let duplicated = AbilityCost::OneOf {
+            costs: vec![sacrifice_self(), sacrifice_self(), generic_mana(2)],
+        };
+        let (mut state, source) = scenario_with(activated(gain_life(1), duplicated), 2, 20);
+        activate_first_ability(&mut state, source);
+        let verdicts = branch_verdicts(&state);
+        assert_eq!(verdicts.len(), 3, "reach guard: both copies are offered");
+        let sacrifices: Vec<_> = verdicts
+            .iter()
+            .filter(|(branch, _)| *branch == sacrifice_self())
+            .collect();
+        assert_eq!(sacrifices.len(), 2);
+        for (_, verdict) in sacrifices {
+            assert_reject(verdict, "self_cost_branch_dearer");
+        }
+        assert_neutral(
+            &verdict_on(&verdicts, &generic_mana(2)),
+            "self_cost_branch_cheapest",
+        );
+    }
+
     /// CR 118.3: two branches whose cheapest routes price the same are a free
     /// choice — neither is dearer.
     #[test]
@@ -1679,8 +1705,7 @@ mod tests {
         );
     }
 
-    /// The prompt answer follows only routes an offered branch starts, and the
-    /// pending activation's ability index (even `None`) is passed through.
+    /// The prompt answer follows only routes an offered branch starts.
     #[test]
     fn prompt_answer_considers_only_offered_branches() {
         let penalties = AiConfig::default().policy_penalties;
@@ -1701,13 +1726,6 @@ mod tests {
             Some(life_index)
         );
 
-        let mut unindexed = (**pending_cast).clone();
-        unindexed.activation_ability_index = None;
-        assert_eq!(
-            cheapest_payable_branch_index(&state, AI, &unindexed, costs, &penalties),
-            Some(life_index)
-        );
-
         // The cheapest route's first branch is not offered: answer among the
         // offered branch's routes, and nothing offered is dearer than itself.
         let mana_only = [generic_mana(1)];
@@ -1723,6 +1741,75 @@ mod tests {
             0,
             &penalties,
         ));
+    }
+
+    /// CR 118.3: a granted ability whose only payable branch sacrifices the
+    /// object that granted it. The pending activation and offered branches come
+    /// from the real prompt; they are priced against the board the activation
+    /// was announced on, where the activation's index makes the granter known
+    /// and the sacrifice a route. The same pending activation with no index has
+    /// no route there, so a `None` index reaches the route query as `None` and
+    /// is never coerced to `Some(0)`.
+    ///
+    /// The board is the pre-activation one because at the prompt state itself
+    /// the engine's own submit check refuses this offered branch, so no route
+    /// exists there under either index.
+    #[test]
+    fn prompt_answer_passes_the_ability_index_through() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::identifiers::ObjectIncarnationRef;
+        let penalties = AiConfig::default().policy_penalties;
+        let sacrifice_granter = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::GrantingObject { bound: None },
+            1,
+        ));
+        let choice = AbilityCost::OneOf {
+            costs: vec![sacrifice_granter.clone(), generic_mana(3)],
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario
+            .add_creature(P0, "Host", 2, 2)
+            .with_ability_definition(activated(gain_life(1), choice))
+            .id();
+        let granter = scenario
+            .add_creature(P0, "Granting Relic", 1, 1)
+            .as_artifact()
+            .id();
+        let mut runner = scenario.build();
+        let stamp = ObjectIncarnationRef::from_object(&runner.state().objects[&granter]);
+        Arc::make_mut(&mut runner.state_mut().objects.get_mut(&host).unwrap().abilities)[0]
+            .granting_object = Some(stamp);
+        let board = runner.state().clone();
+        let mut prompt = board.clone();
+        activate_first_ability(&mut prompt, host);
+        let WaitingFor::ActivationCostOneOfChoice {
+            costs,
+            pending_cast,
+            ..
+        } = &prompt.waiting_for
+        else {
+            panic!("expected the branch prompt, got {:?}", prompt.waiting_for);
+        };
+        assert_eq!(
+            costs.as_slice(),
+            std::slice::from_ref(&sacrifice_granter),
+            "reach guard: with no mana only the granter sacrifice is offered"
+        );
+        assert_eq!(pending_cast.activation_ability_index, Some(0));
+        assert_eq!(
+            cheapest_payable_branch_index(&board, AI, pending_cast, costs, &penalties),
+            Some(0),
+            "with the ability's index the sacrifice starts a route"
+        );
+
+        let mut unindexed = (**pending_cast).clone();
+        unindexed.activation_ability_index = None;
+        assert_eq!(
+            cheapest_payable_branch_index(&board, AI, &unindexed, costs, &penalties),
+            None,
+            "without an index the granter is unknown and no route starts"
+        );
     }
 
     // --- Row 2: Fling-class dynamic damage NOT rejected -------------------

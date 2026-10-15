@@ -1663,7 +1663,10 @@ pub fn fallback_action(
             costs,
             &config.policy_penalties,
         )
-        .map(|index| GameAction::ChooseActivationCostBranch { index }),
+        .map(|index| GameAction::ChooseActivationCostBranch { index })
+        .or_else(|| {
+            issued(|action| matches!(action, GameAction::ChooseActivationCostBranch { .. }))
+        }),
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
