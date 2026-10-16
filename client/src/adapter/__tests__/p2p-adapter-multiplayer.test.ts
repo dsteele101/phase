@@ -8,9 +8,14 @@
  * not engine behavior (engine concede tests live in `crates/engine`).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import React from "react";
+import { act, cleanup, render } from "@testing-library/react";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
+import { ContestOverlay } from "../../components/contest/ContestOverlay";
+import { useContestStore } from "../../stores/contestStore";
+import { useGameStore } from "../../stores/gameStore";
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
 import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult } from "../types";
 import { PROTOCOL_VERSION, type WsAdapterEvent } from "../ws-adapter";
@@ -8280,6 +8285,116 @@ describe("P2PHostAdapter — contest input", () => {
             published.mock.calls.filter(([e]) => e.type === "terminalResult"),
           ).toHaveLength(1);
         } finally {
+          mocks.getState.mockImplementation(priorState!);
+          mocks.getViewerSnapshot.mockImplementation(priorViewer!);
+          consoleError.mockRestore();
+          adapter.dispose();
+        }
+      });
+
+      it("an Active/resume-Updated fixture: preserves host and guest inputs across repeated snapshot failures and later recovery", async () => {
+        const { adapter, guest } = await hostWithGuest();
+        const published = vi.fn();
+        adapter.onEvent(published);
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        const priorState = mocks.getState.getMockImplementation();
+        const priorViewer = mocks.getViewerSnapshot.getMockImplementation();
+        const originalSnapshot = mocks.getSnapshot.getMockImplementation()!;
+
+        // 1. Connectivity resume / clock advance produces an Updated snapshot while the contest
+        // remains Active. The host snapshot read fails, retaining the transition in the adapter.
+        mocks.driveContest.mockResolvedValueOnce({
+          step: "Updated",
+          events: [{ type: "ContestTick" } as never],
+          log_entries: [],
+          contest: RUNNING,
+        });
+        mocks.getSnapshot.mockRejectedValueOnce(new Error("snapshot failed 1"));
+
+        const firstResult = await adapter.driveContest(1_000, [], []);
+        expect(firstResult.published).toBe(true);
+        expect(retryArmed(adapter)).toBe(true);
+
+        // 2. Host clicks accumulate in the production contest store; guest clicks arrive over wire.
+        useContestStore.getState().reset();
+        const hostClick1 = { contest: 9, player: 0, seq: 1, at_ms: 1_020 };
+        useContestStore.getState().bufferClick(hostClick1);
+        await guest.simulateData({ type: "contest_click", contest: 9, seq: 1 });
+
+        // Mount the production overlay driving this adapter.
+        useGameStore.setState({
+          adapter,
+          gameMode: "ai",
+          gameSessionGeneration: 1,
+          waitingFor: {
+            type: "PhysicalContest",
+            data: {
+              contest: {
+                id: 9,
+                kind: "Staring",
+                phase: "Active",
+                config: {
+                  countdown_ms: 3000,
+                  inactivity_timeout_ms: 2000,
+                  reconnect_grace_ms: 10000,
+                  settle_window_ms: 150,
+                  max_active_ms: 300000,
+                },
+                contestants: [
+                  { player: 0, clicks: 0, last_activity_ms: 0, last_seq: null, connection: "Connected" },
+                  { player: 1, clicks: 0, last_activity_ms: 0, last_seq: null, connection: "Connected" },
+                ],
+                clock_ms: 1000,
+                go_at_ms: 1000,
+              },
+              source_id: 1,
+            },
+          },
+        });
+        render(React.createElement(ContestOverlay));
+
+        try {
+          // 3. Repeated snapshot failure 2: overlay ticks, attempts drive, settleOwedHostPublication fails,
+          // driveContest rejects, overlay restores hostClick1, guest click remains buffered in adapter.
+          mocks.getSnapshot.mockRejectedValueOnce(new Error("snapshot failed 2"));
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(60);
+          });
+          expect(useContestStore.getState().pendingClicks).toEqual([hostClick1]);
+
+          // 4. More clicks arrive while failing.
+          const hostClick2 = { contest: 9, player: 0, seq: 2, at_ms: 1_040 };
+          useContestStore.getState().bufferClick(hostClick2);
+          await guest.simulateData({ type: "contest_click", contest: 9, seq: 2 });
+
+          // 5. Repeated snapshot failure 3: overlay ticks again, throws again, restores both host clicks.
+          mocks.getSnapshot.mockRejectedValueOnce(new Error("snapshot failed 3"));
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(60);
+          });
+          expect(useContestStore.getState().pendingClicks).toEqual([hostClick1, hostClick2]);
+
+          // 6. Recovery: snapshot read succeeds.
+          mocks.getSnapshot.mockImplementation(originalSnapshot);
+          mocks.driveContest.mockClear();
+          mocks.driveContest.mockResolvedValueOnce(driveResult(RUNNING));
+
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(60);
+          });
+
+          // Overlay drained and forwarded host clicks; adapter drained guest clicks;
+          // all four clicks reached the engine without input loss!
+          expect(useContestStore.getState().pendingClicks).toEqual([]);
+          expect(mocks.driveContest).toHaveBeenCalledTimes(1);
+          const submittedClicks = mocks.driveContest.mock.calls[0][2] as Array<{ player: number; seq: number }>;
+          expect(submittedClicks).toHaveLength(4);
+          expect(submittedClicks.filter((c) => c.player === 0).map((c) => c.seq)).toEqual([1, 2]);
+          expect(submittedClicks.filter((c) => c.player === 1).map((c) => c.seq)).toEqual([1, 2]);
+        } finally {
+          cleanup();
+          useGameStore.setState({ waitingFor: null, adapter: null });
+          useContestStore.getState().reset();
           mocks.getState.mockImplementation(priorState!);
           mocks.getViewerSnapshot.mockImplementation(priorViewer!);
           consoleError.mockRestore();

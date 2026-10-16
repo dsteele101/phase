@@ -7909,11 +7909,7 @@ mod contest_restore_tests {
         let mut events = Vec::new();
         start_contest(&mut state, config, OLD_EPOCH_MS, &mut events);
         if phase_to_reach == "Active" {
-            advance_contest(
-                &mut state,
-                OLD_EPOCH_MS + config.countdown_ms,
-                &mut events,
-            );
+            advance_contest(&mut state, OLD_EPOCH_MS + config.countdown_ms, &mut events);
             let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
                 panic!("reach guard: still in the contest");
             };

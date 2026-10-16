@@ -2650,7 +2650,9 @@ export class P2PHostAdapter implements EngineAdapter {
     // A settled contest whose resolution never reached the host screen is delivered
     // (and its AI follow-up run) before the engine is driven any further: the
     // engine reports NotInContest from here on and cannot recreate its events.
-    if (!(await this.settleOwedHostPublication())) return idle;
+    if (!(await this.settleOwedHostPublication())) {
+      throw new Error("Contest drive paused: owed host publication could not settle");
+    }
     const awayPlayers = [...this.disconnectedSeats.keys()];
     const guestClicks = this.guestContestClicks.drain();
     const ordered = [...clicks, ...guestClicks].sort((a, b) => a.at_ms - b.at_ms);
@@ -2951,6 +2953,7 @@ export class P2PHostAdapter implements EngineAdapter {
       this.pendingHostTerminalEmit = result;
       return true;
     }
+    if (!this.hostPublicationOwed()) this.disarmHostPublicationRetry();
     this.emit({ type: "terminalResult", result });
     return true;
   }
@@ -3352,6 +3355,7 @@ export class P2PHostAdapter implements EngineAdapter {
       await this.runAiLoop();
       void this.persistAuthoritativeState();
     }
+    if (!this.hostPublicationOwed()) this.disarmHostPublicationRetry();
     return true;
   }
 

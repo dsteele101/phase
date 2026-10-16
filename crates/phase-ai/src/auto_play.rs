@@ -291,6 +291,39 @@ pub fn run_ai_actions_bounded_headless(
     )
 }
 
+/// Settles any pending physical contest between AI seats when running under headless
+/// hosting. Host settlements are counted apart from AI actions. Returns `Ok(true)` if
+/// at least one contest settled, `Ok(false)` if no contest was present or if a contestant
+/// is human (so host settlement must not run), and `Err(())` if settlements hit the safety cap.
+fn settle_headless_host_contests(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    contest_hosting: ContestHosting,
+    settlements: &mut usize,
+    rng: &mut impl Rng,
+) -> Result<bool, ()> {
+    if contest_hosting != ContestHosting::Headless {
+        return Ok(false);
+    }
+    let mut settled_any = false;
+    while matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }) {
+        if *settlements >= MAX_HOST_SETTLEMENTS_PER_SEQUENCE {
+            tracing::warn!(
+                count = *settlements,
+                "AI action loop hit host settlement cap — possible infinite loop"
+            );
+            return Err(());
+        }
+        if !crate::contest::settle_headless_contest(state, ai_players, rng) {
+            // A human contestant's contest is not this host's to play.
+            break;
+        }
+        *settlements += 1;
+        settled_any = true;
+    }
+    Ok(settled_any)
+}
+
 fn run_ai_actions_with_limit(
     state: &mut GameState,
     ai_players: &HashSet<PlayerId>,
@@ -322,14 +355,21 @@ fn run_ai_actions_with_limit(
         let Some((semantic_owner, actor)) = decision else {
             // A contest between AI seats has no actor, but a headless host has no clock
             // or input to settle it with: play it out here and carry on.
-            if contest_hosting == ContestHosting::Headless {
-                if settlements >= MAX_HOST_SETTLEMENTS_PER_SEQUENCE
-                    && matches!(state.waiting_for, WaitingFor::PhysicalContest { .. })
-                {
-                    tracing::warn!(
-                        count = settlements,
-                        "AI action loop hit host settlement cap — possible infinite loop"
-                    );
+            match settle_headless_host_contests(
+                state,
+                ai_players,
+                contest_hosting,
+                &mut settlements,
+                rng,
+            ) {
+                Ok(true) => continue,
+                Ok(false) => {
+                    return AiActionsRun {
+                        results,
+                        stop: AiActionsStop::NoEligibleAiActor,
+                    };
+                }
+                Err(()) => {
                     return AiActionsRun {
                         results,
                         stop: AiActionsStop::ActionSafetyCapReached {
@@ -337,15 +377,7 @@ fn run_ai_actions_with_limit(
                         },
                     };
                 }
-                if crate::contest::settle_headless_contest(state, ai_players, rng) {
-                    settlements += 1;
-                    continue;
-                }
             }
-            return AiActionsRun {
-                results,
-                stop: AiActionsStop::NoEligibleAiActor,
-            };
         };
 
         let config = match ai_configs.get(&actor) {
@@ -433,6 +465,20 @@ fn run_ai_actions_with_limit(
                 };
             }
         }
+    }
+
+    // The budget counts applied AI actions only; host settlements are counted apart.
+    // When the final budgeted AI action creates an all-AI contest, settle it now so
+    // headless play does not hand off an unfinished contest as terminal NoEligibleAiActor.
+    if let Err(()) =
+        settle_headless_host_contests(state, ai_players, contest_hosting, &mut settlements, rng)
+    {
+        return AiActionsRun {
+            results,
+            stop: AiActionsStop::ActionSafetyCapReached {
+                limit: MAX_HOST_SETTLEMENTS_PER_SEQUENCE,
+            },
+        };
     }
 
     if action_limit.is_safety_cap() {

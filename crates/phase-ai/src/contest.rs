@@ -332,6 +332,7 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::actions::GameAction;
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
 
@@ -360,6 +361,28 @@ mod tests {
             ),
             "reach guard: the cast must have parked the game on the contest"
         );
+        (runner.state().clone(), victim)
+    }
+
+    /// A game where Eye to Eye is on the stack and P1 has priority to pass and resolve it.
+    fn cast_on_stack_awaiting_resolution() -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut runner = scenario.build();
+        let _commit = runner.cast(spell).target_objects(&[victim]).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player } if player == P1
+            ),
+            "reach guard: P1 must have priority with the spell on the stack"
+        );
+        assert_eq!(runner.state().stack.len(), 1, "spell must be on the stack");
         (runner.state().clone(), victim)
     }
 
@@ -507,6 +530,83 @@ mod tests {
         );
 
         assert!(run.is_empty());
+        assert!(matches!(run.stop, AiActionsStop::NoEligibleAiActor));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::PhysicalContest { .. }
+        ));
+    }
+
+    /// When the final budgeted AI action creates a contest, host settlement runs and
+    /// the batch reports `ActionBudgetReached` rather than terminal `NoEligibleAiActor`.
+    #[test]
+    fn a_contest_created_by_the_final_budgeted_action_settles_and_continues_batch() {
+        let (mut state, victim) = cast_on_stack_awaiting_resolution();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let run = run_ai_actions_bounded_headless(
+            &mut state,
+            &seats(&[P0, P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            1,
+        );
+
+        assert_eq!(run.len(), 1, "P1's resolving pass must be recorded");
+        assert!(
+            matches!(run.stop, AiActionsStop::ActionBudgetReached { limit: 1 }),
+            "expected ActionBudgetReached, got {:?}",
+            run.stop
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }),
+            "the contest must have settled"
+        );
+        let zone = state.objects[&victim].zone;
+        assert!(zone == Zone::Graveyard || zone == Zone::Battlefield);
+    }
+
+    /// A duel capped at two actions takes the resolving pass, settles the resulting contest,
+    /// and proceeds to take its second action rather than breaking out on `NoEligibleAiActor`.
+    #[test]
+    fn a_contest_created_by_the_final_budgeted_action_continues_the_duel() {
+        let (mut state, _) = cast_on_stack_awaiting_resolution();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let outcome = run_driver_loop(
+            &mut state,
+            &seats(&[P0, P1]),
+            &configs(),
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            2,
+            &mut |_, _, _| {},
+        );
+
+        assert_eq!(outcome.total_actions, 2);
+        assert!(matches!(outcome.exit, DriverExit::CapReached));
+    }
+
+    /// When the final budgeted action creates a contest involving a human player,
+    /// host settlement does not run and the batch hands off to the human via `NoEligibleAiActor`.
+    #[test]
+    fn a_contest_created_by_the_final_budgeted_action_hands_off_to_a_human() {
+        let (mut state, _) = cast_on_stack_awaiting_resolution();
+        let session: Arc<AiSession> = AiSession::arc_from_game(&state);
+
+        let mut p1_configs = configs();
+        p1_configs.remove(&P0);
+        let run = run_ai_actions_bounded_headless(
+            &mut state,
+            &seats(&[P1]),
+            &p1_configs,
+            &mut StdRng::seed_from_u64(3),
+            &session,
+            1,
+        );
+
+        assert_eq!(run.len(), 1, "P1's resolving pass was applied");
         assert!(matches!(run.stop, AiActionsStop::NoEligibleAiActor));
         assert!(matches!(
             state.waiting_for,

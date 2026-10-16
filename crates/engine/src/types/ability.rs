@@ -23049,6 +23049,7 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            | Effect::PhysicalContest { .. }
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
         }
     }
