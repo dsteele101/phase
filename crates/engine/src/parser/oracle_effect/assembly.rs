@@ -3652,40 +3652,40 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 .to_lowercase();
             // CR 608.2c: a plural subject anaphor ("those creatures") names the
             // population of the clause immediately before it — written order,
-            // not a search of older history. `previous_clause_start` bounds that
-            // antecedent to the defs the previous clause emitted.
+            // not a search of older history. `AntecedentSelector::LastEmitted`
+            // binds that antecedent through `AssemblyEnv::resolve`.
             if starts_with_plural_subject_anaphor(&source_text_lower) {
-                let previous_clause = &defs[previous_clause_start.min(defs.len())..];
-                if let Some(population) = chain_nodes(previous_clause)
-                    .find_map(|def| radiance_fanout_population(&def.effect))
+                if let Some(bound_index) =
+                    env.resolve(&defs, AntecedentSelector::LastEmitted, None, OnMiss::Ignore)
                 {
-                    // CR 207.2c: after a Radiance fan-out, "those creatures" is
-                    // the target AND every other object the fan-out reached, so
-                    // the rider fans out over the same population.
-                    let fanout_riders: Vec<AbilityDefinition> = current_defs
-                        .iter()
-                        .filter_map(|current| radiance_fanout_rider(current, population))
-                        .collect();
-                    current_defs.extend(fanout_riders);
-                } else if chain_nodes(previous_clause)
-                    .any(|def| mass_tap_state_population(&def.effect))
-                {
-                    // CR 608.2c: the antecedent is a mass tap/untap population
-                    // that no `ParentTarget` binding can represent. Pumping only
-                    // the chosen target would silently name the wrong creatures,
-                    // so the rider fails closed.
-                    for current in &mut current_defs {
-                        if matches!(
-                            &*current.effect,
-                            Effect::Pump {
-                                target: TargetFilter::ParentTarget,
-                                ..
+                    let antecedent = &defs[bound_index];
+                    if let Some(population) = radiance_fanout_population(&antecedent.effect) {
+                        // CR 207.2c: after a Radiance fan-out, "those creatures" is
+                        // the target AND every other object the fan-out reached, so
+                        // the rider fans out over the same population.
+                        let fanout_riders: Vec<AbilityDefinition> = current_defs
+                            .iter()
+                            .filter_map(|current| radiance_fanout_rider(current, population))
+                            .collect();
+                        current_defs.extend(fanout_riders);
+                    } else if mass_tap_state_population(&antecedent.effect) {
+                        // CR 608.2c: the antecedent is a mass tap/untap population
+                        // that no `ParentTarget` binding can represent. Pumping only
+                        // the chosen target would silently name the wrong creatures,
+                        // so the rider fails closed.
+                        for current in &mut current_defs {
+                            if matches!(
+                                &*current.effect,
+                                Effect::Pump {
+                                    target: TargetFilter::ParentTarget,
+                                    ..
+                                }
+                            ) {
+                                *current.effect = Effect::unimplemented(
+                                    "plural_rider_after_mass_tap_population",
+                                    clause_ir.source.fragment().unwrap_or_default(),
+                                );
                             }
-                        ) {
-                            *current.effect = Effect::unimplemented(
-                                "plural_rider_after_mass_tap_population",
-                                clause_ir.source.fragment().unwrap_or_default(),
-                            );
                         }
                     }
                 }
