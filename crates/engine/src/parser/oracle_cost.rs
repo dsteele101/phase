@@ -1443,24 +1443,34 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal a [Type] card from/in your hand" — reveal from hand with type filter.
+    // CR 701.20a: "Reveal <filter> from/in your hand" — reveal from hand with type filter.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        let split_res = split_once_on(&rest_lower, "from your hand")
-            .or_else(|_| split_once_on(&rest_lower, "in your hand"));
-        if let Ok((_, (before, _))) = split_res {
-            let filter_raw = before.trim();
-            let filter_raw = strip_article(filter_raw, filter_raw);
-            let filter_raw = filter_raw
-                .strip_suffix(" card")
-                .or_else(|| filter_raw.strip_suffix(" cards"))
-                .unwrap_or(filter_raw)
-                .trim();
-            let (filter, _) = parse_target(&format!("target {filter_raw}"));
-            return AbilityCost::Reveal {
-                count: 1,
-                filter: Some(filter),
-            };
+        type E<'a> = super::oracle_nom::error::OracleError<'a>;
+        let res: Result<(&str, &str), _> = alt((
+            take_until::<_, _, E<'_>>(" from your hand"),
+            take_until(" in your hand"),
+        ))
+        .parse(&rest_lower);
+        if let Ok((rem, before)) = res {
+            let tail_matched = alt((tag::<_, _, E<'_>>(" from your hand"), tag(" in your hand")))
+                .parse(rem)
+                .is_ok();
+            if tail_matched {
+                let filter_raw = before.trim();
+                let (count, filter_text) = if let Some((n, rem)) = parse_number(filter_raw) {
+                    (n, rem.trim())
+                } else {
+                    (1, strip_article(filter_raw, filter_raw).trim())
+                };
+                let (filter, remainder) = parse_type_phrase_folding(filter_text);
+                if remainder.trim().is_empty() {
+                    return AbilityCost::Reveal {
+                        count,
+                        filter: Some(filter),
+                    };
+                }
+            }
         }
     }
 
@@ -4666,6 +4676,21 @@ mod tests {
             AbilityCost::Reveal {
                 count: 1,
                 filter: None
+            }
+        );
+    }
+
+    #[test]
+    fn cost_reveal_black_card_from_hand() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a black card in your hand"),
+            AbilityCost::Reveal {
+                count: 1,
+                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Black
+                    }
+                ])))
             }
         );
     }

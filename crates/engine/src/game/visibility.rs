@@ -2777,6 +2777,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         if !can_view_private_for_player(player) {
             // CR 400.2: redacted `choices` for the viewer, computed per `kind`.
             let redacted: Option<Vec<ObjectId>> = match kind {
+                // CR 400.2: Reveal / Discard candidate sets leak private hand contents
+                // (e.g. which cards match a required color or type, and how many matching
+                // cards are in hand). Drop candidate IDs and candidate set cardinality entirely
+                // for viewers without private access, preserving public required count metadata.
+                PayCostKind::Reveal | PayCostKind::Discard => Some(vec![]),
                 // Hand-pitch exile cost (Force of Will family): hand is hidden,
                 // so opaque every choice. Graveyard exile is public — no redaction.
                 PayCostKind::ExileFromZone {

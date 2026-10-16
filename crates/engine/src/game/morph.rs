@@ -481,9 +481,12 @@ pub(crate) fn turn_face_up_prepare(
             Keyword::Morph(crate::types::keywords::MorphCost::Mana(c)) => {
                 Some((TurnUpCostSource::Morph, TurnFaceUpCost::Mana(c.clone())))
             }
-            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(c)) => {
-                Some((TurnUpCostSource::Morph, TurnFaceUpCost::NonMana(c.clone())))
-            }
+            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(c)) => match c {
+                AbilityCost::Mana { cost } => {
+                    Some((TurnUpCostSource::Morph, TurnFaceUpCost::Mana(cost.clone())))
+                }
+                _ => Some((TurnUpCostSource::Morph, TurnFaceUpCost::NonMana(c.clone()))),
+            },
             Keyword::Megamorph(c) => {
                 Some((TurnUpCostSource::Megamorph, TurnFaceUpCost::Mana(c.clone())))
             }

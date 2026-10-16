@@ -145,8 +145,33 @@ pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
         | AbilityCost::Reveal { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Mana { .. } => true,
-        AbilityCost::Composite { .. } => false,
-        _ => false,
+        AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => false,
     }
 }
 
@@ -5773,6 +5798,7 @@ mod tests {
             Keyword::CommanderNinjutsu(mc("{2}{R}")),
             Keyword::Prowl(mc("{2}{R}")),
             Keyword::morph(mc("{2}{R}")),
+            Keyword::morph(pay_life_cost()),
             Keyword::Megamorph(mc("{2}{R}")),
             Keyword::Mayhem(mc("{2}{R}")),
             Keyword::Madness(mc("{2}{R}")),

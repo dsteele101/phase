@@ -5,7 +5,7 @@
 //! "Morph—Return two Islands you control to their owner's hand.
 //! When this creature is turned face up, draw two cards."
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::game_state::{AlternativeCastKeyword, CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaUnit};
@@ -1213,10 +1213,37 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     );
 
     // Submit SelectCards with the two Mountains
-    let res = runner.act(GameAction::SelectCards {
+    let res1 = runner.act(GameAction::SelectCards {
         cards: vec![mountain1, mountain2],
     });
-    assert!(res.is_ok(), "SelectCards must succeed: {:?}", res.err());
+    assert!(res1.is_ok(), "SelectCards must succeed: {:?}", res1.err());
+    let res1 = res1.unwrap();
+    // CR 701.21a + CR 603.2: First mountain moved to graveyard; its delivery tail
+    // paused on an ordinary child prompt. PermanentSacrificed must be emitted so
+    // sacrifice observers trigger.
+    let sac_events1: Vec<_> = res1
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                engine::types::events::GameEvent::PermanentSacrificed { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        sac_events1.len(),
+        1,
+        "must emit exactly one PermanentSacrificed when first mountain moves, got {:?}",
+        sac_events1
+    );
+    assert_eq!(
+        sac_events1[0],
+        &engine::types::events::GameEvent::PermanentSacrificed {
+            object_id: mountain1,
+            player_id: P0,
+        }
+    );
 
     // First mountain moved to graveyard; its delivery tail paused on NamedChoice (not clobbered by replacement_choice)
     assert_eq!(runner.state().objects[&mountain1].zone, Zone::Graveyard);
@@ -1248,13 +1275,39 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     );
 
     // Answer first child prompt
-    let res = runner.act(GameAction::ChooseOption {
+    let res2 = runner.act(GameAction::ChooseOption {
         choice: "Odd".to_string(),
     });
     assert!(
-        res.is_ok(),
+        res2.is_ok(),
         "first ChooseOption must succeed: {:?}",
-        res.err()
+        res2.err()
+    );
+    let res2 = res2.unwrap();
+    // CR 701.21a + CR 603.2: Second mountain moved to graveyard; its delivery tail
+    // paused on the second child prompt. Exactly one PermanentSacrificed must be emitted.
+    let sac_events2: Vec<_> = res2
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                engine::types::events::GameEvent::PermanentSacrificed { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        sac_events2.len(),
+        1,
+        "must emit exactly one PermanentSacrificed when second mountain moves, got {:?}",
+        sac_events2
+    );
+    assert_eq!(
+        sac_events2[0],
+        &engine::types::events::GameEvent::PermanentSacrificed {
+            object_id: mountain2,
+            player_id: P0,
+        }
     );
 
     // Second mountain moved to graveyard; its delivery tail paused on second NamedChoice
@@ -1286,13 +1339,30 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     );
 
     // Answer second child prompt
-    let res = runner.act(GameAction::ChooseOption {
+    let res3 = runner.act(GameAction::ChooseOption {
         choice: "Even".to_string(),
     });
     assert!(
-        res.is_ok(),
+        res3.is_ok(),
         "second ChooseOption must succeed: {:?}",
-        res.err()
+        res3.err()
+    );
+    let res3 = res3.unwrap();
+    let sac_events3: Vec<_> = res3
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                engine::types::events::GameEvent::PermanentSacrificed { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        sac_events3.len(),
+        0,
+        "no sacrifice events on final child drain, got {:?}",
+        sac_events3
     );
 
     // Exactly one flip: permanent is turned face up
@@ -1310,5 +1380,397 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "state must settle at Priority, got {:?}",
         runner.state().waiting_for
+    );
+}
+
+fn cast_face_down(
+    runner: &mut engine::game::scenario::GameRunner,
+    object_id: engine::types::ObjectId,
+) {
+    let card_id = runner.state().objects[&object_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&object_id].face_down);
+}
+
+// CR 116.2b + CR 601.2h + CR 602.2b + CR 702.37e: Turning face up is a special
+// action, not casting a spell or activating an ability. Prohibitions on paying
+// life or sacrificing permanents to cast spells or activate abilities (such as
+// Yasharn, Implacable Earth) do not prevent turning face down creatures face up.
+#[test]
+fn turn_face_up_life_and_sacrifice_costs_permitted_under_yasharn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Yasharn on battlefield controlled by P1:
+    // "Players can't pay life or sacrifice nonland permanents to cast spells or activate abilities."
+    scenario.add_creature_from_oracle(
+        P1,
+        "Yasharn, Implacable Earth",
+        4,
+        4,
+        "When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.",
+    );
+
+    // Zombie Cutthroat in hand
+    let cutthroat = scenario
+        .add_creature_to_hand(P0, "Zombie Cutthroat", 3, 4)
+        .from_oracle_text("Morph—Pay 5 life.")
+        .id();
+
+    // Skirk Volcanist in hand: "Morph—Sacrifice two Mountains."
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .id();
+
+    // Two Mountains on battlefield for P0
+    let mountain1 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mountain2 = scenario.add_basic_land(P0, ManaColor::Red);
+
+    // 6 colorless mana for P0 to cast cutthroat and volcanist face down
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                cutthroat,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                cutthroat,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                cutthroat,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    cast_face_down(&mut runner, cutthroat);
+    cast_face_down(&mut runner, volcanist);
+
+    // 1. Turning Zombie Cutthroat face up by paying 5 life is legal under Yasharn
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: cutthroat,
+        x: 0,
+    });
+    assert!(
+        res.is_ok(),
+        "turn face up paying life under Yasharn must succeed: {:?}",
+        res.err()
+    );
+    assert!(!runner.state().objects[&cutthroat].face_down);
+    assert_eq!(runner.state().players[P0.0 as usize].life, 15);
+
+    // 2. Turning Skirk Volcanist face up by sacrificing two Mountains is legal under Yasharn
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: volcanist,
+        x: 0,
+    });
+    assert!(
+        res.is_ok(),
+        "turn face up initiating sacrifice must succeed: {:?}",
+        res.err()
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ..
+        }
+    ));
+
+    let res = runner.act(GameAction::SelectCards {
+        cards: vec![mountain1, mountain2],
+    });
+    assert!(
+        res.is_ok(),
+        "sacrificing mountains under Yasharn must succeed: {:?}",
+        res.err()
+    );
+    assert!(!runner.state().objects[&volcanist].face_down);
+    assert_eq!(runner.state().objects[&mountain1].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Graveyard);
+}
+
+// CR 702.37e: MorphCost::NonMana(AbilityCost::Mana { cost }) normalizes to
+// TurnFaceUpCost::Mana in turn_face_up_prepare, routing through the standard
+// turn-face-up mana payment pipeline.
+#[test]
+fn turn_face_up_normalizes_non_mana_mana_cost_and_pays_via_special_action() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let morph_creature = scenario
+        .add_creature_to_hand(P0, "Mana Morph Creature", 2, 2)
+        .from_oracle_text("Morph—Pay 5 life.")
+        .id();
+
+    // 3 colorless mana to cast face down, plus 2 colorless to turn face up
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                morph_creature,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                morph_creature,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                morph_creature,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                morph_creature,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                morph_creature,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    cast_face_down(&mut runner, morph_creature);
+
+    // Directly attach MorphCost::NonMana(AbilityCost::Mana { cost: {2} }) to verify normalization
+    let two_mana = ManaCost::Cost {
+        generic: 2,
+        shards: vec![],
+    };
+    let obj = runner.state_mut().objects.get_mut(&morph_creature).unwrap();
+    let back_face = obj.back_face.as_mut().expect("back_face exists");
+    back_face.keywords = vec![engine::types::keywords::Keyword::Morph(
+        engine::types::keywords::MorphCost::NonMana(engine::types::ability::AbilityCost::Mana {
+            cost: two_mana,
+        }),
+    )];
+
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: morph_creature,
+        x: 0,
+    });
+    assert!(
+        res.is_ok(),
+        "TurnFaceUp with normalized NonMana(AbilityCost::Mana) must succeed: {:?}",
+        res.err()
+    );
+    assert!(
+        !runner.state().objects[&morph_creature].face_down,
+        "permanent must be face up after paying normalized mana cost"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "mana pool must be consumed"
+    );
+}
+
+// CR 400.2: Hand candidate sets for Reveal and Discard morph payments leak private
+// hand contents (which cards and how many match the required property). The viewer
+// filter redacts choices to empty for viewers without private access, preserving public
+// required-count metadata.
+#[test]
+fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spectator() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Ruthless Ripper: "Morph—Reveal a black card in your hand."
+    let ripper = scenario
+        .add_creature_to_hand(P0, "Ruthless Ripper", 1, 1)
+        .from_oracle_text(
+            "Deathtouch\nMorph—Reveal a black card in your hand.\nWhen this creature is turned face up, target player loses 2 life if you cast it this turn.",
+        )
+        .id();
+
+    // P0 hand: 1 black creature, 1 white card
+    let black_card = scenario
+        .add_creature_to_hand(P0, "Black Card", 1, 1)
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let _white_card = scenario
+        .add_creature_to_hand(P0, "White Card", 1, 1)
+        .with_color(vec![ManaColor::White])
+        .id();
+
+    // 3 colorless mana to cast face down
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ripper,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ripper,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ripper,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    cast_face_down(&mut runner, ripper);
+
+    // P0 initiates TurnFaceUp
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: ripper,
+        x: 0,
+    });
+    assert!(
+        res.is_ok(),
+        "initiating reveal payment must succeed: {:?}",
+        res.err()
+    );
+
+    // In raw game state, choices contain black_card but not white_card
+    let raw_waiting = &runner.state().waiting_for;
+    assert!(
+        matches!(
+            raw_waiting,
+            WaitingFor::PayCost {
+                player: P0,
+                kind: PayCostKind::Reveal,
+                count: 1,
+                ..
+            }
+        ),
+        "raw state must be waiting for PayCost::Reveal, got {:?}",
+        raw_waiting
+    );
+    if let WaitingFor::PayCost { choices, count, .. } = raw_waiting {
+        assert_eq!(*count, 1);
+        assert_eq!(choices, &vec![black_card]);
+    }
+
+    // Filter for actor (P0) -> choices are preserved
+    let p0_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    if let WaitingFor::PayCost { choices, count, .. } = &p0_view.waiting_for {
+        assert_eq!(*count, 1, "P0 must see required count");
+        assert_eq!(
+            choices,
+            &vec![black_card],
+            "P0 must see their eligible black card"
+        );
+    } else {
+        panic!("P0 view must be WaitingFor::PayCost");
+    }
+
+    // Filter for opponent (P1) -> choices are redacted to empty, count is preserved
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    if let WaitingFor::PayCost { choices, count, .. } = &p1_view.waiting_for {
+        assert_eq!(*count, 1, "P1 must see public required count");
+        assert!(
+            choices.is_empty(),
+            "P1 must not see private candidate IDs or set cardinality, got {:?}",
+            choices
+        );
+    } else {
+        panic!("P1 view must be WaitingFor::PayCost");
+    }
+
+    // Filter for spectator (unseated) -> choices are redacted to empty, count is preserved
+    let spectator_view = engine::game::visibility::filter_state_for_unseated_viewer(runner.state());
+    if let WaitingFor::PayCost { choices, count, .. } = &spectator_view.waiting_for {
+        assert_eq!(*count, 1, "Spectator must see public required count");
+        assert!(
+            choices.is_empty(),
+            "Spectator must not see private candidate IDs or set cardinality, got {:?}",
+            choices
+        );
+    } else {
+        panic!("Spectator view must be WaitingFor::PayCost");
+    }
+
+    // P0 selects the black card to complete the payment
+    let res = runner.act(GameAction::SelectCards {
+        cards: vec![black_card],
+    });
+    assert!(res.is_ok(), "SelectCards must succeed: {:?}", res.err());
+    let res = res.unwrap();
+
+    // Verify public CardsRevealed event is emitted with the selected card
+    let revealed = res.events.iter().any(|e| {
+        matches!(
+            e,
+            engine::types::events::GameEvent::CardsRevealed {
+                card_ids,
+                card_names,
+                ..
+            } if card_ids.contains(&black_card) && card_names.contains(&"Black Card".to_string())
+        )
+    });
+    assert!(
+        revealed,
+        "public CardsRevealed event must be emitted for the chosen card"
+    );
+    assert!(
+        !runner.state().objects[&ripper].face_down,
+        "ripper must be turned face up"
     );
 }

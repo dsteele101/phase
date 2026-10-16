@@ -959,27 +959,10 @@ fn pay_ability_cost_inner(
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
-            PaymentScope::TurnFaceUp {
-                object_id,
-                cost_source,
-            } => {
-                let payment = super::morph::pay_turn_face_up_cost(
-                    state,
-                    player,
-                    *object_id,
-                    cost,
-                    *cost_source,
-                    None,
-                    events,
-                )?;
-                match payment {
-                    super::casting::SpecialActionManaPayment::Paid => {}
-                    super::casting::SpecialActionManaPayment::Paused => {
-                        return Ok(PaymentOutcome::Paused {
-                            remaining_cost: None,
-                        });
-                    }
-                }
+            PaymentScope::TurnFaceUp { .. } => {
+                unreachable!(
+                    "TurnFaceUp mana costs are normalized to TurnFaceUpCost::Mana in turn_face_up_prepare"
+                )
             }
         },
         // CR 118.4 + CR 107.3c: Dynamic-generic mana. At activation it should
@@ -1116,9 +1099,9 @@ fn pay_ability_cost_inner(
             {
                 // CR 614.6 + CR 616.1: Capture depth BEFORE calling helper (C4)
                 let resume_at_resolution_depth = state.resolution_stack.len();
-                let result = super::life_costs::pay_life_as_cast_or_activation_cost(
-                    state, player, amount, events,
-                );
+                // CR 116.2b + CR 702.37e: Turning face up is a special action, not a
+                // cast or activation, so cast/activation-only prohibitions do not apply.
+                let result = super::life_costs::pay_life_as_cost(state, player, amount, events);
                 return match result {
                     super::life_costs::PayLifeCostResult::Paid { .. } => Ok(PaymentOutcome::Paid),
                     super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution { .. }
@@ -1180,12 +1163,13 @@ fn pay_ability_cost_inner(
                     ));
                 }
                 let count = cost.requirement.fixed_count().unwrap_or(1) as usize;
-                let eligible = super::casting::find_eligible_sacrifice_targets(
+                let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
                     state,
                     player,
                     *object_id,
                     None,
                     &cost.target,
+                    Some(scope),
                 );
                 if eligible.len() < count {
                     return Ok(payment_failed("Not enough eligible permanents to sacrifice"));
@@ -2428,19 +2412,23 @@ pub(crate) fn can_pay_turn_face_up(
         }
         AbilityCost::PayLife { amount } => {
             let amount_num = resolve_quantity(state, amount, payer, object_id).max(0) as u32;
-            super::life_costs::can_pay_life_cast_or_activation_cost(state, payer, amount_num)
+            super::life_costs::can_pay_life_cost(state, payer, amount_num)
         }
         AbilityCost::Sacrifice(cost) => {
             if matches!(cost.target, TargetFilter::SelfRef) {
                 return false;
             }
             let count = cost.requirement.fixed_count().unwrap_or(1) as usize;
-            let eligible = super::casting::find_eligible_sacrifice_targets(
+            let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
                 state,
                 payer,
                 object_id,
                 None,
                 &cost.target,
+                Some(&PaymentScope::TurnFaceUp {
+                    object_id,
+                    cost_source: TurnUpCostSource::Morph,
+                }),
             );
             eligible.len() >= count
         }
@@ -2462,43 +2450,9 @@ pub(crate) fn can_pay_turn_face_up(
 }
 
 /// CR 702.37e: Supported cost shapes for turn-face-up special actions.
-/// Exhaustive match with no wildcard.
+/// Delegates to the canonical keyword support predicate.
 pub(crate) fn supported_for_turn_face_up(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Mana { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Discard { .. }
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::Sacrifice(_)
-        | AbilityCost::Reveal { .. } => true,
-        AbilityCost::Composite { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::GetPlayerCounters { .. }
-        | AbilityCost::OneOf { .. }
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Unattach
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        | AbilityCost::EffectCost { .. }
-        | AbilityCost::PerCounter { .. }
-        | AbilityCost::KeywordCostOfCastSpell { .. }
-        | AbilityCost::Unimplemented { .. } => false,
-    }
+    crate::types::keywords::is_ability_cost_supported_for_morph(cost)
 }
 
 /// CR 608.2d: choices made while applying an effect must be legal; CR 118.12:
