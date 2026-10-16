@@ -8,7 +8,7 @@ use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
 use crate::game::turns;
-use crate::types::ability::{ShieldKind, TargetRef};
+use crate::types::ability::{DamageModification, ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -605,12 +605,6 @@ fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bo
     .is_empty()
 }
 
-#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
-fn survives_marked_damage(object: &GameObject, incoming_damage: u32) -> Option<bool> {
-    let toughness = object.toughness?.max(0) as u32;
-    Some(object.damage_marked.saturating_add(incoming_damage) < toughness)
-}
-
 /// Assess the next combat-damage exchange for a currently bound attacker/blocker pair.
 ///
 /// This deliberately fails closed: it only returns fixed facts for an ordinary,
@@ -628,8 +622,7 @@ pub(crate) fn assess_combat_impact(
     let Some(combat) = state.combat.as_ref() else {
         return CombatImpact::Indeterminate;
     };
-    if combat.first_strike_done
-        || combat.regular_damage_done
+    if combat.regular_damage_done
         || combat.damage_step_index.is_some()
         || !combat.pending_damage.is_empty()
         || !combat.damage_assignments.is_empty()
@@ -681,11 +674,17 @@ pub(crate) fn assess_combat_impact(
             .blocker_to_attacker
             .get(&blocker.object_id)
             .is_none_or(|attackers| attackers.as_slice() != [attacker.object_id])
-        || combat
+    {
+        return CombatImpact::Indeterminate;
+    }
+    // CR 510.4 + CR 702.7b: before a first-strike step the exchange spans two
+    // damage steps; once that step is over, only the regular step remains.
+    if !combat.first_strike_done
+        && (combat
             .first_strike_participants
             .as_ref()
             .is_some_and(|participants| !participants.is_empty())
-        || !combat_first_strike_participants(state, combat).is_empty()
+            || !combat_first_strike_participants(state, combat).is_empty())
     {
         return CombatImpact::Indeterminate;
     }
@@ -720,40 +719,55 @@ pub(crate) fn assess_combat_impact(
         return CombatImpact::Indeterminate;
     }
 
-    let damage = FixedCombatDamage {
-        attacker_to_blocker: combat_damage_amount(attacker_object),
-        blocker_to_attacker: combat_damage_amount(blocker_object),
+    // CR 509.1h + CR 603.3 + CR 510.2: the one-on-one special case of the
+    // whole-exchange projection — the declared block's unresolved triggers
+    // folded, the remaining step's damage dealt simultaneously.
+    let Ok(exchange) = ProjectedExchange::project(
+        state,
+        attacker.object_id,
+        &[blocker.object_id],
+        BlockProvenance::Declared,
+    ) else {
+        return CombatImpact::Indeterminate;
     };
     if damage_is_not_fixed(
         state,
         &attacker_context,
         &TargetRef::Object(blocker.object_id),
-        damage.attacker_to_blocker,
+        exchange.attacker().assigned_amount() as u32,
     ) || damage_is_not_fixed(
         state,
         &blocker_context,
         &TargetRef::Object(attacker.object_id),
-        damage.blocker_to_attacker,
+        exchange
+            .combatant(blocker.object_id)
+            .map_or(0, ProjectedCombatant::assigned_amount) as u32,
     ) {
         return CombatImpact::Indeterminate;
     }
-
-    let (Some(attacker_survives), Some(blocker_survives)) = (
-        survives_marked_damage(attacker_object, damage.blocker_to_attacker),
-        survives_marked_damage(blocker_object, damage.attacker_to_blocker),
-    ) else {
+    // CR 510.1c: a lone blocker receives all of a non-trampler's damage, so
+    // exactly one plan realizes.
+    let Ok(plans) = exchange.kill_plans(&[]) else {
         return CombatImpact::Indeterminate;
     };
-    if (!attacker_survives && lethal_destruction_is_not_fixed(state, attacker.object_id))
-        || (!blocker_survives && lethal_destruction_is_not_fixed(state, blocker.object_id))
-    {
+    let [realized] = plans.as_slice() else {
         return CombatImpact::Indeterminate;
-    }
-
+    };
+    let attacker_to_blocker = realized
+        .steps
+        .iter()
+        .flat_map(|step| step.to_blockers.iter())
+        .filter(|(id, _)| *id == blocker.object_id)
+        .map(|(_, amount)| *amount)
+        .sum();
+    let blocker_survives = !realized.plan.killed().any(|id| id == blocker.object_id);
     CombatImpact::Fixed {
-        damage,
+        damage: FixedCombatDamage {
+            attacker_to_blocker,
+            blocker_to_attacker: realized.outcome.blocker_damage_to_attacker as u32,
+        },
         survival: FixedCombatSurvival {
-            attacker_survives,
+            attacker_survives: !realized.outcome.attacker_dies,
             blocker_survives,
         },
     }
@@ -1320,7 +1334,28 @@ fn assign_attacker_damage(
 }
 
 /// How much combat damage `attacker_id` assigns to the defending player over the
-/// whole combat damage phase if exactly `blockers` block it.
+/// whole combat damage phase if exactly `blockers` block it — the defender-side
+/// POLICY value over [`combat_damage_to_defender_checked`].
+///
+/// An `Exact` or `AtMost` projection returns its value. A barrier (see
+/// [`ProjectionBarrier`]) returns the attacker's unblocked damage, which means
+/// "no prevention credit for this block" — a policy, not a bound. A blocked
+/// creature without trample is `Exact(0)` under every reductive barrier and
+/// under amplification (CR 510.1c), so its block keeps its full credit.
+pub fn combat_damage_to_defender(
+    state: &GameState,
+    attacker_id: ObjectId,
+    blockers: &[ObjectId],
+) -> i32 {
+    match combat_damage_to_defender_checked(state, attacker_id, blockers) {
+        Ok(projection) => projection.value,
+        Err(_) => unblocked_policy_damage(state, attacker_id),
+    }
+}
+
+/// How much combat damage `attacker_id` assigns to the defending player over the
+/// whole combat damage phase if exactly `blockers` were declared to block it,
+/// with a typed basis, or the barrier that keeps the figure from being claimed.
 ///
 /// The single authority for "does this block save me". Consumers must not
 /// re-derive it: every hand-rolled version of this calculation has gotten one of
@@ -1331,144 +1366,1569 @@ fn assign_attacker_damage(
 /// - CR 510.1c: a blocked creature assigns to its blockers, and none to the player.
 /// - CR 702.19b: trample assigns lethal to every blocker first, then the excess to
 ///   the player — and *no* damage to the player if lethal is not assigned to all of
-///   them. "Lethal" counts damage already marked (via `lethal_damage_needed`).
+///   them. "Lethal" counts damage already marked.
 /// - CR 702.19d: a blocked trampler with no blockers left when damage is assigned
 ///   assigns everything to the player, as though all blockers had been assigned
-///   lethal damage. This is what makes the second strike of a double striker so
-///   dangerous: the first strike step usually empties the block.
+///   lethal damage.
 /// - CR 702.4b + CR 702.7b: first and double strike split combat into two damage
 ///   steps. Blockers killed in the first step are gone for the second, and a
 ///   first-striking blocker can kill the attacker before its regular-step damage.
-/// - CR 702.2c: deathtouch makes 1 damage lethal, so a deathtouch trampler is
-///   absorbed by almost nothing.
+/// - CR 702.2c: deathtouch makes 1 damage lethal.
+/// - CR 509.1h + CR 603.3: block-declaration triggers (flanking, bushido, rampage,
+///   printed block pumps) resolve before damage, so the figure is computed after
+///   their fold; a trigger the fold cannot settle is a barrier.
 ///
-/// Assignment within a step is resolved as the worst case for the defending
-/// player, since the attacking player chooses (CR 702.19b): lethal is assigned to
-/// the cheapest blockers first, maximising how many die and therefore how little
-/// absorption survives into the second step.
-pub fn combat_damage_to_defender(
+/// The attacking player chooses the division (CR 510.1c), so the figure is the
+/// defender's worst case over every realizable kill plan.
+pub fn combat_damage_to_defender_checked(
     state: &GameState,
     attacker_id: ObjectId,
     blockers: &[ObjectId],
-) -> i32 {
+) -> Result<Projection<i32>, ProjectionBarrier> {
+    ProjectedExchange::project(state, attacker_id, blockers, BlockProvenance::Hypothetical)?
+        .to_defender()
+}
+
+/// The damage an attacker would assign to the player if unblocked, from its
+/// assigned amount and strike count alone: the policy value a barrier falls
+/// back to. Not a bound — it ignores every replacement and prevention effect.
+fn unblocked_policy_damage(state: &GameState, attacker_id: ObjectId) -> i32 {
     let Some(attacker) = state.objects.get(&attacker_id) else {
         return 0;
     };
-    // CR 510.1a + CR 613.11: `combat_damage_amount` is the resolver's authority for
-    // how much a creature assigns — power normally, toughness under a Doran-style
-    // rule-modifying effect, and 0 under "assigns no combat damage". Reading raw
-    // power here would make this helper contradict the combat it exists to predict.
-    // CR 510.1a: a creature assigning 0 or less assigns no combat damage at all.
-    let power = combat_damage_amount(attacker) as i32;
-    if power == 0 {
-        return 0;
+    // CR 510.1a + CR 613.11: the resolver's own assigned amount.
+    let amount = combat_damage_amount(attacker) as i32;
+    // CR 702.4b: a double striker assigns in both combat damage steps.
+    if attacker.has_keyword(&Keyword::DoubleStrike) {
+        amount * 2
+    } else {
+        amount
     }
-    let has_trample = attacker.has_keyword(&Keyword::Trample);
-    let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
-    let has_double_strike = attacker.has_keyword(&Keyword::DoubleStrike);
-    let attacker_strikes_first = has_double_strike || attacker.has_keyword(&Keyword::FirstStrike);
-
-    // CR 510.1b + CR 702.4b: unblocked — the whole power reaches the player, once
-    // per damage step it assigns in. A double striker assigns in both, which is what
-    // `resolve_combat_damage` does (`double_strike_deals_damage_twice`: an unblocked
-    // 3/3 double striker deals 6). Plain first strike assigns in one step only.
-    if blockers.is_empty() {
-        return if has_double_strike { power * 2 } else { power };
-    }
-
-    // Remaining lethal per blocker, in the order the attacker would exhaust them.
-    let mut remaining: Vec<i32> = blockers
-        .iter()
-        .map(|&bid| lethal_damage_needed(state, bid, has_deathtouch) as i32)
-        .collect();
-    remaining.sort_unstable();
-
-    // CR 702.7b: which blockers assign their damage in the first-strike step.
-    let first_strike_blockers: Vec<&GameObject> = blockers
-        .iter()
-        .filter_map(|bid| state.objects.get(bid))
-        .filter(|b| b.has_keyword(&Keyword::FirstStrike) || b.has_keyword(&Keyword::DoubleStrike))
-        .collect();
-
-    let mut to_player = 0;
-    let mut attacker_alive = true;
-
-    // CR 702.4b: the first combat damage step exists at all only if some
-    // participant has first or double strike.
-    if attacker_strikes_first || !first_strike_blockers.is_empty() {
-        if attacker_strikes_first {
-            to_player += assign_step_to_defender(&mut remaining, power, has_trample);
-        }
-        // CR 702.7b: first-striking blockers assign now, and can kill the attacker
-        // before it ever reaches the regular step.
-        let attacker_lethal = lethal_damage_needed(
-            state,
-            attacker_id,
-            first_strike_blockers
-                .iter()
-                .any(|b| b.has_keyword(&Keyword::Deathtouch)),
-        ) as i32;
-        // CR 510.1a + CR 613.11: same authority for the blockers — a first-striking
-        // Doran-style blocker kills the attacker with its toughness, and one that
-        // assigns no combat damage cannot kill it at all.
-        let first_strike_damage: i32 = first_strike_blockers
-            .iter()
-            .map(|b| combat_damage_amount(b) as i32)
-            .sum();
-        if first_strike_damage >= attacker_lethal {
-            attacker_alive = false;
-        }
-    }
-
-    // CR 702.4b: the attacker assigns in the regular step if it has double strike,
-    // or if it never had first strike and so has not assigned at all yet.
-    if attacker_alive && (has_double_strike || !attacker_strikes_first) {
-        to_player += assign_step_to_defender(&mut remaining, power, has_trample);
-    }
-
-    to_player
 }
 
-/// One combat damage step's worth of assignment from a single attacker, returning
-/// the damage that reaches the defending player and consuming the blockers it
-/// kills. See `combat_damage_to_defender` for the governing rules.
-fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bool) -> i32 {
-    if remaining.is_empty() {
-        // CR 702.19d: blocked, but nothing is blocking it now — a trampler assigns
-        // everything to the player. CR 510.1c: without trample it assigns nothing.
-        return if has_trample { power } else { 0 };
-    }
+// ---------------------------------------------------------------------------
+// Whole-exchange combat projection
+// ---------------------------------------------------------------------------
 
-    let total_lethal: i32 = remaining.iter().sum();
+/// Largest blocker count for which [`ProjectedExchange::kill_plans`] searches
+/// every kill plan exactly (each blocker killed in one of the attacker's
+/// remaining damage steps, or surviving: at most 3^8 schedules). Above it the
+/// search falls back to the caller's priority order.
+pub const GANG_EXACT_DIVISION_LIMIT: usize = 8;
 
-    // CR 702.19b: excess reaches the player only once EVERY blocker has been
-    // assigned lethal damage.
-    if has_trample && power > total_lethal {
-        remaining.clear();
-        return power - total_lethal;
-    }
+/// How a projected figure relates to what the engine would actually do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// The engine would produce exactly this value.
+    Exact,
+    /// The engine would produce at most this value: only reductive effects on
+    /// the projected damage itself apply, and they cannot raise it.
+    AtMost,
+}
 
-    // Otherwise every point is spent on blockers. Kill the cheapest first — the
-    // attacking player chooses, and fewer survivors means less absorption in any
-    // later step.
-    //
-    // CR 702.19b: damage assigned to a blocker that survives stays MARKED on it, so
-    // its lethal minimum in a later damage step is reduced by that much. Dropping
-    // the leftover budget instead understated the defender's exposure: a 5-power
-    // double-strike trampler against one 0/6 was read as 0 through, when the first
-    // step marks 5 and the regular step then needs only 1 more before trampling 4.
-    // `remaining` is sorted ascending, so the front is always the cheapest kill.
-    let mut budget = power;
-    while let Some(&lethal) = remaining.first() {
-        if budget >= lethal {
-            budget -= lethal;
-            remaining.remove(0);
-        } else {
-            remaining[0] -= budget;
-            break;
+/// A projected value with its [`Basis`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Projection<T> {
+    pub value: T,
+    pub basis: Basis,
+}
+
+impl<T> Projection<T> {
+    fn exact(value: T) -> Self {
+        Self {
+            value,
+            basis: Basis::Exact,
         }
     }
-    0
+
+    fn at_most(value: T) -> Self {
+        Self {
+            value,
+            basis: Basis::AtMost,
+        }
+    }
+}
+
+/// The recipient role of a damage event a prevention effect applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreventionRecipient {
+    DefendingPlayer,
+    Blocker,
+    Attacker,
+    Other,
+}
+
+/// CR 614.1 + CR 615.1: the class of effect that would change one projected
+/// combat-damage event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DamageEventClass {
+    /// CR 615.1: a prevention effect on damage to `recipient`.
+    Prevention { recipient: PreventionRecipient },
+    /// CR 702.16e: protection prevents the damage.
+    Protection,
+    /// CR 120.1 + CR 120.2: a "can't deal damage" / "can't be dealt damage" rule.
+    DamageGate,
+    /// CR 614.1a: a replacement that raises the amount (Furnace of Rath).
+    Amplification,
+    /// CR 614.9: a replacement that deals the damage to another recipient.
+    Redirection,
+    /// Every other replacement, including any not positively classified above.
+    OtherReplacement,
+}
+
+impl DamageEventClass {
+    /// CR 615.1: reductive classes can only remove or reduce a damage event;
+    /// they never create damage to a player.
+    pub fn is_reductive(self) -> bool {
+        match self {
+            Self::Prevention { .. } | Self::Protection | Self::DamageGate => true,
+            Self::Amplification | Self::Redirection | Self::OtherReplacement => false,
+        }
+    }
+
+    /// CR 614.9: whether the class could carry damage to a recipient the
+    /// assignment did not name. Amplification changes amounts, not recipients.
+    pub fn can_change_recipient(self) -> bool {
+        match self {
+            Self::Redirection | Self::OtherReplacement => true,
+            Self::Prevention { .. } | Self::Protection | Self::DamageGate | Self::Amplification => {
+                false
+            }
+        }
+    }
+}
+
+/// Why a projected combat fact cannot be claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionBarrier {
+    /// A damage event of this class makes the direction of the change unproven.
+    UnknownDirection(DamageEventClass),
+    /// CR 614.1: a replacement could stop a lethally damaged combatant's
+    /// destruction (regeneration, shield counters, ...).
+    LethalDestructionReplacement,
+    /// CR 603.3: a block-declaration trigger whose effect the fold cannot price.
+    UnmodelledBlockTrigger { source: ObjectId },
+    /// CR 603.4 + CR 608.2c: a block-declaration trigger's condition is not
+    /// settled by the declaration.
+    UnsettledBlockTriggerCondition,
+    /// CR 509.3c: the bare "becomes blocked" form names "the blocking creature"
+    /// while more than one creature blocks.
+    AmbiguousTriggeringBlocker,
+    /// CR 702.22j / CR 510.1c: banding or "assigns combat damage as though it
+    /// weren't blocked" changes who divides the damage.
+    BandingOrAssignAsThoughUnblocked,
+    /// CR 510.1c + CR 510.1d: a combat-damage assignment is in progress, or a
+    /// blocker's damage is divided among several attackers.
+    PendingInteractiveAssignment,
+    /// CR 405.1: an object on the stack is not a known block-declaration trigger.
+    StackObjectNotFoldable,
+    /// The requested kill plan has no legal division (CR 510.1c, CR 702.19b).
+    UnrealizablePlan,
+    /// A combatant is missing, off the battlefield, not a creature, or not in
+    /// the declared combat.
+    StaleCombatant,
+}
+
+/// Whether the projected block was declared already or is a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockProvenance {
+    /// A candidate block: `state.combat` need not hold it; its triggers are
+    /// collected as a declaration of exactly these blockers would fire them.
+    Hypothetical,
+    /// The block in `state.combat`: its unresolved triggers on the stack are
+    /// folded once, resolved ones are already in the objects.
+    Declared,
+}
+
+/// A power/toughness change one object receives from block-declaration triggers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PtShift {
+    pub power: i32,
+    pub toughness: i32,
+}
+
+/// CR 613.4c: the P/T shifts block-declaration triggers apply, per recipient.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BlockShifts {
+    shifts: Vec<(ObjectId, PtShift)>,
+}
+
+impl BlockShifts {
+    pub(crate) fn add(&mut self, object_id: ObjectId, power: i32, toughness: i32) {
+        match self.shifts.iter_mut().find(|(id, _)| *id == object_id) {
+            Some((_, shift)) => {
+                shift.power += power;
+                shift.toughness += toughness;
+            }
+            None => self.shifts.push((object_id, PtShift { power, toughness })),
+        }
+    }
+
+    pub(crate) fn of(&self, object_id: ObjectId) -> PtShift {
+        self.shifts
+            .iter()
+            .find(|(id, _)| *id == object_id)
+            .map(|(_, shift)| *shift)
+            .unwrap_or_default()
+    }
+}
+
+/// CR 510.1a + CR 613.11: which characteristic a creature assigns combat damage by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignedAmountRule {
+    Power,
+    Toughness,
+    /// CR 510.1a: "assigns no combat damage".
+    Nothing,
+}
+
+/// One combatant as the projection sees it: block-trigger shifts folded in,
+/// damage and -1/-1 counters accumulated step by step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedCombatant {
+    pub id: ObjectId,
+    /// Power after block-declaration shifts, before counters this projection places.
+    pub power: i32,
+    /// Toughness after block-declaration shifts, before counters this projection places.
+    pub toughness: i32,
+    /// Damage marked on it (CR 120.3e).
+    pub marked: i32,
+    /// -1/-1 counters placed by projected wither/infect damage (CR 120.3d).
+    pub minus_counters: i32,
+    pub assigns_by: AssignedAmountRule,
+    /// Remaining combat damage steps it deals damage in (CR 510.4).
+    pub deals_in: Vec<CombatDamageSubStep>,
+    pub alive: bool,
+    traits: CombatantTraits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CombatantTraits {
+    deathtouch: bool,
+    /// CR 702.80a + CR 702.90c: wither or infect.
+    damage_as_counters: bool,
+    indestructible: bool,
+    /// CR 614.1: a replacement could stop its destruction by lethal damage.
+    destruction_replaceable: bool,
+    deathtouched: bool,
+}
+
+impl ProjectedCombatant {
+    /// CR 510.1a + CR 613.11: the combat damage it assigns now.
+    pub fn assigned_amount(&self) -> i32 {
+        match self.assigns_by {
+            AssignedAmountRule::Nothing => 0,
+            AssignedAmountRule::Power => (self.power - self.minus_counters).max(0),
+            AssignedAmountRule::Toughness => (self.toughness - self.minus_counters).max(0),
+        }
+    }
+
+    /// CR 704.5f: toughness after projected -1/-1 counters.
+    pub fn current_toughness(&self) -> i32 {
+        self.toughness - self.minus_counters
+    }
+
+    pub fn has_wither_or_infect(&self) -> bool {
+        self.traits.damage_as_counters
+    }
+
+    /// The damage `source` must deal for this creature to die in that step,
+    /// or `None` when its damage cannot kill it (CR 702.12b).
+    ///
+    /// CR 702.2c + CR 704.5h: 1 from a deathtouch source unless indestructible.
+    /// CR 702.12b + CR 704.5f: an indestructible creature dies only when
+    /// -1/-1 counters from wither/infect (CR 702.80a, CR 702.90c) bring its
+    /// toughness to 0, so it needs exactly its current toughness of them.
+    fn kill_need(&self, source: &ProjectedCombatant) -> Option<i32> {
+        let toughness = self.current_toughness();
+        if self.traits.indestructible {
+            return source.traits.damage_as_counters.then_some(toughness.max(1));
+        }
+        if source.traits.deathtouch {
+            return Some(1);
+        }
+        Some((toughness - self.marked).max(1))
+    }
+
+    /// CR 702.19b: lethal damage for trample assignment — marked damage counts,
+    /// deathtouch makes it 1, and indestructibility is ignored.
+    fn assignment_lethal(&self, source: &ProjectedCombatant) -> i32 {
+        if source.traits.deathtouch {
+            return 1;
+        }
+        (self.current_toughness() - self.marked).max(0)
+    }
+
+    /// CR 120.3d + CR 120.3e: receive `amount` combat damage from `source`.
+    fn receive(&mut self, amount: i32, source: &CombatantTraits) {
+        if amount <= 0 {
+            return;
+        }
+        if source.damage_as_counters {
+            self.minus_counters += amount;
+        } else {
+            self.marked += amount;
+        }
+        if source.deathtouch {
+            self.traits.deathtouched = true;
+        }
+    }
+
+    /// CR 704.5f + CR 704.5g + CR 704.5h: whether state-based actions put it
+    /// into the graveyard now, and whether that death is by destruction.
+    fn sba_death(&self) -> Option<DeathKind> {
+        let toughness = self.current_toughness();
+        if toughness <= 0 {
+            return Some(DeathKind::ZeroToughness);
+        }
+        if !self.traits.indestructible && (self.marked >= toughness || self.traits.deathtouched) {
+            return Some(DeathKind::Destroyed);
+        }
+        None
+    }
+
+    fn cap(&self, source: &ProjectedCombatant) -> i32 {
+        self.kill_need(source).map_or(i32::MAX, |need| need - 1)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeathKind {
+    /// CR 704.5f: not a destruction; no replacement can stop it.
+    ZeroToughness,
+    /// CR 704.5g / CR 704.5h: destruction by lethal damage.
+    Destroyed,
+}
+
+/// CR 509.1h: whether the projected attacker is a blocked creature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockStatus {
+    Unblocked,
+    Blocked,
+}
+
+/// A kill plan request: the blockers the attacker kills in each damage step.
+/// Every blocker not named survives.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KillPlan {
+    pub first_strike_step: Vec<ObjectId>,
+    pub regular_step: Vec<ObjectId>,
+}
+
+impl KillPlan {
+    fn step_of(&self, blocker: ObjectId) -> Option<CombatDamageSubStep> {
+        if self.first_strike_step.contains(&blocker) {
+            Some(CombatDamageSubStep::FirstStrike)
+        } else if self.regular_step.contains(&blocker) {
+            Some(CombatDamageSubStep::Regular)
+        } else {
+            None
+        }
+    }
+
+    /// Every blocker the plan kills.
+    pub fn killed(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.first_strike_step
+            .iter()
+            .chain(self.regular_step.iter())
+            .copied()
+    }
+
+    fn push(&mut self, blocker: ObjectId, step: CombatDamageSubStep) {
+        match step {
+            CombatDamageSubStep::FirstStrike => self.first_strike_step.push(blocker),
+            CombatDamageSubStep::Regular => self.regular_step.push(blocker),
+        }
+    }
+}
+
+/// One damage step of a realized plan: the attacker's division.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepAllocation {
+    pub step: CombatDamageSubStep,
+    /// `(blocker, damage the attacker assigns it)`, nonzero entries only.
+    pub to_blockers: Vec<(ObjectId, u32)>,
+    pub to_defender: u32,
+}
+
+/// A kill plan with the exact legal division that realizes it and its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealizedPlan {
+    pub plan: KillPlan,
+    pub steps: Vec<StepAllocation>,
+    pub outcome: PlanOutcome,
+}
+
+/// The combat facts a realized plan produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanOutcome {
+    pub attacker_dies: bool,
+    /// Damage the attacker assigns to the defending player over the remaining steps.
+    pub to_defender: i32,
+    /// Total combat damage the blockers deal to the attacker.
+    pub blocker_damage_to_attacker: i32,
+    /// The attacker after the remaining steps.
+    pub attacker: ProjectedCombatant,
+    /// Every blocker after the remaining steps.
+    pub blockers: Vec<ProjectedCombatant>,
+}
+
+impl PlanOutcome {
+    /// The plan is better for the attacking player: it survives, then more
+    /// damage to the defender, then less damage dealt back.
+    fn better_for_attacker_than(&self, other: &PlanOutcome) -> bool {
+        (
+            !self.attacker_dies,
+            self.to_defender,
+            -self.blocker_damage_to_attacker,
+        ) > (
+            !other.attacker_dies,
+            other.to_defender,
+            -other.blocker_damage_to_attacker,
+        )
+    }
+}
+
+/// CR 510 + CR 509.1h + CR 603.3: one attacker's whole remaining combat-damage
+/// exchange with the creatures blocking it — trigger-aware (block-declaration
+/// shifts folded in), step-aware (first strike and double strike, CR 510.4), and
+/// barrier-aware (prevention, protection, replacements). The engine's single
+/// authority for projected combat outcomes; consumers score it, they never
+/// re-derive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedExchange {
+    attacker: ProjectedCombatant,
+    blockers: Vec<ProjectedCombatant>,
+    status: BlockStatus,
+    trample: Option<TrampleKind>,
+    steps: Vec<CombatDamageSubStep>,
+    /// Classes on the damage the combatants would deal each other.
+    exchange_classes: Vec<DamageEventClass>,
+    /// Class on the damage the attacker would deal the defending player.
+    defender_class: Option<DamageEventClass>,
+}
+
+impl ProjectedExchange {
+    /// Project `attacker`'s exchange with exactly `blockers`.
+    ///
+    /// Returns `Err` for structural barriers (stale combatants, banding, a
+    /// pending assignment, an unfoldable block trigger). Damage barriers are
+    /// recorded and surface from the fact queries: every class barriers the
+    /// exchange facts ([`Self::kill_plans`], [`Self::realize`]); the to-defender
+    /// figure is classified separately by [`Self::to_defender`].
+    pub fn project(
+        state: &GameState,
+        attacker_id: ObjectId,
+        blockers: &[ObjectId],
+        provenance: BlockProvenance,
+    ) -> Result<Self, ProjectionBarrier> {
+        let live_creature = |id: ObjectId| {
+            state.objects.get(&id).filter(|object| {
+                object.zone == crate::types::zones::Zone::Battlefield
+                    && object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Creature)
+            })
+        };
+        let attacker_object =
+            live_creature(attacker_id).ok_or(ProjectionBarrier::StaleCombatant)?;
+        let mut seen = std::collections::HashSet::new();
+        for &blocker in blockers {
+            if blocker == attacker_id || !seen.insert(blocker) || live_creature(blocker).is_none() {
+                return Err(ProjectionBarrier::StaleCombatant);
+            }
+        }
+
+        let (status, steps, participants, pairs, defending_player) = match provenance {
+            BlockProvenance::Hypothetical => {
+                let participants: std::collections::HashSet<ObjectId> =
+                    std::iter::once(attacker_id)
+                        .chain(blockers.iter().copied())
+                        .filter(|id| {
+                            state.objects.get(id).is_some_and(|object| {
+                                object.has_keyword(&Keyword::FirstStrike)
+                                    || object.has_keyword(&Keyword::DoubleStrike)
+                            })
+                        })
+                        .collect();
+                // CR 510.4 + CR 702.7b: the first-strike step exists only if a
+                // participant has first or double strike.
+                let steps = if participants.is_empty() {
+                    vec![CombatDamageSubStep::Regular]
+                } else {
+                    vec![
+                        CombatDamageSubStep::FirstStrike,
+                        CombatDamageSubStep::Regular,
+                    ]
+                };
+                let status = if blockers.is_empty() {
+                    BlockStatus::Unblocked
+                } else {
+                    BlockStatus::Blocked
+                };
+                let pairs: Vec<(ObjectId, ObjectId)> = blockers
+                    .iter()
+                    .map(|&blocker| (blocker, attacker_id))
+                    .collect();
+                let defending_player = state
+                    .combat
+                    .as_ref()
+                    .and_then(|combat| {
+                        combat
+                            .attackers
+                            .iter()
+                            .find(|info| info.object_id == attacker_id)
+                            .map(|info| info.defending_player)
+                    })
+                    .or_else(|| {
+                        blockers
+                            .first()
+                            .and_then(|blocker| state.objects.get(blocker))
+                            .map(|blocker| blocker.controller)
+                    })
+                    .or_else(|| {
+                        crate::game::players::opponents(state, attacker_object.controller)
+                            .first()
+                            .copied()
+                    });
+                (status, steps, participants, pairs, defending_player)
+            }
+            BlockProvenance::Declared => {
+                let combat = state
+                    .combat
+                    .as_ref()
+                    .ok_or(ProjectionBarrier::StaleCombatant)?;
+                // CR 510.1c + CR 510.1d: an assignment already in progress is an
+                // interactive choice the projection does not make.
+                if combat.damage_step_index.is_some()
+                    || !combat.pending_damage.is_empty()
+                    || !combat.damage_assignments.is_empty()
+                    || matches!(
+                        state.waiting_for,
+                        WaitingFor::AssignCombatDamage { .. }
+                            | WaitingFor::AssignBlockerDamage { .. }
+                    )
+                {
+                    return Err(ProjectionBarrier::PendingInteractiveAssignment);
+                }
+                let info = combat
+                    .attackers
+                    .iter()
+                    .find(|info| info.object_id == attacker_id)
+                    .ok_or(ProjectionBarrier::StaleCombatant)?;
+                let declared = combat
+                    .blocker_assignments
+                    .get(&attacker_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if declared.len() != blockers.len()
+                    || !blockers.iter().all(|blocker| declared.contains(blocker))
+                {
+                    return Err(ProjectionBarrier::StaleCombatant);
+                }
+                if info.band_id.is_some() {
+                    return Err(ProjectionBarrier::BandingOrAssignAsThoughUnblocked);
+                }
+                // CR 510.1d: a blocker blocking several attackers divides its
+                // damage among them as its controller chooses.
+                if blockers.iter().any(|blocker| {
+                    combat
+                        .blocker_to_attacker
+                        .get(blocker)
+                        .is_some_and(|attackers| attackers.len() > 1)
+                }) {
+                    return Err(ProjectionBarrier::PendingInteractiveAssignment);
+                }
+                let participants = combat
+                    .first_strike_participants
+                    .clone()
+                    .unwrap_or_else(|| combat_first_strike_participants(state, combat));
+                // CR 510.4: once the first-strike step is over only the regular
+                // step remains; once that is over nothing does.
+                let steps = if combat.regular_damage_done {
+                    Vec::new()
+                } else if combat.first_strike_done || participants.is_empty() {
+                    vec![CombatDamageSubStep::Regular]
+                } else {
+                    vec![
+                        CombatDamageSubStep::FirstStrike,
+                        CombatDamageSubStep::Regular,
+                    ]
+                };
+                // CR 509.1h: blocked stays blocked even with no blockers left.
+                let status = if info.blocked {
+                    BlockStatus::Blocked
+                } else {
+                    BlockStatus::Unblocked
+                };
+                let pairs: Vec<(ObjectId, ObjectId)> = combat
+                    .blocker_to_attacker
+                    .iter()
+                    .flat_map(|(blocker, attackers)| {
+                        attackers.iter().map(move |attacker| (*blocker, *attacker))
+                    })
+                    .collect();
+                (
+                    status,
+                    steps,
+                    participants,
+                    pairs,
+                    Some(info.defending_player),
+                )
+            }
+        };
+
+        // CR 702.22j + CR 510.1c: banding, or an attacker that may assign as
+        // though unblocked, changes who divides the damage.
+        if status == BlockStatus::Blocked
+            && (attacker_object.assigns_damage_as_though_unblocked
+                || crate::game::combat::has_banding(state, attacker_id)
+                || blockers
+                    .iter()
+                    .any(|blocker| crate::game::combat::has_banding(state, *blocker)))
+        {
+            return Err(ProjectionBarrier::BandingOrAssignAsThoughUnblocked);
+        }
+
+        // CR 509.1h + CR 603.3: block-declaration triggers resolve before damage.
+        let shifts = triggers::project_block_declaration(state, &pairs, provenance)?;
+
+        let build = |id: ObjectId| -> Option<ProjectedCombatant> {
+            let object = state.objects.get(&id)?;
+            let context = DamageContext::from_source(state, id)?;
+            let shift = shifts.of(id);
+            let assigns_by = if object.assigns_no_combat_damage {
+                AssignedAmountRule::Nothing
+            } else if object.assigns_damage_from_toughness {
+                AssignedAmountRule::Toughness
+            } else {
+                AssignedAmountRule::Power
+            };
+            let mut combatant = ProjectedCombatant {
+                id,
+                power: object.power.unwrap_or(0) + shift.power,
+                toughness: object.toughness.unwrap_or(0) + shift.toughness,
+                marked: object.damage_marked as i32,
+                minus_counters: 0,
+                assigns_by,
+                deals_in: steps
+                    .iter()
+                    .copied()
+                    .filter(|step| deals_in_substep(object, *step, &participants))
+                    .collect(),
+                alive: true,
+                traits: CombatantTraits {
+                    deathtouch: context.has_deathtouch,
+                    damage_as_counters: context.has_wither || context.has_infect,
+                    indestructible: object.has_keyword(&Keyword::Indestructible),
+                    destruction_replaceable: lethal_destruction_is_not_fixed(state, id),
+                    deathtouched: false,
+                },
+            };
+            // CR 704.5f + CR 704.5g: a combatant the shifts leave with lethal
+            // damage or 0 toughness dies before any combat damage is dealt.
+            combatant.alive = combatant.sba_death().is_none();
+            Some(combatant)
+        };
+        let attacker = build(attacker_id).ok_or(ProjectionBarrier::StaleCombatant)?;
+        let blockers: Vec<ProjectedCombatant> = blockers
+            .iter()
+            .map(|&id| build(id).ok_or(ProjectionBarrier::StaleCombatant))
+            .collect::<Result<_, _>>()?;
+
+        let trample = if attacker_object.has_keyword(&Keyword::Trample) {
+            Some(TrampleKind::Standard)
+        } else if attacker_object.has_keyword(&Keyword::TrampleOverPlaneswalkers) {
+            Some(TrampleKind::OverPlaneswalkers)
+        } else {
+            None
+        };
+
+        // CR 614.1 + CR 615.1: classify every damage event the combatants would
+        // deal each other, and the attacker's damage to the defending player.
+        let mut exchange_classes = Vec::new();
+        if attacker.alive {
+            let attacker_amount = attacker.assigned_amount() as u32;
+            for blocker in blockers.iter().filter(|blocker| blocker.alive) {
+                exchange_classes.extend(classify_combat_damage(
+                    state,
+                    attacker_id,
+                    &TargetRef::Object(blocker.id),
+                    attacker_amount,
+                    PreventionRecipient::Blocker,
+                ));
+                if !blocker.deals_in.is_empty() {
+                    exchange_classes.extend(classify_combat_damage(
+                        state,
+                        blocker.id,
+                        &TargetRef::Object(attacker_id),
+                        blocker.assigned_amount() as u32,
+                        PreventionRecipient::Attacker,
+                    ));
+                }
+            }
+        }
+        let defender_class = match defending_player {
+            Some(player) if attacker.alive => classify_combat_damage(
+                state,
+                attacker_id,
+                &TargetRef::Player(player),
+                attacker.assigned_amount() as u32,
+                PreventionRecipient::DefendingPlayer,
+            ),
+            _ => None,
+        };
+
+        Ok(Self {
+            attacker,
+            blockers,
+            status,
+            trample,
+            steps,
+            exchange_classes,
+            defender_class,
+        })
+    }
+
+    /// The combat damage steps still to come (CR 510.4): both before a
+    /// first-strike step, only the regular step after it.
+    pub fn remaining_steps(&self) -> &[CombatDamageSubStep] {
+        &self.steps
+    }
+
+    /// The attacker, block-trigger shifts folded in.
+    pub fn attacker(&self) -> &ProjectedCombatant {
+        &self.attacker
+    }
+
+    /// The blockers, block-trigger shifts folded in; one the shifts kill before
+    /// damage (CR 704.5f) is present with `alive == false`.
+    pub fn blockers(&self) -> &[ProjectedCombatant] {
+        &self.blockers
+    }
+
+    /// The combatant with `id`, if it is part of this exchange.
+    pub fn combatant(&self, id: ObjectId) -> Option<&ProjectedCombatant> {
+        std::iter::once(&self.attacker)
+            .chain(self.blockers.iter())
+            .find(|combatant| combatant.id == id)
+    }
+
+    /// CR 614.1 + CR 615.1: every damage-event class barriers the exchange facts
+    /// (kills, survival), since marks and deaths can change.
+    fn exchange_barrier(&self) -> Result<(), ProjectionBarrier> {
+        match self.exchange_classes.first() {
+            Some(class) => Err(ProjectionBarrier::UnknownDirection(*class)),
+            None => Ok(()),
+        }
+    }
+
+    /// The damage the attacker assigns to the defending player over the
+    /// remaining steps, with its basis.
+    ///
+    /// 1. CR 509.1h + CR 510.1c: a blocked attacker without trample assigns
+    ///    nothing to the player, even with no blockers left, so the figure is
+    ///    `Exact(0)` under every reductive class and under amplification. Only a
+    ///    class that can change the recipient (redirection, an unclassified
+    ///    replacement) on the damage the combatants deal makes it unknown.
+    /// 2. CR 510.1b: an unblocked attacker, or a trampler's player-bound damage,
+    ///    under a reductive class confined to damage dealt to the defending
+    ///    player is `AtMost`: assignments, marks and deaths are unchanged
+    ///    (CR 702.19b), so dealt <= assigned.
+    /// 3. Every other barrier on a trampler, or a creative class on an
+    ///    unblocked attacker's damage to the player, is `UnknownDirection`.
+    pub fn to_defender(&self) -> Result<Projection<i32>, ProjectionBarrier> {
+        let figure = match self.status {
+            BlockStatus::Unblocked => {
+                if !self.attacker.alive {
+                    0
+                } else {
+                    // CR 510.1b + CR 702.4b: all of it, once per step it deals in.
+                    self.attacker.assigned_amount() * self.attacker.deals_in.len() as i32
+                }
+            }
+            BlockStatus::Blocked if self.trample.is_none() => {
+                if let Some(class) = self
+                    .exchange_classes
+                    .iter()
+                    .find(|class| class.can_change_recipient())
+                {
+                    return Err(ProjectionBarrier::UnknownDirection(*class));
+                }
+                return Ok(Projection::exact(0));
+            }
+            BlockStatus::Blocked => {
+                self.exchange_barrier()?;
+                self.realizable_outcomes()?
+                    .iter()
+                    .map(|realized| realized.outcome.to_defender)
+                    .max()
+                    .ok_or(ProjectionBarrier::UnrealizablePlan)?
+            }
+        };
+        if figure == 0 {
+            return Ok(Projection::exact(0));
+        }
+        match self.defender_class {
+            None => Ok(Projection::exact(figure)),
+            Some(class) if class.is_reductive() => Ok(Projection::at_most(figure)),
+            Some(class) => Err(ProjectionBarrier::UnknownDirection(class)),
+        }
+    }
+
+    /// Every realizable kill plan, one per distinct killed set, each with the
+    /// schedule best for the attacker (it survives, then more damage to the
+    /// defender, then less damage dealt back). Exact up to
+    /// [`GANG_EXACT_DIVISION_LIMIT`] blockers; above it, one plan built by
+    /// adding kills in `priority` order (earliest step first) while the plan
+    /// stays realizable.
+    pub fn kill_plans(
+        &self,
+        priority: &[ObjectId],
+    ) -> Result<Vec<RealizedPlan>, ProjectionBarrier> {
+        self.exchange_barrier()?;
+        let live = self.blockers.iter().filter(|b| b.alive).count();
+        if live > GANG_EXACT_DIVISION_LIMIT {
+            return Ok(self.priority_fallback_plan(priority).into_iter().collect());
+        }
+        let mut best: Vec<RealizedPlan> = Vec::new();
+        for realized in self.realizable_outcomes()? {
+            let mut killed: Vec<ObjectId> = realized.plan.killed().collect();
+            killed.sort_unstable();
+            match best.iter_mut().find(|existing| {
+                let mut other: Vec<ObjectId> = existing.plan.killed().collect();
+                other.sort_unstable();
+                other == killed
+            }) {
+                Some(existing) => {
+                    if realized.outcome.better_for_attacker_than(&existing.outcome) {
+                        *existing = realized;
+                    }
+                }
+                None => best.push(realized),
+            }
+        }
+        Ok(best)
+    }
+
+    /// The exact legal division that realizes `plan`, or `UnrealizablePlan`.
+    /// Never reschedules a kill into another step.
+    pub fn realize(&self, plan: &KillPlan) -> Result<RealizedPlan, ProjectionBarrier> {
+        self.exchange_barrier()?;
+        self.realize_unbarriered(plan)
+    }
+
+    /// The outcome of `plan`, through [`Self::realize`].
+    pub fn apply_plan(&self, plan: &KillPlan) -> Result<PlanOutcome, ProjectionBarrier> {
+        self.realize(plan).map(|realized| realized.outcome)
+    }
+
+    /// Every schedule of the live blockers over the attacker's damage steps
+    /// that realizes, pruned by the cumulative lethal bound.
+    fn realizable_outcomes(&self) -> Result<Vec<RealizedPlan>, ProjectionBarrier> {
+        let live: Vec<&ProjectedCombatant> = self.blockers.iter().filter(|b| b.alive).collect();
+        if live.len() > GANG_EXACT_DIVISION_LIMIT {
+            // Cheapest kills first maximises deaths: the defender's worst case.
+            let mut by_need: Vec<&ProjectedCombatant> = live.clone();
+            by_need.sort_by_key(|blocker| blocker.kill_need(&self.attacker).unwrap_or(i32::MAX));
+            let priority: Vec<ObjectId> = by_need.iter().map(|blocker| blocker.id).collect();
+            return Ok(self.priority_fallback_plan(&priority).into_iter().collect());
+        }
+        let dealing: Vec<CombatDamageSubStep> = self
+            .steps
+            .iter()
+            .copied()
+            .filter(|step| self.attacker.alive && self.attacker.deals_in.contains(step))
+            .collect();
+        let total_power = self.attacker.assigned_amount() * dealing.len() as i32;
+        let choices = dealing.len() + 1;
+        let schedules = choices.pow(live.len() as u32);
+        let mut realized = Vec::new();
+        for schedule in 0..schedules {
+            let mut plan = KillPlan::default();
+            let mut need = 0i32;
+            let mut digits = schedule;
+            let mut killable = true;
+            for blocker in &live {
+                let choice = digits % choices;
+                digits /= choices;
+                if let Some(step) = dealing.get(choice) {
+                    match blocker.kill_need(&self.attacker) {
+                        Some(n) => need += n,
+                        None => killable = false,
+                    }
+                    plan.push(blocker.id, *step);
+                }
+            }
+            // A pruning bound only: the lethal total cannot exceed all the
+            // damage the attacker assigns over its steps.
+            if !killable || need > total_power {
+                continue;
+            }
+            match self.realize_unbarriered(&plan) {
+                Ok(plan) => realized.push(plan),
+                Err(ProjectionBarrier::UnrealizablePlan) => {}
+                Err(barrier) => return Err(barrier),
+            }
+        }
+        if realized.is_empty() {
+            return Err(ProjectionBarrier::UnrealizablePlan);
+        }
+        Ok(realized)
+    }
+
+    /// Above the exact limit: add kills in `priority` order, each at the
+    /// earliest step it fits, while the plan stays realizable (a kill that is
+    /// still needed to absorb forced damage is kept until it does).
+    fn priority_fallback_plan(&self, priority: &[ObjectId]) -> Option<RealizedPlan> {
+        let dealing: Vec<CombatDamageSubStep> = self
+            .steps
+            .iter()
+            .copied()
+            .filter(|step| self.attacker.alive && self.attacker.deals_in.contains(step))
+            .collect();
+        // Earliest fit: each step's kills must fit in the damage it deals.
+        let step_power = self.attacker.assigned_amount();
+        let mut step_need = vec![0i32; dealing.len()];
+        let mut plan = KillPlan::default();
+        let ordered = priority
+            .iter()
+            .filter_map(|id| self.blockers.iter().find(|b| b.id == *id && b.alive))
+            .chain(
+                self.blockers
+                    .iter()
+                    .filter(|b| b.alive && !priority.contains(&b.id)),
+            );
+        for blocker in ordered {
+            let Some(blocker_need) = blocker.kill_need(&self.attacker) else {
+                continue;
+            };
+            let current_realizes = self.realize_unbarriered(&plan).is_ok();
+            for (index, step) in dealing.iter().enumerate() {
+                if step_need[index] + blocker_need > step_power {
+                    continue;
+                }
+                let mut candidate = plan.clone();
+                candidate.push(blocker.id, *step);
+                if self.realize_unbarriered(&candidate).is_ok() || !current_realizes {
+                    plan = candidate;
+                    step_need[index] += blocker_need;
+                    break;
+                }
+            }
+        }
+        self.realize_unbarriered(&plan).ok()
+    }
+
+    /// CR 510.1c + CR 510.2 + CR 702.19b: the per-step division that realizes
+    /// `plan`. All of a step's damage goes to blockers (or, for a trampler that
+    /// has assigned lethal to every blocker, the excess to the defender).
+    ///
+    /// Leftover placement (the attacker's choice): first the carry a later
+    /// step's kills need; for a trampler that may trample, the excess to the
+    /// defender; then step-alive blockers in descending power up to
+    /// `min(capacity, power)` — for a wither/infect attacker each -1/-1 counter
+    /// removes a point of that blocker's later damage (CR 702.80a, CR 702.90c) —
+    /// keeping enough survivor capacity for a later step with no kill to absorb
+    /// it; for a trampler, carry onto creatures it kills later (lowering the
+    /// lethal it must assign there, CR 702.19b); then overkill on a creature
+    /// killed this step; then any capacity left.
+    fn realize_unbarriered(&self, plan: &KillPlan) -> Result<RealizedPlan, ProjectionBarrier> {
+        let fate = |id: ObjectId| plan.step_of(id);
+        if plan
+            .killed()
+            .any(|id| !self.blockers.iter().any(|b| b.id == id && b.alive))
+        {
+            return Err(ProjectionBarrier::UnrealizablePlan);
+        }
+        let mut attacker = self.attacker.clone();
+        let mut blockers = self.blockers.clone();
+        let mut steps_out = Vec::new();
+        let mut to_defender_total = 0i32;
+        let mut damage_back = 0i32;
+
+        for (index, step) in self.steps.iter().copied().enumerate() {
+            let attacker_deals = attacker.alive && attacker.deals_in.contains(&step);
+            let live: Vec<usize> = (0..blockers.len()).filter(|&i| blockers[i].alive).collect();
+            let killed_now: Vec<usize> = live
+                .iter()
+                .copied()
+                .filter(|&i| fate(blockers[i].id) == Some(step))
+                .collect();
+            if !attacker_deals && !killed_now.is_empty() {
+                return Err(ProjectionBarrier::UnrealizablePlan);
+            }
+
+            // CR 510.2: every combatant deals its damage simultaneously, from
+            // the amounts it has as the step begins. CR 510.1d: a blocker whose
+            // attacker has left combat assigns no combat damage.
+            let hits: Vec<(i32, CombatantTraits)> = live
+                .iter()
+                .filter(|&&i| attacker.alive && blockers[i].deals_in.contains(&step))
+                .map(|&i| (blockers[i].assigned_amount(), blockers[i].traits))
+                .filter(|(amount, _)| *amount > 0)
+                .collect();
+
+            let mut allocation = vec![0i32; blockers.len()];
+            let mut to_defender = 0i32;
+            if attacker_deals {
+                let power = attacker.assigned_amount();
+                if live.is_empty() {
+                    to_defender = match (self.status, self.trample) {
+                        // CR 510.1b: unblocked — all of it to the player.
+                        (BlockStatus::Unblocked, _) => power,
+                        // CR 702.19d: blocked trampler, no blockers left.
+                        (BlockStatus::Blocked, Some(_)) => power,
+                        // CR 509.1h + CR 510.1c: blocked, no blockers, no trample.
+                        (BlockStatus::Blocked, None) => 0,
+                    };
+                } else {
+                    let later = self.steps.get(index + 1).copied();
+                    let later_power = later
+                        .filter(|later| attacker.deals_in.contains(later))
+                        .and_then(|_| {
+                            let mut after = attacker.clone();
+                            for (amount, traits) in &hits {
+                                after.receive(*amount, traits);
+                            }
+                            after.sba_death().is_none().then(|| after.assigned_amount())
+                        });
+                    to_defender = self.allocate_step(
+                        &attacker,
+                        &blockers,
+                        &live,
+                        &killed_now,
+                        later.map(|later| {
+                            live.iter()
+                                .copied()
+                                .filter(|&i| fate(blockers[i].id) == Some(later))
+                                .collect::<Vec<_>>()
+                        }),
+                        later_power,
+                        power,
+                        &mut allocation,
+                    )?;
+                }
+            }
+
+            let attacker_traits = attacker.traits;
+            for &i in &live {
+                blockers[i].receive(allocation[i], &attacker_traits);
+            }
+            for (amount, traits) in &hits {
+                attacker.receive(*amount, traits);
+                damage_back += amount;
+            }
+            to_defender_total += to_defender;
+
+            // CR 704.3: state-based actions after the step.
+            for &i in &live {
+                let death = blockers[i].sba_death();
+                let planned = fate(blockers[i].id) == Some(step);
+                if death.is_some() != planned {
+                    return Err(ProjectionBarrier::UnrealizablePlan);
+                }
+                if death == Some(DeathKind::Destroyed) && blockers[i].traits.destruction_replaceable
+                {
+                    return Err(ProjectionBarrier::LethalDestructionReplacement);
+                }
+                if death.is_some() {
+                    blockers[i].alive = false;
+                }
+            }
+            if attacker.alive {
+                match attacker.sba_death() {
+                    Some(DeathKind::Destroyed) if attacker.traits.destruction_replaceable => {
+                        return Err(ProjectionBarrier::LethalDestructionReplacement);
+                    }
+                    Some(_) => attacker.alive = false,
+                    None => {}
+                }
+            }
+
+            steps_out.push(StepAllocation {
+                step,
+                to_blockers: live
+                    .iter()
+                    .filter(|&&i| allocation[i] > 0)
+                    .map(|&i| (blockers[i].id, allocation[i] as u32))
+                    .collect(),
+                to_defender: to_defender as u32,
+            });
+        }
+
+        // A kill planned for a step that never came is not realized.
+        if plan
+            .killed()
+            .any(|id| blockers.iter().any(|b| b.id == id && b.alive))
+        {
+            return Err(ProjectionBarrier::UnrealizablePlan);
+        }
+
+        Ok(RealizedPlan {
+            plan: plan.clone(),
+            steps: steps_out,
+            outcome: PlanOutcome {
+                attacker_dies: !attacker.alive,
+                to_defender: to_defender_total,
+                blocker_damage_to_attacker: damage_back,
+                attacker,
+                blockers,
+            },
+        })
+    }
+
+    /// One step's division of `power` among the live blockers. Fills
+    /// `allocation` and returns the damage assigned to the defender.
+    #[allow(clippy::too_many_arguments)]
+    fn allocate_step(
+        &self,
+        attacker: &ProjectedCombatant,
+        blockers: &[ProjectedCombatant],
+        live: &[usize],
+        killed_now: &[usize],
+        killed_later: Option<Vec<usize>>,
+        later_power: Option<i32>,
+        power: i32,
+        allocation: &mut [i32],
+    ) -> Result<i32, ProjectionBarrier> {
+        let mut left = power;
+        for &i in killed_now {
+            let need = blockers[i]
+                .kill_need(attacker)
+                .ok_or(ProjectionBarrier::UnrealizablePlan)?;
+            if need > left {
+                return Err(ProjectionBarrier::UnrealizablePlan);
+            }
+            allocation[i] = need;
+            left -= need;
+        }
+        let survivors_now: Vec<usize> = live
+            .iter()
+            .copied()
+            .filter(|i| !killed_now.contains(i))
+            .collect();
+        let killed_later = killed_later.unwrap_or_default();
+        let capacity = |i: usize, allocation: &[i32]| blockers[i].cap(attacker) - allocation[i];
+
+        // The carry a later step's kills need (Σ need − later power).
+        if !killed_later.is_empty() {
+            let later_power = later_power.ok_or(ProjectionBarrier::UnrealizablePlan)?;
+            let mut later_need = 0i32;
+            for &i in &killed_later {
+                later_need += blockers[i]
+                    .kill_need(attacker)
+                    .ok_or(ProjectionBarrier::UnrealizablePlan)?;
+            }
+            let mut required = later_need - later_power;
+            let mut by_power = killed_later.clone();
+            by_power.sort_by_key(|&i| std::cmp::Reverse(blockers[i].assigned_amount()));
+            for power_limited in [true, false] {
+                for &i in &by_power {
+                    if required <= 0 || left <= 0 {
+                        break;
+                    }
+                    let room = if power_limited {
+                        capacity(i, allocation).min(blockers[i].assigned_amount() - allocation[i])
+                    } else {
+                        capacity(i, allocation)
+                    };
+                    let carry = room.min(required).min(left).max(0);
+                    allocation[i] += carry;
+                    left -= carry;
+                    required -= carry;
+                }
+            }
+            if required > 0 {
+                return Err(ProjectionBarrier::UnrealizablePlan);
+            }
+        }
+
+        // CR 702.19b: a trampler may assign the excess to the defender once
+        // every blocker has lethal — possible only if no live killable blocker
+        // remains (lethal kills it) and the rest absorb lethal and survive.
+        if self.trample.is_some() && killed_later.is_empty() {
+            let can_trample = survivors_now.iter().all(|&i| {
+                blockers[i]
+                    .kill_need(attacker)
+                    .is_none_or(|need| blockers[i].assignment_lethal(attacker) < need)
+            });
+            let lethal_rest: i32 = survivors_now
+                .iter()
+                .map(|&i| (blockers[i].assignment_lethal(attacker) - allocation[i]).max(0))
+                .sum();
+            if can_trample && left >= lethal_rest {
+                for &i in &survivors_now {
+                    let top_up = (blockers[i].assignment_lethal(attacker) - allocation[i]).max(0);
+                    allocation[i] += top_up;
+                }
+                return Ok(left - lethal_rest);
+            }
+        }
+
+        // Survivor capacity a later kill-less step must keep to absorb its damage.
+        let survivors_forever: Vec<usize> = survivors_now
+            .iter()
+            .copied()
+            .filter(|i| !killed_later.contains(i))
+            .collect();
+        let mut survivor_budget = match later_power {
+            Some(later_power) if killed_later.is_empty() => {
+                let total_capacity: i64 = survivors_forever
+                    .iter()
+                    .map(|&i| i64::from(capacity(i, allocation)))
+                    .sum();
+                (total_capacity - i64::from(later_power)).clamp(0, i64::from(i32::MAX)) as i32
+            }
+            _ => i32::MAX,
+        };
+        let mut place = |i: usize, room: i32, left: &mut i32, allocation: &mut [i32]| {
+            let limited = if survivors_forever.contains(&i) {
+                room.min(survivor_budget)
+            } else {
+                room
+            };
+            let amount = limited.min(*left).max(0);
+            allocation[i] += amount;
+            *left -= amount;
+            if survivors_forever.contains(&i) {
+                survivor_budget -= amount;
+            }
+        };
+
+        let mut by_power = survivors_now.clone();
+        by_power.sort_by_key(|&i| std::cmp::Reverse(blockers[i].assigned_amount()));
+        for &i in &by_power {
+            let room = capacity(i, allocation).min(blockers[i].assigned_amount() - allocation[i]);
+            place(i, room, &mut left, allocation);
+        }
+        // CR 702.19b: damage carried onto a creature the trampler kills later
+        // lowers the lethal it must assign there, freeing excess for the defender.
+        if self.trample.is_some() {
+            for &i in &killed_later {
+                let room = capacity(i, allocation);
+                place(i, room, &mut left, allocation);
+            }
+        }
+        if left > 0 {
+            if let Some(&i) = killed_now.first() {
+                allocation[i] += left;
+                left = 0;
+            }
+        }
+        for &i in &by_power {
+            let room = capacity(i, allocation);
+            place(i, room, &mut left, allocation);
+        }
+        if left > 0 {
+            return Err(ProjectionBarrier::UnrealizablePlan);
+        }
+        Ok(0)
+    }
+}
+
+/// CR 614.1 + CR 615.1 + CR 702.16e: the class of effect that would change
+/// `amount` combat damage from `source_id` to `target`, or `None` when the
+/// event would be dealt exactly as assigned. Read-only: it never runs the
+/// replacement pipeline.
+fn classify_combat_damage(
+    state: &GameState,
+    source_id: ObjectId,
+    target: &TargetRef,
+    amount: u32,
+    recipient: PreventionRecipient,
+) -> Option<DamageEventClass> {
+    let context = DamageContext::from_source(state, source_id)?;
+    classify_damage_barrier(state, &context, target, amount, recipient)
+}
+
+/// The classification behind [`classify_combat_damage`], over the same gate
+/// and replacement lookup as `damage_is_not_fixed` (which keeps its bool
+/// contract for [`assess_combat_impact`]).
+fn classify_damage_barrier(
+    state: &GameState,
+    context: &DamageContext,
+    target: &TargetRef,
+    amount: u32,
+    recipient: PreventionRecipient,
+) -> Option<DamageEventClass> {
+    if amount == 0 {
+        return None;
+    }
+    let mut discarded_events = Vec::new();
+    let Some(proposed) =
+        pre_replacement_damage_gate(state, context, target, amount, true, &mut discarded_events)
+    else {
+        // CR 120.1 + CR 120.2: the gate's "can't" rules come before protection.
+        let source_cant_deal = crate::game::static_abilities::object_has_static_other(
+            state,
+            context.source_id,
+            "CantDealDamage",
+        );
+        let target_cant_be_dealt = matches!(target, TargetRef::Object(id)
+            if crate::game::static_abilities::object_has_static_other(state, *id, "CantBeDealtDamage"));
+        return Some(if source_cant_deal || target_cant_be_dealt {
+            DamageEventClass::DamageGate
+        } else {
+            DamageEventClass::Protection
+        });
+    };
+    let classes: Vec<DamageEventClass> = replacement::find_applicable_replacements(
+        state,
+        &proposed,
+        replacement::replacement_registry(),
+    )
+    .into_iter()
+    .map(|rid| classify_damage_replacement(state, rid, recipient))
+    .collect();
+    // A creative class dominates: it is the one that can change direction.
+    classes
+        .iter()
+        .copied()
+        .find(|class| !class.is_reductive())
+        .or_else(|| classes.first().copied())
+}
+
+/// CR 614.1a + CR 614.9 + CR 615.1: classify one applicable damage
+/// replacement from its definition's structure; anything not positively
+/// classified is `OtherReplacement`.
+fn classify_damage_replacement(
+    state: &GameState,
+    rid: crate::types::proposed_event::ReplacementId,
+    recipient: PreventionRecipient,
+) -> DamageEventClass {
+    // `ObjectId(0)` selects the floating registry of resolution shields.
+    let definition = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|object| object.replacement_definitions.get(rid.index))
+    };
+    let Some(definition) = definition else {
+        return DamageEventClass::OtherReplacement;
+    };
+    if definition.redirect_target.is_some() {
+        return DamageEventClass::Redirection;
+    }
+    match &definition.shield_kind {
+        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot => {
+            DamageEventClass::Prevention { recipient }
+        }
+        ShieldKind::Redirection { .. } => DamageEventClass::Redirection,
+        ShieldKind::Regeneration => DamageEventClass::OtherReplacement,
+        ShieldKind::None | ShieldKind::DamageReplacementOneShot => {
+            match &definition.damage_modification {
+                Some(
+                    DamageModification::Double
+                    | DamageModification::Triple
+                    | DamageModification::Plus { .. },
+                ) => DamageEventClass::Amplification,
+                Some(DamageModification::PreventionMinus { .. }) => {
+                    DamageEventClass::Prevention { recipient }
+                }
+                Some(
+                    DamageModification::Minus { .. }
+                    | DamageModification::SetToSourcePower
+                    | DamageModification::SetTo { .. }
+                    | DamageModification::LifeFloor { .. },
+                )
+                | None => DamageEventClass::OtherReplacement,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whole-attack residual
+// ---------------------------------------------------------------------------
+
+/// One attacker's projected remaining damage to the defending player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackerResidual {
+    /// The engine would assign exactly this much (step-aware, trigger-aware).
+    Exact(i32),
+    /// At most this much: a reductive effect confined to damage to the defender.
+    AtMost(i32),
+    /// A barrier: the attacker's unblocked policy value, explicitly NOT a bound.
+    NoCredit(i32),
+}
+
+impl AttackerResidual {
+    /// The value the defender's lethality check counts: `Exact` and `AtMost`
+    /// at their figure, `NoCredit` at its unblocked damage — a defensive
+    /// heuristic, not a claim of fact.
+    pub fn lethality_value(self) -> i32 {
+        match self {
+            Self::Exact(value) | Self::AtMost(value) | Self::NoCredit(value) => value,
+        }
+    }
+}
+
+/// The residual totals by basis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResidualTotal {
+    pub exact: i32,
+    pub at_most: i32,
+    pub no_credit: i32,
+}
+
+impl ResidualTotal {
+    /// The lethality figure: every basis counted (see
+    /// [`AttackerResidual::lethality_value`]).
+    pub fn lethality(&self) -> i32 {
+        self.exact + self.at_most + self.no_credit
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResidualEntry {
+    attacker: ObjectId,
+    blockers: Vec<ObjectId>,
+    residual: AttackerResidual,
+}
+
+/// CR 510.1 + CR 510.2: the whole attack's projected damage to one defending
+/// player, attacker by attacker, under a candidate set of blocks. The ledger a
+/// blocking decision commits blocks into: prevention credit compares `Exact`
+/// figures only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttackResidual {
+    defender: PlayerId,
+    entries: Vec<ResidualEntry>,
+}
+
+impl AttackResidual {
+    /// Project every attacker in `attackers` aimed at `defender` under `blocks`
+    /// (each `(blocker, attacker)`). An attacker `state.combat` records as
+    /// attacking another player, a planeswalker or a battle is excluded.
+    pub fn project_attack(
+        state: &GameState,
+        defender: PlayerId,
+        attackers: &[ObjectId],
+        blocks: &[(ObjectId, ObjectId)],
+    ) -> Self {
+        let aimed_at_defender = |attacker: ObjectId| {
+            state
+                .combat
+                .as_ref()
+                .and_then(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .find(|info| info.object_id == attacker)
+                })
+                .is_none_or(|info| info.attack_target == AttackTarget::Player(defender))
+        };
+        let entries = attackers
+            .iter()
+            .copied()
+            .filter(|&attacker| aimed_at_defender(attacker))
+            .map(|attacker| {
+                let blockers: Vec<ObjectId> = blocks
+                    .iter()
+                    .filter(|(_, blocked)| *blocked == attacker)
+                    .map(|(blocker, _)| *blocker)
+                    .collect();
+                ResidualEntry {
+                    attacker,
+                    residual: residual_for(state, attacker, &blockers),
+                    blockers,
+                }
+            })
+            .collect();
+        Self { defender, entries }
+    }
+
+    /// The defending player this ledger projects damage to.
+    pub fn defender(&self) -> PlayerId {
+        self.defender
+    }
+
+    /// The committed residual for `attacker`, if it is in the ledger.
+    pub fn residual(&self, attacker: ObjectId) -> Option<AttackerResidual> {
+        self.entry(attacker).map(|entry| entry.residual)
+    }
+
+    /// The committed blockers of `attacker`.
+    pub fn blockers_of(&self, attacker: ObjectId) -> &[ObjectId] {
+        self.entry(attacker)
+            .map(|entry| entry.blockers.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The residual `attacker` would have if exactly `blockers` blocked it,
+    /// re-projecting only that attacker.
+    pub fn with_blockers(
+        &self,
+        state: &GameState,
+        attacker: ObjectId,
+        blockers: &[ObjectId],
+    ) -> AttackerResidual {
+        residual_for(state, attacker, blockers)
+    }
+
+    /// Commit exactly `blockers` as `attacker`'s block.
+    pub fn commit(&mut self, state: &GameState, attacker: ObjectId, blockers: &[ObjectId]) {
+        let residual = residual_for(state, attacker, blockers);
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.attacker == attacker) {
+            entry.blockers = blockers.to_vec();
+            entry.residual = residual;
+        }
+    }
+
+    /// Damage to the defender the block `blockers` (replacing `attacker`'s
+    /// committed block) prevents. Credited only when the committed figure and
+    /// the candidate figure are both `Exact`; anything else credits nothing.
+    pub fn prevented_by(
+        &self,
+        state: &GameState,
+        attacker: ObjectId,
+        blockers: &[ObjectId],
+    ) -> i32 {
+        let Some(AttackerResidual::Exact(before)) = self.residual(attacker) else {
+            return 0;
+        };
+        match self.with_blockers(state, attacker, blockers) {
+            AttackerResidual::Exact(after) => (before - after).max(0),
+            AttackerResidual::AtMost(_) | AttackerResidual::NoCredit(_) => 0,
+        }
+    }
+
+    /// The ledger's totals by basis.
+    pub fn total(&self) -> ResidualTotal {
+        self.entries
+            .iter()
+            .fold(ResidualTotal::default(), |mut total, entry| {
+                match entry.residual {
+                    AttackerResidual::Exact(value) => total.exact += value,
+                    AttackerResidual::AtMost(value) => total.at_most += value,
+                    AttackerResidual::NoCredit(value) => total.no_credit += value,
+                }
+                total
+            })
+    }
+
+    fn entry(&self, attacker: ObjectId) -> Option<&ResidualEntry> {
+        self.entries.iter().find(|entry| entry.attacker == attacker)
+    }
+}
+
+/// The ledger's per-attacker policy over [`combat_damage_to_defender_checked`].
+fn residual_for(state: &GameState, attacker: ObjectId, blockers: &[ObjectId]) -> AttackerResidual {
+    match combat_damage_to_defender_checked(state, attacker, blockers) {
+        Ok(Projection {
+            value,
+            basis: Basis::Exact,
+        }) => AttackerResidual::Exact(value),
+        Ok(Projection {
+            value,
+            basis: Basis::AtMost,
+        }) => AttackerResidual::AtMost(value),
+        Err(_) => AttackerResidual::NoCredit(unblocked_policy_damage(state, attacker)),
+    }
 }
 
 /// How much damage is needed to kill this creature.
@@ -2365,6 +3825,50 @@ mod tests {
             ),
             CombatImpact::Indeterminate,
             "indestructibility separates fixed damage from fixed survival"
+        );
+    }
+
+    /// CR 510.4 + CR 702.7b: after the first-strike combat damage step only the
+    /// regular step remains, so the exchange is one simultaneous step again —
+    /// newly supportable. A first-strike-only attacker deals nothing in it; its
+    /// blocker deals its power. Before that step the same pair stays
+    /// Indeterminate (two steps).
+    #[test]
+    fn assess_combat_impact_reads_the_regular_step_after_first_strike() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "First Striker", 2, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 2, 4);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        state.objects.get_mut(&blocker).unwrap().damage_marked = 2;
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        let attacker_ref = current_incarnation(&state, attacker);
+        let blocker_ref = current_incarnation(&state, blocker);
+        assert_eq!(
+            assess_combat_impact(&state, attacker_ref, blocker_ref),
+            CombatImpact::Indeterminate,
+            "reach guard: before the first-strike step the exchange spans two steps"
+        );
+
+        let combat = state.combat.as_mut().unwrap();
+        combat.first_strike_done = true;
+        combat.first_strike_participants = Some(std::iter::once(attacker).collect());
+        assert_eq!(
+            assess_combat_impact(&state, attacker_ref, blocker_ref),
+            CombatImpact::Fixed {
+                damage: FixedCombatDamage {
+                    attacker_to_blocker: 0,
+                    blocker_to_attacker: 2,
+                },
+                survival: FixedCombatSurvival {
+                    attacker_survives: true,
+                    blocker_survives: true,
+                },
+            }
         );
     }
 

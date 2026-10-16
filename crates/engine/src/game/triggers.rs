@@ -51387,3 +51387,13 @@ mod pending_trigger_pin_reassignment_tests {
         );
     }
 }
+
+pub(crate) fn project_block_declaration(
+    _state: &GameState,
+    _pairs: &[(ObjectId, ObjectId)],
+    _provenance: crate::game::combat_damage::BlockProvenance,
+) -> Result<crate::game::combat_damage::BlockShifts, crate::game::combat_damage::ProjectionBarrier>
+{
+    Ok(crate::game::combat_damage::BlockShifts::default())
+}
+
