@@ -24050,7 +24050,9 @@ impl Effect {
             | Effect::ExileFromTopUntil { player, .. }
             | Effect::GainLife { player, .. }
             | Effect::Discover { player, .. }
-            | Effect::PhysicalContest { contestant: player, .. }
+            | Effect::PhysicalContest {
+                contestant: player, ..
+            }
             | Effect::BlightEffect { player, .. }
             | Effect::Amass { player, .. } => Some(player),
 
