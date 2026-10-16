@@ -281,18 +281,6 @@
     {
       "Morph": {
         "data": {
-          "generic": 2,
-          "shards": [
-            "Red"
-          ],
-          "type": "Cost"
-        },
-        "type": "Mana"
-      }
-    },
-    {
-      "Morph": {
-        "data": {
           "amount": {
             "type": "Fixed",
             "value": 3
@@ -1034,6 +1022,18 @@
           "WhiteBlue"
         ],
         "type": "Cost"
+      }
+    },
+    {
+      "Morph": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
       }
     },
     {

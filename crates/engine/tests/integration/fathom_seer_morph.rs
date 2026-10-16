@@ -864,6 +864,10 @@ fn skirk_volcanist_turn_face_up_sacrifice_replacement_pause() {
             .expect("choose replacement");
     }
 
+    // CR 614.6: Both sacrificed mountains were moved to exile instead of graveyard.
+    assert_eq!(runner.state().objects[&mountain1].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Exile);
+
     // Must be face up now
     assert!(!runner.state().objects[&volcanist].face_down);
     assert!(
@@ -880,8 +884,11 @@ fn skirk_volcanist_turn_face_up_sacrifice_replacement_pause() {
 // CR 702.37e + CR 605.3b + CR 616.1: Cost move root resumes at common PriorityBoundary after child prompt drains
 #[test]
 fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
-    use engine::types::ability::TurnUpCostSource;
-    use engine::types::game_state::{PendingCostMoveResume, TurnFaceUpMoveKind};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ChoiceType, Effect, TargetSelectionMode,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::{ReplacementDefinition, TargetFilter};
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -938,27 +945,76 @@ fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
     runner.resolve_top();
     assert!(runner.state().objects[&seer].face_down);
 
-    // Install TurnFaceUpCostMove and a mandatory child prompt (ChooseOneOf)
-    runner.state_mut().pending_cost_move_resume = Some(PendingCostMoveResume::TurnFaceUpCostMove {
-        player: P0,
-        object_id: seer,
-        cost_source: TurnUpCostSource::Morph,
-        move_kind: TurnFaceUpMoveKind::ReturnToHand,
-        chosen: vec![island1, island2],
-        paused_at_index: 0,
-        remaining_cost: None,
-    });
-    runner.state_mut().waiting_for = WaitingFor::NamedChoice {
-        player: P0,
-        choice_type: engine::types::ability::ChoiceType::OddOrEven,
-        options: vec!["Odd".to_string(), "Even".to_string()],
-        source: None,
-        persist_player: None,
-        free_entry: None,
-    };
+    // Install delivery-child replacement on island1 (moved to hand -> choose odd or even)
+    let delivery_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::OddOrEven,
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Hand);
 
-    // Submitting the choice must drain the child prompt, reach PriorityBoundary,
-    // resume TurnFaceUpCostMove, finish moving island2, and flip Fathom Seer.
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&island1)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(delivery_repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&island1)
+        .unwrap()
+        .replacement_definitions
+        .push(delivery_repl);
+
+    // Public payment flow: dispatch GameAction::TurnFaceUp
+    runner
+        .act(GameAction::TurnFaceUp {
+            object_id: seer,
+            x: 0,
+        })
+        .expect("turn face up");
+
+    // Select the two Islands to return to hand
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![island1, island2],
+        })
+        .expect("select islands");
+
+    // Intermediate state: island1 was moved to hand, but delivery replacement paused for NamedChoice
+    assert_eq!(runner.state().objects[&island1].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&island2].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&seer].face_down,
+        "must remain face down while paused"
+    );
+    assert!(
+        runner.state().pending_cost_move_resume.is_some(),
+        "must hold pending_cost_move_resume while child prompt is open"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::OddOrEven,
+                ..
+            }
+        ),
+        "expected NamedChoice child prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Submitting the choice drains the child prompt, reaches PriorityBoundary,
+    // resumes TurnFaceUpCostMove, finishes moving island2, and flips Fathom Seer.
     let res = runner.act(GameAction::ChooseOption {
         choice: "Odd".to_string(),
     });
@@ -983,8 +1039,12 @@ fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
 // CR 702.37e + CR 614.6 + CR 616.1: Deferred life cost depth pre-capture ensures child tail completes before flip
 #[test]
 fn zombie_cutthroat_deferred_life_cost_child_drain_before_flip() {
-    use engine::types::ability::TurnUpCostSource;
-    use engine::types::game_state::DeferredLifeCostResume;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, PlayerFilter, QuantityExpr,
+        QuantityModification,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::{ReplacementDefinition, TargetFilter};
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1040,37 +1100,82 @@ fn zombie_cutthroat_deferred_life_cost_child_drain_before_flip() {
     assert!(runner.state().objects[&cutthroat].face_down);
     assert_eq!(runner.state().players[0].life, 20);
 
-    // Deduct 5 life for the cost payment
-    runner.state_mut().players[0].life -= 5;
+    // Install interactive LoseLife substitution rider on cutthroat:
+    // When controller loses life, prompt ChooseOneOfBranch with a branch that gains 1 life
+    let choice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )],
+            kind: ChooseOneOfKind::Ordinary,
+        },
+    );
+    let life_repl = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .quantity_modification(QuantityModification::Plus { value: 0 })
+        .execute(choice);
 
-    // Simulate deferred life continuation with depth 0 and active child prompt
-    runner.state_mut().pending_deferred_life_cost_resume =
-        Some(DeferredLifeCostResume::TurnFaceUp {
-            player: P0,
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&cutthroat)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(life_repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&cutthroat)
+        .unwrap()
+        .replacement_definitions
+        .push(life_repl);
+
+    // Public payment flow: dispatch GameAction::TurnFaceUp
+    runner
+        .act(GameAction::TurnFaceUp {
             object_id: cutthroat,
-            cost_source: TurnUpCostSource::Morph,
-            resume_at_resolution_depth: 0,
-            remaining_cost: None,
-        });
-    runner.state_mut().waiting_for = WaitingFor::NamedChoice {
-        player: P0,
-        choice_type: engine::types::ability::ChoiceType::OddOrEven,
-        options: vec!["Odd".to_string(), "Even".to_string()],
-        source: None,
-        persist_player: None,
-        free_entry: None,
-    };
+            x: 0,
+        })
+        .expect("turn face up");
 
-    // Submitting child answer drains back to resolution depth 0, triggering DeferredLifeCostResume::TurnFaceUp
-    let res = runner.act(GameAction::ChooseOption {
-        choice: "Odd".to_string(),
-    });
-    assert!(res.is_ok(), "choice action should succeed: {:?}", res.err());
+    // Intermediate state:
+    // 5 life was deducted immediately by the engine (20 -> 15)
+    assert_eq!(runner.state().players[0].life, 15);
+    // Creature is still face down
+    assert!(
+        runner.state().objects[&cutthroat].face_down,
+        "must remain face down during pause"
+    );
+    // Deferred life root is parked
+    assert!(
+        runner.state().pending_deferred_life_cost_resume.is_some(),
+        "must park pending_deferred_life_cost_resume"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ),
+        "expected ChooseOneOfBranch prompt, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Submitting the child choice executes the branch (+1 life), drains back to
+    // resolution depth 0, resumes DeferredLifeCostResume::TurnFaceUp, and flips Zombie Cutthroat.
+    let res = runner.act(GameAction::ChooseBranch { index: 0 });
+    assert!(res.is_ok(), "branch action should succeed: {:?}", res.err());
 
     // Creature is now turned face up
     assert!(!runner.state().objects[&cutthroat].face_down);
-    // Life was deducted exactly once (15)
-    assert_eq!(runner.state().players[0].life, 15);
+    // Life was deducted (20 - 5 = 15) then gained 1 from branch (16)
+    assert_eq!(runner.state().players[0].life, 16);
     assert!(
         runner.state().pending_deferred_life_cost_resume.is_none(),
         "deferred life root must be cleared"
@@ -1772,5 +1877,341 @@ fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spec
     assert!(
         !runner.state().objects[&ripper].face_down,
         "ripper must be turned face up"
+    );
+}
+
+// CR 701.21a + CR 702.37e + CR 116.2b: Turning face up is a special action exempt from
+// cast/activation sacrifice prohibitions (Yasharn), but universal "can't be sacrificed"
+// restrictions (Assault Suit) must exclude the object from morph sacrifice candidates.
+#[test]
+fn turn_face_up_sacrifice_cost_excludes_cant_be_sacrificed_permanent_under_yasharn() {
+    use engine::types::statics::StaticMode;
+    use engine::types::{StaticDefinition, TargetFilter};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Yasharn on battlefield controlled by P1:
+    // "Players can't pay life or sacrifice nonland permanents to cast spells or activate abilities."
+    scenario.add_creature_from_oracle(
+        P1,
+        "Yasharn, Implacable Earth",
+        4,
+        4,
+        "When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.",
+    );
+
+    // Gift of Doom in P0's hand: "Morph—Sacrifice another creature."
+    let gift = scenario
+        .add_creature_to_hand(P0, "Gift of Doom", 1, 1)
+        .from_oracle_text("Morph—Sacrifice another creature.")
+        .id();
+
+    // Creature equipped with Assault Suit: "can't be sacrificed"
+    let assault_creature = scenario.add_creature(P0, "Assault Bear", 2, 2).id();
+
+    // Ordinary creature: can be sacrificed to pay the special action cost
+    let ordinary_creature = scenario.add_creature(P0, "Ordinary Bear", 2, 2).id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    // Add CantBeSacrificed static to assault_creature
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&assault_creature)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+                .affected(TargetFilter::SelfRef),
+        );
+
+    cast_face_down(&mut runner, gift);
+
+    // P0 initiates TurnFaceUp
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: gift,
+        x: 0,
+    });
+    assert!(
+        res.is_ok(),
+        "initiating morph sacrifice under Yasharn must succeed: {:?}",
+        res.err()
+    );
+
+    // Prompt must offer ordinary_creature, but EXCLUDE assault_creature
+    let waiting = &runner.state().waiting_for;
+    assert!(
+        matches!(
+            waiting,
+            WaitingFor::PayCost {
+                player: P0,
+                kind: PayCostKind::Sacrifice,
+                count: 1,
+                ..
+            }
+        ),
+        "expected WaitingFor::PayCost::Sacrifice, got {:?}",
+        waiting
+    );
+    if let WaitingFor::PayCost { choices, count, .. } = waiting {
+        assert_eq!(*count, 1);
+        assert!(
+            choices.contains(&ordinary_creature),
+            "ordinary creature must be an eligible sacrifice choice under Yasharn"
+        );
+        assert!(
+            !choices.contains(&assault_creature),
+            "CR 701.21a: CantBeSacrificed permanent must be excluded from sacrifice choices"
+        );
+        assert!(
+            !choices.contains(&gift),
+            "face-down morph source must not sacrifice itself"
+        );
+    }
+
+    // Complete the payment by sacrificing ordinary_creature
+    let res = runner.act(GameAction::SelectCards {
+        cards: vec![ordinary_creature],
+    });
+    assert!(
+        res.is_ok(),
+        "SelectCards for ordinary_creature must succeed: {:?}",
+        res.err()
+    );
+
+    assert_eq!(
+        runner.state().objects[&ordinary_creature].zone,
+        Zone::Graveyard
+    );
+    assert_eq!(
+        runner.state().objects[&assault_creature].zone,
+        Zone::Battlefield
+    );
+    assert!(
+        !runner.state().objects[&gift].face_down,
+        "Gift of Doom must be turned face up"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+// CR 702.37e + CR 118.1: Morph cost shapes must reject aggregate sacrifice requirements
+// and random/source-card discards across offer, payment, and coverage.
+#[test]
+fn turn_face_up_rejects_unsupported_aggregate_and_random_discard_costs() {
+    use engine::game::EngineError;
+    use engine::types::ability::{
+        CardSelectionMode, Comparator, DiscardSelfScope, QuantityExpr, SacrificeAggregateStat,
+        SacrificeCost, SacrificeRequirement,
+    };
+    use engine::types::keywords::{is_ability_cost_supported_for_morph, Keyword};
+    use engine::types::{AbilityCost, TargetFilter};
+
+    // 1. Aggregate sacrifice requirement
+    let aggregate_sac_cost = AbilityCost::Sacrifice(SacrificeCost {
+        target: TargetFilter::Any,
+        requirement: SacrificeRequirement::Aggregate {
+            stat: SacrificeAggregateStat::TotalPower,
+            comparator: Comparator::GE,
+            value: 4,
+        },
+    });
+    assert!(
+        !is_ability_cost_supported_for_morph(&aggregate_sac_cost),
+        "aggregate sacrifice must be unsupported for morph"
+    );
+
+    // 2. Random from-hand discard
+    let random_discard_cost = AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        selection: CardSelectionMode::Random,
+        self_scope: DiscardSelfScope::FromHand,
+    };
+    assert!(
+        !is_ability_cost_supported_for_morph(&random_discard_cost),
+        "random discard must be unsupported for morph"
+    );
+
+    // 3. Source-card discard
+    let source_discard_cost = AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        selection: CardSelectionMode::Chosen,
+        self_scope: DiscardSelfScope::SourceCard,
+    };
+    assert!(
+        !is_ability_cost_supported_for_morph(&source_discard_cost),
+        "source-card discard must be unsupported for morph"
+    );
+
+    // Verify public payment rejection: GameAction::TurnFaceUp with unsupported morph payload
+    // A) Aggregate sacrifice
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let agg_morph = scenario
+        .add_creature_to_hand(P0, "Aggregate Morph", 2, 2)
+        .with_keyword(Keyword::morph(aggregate_sac_cost))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                agg_morph,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                agg_morph,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                agg_morph,
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let mut runner = scenario.build();
+    cast_face_down(&mut runner, agg_morph);
+
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: agg_morph,
+        x: 0,
+    });
+    assert!(
+        matches!(res, Err(EngineError::InvalidAction(_))),
+        "TurnFaceUp with aggregate sacrifice must fail with InvalidAction, got {:?}",
+        res
+    );
+    assert!(
+        runner.state().objects[&agg_morph].face_down,
+        "must remain face down"
+    );
+
+    // B) Random discard
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rand_morph = scenario
+        .add_creature_to_hand(P0, "Random Discard Morph", 2, 2)
+        .with_keyword(Keyword::morph(random_discard_cost))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                rand_morph,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                rand_morph,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                rand_morph,
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let mut runner = scenario.build();
+    cast_face_down(&mut runner, rand_morph);
+
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: rand_morph,
+        x: 0,
+    });
+    assert!(
+        matches!(res, Err(EngineError::InvalidAction(_))),
+        "TurnFaceUp with random discard must fail with InvalidAction, got {:?}",
+        res
+    );
+    assert!(
+        runner.state().objects[&rand_morph].face_down,
+        "must remain face down"
+    );
+
+    // C) Source-card discard
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let src_morph = scenario
+        .add_creature_to_hand(P0, "Source Discard Morph", 2, 2)
+        .with_keyword(Keyword::morph(source_discard_cost))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                src_morph,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                src_morph,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                src_morph,
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let mut runner = scenario.build();
+    cast_face_down(&mut runner, src_morph);
+
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: src_morph,
+        x: 0,
+    });
+    assert!(
+        matches!(res, Err(EngineError::InvalidAction(_))),
+        "TurnFaceUp with source-card discard must fail with InvalidAction, got {:?}",
+        res
+    );
+    assert!(
+        runner.state().objects[&src_morph].face_down,
+        "must remain face down"
     );
 }

@@ -25439,6 +25439,11 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
             if obj.controller != player {
                 return false;
             }
+            // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
+            // for any cost regardless of payment scope (e.g. Assault Suit).
+            if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
+                return false;
+            }
             if !skip_cant_sacrifice
                 && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
             {

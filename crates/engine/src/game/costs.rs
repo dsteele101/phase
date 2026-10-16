@@ -1162,7 +1162,12 @@ fn pay_ability_cost_inner(
                         "Cannot sacrifice a face-down permanent to turn itself face up",
                     ));
                 }
-                let count = cost.requirement.fixed_count().unwrap_or(1) as usize;
+                let Some(count) = cost.requirement.fixed_count() else {
+                    return Ok(payment_failed(
+                        "Aggregate sacrifice requirements are not supported for turn-face-up costs",
+                    ));
+                };
+                let count = count as usize;
                 let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
                     state,
                     player,
@@ -1227,8 +1232,16 @@ fn pay_ability_cost_inner(
         AbilityCost::Discard {
             count,
             filter,
-            ..
+            selection,
+            self_scope,
         } if matches!(scope, PaymentScope::TurnFaceUp { .. }) => {
+            if self_scope.is_source_card()
+                || *selection == crate::types::ability::CardSelectionMode::Random
+            {
+                return Ok(payment_failed(
+                    "Random or source-card discard costs are not supported for turn-face-up costs",
+                ));
+            }
             let PaymentScope::TurnFaceUp {
                 object_id,
                 cost_source,
@@ -2399,7 +2412,17 @@ pub(crate) fn can_pay_turn_face_up(
             );
             (eligible.len() as u32) >= *count
         }
-        AbilityCost::Discard { count, filter, .. } => {
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope,
+        } => {
+            if self_scope.is_source_card()
+                || *selection == crate::types::ability::CardSelectionMode::Random
+            {
+                return false;
+            }
             let count_num = resolve_quantity(state, count, payer, object_id).max(0) as usize;
             let eligible = super::casting::find_eligible_discard_targets(
                 state,
@@ -2418,7 +2441,10 @@ pub(crate) fn can_pay_turn_face_up(
             if matches!(cost.target, TargetFilter::SelfRef) {
                 return false;
             }
-            let count = cost.requirement.fixed_count().unwrap_or(1) as usize;
+            let Some(count) = cost.requirement.fixed_count() else {
+                return false;
+            };
+            let count = count as usize;
             let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
                 state,
                 payer,

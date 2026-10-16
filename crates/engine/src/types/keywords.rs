@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, CostReduction, FilterProp,
-    QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, CardSelectionMode, Comparator, CostObjectCount,
+    CostReduction, FilterProp, QuantityExpr, SacrificeRequirement, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -134,17 +135,25 @@ impl MorphCost {
     }
 }
 
-/// CR 702.37e: Supported non-mana cost shapes for morph: ReturnToHand, Discard,
-/// PayLife, Reveal, Sacrifice, and Mana. Composite is suppressed until
+/// CR 702.37e + CR 118.1: Supported non-mana cost shapes for morph: ReturnToHand,
+/// Discard (chosen from hand only), PayLife, Reveal, Sacrifice (fixed count only),
+/// and Mana. Aggregate sacrifice requirements and random/source-card discards are
+/// rejected until prompt semantics exist. Composite is suppressed until
 /// transaction rollback / pause continuations are implemented.
 pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Discard { .. }
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Sacrifice(_)
-        | AbilityCost::Mana { .. } => true,
+        AbilityCost::ReturnToHand { .. } => true,
+        AbilityCost::Discard {
+            selection,
+            self_scope,
+            ..
+        } => !self_scope.is_source_card() && *selection != CardSelectionMode::Random,
+        AbilityCost::PayLife { .. } => true,
+        AbilityCost::Reveal { .. } => true,
+        AbilityCost::Sacrifice(cost) => {
+            matches!(cost.requirement, SacrificeRequirement::Count { .. })
+        }
+        AbilityCost::Mana { .. } => true,
         AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -5797,7 +5806,6 @@ mod tests {
             Keyword::Ninjutsu(mc("{2}{R}")),
             Keyword::CommanderNinjutsu(mc("{2}{R}")),
             Keyword::Prowl(mc("{2}{R}")),
-            Keyword::morph(mc("{2}{R}")),
             Keyword::morph(pay_life_cost()),
             Keyword::Megamorph(mc("{2}{R}")),
             Keyword::Mayhem(mc("{2}{R}")),
@@ -6386,6 +6394,7 @@ mod tests {
             Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
             Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
             Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
+            Keyword::morph(mc("{2}{R}")),
             Keyword::Ward(WardCost::Mana(mc("{2}"))),
             Keyword::Ward(WardCost::Waterbend(mc("{4}"))),
             Keyword::Ward(WardCost::Compound(vec![
