@@ -25949,21 +25949,18 @@ fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
 /// a ParentTarget referent is active and carrying forward (e.g. Code of Constraint's
 /// "tap that creature and it doesn't untap...").
 fn chain_has_prior_parent_target_carrier(clauses: &[ClauseIr]) -> bool {
-    for prev in clauses.iter().rev() {
-        if let Some(cond) = prev.condition.as_ref() {
-            if !cond.has_when_you_do_marker()
-                && !cond.is_affirmative_reflexive_gate()
-                && !cond.is_casting_condition()
-            {
-                return false;
-            }
-        }
-        if effect_is_parent_target_carrier(&prev.parsed.effect) {
-            return true;
-        }
+    let Some(prev) = clauses.last() else {
         return false;
+    };
+    if let Some(cond) = prev.condition.as_ref() {
+        if !cond.has_when_you_do_marker()
+            && !cond.is_affirmative_reflexive_gate()
+            && !cond.is_casting_condition()
+        {
+            return false;
+        }
     }
-    false
+    effect_is_parent_target_carrier(&prev.parsed.effect)
 }
 
 /// CR 611.2a + CR 400.7: An `Otherwise, return it ... and it's a <animation>` else
