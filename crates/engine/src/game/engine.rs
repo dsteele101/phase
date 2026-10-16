@@ -8503,15 +8503,19 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
-        CostMoveDrainBoundary::PriorityBoundary => matches!(
-            state.pending_cost_move_resume,
-            Some(
-                PendingCostMoveResume::Cast {
-                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
-                    ..
-                } | PendingCostMoveResume::ManaAbilityPayment { .. }
-            )
-        ),
+        CostMoveDrainBoundary::PriorityBoundary => {
+            state.pending_replacement.is_none()
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(
+                        PendingCostMoveResume::Cast {
+                            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                            ..
+                        } | PendingCostMoveResume::ManaAbilityPayment { .. }
+                            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                    )
+                )
+        }
     };
     if !eligible {
         return Ok(None);
@@ -12706,17 +12710,14 @@ fn apply_non_priority_pass_action(
                     }
                     PayCostKind::Sacrifice => {
                         for (index, &id) in chosen.iter().enumerate() {
-                            match crate::game::zone_pipeline::move_object(
+                            match super::sacrifice::sacrifice_permanent(
                                 state,
-                                crate::game::zone_pipeline::ZoneMoveRequest::cost(
-                                    id,
-                                    Zone::Graveyard,
-                                    *object_id,
-                                ),
+                                id,
+                                *player,
                                 &mut events,
-                            ) {
-                                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                            )? {
+                                super::sacrifice::SacrificeOutcome::Complete => {}
+                                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
@@ -12728,16 +12729,11 @@ fn apply_non_priority_pass_action(
                                             remaining_cost: remaining_cost.clone(),
                                         },
                                     );
-                                    if state.pending_replacement.is_some() {
-                                        super::costs::pause_cost_payment_for_replacement_choice(
-                                            state,
-                                            choice_player,
-                                        );
-                                    }
+                                    super::costs::pause_cost_payment_for_replacement_choice(
+                                        state,
+                                        choice_player,
+                                    );
                                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
-                                }
-                                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                                    unreachable!("a cost move to Graveyard cannot require Aura attachment");
                                 }
                             }
                         }

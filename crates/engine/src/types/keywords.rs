@@ -135,7 +135,8 @@ impl MorphCost {
 }
 
 /// CR 702.37e: Supported non-mana cost shapes for morph: ReturnToHand, Discard,
-/// PayLife, Reveal, Sacrifice, Mana, and Composite combinations thereof.
+/// PayLife, Reveal, Sacrifice, and Mana. Composite is suppressed until
+/// transaction rollback / pause continuations are implemented.
 pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::ReturnToHand { .. }
@@ -144,9 +145,7 @@ pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
         | AbilityCost::Reveal { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Mana { .. } => true,
-        AbilityCost::Composite { costs } => {
-            !costs.is_empty() && costs.iter().all(is_ability_cost_supported_for_morph)
-        }
+        AbilityCost::Composite { .. } => false,
         _ => false,
     }
 }

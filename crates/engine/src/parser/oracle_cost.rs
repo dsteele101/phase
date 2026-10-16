@@ -2215,7 +2215,7 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
     None
 }
 
-/// CR 118.12: Parse "return a land you control to its owner's hand" /
+/// CR 118.1: Parse "return a land you control to its owner's hand" /
 /// "return two Islands you control to their owner's hand" style bounce costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;

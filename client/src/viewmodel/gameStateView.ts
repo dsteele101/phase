@@ -446,7 +446,7 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
     return data.resume.object_id as ObjectId;
   }
   if (data.resume.type === "SpellCost") {
-    return (data.resume.spell as { object_id?: ObjectId } | undefined)?.object_id;
+    return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
   }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }

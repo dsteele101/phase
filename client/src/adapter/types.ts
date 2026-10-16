@@ -836,10 +836,15 @@ export type PayCostKind =
 // choice. The frontend treats the inner pending payload as opaque pass-through.
 export type CostResume =
   | { type: "Spell"; Spell: PendingCast }
-  | { type: "SpellCost"; spell: PendingCast; cost_source: number; remaining_cost?: unknown }
+  | { type: "SpellCost"; Spell: PendingCast; cost: unknown; source: "Other" | "Offering" | "Emerge" }
   | { type: "Resolution" }
   | { type: "ManaAbility"; ManaAbility: unknown }
-  | { type: "TurnFaceUp"; object_id: number; cost_source: number; remaining_cost?: unknown };
+  | {
+      type: "TurnFaceUp";
+      object_id: number;
+      cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
+      remaining_cost?: unknown;
+    };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
