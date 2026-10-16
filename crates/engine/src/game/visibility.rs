@@ -1277,7 +1277,8 @@ fn redact_activation_records(filtered: &mut GameState) {
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => {}
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {}
         }
     }
     if let Some(resume) = filtered.pending_deferred_life_cost_resume.as_mut() {
@@ -1287,7 +1288,9 @@ fn redact_activation_records(filtered: &mut GameState) {
                     clear(pending);
                 }
             }
-            DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::ManaRoot { .. } => {}
+            DeferredLifeCostResume::PayAmount { .. }
+            | DeferredLifeCostResume::ManaRoot { .. }
+            | DeferredLifeCostResume::TurnFaceUp { .. } => {}
         }
     }
     for entry in filtered.stack.iter_mut() {

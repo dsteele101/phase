@@ -1424,9 +1424,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal this card from your hand" — reveal self cost
+    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
-        value((), tag("reveal this card from your hand")).parse(i)
+        value(
+            (),
+            alt((
+                tag("reveal this card from your hand"),
+                tag("reveal this card in your hand"),
+            )),
+        )
+        .parse(i)
     })
     .is_some()
     {
@@ -1436,10 +1443,12 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
+    // "Reveal a [Type] card from/in your hand" — reveal from hand with type filter.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
+        let split_res = split_once_on(&rest_lower, "from your hand")
+            .or_else(|_| split_once_on(&rest_lower, "in your hand"));
+        if let Ok((_, (before, _))) = split_res {
             let filter_raw = before.trim();
             let filter_raw = strip_article(filter_raw, filter_raw);
             let filter_raw = filter_raw

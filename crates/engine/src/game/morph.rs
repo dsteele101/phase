@@ -93,7 +93,9 @@ pub(crate) fn turn_face_up_offer(
             })
         }
         TurnFaceUpCost::NonMana(ability_cost) => {
-            if ability_cost.is_payable_for_activation(state, player, object_id, None) {
+            if crate::types::keywords::is_ability_cost_supported_for_morph(&ability_cost)
+                && ability_cost.is_payable_for_activation(state, player, object_id, None)
+            {
                 Some(TurnFaceUpOffer::Ready)
             } else {
                 None
@@ -626,103 +628,416 @@ pub(crate) fn handle_turn_face_up(
                     "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
                 ));
             }
-            match ability_cost {
-                AbilityCost::ReturnToHand { count, filter, .. } => {
-                    let eligible = super::casting::find_eligible_return_to_hand_targets(
+            if !crate::types::keywords::is_ability_cost_supported_for_morph(&ability_cost) {
+                return Err(EngineError::InvalidAction(
+                    "Unsupported non-mana turn-face-up cost".to_string(),
+                ));
+            }
+            pay_ability_cost_for_turn_face_up(
+                state,
+                player,
+                object_id,
+                cost_source,
+                &ability_cost,
+                None,
+                events,
+            )
+        }
+    }
+}
+
+/// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Authoritative handler for paying
+/// non-mana turn-face-up costs. Supports ReturnToHand, Discard, PayLife, Reveal,
+/// Sacrifice, Mana, and Composite chains thereof.
+pub(crate) fn pay_ability_cost_for_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost_source: TurnUpCostSource,
+    cost: &AbilityCost,
+    remaining_cost: Option<Box<AbilityCost>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match cost {
+        AbilityCost::Composite { costs } => {
+            if costs.is_empty() {
+                return finish_or_continue_turn_face_up(
+                    state,
+                    player,
+                    object_id,
+                    cost_source,
+                    remaining_cost,
+                    events,
+                );
+            }
+            let first = &costs[0];
+            let tail = if costs.len() > 1 {
+                let rest = AbilityCost::Composite {
+                    costs: costs[1..].to_vec(),
+                };
+                let chained = match remaining_cost {
+                    Some(rem) => AbilityCost::Composite {
+                        costs: vec![rest, *rem],
+                    },
+                    None => rest,
+                };
+                Some(Box::new(chained))
+            } else {
+                remaining_cost
+            };
+            pay_ability_cost_for_turn_face_up(
+                state,
+                player,
+                object_id,
+                cost_source,
+                first,
+                tail,
+                events,
+            )
+        }
+        AbilityCost::Mana { cost } => {
+            let payment =
+                pay_turn_face_up_cost(state, player, object_id, cost, cost_source, None, events)?;
+            match payment {
+                super::casting::SpecialActionManaPayment::Paid => finish_or_continue_turn_face_up(
+                    state,
+                    player,
+                    object_id,
+                    cost_source,
+                    remaining_cost,
+                    events,
+                ),
+                super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+            }
+        }
+        AbilityCost::ReturnToHand { count, filter, .. } => {
+            let eligible = super::casting::find_eligible_return_to_hand_targets(
+                state,
+                player,
+                object_id,
+                None,
+                filter.as_ref(),
+            );
+            if (eligible.len() as u32) < *count {
+                return Err(EngineError::InvalidAction(
+                    "Not enough eligible permanents to return to hand".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: crate::types::game_state::PayCostKind::ReturnToHand,
+                choices: eligible,
+                count: *count as usize,
+                min_count: 0,
+                resume: crate::types::game_state::CostResume::TurnFaceUp {
+                    object_id,
+                    cost_source,
+                    remaining_cost,
+                },
+            };
+            Ok(state.waiting_for.clone())
+        }
+        AbilityCost::Discard { count, filter, .. } => {
+            let eligible = super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                object_id,
+                None,
+                filter.as_ref(),
+            );
+            let count_num = crate::game::quantity::resolve_quantity(state, count, player, object_id)
+                .max(0) as usize;
+            if eligible.len() < count_num {
+                return Err(EngineError::InvalidAction(
+                    "Not enough eligible cards in hand to discard".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: crate::types::game_state::PayCostKind::Discard,
+                choices: eligible,
+                count: count_num,
+                min_count: 0,
+                resume: crate::types::game_state::CostResume::TurnFaceUp {
+                    object_id,
+                    cost_source,
+                    remaining_cost,
+                },
+            };
+            Ok(state.waiting_for.clone())
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount_num =
+                crate::game::quantity::resolve_quantity(state, amount, player, object_id).max(0)
+                    as u32;
+            let res = super::life_costs::pay_life_as_cast_or_activation_cost(
+                state, player, amount_num, events,
+            );
+            match res {
+                super::life_costs::PayLifeCostResult::Paid { .. } => {
+                    finish_or_continue_turn_face_up(
                         state,
                         player,
                         object_id,
-                        None,
-                        filter.as_ref(),
-                    );
-                    if (eligible.len() as u32) < count {
-                        return Err(EngineError::InvalidAction(
-                            "Not enough eligible permanents to return to hand".to_string(),
-                        ));
-                    }
-                    state.waiting_for = WaitingFor::PayCost {
-                        player,
-                        kind: crate::types::game_state::PayCostKind::ReturnToHand,
-                        choices: eligible,
-                        count: count as usize,
-                        min_count: 0,
-                        resume: crate::types::game_state::CostResume::TurnFaceUp {
-                            object_id,
-                            cost_source,
-                        },
-                    };
-                    Ok(state.waiting_for.clone())
+                        cost_source,
+                        remaining_cost,
+                        events,
+                    )
                 }
-                AbilityCost::Discard { count, filter, .. } => {
-                    let eligible = super::casting::find_eligible_discard_targets(
-                        state,
-                        player,
-                        object_id,
-                        None,
-                        filter.as_ref(),
-                    );
-                    let count_num =
-                        crate::game::quantity::resolve_quantity(state, &count, player, object_id)
-                            .max(0) as usize;
-                    if eligible.len() < count_num {
-                        return Err(EngineError::InvalidAction(
-                            "Not enough eligible cards in hand to discard".to_string(),
-                        ));
-                    }
-                    state.waiting_for = WaitingFor::PayCost {
-                        player,
-                        kind: crate::types::game_state::PayCostKind::Discard,
-                        choices: eligible,
-                        count: count_num,
-                        min_count: 0,
-                        resume: crate::types::game_state::CostResume::TurnFaceUp {
-                            object_id,
-                            cost_source,
-                        },
-                    };
-                    Ok(state.waiting_for.clone())
-                }
-                AbilityCost::PayLife { amount } => {
-                    let amount_num =
-                        crate::game::quantity::resolve_quantity(state, &amount, player, object_id)
-                            .max(0) as u32;
-                    let res = super::life_costs::pay_life_as_cast_or_activation_cost(
-                        state, player, amount_num, events,
-                    );
-                    if res.is_paid() {
-                        finish_paid_turn_face_up(
-                            state,
+                super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution { .. }
+                | super::life_costs::PayLifeCostResult::DeferredReplacementChoice { .. } => {
+                    state.pending_deferred_life_cost_resume = Some(
+                        crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
                             player,
                             object_id,
                             cost_source,
-                            None,
-                            events,
-                        )
-                    } else {
-                        match res {
-                            super::life_costs::PayLifeCostResult::DeferredReplacementChoice {
-                                ..
-                            } => Ok(state.waiting_for.clone()),
-                            super::life_costs::PayLifeCostResult::InsufficientLife => {
-                                Err(EngineError::InvalidAction(
-                                    "Not enough life to pay turn-face-up cost".to_string(),
-                                ))
-                            }
-                            super::life_costs::PayLifeCostResult::Prohibited => {
-                                Err(EngineError::InvalidAction(
-                                    "Cannot pay life to turn face up right now".to_string(),
-                                ))
-                            }
-                            _ => unreachable!(),
+                            resume_at_resolution_depth: state.resolution_stack.len(),
+                            remaining_cost,
+                        },
+                    );
+                    Ok(state.waiting_for.clone())
+                }
+                super::life_costs::PayLifeCostResult::InsufficientLife => {
+                    Err(EngineError::InvalidAction(
+                        "Not enough life to pay turn-face-up cost".to_string(),
+                    ))
+                }
+                super::life_costs::PayLifeCostResult::Prohibited => {
+                    Err(EngineError::InvalidAction(
+                        "Cannot pay life to turn face up right now".to_string(),
+                    ))
+                }
+            }
+        }
+        AbilityCost::Sacrifice(cost) => {
+            if matches!(cost.target, crate::types::ability::TargetFilter::SelfRef) {
+                return Err(EngineError::InvalidAction(
+                    "Cannot sacrifice a face-down permanent to turn itself face up".to_string(),
+                ));
+            }
+            let eligible = super::casting::find_eligible_sacrifice_targets(
+                state,
+                player,
+                object_id,
+                None,
+                &cost.target,
+            );
+            let count = cost.requirement.fixed_count().unwrap_or(1) as usize;
+            if eligible.len() < count {
+                return Err(EngineError::InvalidAction(
+                    "Not enough eligible permanents to sacrifice".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: crate::types::game_state::PayCostKind::Sacrifice,
+                choices: eligible,
+                count,
+                min_count: 0,
+                resume: crate::types::game_state::CostResume::TurnFaceUp {
+                    object_id,
+                    cost_source,
+                    remaining_cost,
+                },
+            };
+            Ok(state.waiting_for.clone())
+        }
+        AbilityCost::Reveal { count, filter } => {
+            let eligible = match filter {
+                Some(f) => {
+                    super::casting::find_eligible_reveal_targets(state, player, object_id, None, f)
+                }
+                None => state.players[player.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect(),
+            };
+            let count = *count as usize;
+            if eligible.len() < count {
+                return Err(EngineError::InvalidAction(
+                    "Not enough eligible cards in hand to reveal".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: crate::types::game_state::PayCostKind::Reveal,
+                choices: eligible,
+                count,
+                min_count: 0,
+                resume: crate::types::game_state::CostResume::TurnFaceUp {
+                    object_id,
+                    cost_source,
+                    remaining_cost,
+                },
+            };
+            Ok(state.waiting_for.clone())
+        }
+        _ => Err(EngineError::InvalidAction(
+            "Unsupported non-mana turn-face-up cost".to_string(),
+        )),
+    }
+}
+
+/// Helper that either chains to the next sub-cost or completes the turn face up.
+pub(crate) fn finish_or_continue_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost_source: TurnUpCostSource,
+    remaining_cost: Option<Box<AbilityCost>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(next_cost) = remaining_cost {
+        pay_ability_cost_for_turn_face_up(
+            state,
+            player,
+            object_id,
+            cost_source,
+            &next_cost,
+            None,
+            events,
+        )
+    } else {
+        finish_paid_turn_face_up(state, player, object_id, cost_source, None, events)
+    }
+}
+
+/// CR 702.37e + CR 614.6 + CR 616.1: Resume paying a turn-face-up cost move
+/// after a replacement choice settles.
+pub(crate) fn resume_turn_face_up_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+        player,
+        object_id,
+        cost_source,
+        move_kind,
+        chosen,
+        paused_at_index,
+        remaining_cost,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        return Ok(state.waiting_for.clone());
+    };
+
+    for (index, &card_id) in chosen.iter().enumerate().skip(paused_at_index + 1) {
+        match move_kind {
+            crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand => {
+                match crate::game::zone_pipeline::move_object(
+                    state,
+                    crate::game::zone_pipeline::ZoneMoveRequest::cost(
+                        card_id,
+                        Zone::Hand,
+                        object_id,
+                    ),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                        state.pending_cost_move_resume = Some(
+                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+                                player,
+                                object_id,
+                                cost_source,
+                                move_kind,
+                                chosen,
+                                paused_at_index: index,
+                                remaining_cost,
+                            },
+                        );
+                        if state.pending_replacement.is_some() {
+                            super::costs::pause_cost_payment_for_replacement_choice(
+                                state,
+                                choice_player,
+                            );
                         }
+                        return Ok(state.waiting_for.clone());
+                    }
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        unreachable!()
                     }
                 }
-                _ => Err(EngineError::InvalidAction(
-                    "Unsupported non-mana turn-face-up cost".to_string(),
-                )),
+            }
+            crate::types::game_state::TurnFaceUpMoveKind::Discard => {
+                match super::effects::discard::discard_as_cost_with_source(
+                    state,
+                    card_id,
+                    player,
+                    Some(object_id),
+                    events,
+                ) {
+                    super::effects::discard::DiscardOutcome::Complete => {}
+                    super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
+                        choice_player,
+                    ) => {
+                        state.pending_cost_move_resume = Some(
+                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+                                player,
+                                object_id,
+                                cost_source,
+                                move_kind,
+                                chosen,
+                                paused_at_index: index,
+                                remaining_cost,
+                            },
+                        );
+                        super::costs::pause_cost_payment_for_replacement_choice(
+                            state,
+                            choice_player,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
+            crate::types::game_state::TurnFaceUpMoveKind::Sacrifice => {
+                match crate::game::zone_pipeline::move_object(
+                    state,
+                    crate::game::zone_pipeline::ZoneMoveRequest::cost(
+                        card_id,
+                        Zone::Graveyard,
+                        object_id,
+                    ),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                        state.pending_cost_move_resume = Some(
+                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+                                player,
+                                object_id,
+                                cost_source,
+                                move_kind,
+                                chosen,
+                                paused_at_index: index,
+                                remaining_cost,
+                            },
+                        );
+                        if state.pending_replacement.is_some() {
+                            super::costs::pause_cost_payment_for_replacement_choice(
+                                state,
+                                choice_player,
+                            );
+                        }
+                        return Ok(state.waiting_for.clone());
+                    }
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        unreachable!()
+                    }
+                }
             }
         }
     }
+
+    finish_or_continue_turn_face_up(
+        state,
+        player,
+        object_id,
+        cost_source,
+        remaining_cost,
+        events,
+    )
 }
 
 /// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through

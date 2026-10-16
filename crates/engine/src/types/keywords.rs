@@ -124,6 +124,33 @@ impl From<AbilityCost> for MorphCost {
     }
 }
 
+impl MorphCost {
+    /// CR 702.37e: Returns true if the morph cost is supported by the engine.
+    pub fn is_supported(&self) -> bool {
+        match self {
+            Self::Mana(_) => true,
+            Self::NonMana(cost) => is_ability_cost_supported_for_morph(cost),
+        }
+    }
+}
+
+/// CR 702.37e: Supported non-mana cost shapes for morph: ReturnToHand, Discard,
+/// PayLife, Reveal, Sacrifice, Mana, and Composite combinations thereof.
+pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::Mana { .. } => true,
+        AbilityCost::Composite { costs } => {
+            !costs.is_empty() && costs.iter().all(is_ability_cost_supported_for_morph)
+        }
+        _ => false,
+    }
+}
+
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
 /// card as an Aura. Classic Theros bestow uses a pure mana cost (e.g. Boon Satyr
 /// "Bestow {3}{G}{G}"). Murders at Karlov Manor reprints introduced compound

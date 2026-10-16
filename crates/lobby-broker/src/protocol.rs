@@ -60,6 +60,11 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 144 — `CostResume` gains `TurnFaceUp`, `DeferredLifeCostResume` gains
+///      `TurnFaceUp`, `PendingCostMoveResume` gains `TurnFaceUpCostMove`,
+///      `Keyword::Morph` supports non-mana `MorphCost`. Full-game peers and
+///      P2P move in lockstep (wire 126); no lobby carrier names it.
+///
 /// 143 — `GameState.modal_modes_chosen_this_turn` and
 ///      `GameState.modal_modes_chosen_this_game` retype from
 ///      `HashSet<(ObjectId, usize)>` to `HashSet<(ObjectIncarnationRef, usize)>`
@@ -1070,7 +1075,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 143;
+pub const PROTOCOL_VERSION: u32 = 144;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2327,12 +2332,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 143);
+        assert_eq!(PROTOCOL_VERSION, 144);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 142);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 143);
     }
 
     #[test]

@@ -211,6 +211,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 144 — CostResume gains TurnFaceUp, DeferredLifeCostResume gains TurnFaceUp,
+ *      PendingCostMoveResume gains TurnFaceUpCostMove, Keyword::Morph supports
+ *      non-mana MorphCost. Wire 126 moves with it.
  * 143 — GameState.modal_modes_chosen_this_turn / _this_game retype from
  *      (ObjectId, usize) to (ObjectIncarnationRef, usize) (CR 400.7), so a
  *      non-empty entry [50, 1] is now [{object_id: 50, incarnation: 0}, 1] —
@@ -874,7 +877,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 143;
+export const PROTOCOL_VERSION = 144;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

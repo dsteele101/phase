@@ -8474,6 +8474,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -8499,6 +8500,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -8580,6 +8582,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         // returns a replacement choice; the delivered boundary resumes the
         // payment through its already-authorized paid epilogue.
         engine_payment_choices::resume_random_discard_unless_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
+    ) {
+        super::morph::resume_turn_face_up_cost_move(state, events)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
@@ -8907,6 +8914,20 @@ fn drain_pending_deferred_life_cost_resume(
                     state, player, *resume, events,
                 )
             }
+            crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
+                player,
+                object_id,
+                cost_source,
+                resume_at_resolution_depth: _,
+                remaining_cost,
+            } => super::morph::finish_or_continue_turn_face_up(
+                state,
+                player,
+                object_id,
+                cost_source,
+                remaining_cost,
+                events,
+            ),
         }
     })();
     if result.is_err()
@@ -12575,66 +12596,186 @@ fn apply_non_priority_pass_action(
             CostResume::TurnFaceUp {
                 object_id,
                 cost_source,
-            } => match kind {
-                PayCostKind::ReturnToHand => {
-                    if chosen.len() != *count {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Must choose exactly {} permanent(s) to return to hand",
-                            count
-                        )));
+                remaining_cost,
+            } => {
+                if chosen.len() != *count {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Must choose exactly {} permanent(s)/card(s)",
+                        count
+                    )));
+                }
+                // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
+                let mut seen = std::collections::HashSet::new();
+                for &id in chosen.iter() {
+                    if !seen.insert(id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected cards/permanents must be distinct".into(),
+                        ));
                     }
-                    for &id in chosen.iter() {
-                        if !choices.contains(&id) {
-                            return Err(EngineError::InvalidAction(
-                                "Selected permanent is not an eligible target to return to hand"
-                                    .to_string(),
-                            ));
+                    if !choices.contains(&id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card or permanent is not eligible".to_string(),
+                        ));
+                    }
+                }
+                match kind {
+                    PayCostKind::ReturnToHand => {
+                        for (index, &id) in chosen.iter().enumerate() {
+                            match crate::game::zone_pipeline::move_object(
+                                state,
+                                crate::game::zone_pipeline::ZoneMoveRequest::cost(
+                                    id,
+                                    Zone::Hand,
+                                    *object_id,
+                                ),
+                                &mut events,
+                            ) {
+                                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                    state.pending_cost_move_resume = Some(
+                                        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+                                            player: *player,
+                                            object_id: *object_id,
+                                            cost_source: *cost_source,
+                                            move_kind: crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand,
+                                            chosen: chosen.clone(),
+                                            paused_at_index: index,
+                                            remaining_cost: remaining_cost.clone(),
+                                        },
+                                    );
+                                    if state.pending_replacement.is_some() {
+                                        super::costs::pause_cost_payment_for_replacement_choice(
+                                            state,
+                                            choice_player,
+                                        );
+                                    }
+                                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                                }
+                                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                    unreachable!("a cost move to Hand cannot require Aura attachment");
+                                }
+                            }
                         }
+                        super::morph::finish_or_continue_turn_face_up(
+                            state,
+                            *player,
+                            *object_id,
+                            *cost_source,
+                            remaining_cost.clone(),
+                            &mut events,
+                        )?
                     }
-                    for &id in chosen.iter() {
-                        crate::game::zones::move_to_zone(state, id, Zone::Hand, &mut events);
-                    }
-                    super::morph::finish_paid_turn_face_up(
-                        state,
-                        *player,
-                        *object_id,
-                        *cost_source,
-                        None,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Discard => {
-                    if chosen.len() != *count {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Must choose exactly {} card(s) to discard",
-                            count
-                        )));
-                    }
-                    for &id in chosen.iter() {
-                        if !choices.contains(&id) {
-                            return Err(EngineError::InvalidAction(
-                                "Selected card is not an eligible card to discard".to_string(),
-                            ));
+                    PayCostKind::Discard => {
+                        for (index, &id) in chosen.iter().enumerate() {
+                            match super::effects::discard::discard_as_cost_with_source(
+                                state,
+                                id,
+                                *player,
+                                Some(*object_id),
+                                &mut events,
+                            ) {
+                                super::effects::discard::DiscardOutcome::Complete => {}
+                                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                                    state.pending_cost_move_resume = Some(
+                                        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+                                            player: *player,
+                                            object_id: *object_id,
+                                            cost_source: *cost_source,
+                                            move_kind: crate::types::game_state::TurnFaceUpMoveKind::Discard,
+                                            chosen: chosen.clone(),
+                                            paused_at_index: index,
+                                            remaining_cost: remaining_cost.clone(),
+                                        },
+                                    );
+                                    super::costs::pause_cost_payment_for_replacement_choice(
+                                        state,
+                                        choice_player,
+                                    );
+                                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                                }
+                            }
                         }
+                        super::morph::finish_or_continue_turn_face_up(
+                            state,
+                            *player,
+                            *object_id,
+                            *cost_source,
+                            remaining_cost.clone(),
+                            &mut events,
+                        )?
                     }
-                    for &id in chosen.iter() {
-                        crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+                    PayCostKind::Sacrifice => {
+                        for (index, &id) in chosen.iter().enumerate() {
+                            match crate::game::zone_pipeline::move_object(
+                                state,
+                                crate::game::zone_pipeline::ZoneMoveRequest::cost(
+                                    id,
+                                    Zone::Graveyard,
+                                    *object_id,
+                                ),
+                                &mut events,
+                            ) {
+                                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                    state.pending_cost_move_resume = Some(
+                                        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+                                            player: *player,
+                                            object_id: *object_id,
+                                            cost_source: *cost_source,
+                                            move_kind: crate::types::game_state::TurnFaceUpMoveKind::Sacrifice,
+                                            chosen: chosen.clone(),
+                                            paused_at_index: index,
+                                            remaining_cost: remaining_cost.clone(),
+                                        },
+                                    );
+                                    if state.pending_replacement.is_some() {
+                                        super::costs::pause_cost_payment_for_replacement_choice(
+                                            state,
+                                            choice_player,
+                                        );
+                                    }
+                                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                                }
+                                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                    unreachable!("a cost move to Graveyard cannot require Aura attachment");
+                                }
+                            }
+                        }
+                        super::morph::finish_or_continue_turn_face_up(
+                            state,
+                            *player,
+                            *object_id,
+                            *cost_source,
+                            remaining_cost.clone(),
+                            &mut events,
+                        )?
                     }
-                    super::morph::finish_paid_turn_face_up(
-                        state,
-                        *player,
-                        *object_id,
-                        *cost_source,
-                        None,
-                        &mut events,
-                    )?
+                    PayCostKind::Reveal => {
+                        let revealed_names = chosen
+                            .iter()
+                            .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                            .collect();
+                        events.push(GameEvent::CardsRevealed {
+                            player: *player,
+                            card_ids: chosen.to_vec(),
+                            card_names: revealed_names,
+                        });
+                        super::morph::finish_or_continue_turn_face_up(
+                            state,
+                            *player,
+                            *object_id,
+                            *cost_source,
+                            remaining_cost.clone(),
+                            &mut events,
+                        )?
+                    }
+                    _ => {
+                        return Err(EngineError::InvalidAction(
+                            "Cost kind cannot resume a turn-face-up PayCost".into(),
+                        ));
+                    }
                 }
-                _ => {
-                    return Err(EngineError::InvalidAction(
-                        "Cost kind cannot resume a turn-face-up PayCost".into(),
-                    ));
-                }
-            },
+            }
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
