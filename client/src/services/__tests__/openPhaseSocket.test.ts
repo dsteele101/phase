@@ -286,10 +286,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v143 before it can read turn-face-up cost resumes", async () => {
+  it("rejects Full v144 before it can read turn-face-up cost resumes", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 143 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -297,10 +297,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v144 turn-face-up cost resumes protocol", async () => {
+  it("accepts the literal Full v145 turn-face-up cost resumes protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 145 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();
