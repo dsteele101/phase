@@ -12,16 +12,17 @@ use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChosenAttribute, CombatHistoryScope, CombatRelation, CombatRelationDirection,
+    ChooseOneOfKind, ChosenAttribute, CombatHistoryScope, CombatRelation, CombatRelationDirection,
     CombatRelationSubject, Comparator, ContinuousModification, ControllerRef, CopyChooseScope,
     CopyRetargetPermission, CountScope, CounterTransferMode, DamageAmountScope,
     DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
     DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
     ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PropertyAggregate, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality,
-    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
+    PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
+    SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
     EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, SpentColor,
@@ -2236,6 +2237,68 @@ fn static_condition_to_trigger_condition_source_in_battlefield() {
     );
 }
 
+/// CR 603.4: the trigger bridge's `Not` arm recurses through the bridge, so any
+/// bridgeable inner condition negates and an unbridgeable one stays `None`.
+#[test]
+fn static_condition_to_trigger_condition_not_recurses() {
+    let not = |inner: StaticCondition| StaticCondition::Not {
+        condition: Box::new(inner),
+    };
+    // Not(SourceIsEquipped) → Not(SourceMatchesFilter) (None before recursion).
+    let equipped = static_condition_to_trigger_condition(&StaticCondition::SourceIsEquipped)
+        .expect("the affirmative form bridges");
+    assert!(matches!(
+        equipped,
+        TriggerCondition::SourceMatchesFilter { .. }
+    ));
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::SourceIsEquipped)),
+        Some(TriggerCondition::Not {
+            condition: Box::new(equipped),
+        })
+    );
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::HasCityBlessing)),
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::HasCityBlessing),
+        })
+    );
+    // Unbridgeable inner condition: still `None`.
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::IsRingBearer)),
+        None
+    );
+    // Preserved shapes: comparator flip, and IsPresent{None} → ObjectCount == 0.
+    let hand = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 3 },
+    };
+    assert!(matches!(
+        static_condition_to_trigger_condition(&not(hand)),
+        Some(TriggerCondition::QuantityComparison {
+            comparator: Comparator::LT,
+            ..
+        })
+    ));
+    assert_eq!(
+        static_condition_to_trigger_condition(&not(StaticCondition::IsPresent { filter: None })),
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Any,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+}
+
 #[test]
 fn intervening_if_source_attacked_this_turn_populates_condition() {
     // CR 508.1 + CR 603.4: a source-scoped "if ~ attacked this turn"
@@ -3148,12 +3211,17 @@ fn trigger_hex_companion_keeps_exile_or_battlefield_perpetual_condition() {
         Effect::ApplyPerpetual {
             modification:
                 PerpetualModification::ModifyPowerToughness {
-                    power_delta,
-                    toughness_delta,
+                    power, toughness, ..
                 },
             ..
         } => {
-            assert_eq!((*power_delta, *toughness_delta), (1, 1));
+            assert_eq!(
+                (power, toughness),
+                (
+                    &QuantityExpr::Fixed { value: 1 },
+                    &QuantityExpr::Fixed { value: 1 }
+                )
+            );
         }
         other => panic!("expected ApplyPerpetual +1/+1, got {other:?}"),
     }
@@ -4050,12 +4118,14 @@ fn gendered_past_type_condition_does_not_hoist_outside_leading_dies_position() {
     assert_eq!(trailing.origin, Some(Zone::Battlefield));
     assert_eq!(trailing.destination, Some(Zone::Graveyard));
     assert_eq!(trailing.condition, None);
+    // The draw count position reads "a card" only; the trailing "if she was a
+    // land" it cannot read makes the clause an honest gap (CR 603.4).
     assert!(matches!(
         trailing
             .execute
             .as_deref()
             .map(|ability| ability.effect.as_ref()),
-        Some(Effect::Draw { .. })
+        Some(Effect::Unimplemented { .. })
     ));
     assert_eq!(
         trailing
@@ -4073,18 +4143,12 @@ fn gendered_past_type_condition_does_not_hoist_outside_leading_dies_position() {
         &[],
     );
     assert!(
-        trailing_card.parse_warnings.iter().any(|warning| matches!(
-            warning,
-            OracleDiagnostic::SwallowedClause {
-                detector,
-                description,
-                line_index: 0,
-                ..
-            } if detector == "Condition_If"
-                && description == "When this creature dies, draw a card if she was a land."
-        )),
-        "the trailing predicate must remain an exact honest deferral: {:?}",
-        trailing_card.parse_warnings
+        trailing_card.triggers.iter().any(|trigger| trigger
+            .execute
+            .as_deref()
+            .is_some_and(|ability| matches!(&*ability.effect, Effect::Unimplemented { .. }))),
+        "the trailing predicate must remain an honest deferral: a clause gap, not an \
+         unconditional draw"
     );
 
     let leading_card = parse_oracle_text(
@@ -6499,6 +6563,128 @@ fn trigger_exploits_a_creature() {
         "Exploit Payoff",
     );
     assert!(matches!(unsupported.mode, TriggerMode::Unknown(_)));
+}
+
+#[test]
+fn trigger_enlists_a_creature() {
+    // Benalish Knight-Counselor + Guardian of New Benalia: the only printed
+    // actor-side enlist triggers. Same shape as the synthesized Enlist keyword
+    // trigger (`valid_card` = subject), which `match_enlisted` fires on.
+    let cases = [
+        "Whenever Benalish Knight-Counselor enlists a creature, scry 1.",
+        "Whenever this creature enlists a creature, scry 2.",
+        "When Benalish Knight-Counselor enlists, scry 1.",
+    ];
+    for oracle in cases {
+        let def = parse_trigger_line(oracle, "Benalish Knight-Counselor");
+        assert_eq!(def.mode, TriggerMode::Enlisted, "{oracle}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{oracle}");
+        assert_eq!(def.valid_source, None, "{oracle}");
+        assert_no_unimplemented(def.execute.as_deref().expect("trigger body"));
+    }
+
+    // Goblin Morale Sergeant: victim-qualified ("nontoken") — fails closed,
+    // since `match_enlisted` keys on the attacker alone and would over-fire.
+    // Non-self subjects likewise (none printed).
+    let unsupported = [
+        "Whenever Goblin Morale Sergeant enlists a nontoken creature, scry 1.",
+        "Whenever a creature you control enlists a creature, scry 1.",
+    ];
+    for oracle in unsupported {
+        let def = parse_trigger_line(oracle, "Goblin Morale Sergeant");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{oracle}: {def:?}"
+        );
+    }
+}
+
+/// CR 201.5 + CR 603.4: opposite-power controls for strict possessive P/T
+/// gates. On a SELF trigger ("When this creature dies, if its power is
+/// greater than 0" — Dragonborn Immolator) "its" is the source and the GT
+/// gate binds `Power { Source }`. On a NON-SELF trigger the pronoun names
+/// the event object (whose past-tense form the dying-object arm owns), so
+/// the present-tense strict gate fails closed instead of checking the
+/// grantor's stat. Explicit source subjects ("this creature has ...") on
+/// non-self triggers keep working.
+#[test]
+fn strict_pronoun_pt_gate_binds_source_only_on_self_trigger() {
+    use crate::types::ability::{
+        Comparator, ObjectScope, QuantityExpr, QuantityRef, TriggerCondition,
+    };
+
+    // Self: "its" == the source. Gate binds Source, strictly.
+    let zelf = parse_trigger_line(
+        "When this creature dies, if its power is greater than 0, draw a card.",
+        "Self Prober",
+    );
+    match zelf.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                },
+            comparator,
+            rhs,
+        }) => {
+            assert_eq!(*scope, ObjectScope::Source);
+            assert_eq!(*comparator, Comparator::GT);
+            assert_eq!(*rhs, QuantityExpr::Fixed { value: 0 });
+        }
+        other => panic!("self strict gate must bind Source GT 0, got {other:?}"),
+    }
+
+    // Non-self: the pronoun names the event object — fail closed (no hoisted
+    // gate), for both strict directions. Reach guard: the trigger head
+    // itself still parses; only the gate declines.
+    for oracle in [
+        "Whenever another creature dies, if its power is greater than 0, draw a card.",
+        "Whenever another creature dies, if its toughness is less than 3, draw a card.",
+    ] {
+        let def = parse_trigger_line(oracle, "Other Prober");
+        assert!(
+            matches!(def.mode, TriggerMode::ChangesZone),
+            "{oracle}: head must parse, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.condition, None,
+            "{oracle}: non-self strict pronoun gate must fail closed, got {:?}",
+            def.condition
+        );
+        // Body-gap control: the refused guard gaps the WHOLE trigger. The
+        // generic body fallback must not rescue the guard text as a
+        // Source-bound resolution condition with no fire-time check.
+        let body = def
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{oracle}: refused trigger keeps a body slot"));
+        assert!(
+            matches!(body.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{oracle}: refused leading guard must gap the whole body, got {:?}",
+            body.effect
+        );
+    }
+
+    // Explicit source subject on a non-self trigger: still binds Source.
+    let explicit = parse_trigger_line(
+        "Whenever another creature dies, if this creature has power greater than 2, draw a card.",
+        "Explicit Prober",
+    );
+    match explicit.condition.as_ref() {
+        Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power { scope },
+                },
+            comparator,
+            ..
+        }) => {
+            assert_eq!(*scope, ObjectScope::Source);
+            assert_eq!(*comparator, Comparator::GT);
+        }
+        other => panic!("explicit-source strict gate must survive, got {other:?}"),
+    }
 }
 
 #[test]
@@ -12515,13 +12701,14 @@ fn subtype_intervening_if_dispatches_by_trigger_kind() {
     );
 
     // Zone-change trigger (dies): event-snapshot `ZoneChangeObjectMatchesFilter`.
-    let (_, zone_change) = extract_if_condition_with_card_name(
+    let extraction = extract_if_condition_with_card_name(
         "if it's not a spirit, draw a card",
         "",
         None,
         Some((Zone::Battlefield, Zone::Graveyard)),
         false,
     );
+    let zone_change = extraction.condition;
     let Some(TriggerCondition::Not { condition }) = zone_change else {
         panic!("expected negated condition, got {zone_change:?}");
     };
@@ -15771,23 +15958,23 @@ fn widened_boundary_window_is_monotone_over_effect_verbs() {
 /// (`that `/`which `/`with `) rather than reading into it. Without this bound,
 /// **Immolation Shaman**'s "an ability of an artifact, creature, or land THAT
 /// ISN'T a mana ability" would let the widened window reach "isn't", which
-/// `is_negated_auxiliary_predicate_token` classifies as an effect predicate,
-/// moving the boundary from the card's second comma to its first and
-/// narrowing `valid_card` from `AnyOf[Artifact, Creature]` to `Artifact`.
-/// Revert-failing against the round-2 variant (sentence bound only), under
-/// which row 1 moves to the first comma and row 3 returns
-/// `"creature, or land that isn't a mana ability"`.
+/// `is_negated_auxiliary_predicate_token` classifies as an effect predicate.
+/// The window bound itself is pinned by the `type_list_clause_window` row
+/// below. The Immolation Shaman boundary row is now decided earlier, by
+/// `continues_type_list_final_leg` (an effect cannot open with "or"), so the
+/// boundary is the CR 603.1 one after the whole list — #7451 pinned it at the
+/// closing leg, which kept "land" out of `valid_card`.
 #[test]
 fn widened_window_stops_at_a_restrictive_postmodifier() {
     let immolation_shaman = "whenever an opponent activates an ability of an artifact, creature, or land that isn't a mana ability, this creature deals 1 damage to that player.";
     let lower = immolation_shaman.to_lowercase();
     let boundary = find_effect_boundary(&lower).expect("effect boundary");
     let suffix = &lower[boundary..];
-    let expected = ", or land that isn't";
+    let expected = ", this creature deals";
     assert_eq!(
         &suffix[..expected.len()],
         expected,
-        "boundary must stay at the card's second comma, got {suffix:?}"
+        "boundary must follow the whole type list, got {suffix:?}"
     );
 
     let harsh_mentor = "whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, this creature deals 2 damage to that player.";
@@ -15930,30 +16117,30 @@ fn comma_terminated_bare_event_verb_is_an_event_head_not_a_predicate() {
 }
 
 /// Issue #7451: a condition-side Oxford type list — the trigger's SUBJECT, not
-/// its effect — must stay exactly where it is today. These cards remain
-/// `TriggerMode::Unknown`; turning them green is out of scope for #7451.
-/// Revert-failing against `naive-B` (the two-pass design with the widened
-/// window but WITHOUT the event-head exclusion): under `naive-B` the boundary
-/// jumps to the FIRST comma. **Not** revert-failing against `naive-A` — under
-/// `naive-A` the widened window still contains the event head ("attacks" /
-/// "becomes"), so `naive-A`'s whole-window veto also leaves the boundary at
-/// comma 2.
+/// its effect — stays whole in the condition. #7451 pinned the boundary at the
+/// list's closing "or" leg and left these cards `TriggerMode::Unknown`; that
+/// split was wrong under CR 603.1 (an effect clause cannot open with the list
+/// conjunction "or"), and `continues_type_list_final_leg` now keeps the whole
+/// list. Still revert-failing against `naive-B` (the two-pass design without
+/// the event-head exclusion), which jumps to the FIRST comma.
 #[test]
-fn condition_side_type_list_boundary_is_unchanged() {
-    let bird_frog_otter = "whenever a bird, frog, or otter you control attacks, draw a card";
-    let lower = bird_frog_otter.to_lowercase();
-    let boundary = find_effect_boundary(&lower).expect("effect boundary");
-    let suffix = &lower[boundary..];
-    let expected = ", or otter";
-    assert_eq!(&suffix[..expected.len()], expected, "got {suffix:?}");
-
-    let forest_island_swamp =
-        "whenever a forest, island, or swamp you control becomes tapped, draw a card";
-    let lower = forest_island_swamp.to_lowercase();
-    let boundary = find_effect_boundary(&lower).expect("effect boundary");
-    let suffix = &lower[boundary..];
-    let expected = ", or swamp";
-    assert_eq!(&suffix[..expected.len()], expected, "got {suffix:?}");
+fn condition_side_type_list_stays_whole() {
+    for (text, first_leg) in [
+        (
+            "whenever a bird, frog, or otter you control attacks, draw a card",
+            ", frog",
+        ),
+        (
+            "whenever a forest, island, or swamp you control becomes tapped, draw a card",
+            ", island",
+        ),
+    ] {
+        let lower = text.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        assert!(suffix.starts_with(", draw a card"), "got {suffix:?}");
+        assert!(!suffix.starts_with(first_leg), "got {suffix:?}");
+    }
 }
 
 /// `type_list_clause_window` bounds: extended across every list comma when
@@ -24228,12 +24415,33 @@ fn karazikar_attack_trigger_scopes_both_opponents() {
     assert_eq!(def.valid_source, Some(opponent.clone()));
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
     assert_eq!(def.valid_target, Some(opponent));
-    assert!(matches!(
-        def.execute
-            .as_deref()
-            .map(|ability| ability.effect.as_ref()),
-        Some(Effect::Unimplemented { .. })
-    ));
+
+    // CR 508.1 + CR 603.2 + CR 608.2e: "you and the attacking player each draw a
+    // card and lose 1 life" — the controller and the attacking player each draw
+    // (CR 121.2) and lose life (CR 119.3), every link scoped to the set and its
+    // implicit recipient bound to the seat.
+    let set = Some(PlayerFilter::AnyOf {
+        filters: vec![PlayerFilter::Controller, PlayerFilter::TriggeringPlayer],
+    });
+    let draw = def.execute.as_deref().expect("execute");
+    assert_eq!(
+        *draw.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_eq!(draw.player_scope, set);
+    let lose = draw.sub_ability.as_deref().expect("the lose-life link");
+    assert_eq!(
+        *lose.effect,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::ScopedPlayer),
+        }
+    );
+    assert_eq!(lose.player_scope, set);
+    assert!(lose.sub_ability.is_none());
 }
 
 #[test]
@@ -30805,7 +31013,7 @@ fn attack_one_or_more_opponents_uses_defending_player_controller() {
 /// cards) — distinct from the "attack a player ... that player controls"
 /// anaphor path covered above. Drives the full trigger→effect→target
 /// pipeline on the real Oracle text; the assertion flips to `None` if the
-/// `parse_zone_controller` arm is reverted.
+/// "defending player" arm of `nom_target::parse_controller_phrase` is reverted.
 #[test]
 fn attack_trigger_destroy_or_target_defending_player_controls() {
     use crate::types::ability::Effect;
@@ -33852,7 +34060,7 @@ fn thieving_skydiver_dependent_continuation_is_never_replicated_or_branch() {
 /// Mishra's Command mode 1: "Choose target player. They may discard up to X
 /// cards." Before the fix: `Discard { target: Any, .. }`, non-optional —
 /// unbound to the just-chosen player and mandatory despite "may". After: the
-/// discard binds to `ParentTarget` (the chosen player) and is optional.
+/// discard binds to the chosen player and is optional.
 #[test]
 fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
     let parsed = parse_oracle_text(
@@ -33877,10 +34085,9 @@ fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
         .expect("the discard must remain chained to the chosen target");
     match &*discard.effect {
         Effect::Discard { target, .. } => {
-            assert_eq!(
-                target,
-                &TargetFilter::ParentTarget,
-                "\"they\" discard must bind to the just-chosen target player, not float unbound"
+            assert!(
+                matches!(target, TargetFilter::DeclaredPlayer { .. }),
+                "\"they\" discard must bind to the just-chosen target player, not float unbound: {target:?}"
             );
         }
         other => panic!("expected Discard, got {other:?}"),
@@ -33896,7 +34103,7 @@ fn mishras_command_they_may_discard_binds_to_chosen_player_and_is_optional() {
 /// the second Discard's target was `Any` (unbound) and non-optional, so the
 /// "if they don't" branch's condition was unreachable in practice.
 #[test]
-fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
+fn undercity_plunder_they_may_discard_additional_binds_to_the_declared_player() {
     let parsed = parse_oracle_text(
         "Target opponent discards a card. Then they may discard an additional card. If they don't, conjure a duplicate of a random card from their library into your hand. It perpetually gains \"You may spend mana as though it were mana of any color to cast this spell.\"",
         "Undercity Plunder",
@@ -33912,11 +34119,15 @@ fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
         .sub_ability
         .as_ref()
         .expect("\"they may discard an additional card\" must remain chained");
+    let declared = TargetFilter::DeclaredPlayer {
+        group: head
+            .declares_chosen_group
+            .expect("the declaring clause carries its tag"),
+    };
     match &*second_discard.effect {
         Effect::Discard { target, .. } => {
             assert_eq!(
-                target,
-                &TargetFilter::ParentTarget,
+                target, &declared,
                 "the additional discard must bind to the same targeted opponent"
             );
         }
@@ -33925,6 +34136,11 @@ fn undercity_plunder_they_may_discard_additional_binds_to_parent_target() {
     assert!(
         second_discard.optional,
         "\"they may discard an additional card\" must be optional"
+    );
+    assert_eq!(
+        second_discard.optional_player.as_ref(),
+        Some(&declared),
+        "the opponent, not the caster, is offered the additional discard"
     );
     let conjure_gate = second_discard
         .sub_ability
@@ -37270,6 +37486,299 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
     )));
 }
 
+/// CR 608.2c + CR 603.10a + CR 607.2q: Gorex, the Tombshell's "that card" names
+/// the card chosen from among those exiled with Gorex in both halves of its
+/// trigger. The dies half (a `ChangesZone` event-source trigger) must not lift
+/// it to the trigger event, which is Gorex in the graveyard.
+#[test]
+fn gorex_dies_half_keeps_the_chosen_card_anaphor() {
+    let triggers = parse_trigger_lines(
+        "Whenever Gorex attacks or dies, choose a card at random exiled with Gorex and put that card into its owner's hand.",
+        "Gorex, the Tombshell",
+    );
+    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    assert_eq!(triggers[1].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[1].destination, Some(Zone::Graveyard));
+    for trigger in &triggers {
+        let exec = trigger.execute.as_deref().expect("execute");
+        assert!(
+            matches!(&*exec.effect, Effect::ChooseFromZone { .. }),
+            "{:?}: the top effect is the zone choice, got {:?}",
+            trigger.mode,
+            exec.effect
+        );
+        let sub = exec
+            .sub_ability
+            .as_deref()
+            .expect("put that card sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{:?}: \"that card\" must bind to the chosen card (ParentTarget), got {:?}",
+            trigger.mode,
+            sub.effect
+        );
+    }
+}
+
+/// CR 608.2c + CR 608.2d: every `ChooseFromZone` form hands its pick to the
+/// next instruction, so each stops the event-source anaphor walks.
+#[test]
+fn zone_choice_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    let choose = |selection: CardSelectionMode, zone_owner: ZoneOwner| Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Exile,
+        additional_zones: Vec::new(),
+        zone_owner,
+        filter: None,
+        chooser: ZoneChoiceChooser::default(),
+        candidate_source: ZoneChoiceCandidateSource::default(),
+        reciprocal_role: None,
+        up_to: false,
+        selection,
+        constraint: None,
+    };
+    for selection in [CardSelectionMode::Chosen, CardSelectionMode::Random] {
+        for zone_owner in [
+            ZoneOwner::Controller,
+            ZoneOwner::AllOwners,
+            ZoneOwner::Each(PerPlayerScope::TargetedPlayers),
+        ] {
+            assert!(
+                introduces_chosen_object_target(&choose(selection, zone_owner)),
+                "{selection:?} / {zone_owner:?} must stop the walk"
+            );
+        }
+    }
+    // Reach guards: the predicate still answers both ways for other effects.
+    assert!(introduces_chosen_object_target(&Effect::RevealTop {
+        player: TargetFilter::Controller,
+        count: 1,
+    }));
+    let lifted_move: Effect = serde_json::from_str(
+        r#"{"type":"ChangeZone","destination":"Hand","target":{"type":"TriggeringSource"}}"#,
+    )
+    .expect("ChangeZone JSON");
+    assert!(!introduces_chosen_object_target(&lifted_move));
+}
+
+/// CR 608.2c + CR 701.13a: Breaching Dragonstorm's "it" / "that card" names the
+/// card its exile-until loop exiled, so the event-source lift must stop at the
+/// loop and leave the decline link's move bound to the hit (`ParentTarget`),
+/// never to the entering enchantment.
+#[test]
+fn breaching_dragonstorm_that_card_names_the_exiled_hit() {
+    let triggers = parse_trigger_lines(
+        "When this enchantment enters, exile cards from the top of your library until you exile a nonland card. You may cast it without paying its mana cost if that spell's mana value is 8 or less. If you don't, put that card into your hand.",
+        "Breaching Dragonstorm",
+    );
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    let exec = triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        matches!(&*exec.effect, Effect::ExileFromTopUntil { .. }),
+        "the top effect is the exile-until loop, got {:?}",
+        exec.effect
+    );
+    let cast = exec.sub_ability.as_deref().expect("cast link");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "the cast link names the hit, got {:?}",
+        cast.effect
+    );
+    let to_hand = cast.sub_ability.as_deref().expect("decline link");
+    assert!(
+        matches!(
+            &*to_hand.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "\"put that card into your hand\" must bind to the exiled card (ParentTarget), got {:?}",
+        to_hand.effect
+    );
+}
+
+/// CR 608.2c + CR 614.1a: Transcendent Dragon's "exile it instead" names the
+/// spell its trigger countered (CR 115.1d target), so the event-source lift
+/// must stop at the stack-object target and leave the rider on `ParentTarget`.
+#[test]
+fn transcendent_dragon_rider_names_the_countered_spell() {
+    let triggers = parse_trigger_lines(
+        "When this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.",
+        "Transcendent Dragon",
+    );
+    assert_eq!(triggers.len(), 1);
+    let exec = triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        matches!(
+            &*exec.effect,
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                ..
+            }
+        ),
+        "the top effect counters target spell, got {:?}",
+        exec.effect
+    );
+    let rider = exec.sub_ability.as_deref().expect("exile rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "\"exile it instead\" must bind to the countered spell (ParentTarget), got {:?}",
+        rider.effect
+    );
+    let cast = rider.sub_ability.as_deref().expect("cast link");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "the cast link names the countered spell, got {:?}",
+        cast.effect
+    );
+}
+
+/// CR 608.2c + CR 701.13a: every `UntilCondition` of an exile-until loop hands
+/// the exiled card(s) on, so each stops the event-source anaphor walks.
+#[test]
+fn exile_until_loop_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    for json in [
+        r#"{"type":"ExileFromTopUntil","player":{"type":"Controller"},"until":{"type":"NextMatches","filter":{"type":"Typed","type_filters":[{"Non":"Land"}],"controller":null,"properties":[]}}}"#,
+        r#"{"type":"ExileFromTopUntil","player":{"type":"Controller"},"until":{"type":"CumulativeThreshold","property":"ManaValue","comparator":"GE","threshold":{"type":"Fixed","value":4}}}"#,
+    ] {
+        let effect: Effect = serde_json::from_str(json).expect("ExileFromTopUntil JSON");
+        assert!(
+            introduces_chosen_object_target(&effect),
+            "{effect:?} must stop the walk"
+        );
+    }
+    // Reach guards: the predicate still answers both ways for other effects.
+    assert!(introduces_chosen_object_target(&Effect::RevealTop {
+        player: TargetFilter::Controller,
+        count: 1,
+    }));
+    let lifted_move: Effect = serde_json::from_str(
+        r#"{"type":"ChangeZone","destination":"Hand","target":{"type":"TriggeringSource"}}"#,
+    )
+    .expect("ChangeZone JSON");
+    assert!(!introduces_chosen_object_target(&lifted_move));
+}
+
+/// CR 115.1a + CR 115.1d: a "target spell" / "target activated ability" slot is
+/// a chosen stack object and stops the event-source anaphor walks; an anaphoric
+/// counter (Strict Proctor's `Counter[ParentTarget]`) does not.
+#[test]
+fn stack_object_target_is_a_chosen_object_boundary_for_the_event_source_lift() {
+    let cases = [
+        (r#"{"type":"StackSpell"}"#, true),
+        (r#"{"type":"StackAbility"}"#, true),
+        (
+            r#"{"type":"Or","filters":[{"type":"StackSpell"},{"type":"StackAbility"}]}"#,
+            true,
+        ),
+        (r#"{"type":"ParentTarget"}"#, false),
+        (r#"{"type":"TriggeringSource"}"#, false),
+    ];
+    for (target, stops) in cases {
+        let effect: Effect =
+            serde_json::from_str(&format!(r#"{{"type":"Counter","target":{target}}}"#))
+                .expect("Counter JSON");
+        assert_eq!(
+            introduces_chosen_object_target(&effect),
+            stops,
+            "Counter with target {target}"
+        );
+    }
+}
+
+/// CR 700.4 + CR 603.10a: Hook Horror's "it" / "that card" is the creature card
+/// that died, the trigger's event object — no exile-until loop or stack target
+/// precedes it, so the lift still applies. The "Molting Exoskeleton — " ability
+/// word is left off: `parse_trigger_lines` does not strip it (the full Oracle
+/// pipeline does), and with it the line lowers without the lift.
+#[test]
+fn hook_horror_dying_card_stays_lifted_to_the_trigger_event() {
+    let triggers = parse_trigger_lines(
+        "When Hook Horror dies, it perpetually gets -1/-1. Then if that card's toughness is 1 or greater, return it to the battlefield under its owner's control.",
+        "Hook Horror",
+    );
+    assert_eq!(triggers.len(), 1);
+    let exec = triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        matches!(&*exec.effect, Effect::ApplyPerpetual { .. }),
+        "the top effect is the perpetual -1/-1, got {:?}",
+        exec.effect
+    );
+    let ret = exec.sub_ability.as_deref().expect("return link");
+    assert!(
+        matches!(
+            &*ret.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ),
+        "\"return it\" names the dying card (TriggeringSource), got {:?}",
+        ret.effect
+    );
+}
+
+/// No-collateral guard: Seraph's chain carries no exile-until loop or stack
+/// target, so its lifted `Sacrifice` is unchanged by those stop arms. (This
+/// pins the current shape only; it does not assert Seraph's timing.)
+#[test]
+fn seraph_chain_keeps_its_lifted_sacrifice() {
+    let triggers = parse_trigger_lines(
+        "Whenever a creature dealt damage by this creature this turn dies, put that card onto the battlefield under your control at the beginning of the next end step. Sacrifice the creature when you lose control of this creature.",
+        "Seraph",
+    );
+    assert_eq!(triggers.len(), 1);
+    let exec = triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        matches!(&*exec.effect, Effect::CreateDelayedTrigger { .. }),
+        "the top effect is the delayed return, got {:?}",
+        exec.effect
+    );
+    let sacrifice = exec.sub_ability.as_deref().expect("sacrifice link");
+    assert!(
+        matches!(
+            &*sacrifice.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }
+        ),
+        "the sacrifice link stays lifted, got {:?}",
+        sacrifice.effect
+    );
+}
+
 #[test]
 fn rohgahh_plural_control_transfer_preserves_parent_operand() {
     let parsed = parse_oracle_text(
@@ -37773,6 +38282,7 @@ fn chain_creates_reflexive_ability_descends_nested_definitions() {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![AbilityDefinition::new(AbilityKind::Spell, draw()), branch],
+                kind: ChooseOneOfKind::Ordinary,
             },
         )
     };
@@ -37782,4 +38292,171 @@ fn chain_creates_reflexive_ability_descends_nested_definitions() {
     assert!(!chain_creates_reflexive_ability(&choose_one_of(
         branch_without_reflexive
     )));
+}
+
+/// Maintainer round 4, finding 2. CR 608.2c: in a becomes-target body an
+/// explicit object-controller antecedent ("that creature's controller") names
+/// the targeted object's controller, which the lowered `ParentTargetController`
+/// can't keep apart from the targeter, so the body fails closed. A spell or
+/// ability controller ("that spell's controller", "that spell or ability's
+/// controller") keeps the targeter rewrite. The first line is the maintainer's
+/// synthetic grammar control; Forsaken Wastes is verbatim (Scryfall).
+#[test]
+fn becomes_target_object_controller_antecedent_fails_closed() {
+    // The maintainer's synthetic line, then compound noun phrases: the guard
+    // reads `that|the` + any noun phrase + `'s controller`, exempting only a
+    // spell or ability head noun.
+    for (name, text) in [
+        (
+            "Synthetic Watcher",
+            "Whenever a creature becomes the target of a spell or ability, that creature's controller draws a card.",
+        ),
+        (
+            "Synthetic Token Watcher",
+            "Whenever a creature becomes the target of a spell or ability, that creature token's controller draws a card.",
+        ),
+        (
+            "Synthetic Artifact Watcher",
+            "Whenever an artifact creature becomes the target of a spell, that artifact creature's controller draws a card.",
+        ),
+        (
+            "Synthetic Bare Token Watcher",
+            "Whenever a token becomes the target of a spell, that token's controller draws a card.",
+        ),
+        (
+            "Synthetic Non-Human Watcher",
+            "Whenever a creature becomes the target of a spell, that non-Human creature's controller draws a card.",
+        ),
+        (
+            "Synthetic Assembly-Worker Watcher",
+            "Whenever an Assembly-Worker becomes the target of a spell, that Assembly-Worker's controller draws a card.",
+        ),
+        (
+            "Synthetic Stat Token Watcher",
+            "Whenever a creature token becomes the target of a spell, that 1/1 creature token's controller draws a card.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::BecomesTarget, "{name}: reach guard");
+        let json = serde_json::to_string(&def).expect("trigger serializes");
+        assert!(
+            json.contains("becomes_target_object_controller_antecedent"),
+            "{name}: the explicit object-controller body fails closed: {json}"
+        );
+        assert!(
+            !json.contains("TriggeringSpellController"),
+            "{name}: no targeter rewrite for the object's controller: {json}"
+        );
+    }
+
+    // After a fresh object-target choice the rebind stops, so "that creature"
+    // names the chosen creature and the guard doesn't fire: the body stays
+    // supported and the chosen creature's controller is not rewritten.
+    let fresh = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, tap target creature. That creature's controller draws a card.",
+        "Synthetic Fresh Choice",
+    );
+    assert_eq!(fresh.mode, TriggerMode::BecomesTarget, "reach guard");
+    let json = serde_json::to_string(&fresh).expect("trigger serializes");
+    assert!(
+        !json.contains("becomes_target_object_controller_antecedent"),
+        "past the fresh-choice boundary the guard doesn't fire: {json}"
+    );
+    assert!(
+        json.contains("ParentTargetController") && !json.contains("TriggeringSpellController"),
+        "the chosen creature's controller keeps its parent-target reading: {json}"
+    );
+
+    // An "Otherwise" body is visited before the conditional link's fresh-choice
+    // stop, as the rebind visits `else_ability` first: it fails closed.
+    let otherwise = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, tap target artifact if you control an Island. Otherwise, that creature's controller draws a card.",
+        "Synthetic Otherwise Watcher",
+    );
+    assert_eq!(otherwise.mode, TriggerMode::BecomesTarget, "reach guard");
+    let json = serde_json::to_string(&otherwise).expect("trigger serializes");
+    assert!(
+        json.contains("becomes_target_object_controller_antecedent"),
+        "the else body's object controller fails closed: {json}"
+    );
+    // An "Otherwise" binds to the most recent conditional even across an
+    // intervening clause, so a chain holding one is read whole: fails closed.
+    let distant = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, tap target artifact if you control an Island. You gain 1 life. Otherwise, that creature's controller draws a card.",
+        "Synthetic Distant Otherwise Watcher",
+    );
+    assert_eq!(distant.mode, TriggerMode::BecomesTarget, "reach guard");
+    let json = serde_json::to_string(&distant).expect("trigger serializes");
+    assert!(
+        json.contains("becomes_target_object_controller_antecedent"),
+        "a distant Otherwise's object controller fails closed: {json}"
+    );
+    // Complementary reveal conditions attach an `else_ability` with no
+    // "Otherwise" clause; the assembled else reads the body whole: fails closed.
+    let complementary = parse_trigger_line(
+        "Whenever a creature becomes the target of a spell or ability, reveal the top card of your library. If it's a land card, tap target artifact. If it isn't a land card, that creature's controller draws a card.",
+        "Synthetic Complementary Watcher",
+    );
+    assert_eq!(
+        complementary.mode,
+        TriggerMode::BecomesTarget,
+        "reach guard"
+    );
+    let json = serde_json::to_string(&complementary).expect("trigger serializes");
+    assert!(
+        json.contains("\"else_ability\"") && json.contains("RevealedHasCardType"),
+        "reach guard: the complementary conditions assemble an else branch: {json}"
+    );
+    assert!(
+        json.contains("becomes_target_object_controller_antecedent"),
+        "a complementary-condition else body's object controller fails closed: {json}"
+    );
+
+    // A modal body is scoped by the same traversal, mode by mode: the fresh
+    // target in the first mode stops the rewrite there, so the mode stays
+    // supported with its Tap and Draw.
+    let modal = parse_oracle_text(
+        "Whenever this enchantment becomes the target of a spell or ability, choose one \u{2014}\n\u{2022} Tap target creature. That creature's controller draws a card.\n\u{2022} You gain 1 life.",
+        "Synthetic Modal Watcher",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = modal
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::BecomesTarget)
+        .expect("reach guard: the becomes-target trigger parses");
+    let json = serde_json::to_string(trigger).expect("trigger serializes");
+    assert!(
+        json.contains("\"Tap\"") && json.contains("\"Draw\""),
+        "the modal mode keeps its Tap and Draw: {json}"
+    );
+    assert!(
+        !json.contains("Unimplemented"),
+        "the modal body stays supported: {json}"
+    );
+
+    for (name, text) in [
+        (
+            "Synthetic Targeter Watcher",
+            "Whenever a creature becomes the target of a spell or ability, that spell or ability's controller draws a card.",
+        ),
+        (
+            "Forsaken Wastes",
+            "Whenever this enchantment becomes the target of a spell, that spell's controller loses 5 life.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::BecomesTarget, "{name}: reach guard");
+        let json = serde_json::to_string(&def).expect("trigger serializes");
+        assert!(
+            json.contains("TriggeringSpellController"),
+            "{name}: the targeter controller keeps the rewrite: {json}"
+        );
+        assert!(
+            !json.contains("Unimplemented"),
+            "{name}: stays supported: {json}"
+        );
+    }
 }

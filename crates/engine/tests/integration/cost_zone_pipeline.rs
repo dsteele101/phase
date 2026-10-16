@@ -989,6 +989,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
         simultaneous_combat_snapshots: Vec::new(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
@@ -3626,7 +3627,6 @@ fn synthesized_plot_redirect_resumes_as_special_action() {
     let second = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("redirect plotted self-exile");
-
     assert_eq!(runner.state().objects[&plotted].zone, Zone::Graveyard);
     assert!(runner.state().objects[&plotted]
         .casting_permissions
@@ -4936,6 +4936,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
         simultaneous_combat_snapshots: Vec::new(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
@@ -7458,8 +7459,7 @@ fn count_mana_added_from(events: &[GameEvent], source: ObjectId) -> usize {
 fn pips_produced_by(state: &GameState, source: ObjectId) -> usize {
     state.players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.source_id == source)
         .count()
 }
@@ -10586,8 +10586,7 @@ impl DelveWitness {
     fn markers(&self) -> Vec<ObjectId> {
         self.runner.state().players[0]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .filter(|unit| unit.is_convoke_payment())
             .map(|unit| unit.source_id)
             .collect()
@@ -10632,6 +10631,9 @@ impl DelveWitness {
                 || path.starts_with("/resolved_rules_journal/")
                 // Monotone mana-unit id counter, never rewound.
                 || path == "/next_pip_id"
+                // CR 601.2a + CR 733.1: monotone spell-announcement counter; an
+                // undone announcement's id is never reminted.
+                || path == "/next_spell_announcement"
                 // Layer-pass caches derived from printed characteristics.
                 || (std::iter::once(&self.spell)
                     .chain(&self.redirects)

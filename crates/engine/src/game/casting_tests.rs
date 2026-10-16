@@ -9,11 +9,11 @@ use crate::parser::oracle_util::normalize_card_name_refs_reporting;
 use crate::types::ability::{
     AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
     AttackedYouScope, BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
-    ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-    CostCategory, CountScope, EffectScope, FilterProp, GameRestriction, KickerVariant,
-    ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
-    ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ChooseOneOfKind, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
+    ControllerRef, CostCategory, CountScope, EffectScope, FilterProp, GameRestriction,
+    KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction,
+    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec,
+    ObjectProperty, ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
     SacrificeCost, SacrificeRequirement, SearchSelectionConstraint, StaticCondition,
     StaticDefinition, TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -415,6 +415,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -1943,7 +1944,7 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
     .unwrap();
 
     assert!(state.objects.get(&restricted_source).unwrap().tapped);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
 #[test]
@@ -1957,7 +1958,7 @@ fn unless_mana_payment_rejects_activation_only_source() {
     assert!(pay_unless_cost(&mut state, PlayerId(0), &cost, &mut events).is_err());
 
     assert!(!state.objects.get(&restricted_source).unwrap().tapped);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
 #[test]
@@ -1994,6 +1995,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -2010,7 +2012,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
     pay_mana_cost(&mut state, PlayerId(0), spell, &cost, &mut events).unwrap();
 
     assert!(state.objects.get(&mountain).unwrap().tapped);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    assert_eq!(state.players[0].mana_pool.total(), 0);
 }
 
 fn add_play_from_exile_test_spell(
@@ -2057,6 +2059,7 @@ fn add_play_from_exile_test_spell(
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
     spell
@@ -2091,7 +2094,7 @@ fn play_from_exile_any_color_pays_colored_cost_and_respects_grantee() {
         let outcome = runner.cast(spell).resolve();
         outcome.assert_zone(&[spell], Zone::Graveyard);
         assert!(
-            outcome.state().players[0].mana_pool.mana.is_empty(),
+            outcome.state().players[0].mana_pool.is_empty(),
             "{available_mana:?} must be spent to pay the blue pip"
         );
     }
@@ -2159,7 +2162,7 @@ fn play_from_exile_any_color_is_bound_to_elected_object_permission() {
         .stack
         .iter()
         .any(|entry| entry.source_id == allowed_spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -2237,7 +2240,7 @@ fn play_from_exile_any_color_preserves_strict_colorless_requirement() {
         .stack
         .iter()
         .any(|entry| entry.source_id == allowed_spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 /// CR 609.4b + CR 107.4h: `AnyColor` does not waive the snow-source quality
@@ -2304,7 +2307,7 @@ fn play_from_exile_any_color_preserves_snow_source_requirement() {
         .stack
         .iter()
         .any(|entry| entry.source_id == allowed_spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -2349,6 +2352,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -2402,6 +2406,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -3382,7 +3387,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
     )
     .expect("Foretell must pay its elected blue cost through the public cast path");
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -4927,6 +4932,7 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         }]),
     );
 }
@@ -6849,6 +6855,7 @@ fn legacy_equip_effect_cost_one_of_is_legal_without_mana_when_discard_available(
                     },
                 ),
             ],
+            kind: ChooseOneOfKind::Ordinary,
         }),
     };
     let source = create_colorless_tap_activated_source(
@@ -12577,6 +12584,7 @@ fn play_from_exile_raise(
         single_use: false,
         cast_cost_modifier: modifier,
         alt_ability_cost: None,
+        without_paying_mana_cost: false,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
     }
 }
@@ -13048,6 +13056,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 cast_variant: CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             },
             crate::types::SpellCastRecord {
                 name: "Opt".to_string(),
@@ -13063,6 +13072,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 cast_variant: CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             },
         ]),
     );
@@ -20165,6 +20175,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -20269,6 +20280,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -20444,6 +20456,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -20821,6 +20834,7 @@ fn graveyard_timed_alt_cost_grant_omits_an_artifact_land_but_keeps_its_land_play
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 mode: crate::types::ability::CardPlayMode::Play,
@@ -21927,6 +21941,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -22003,6 +22018,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -24082,7 +24098,7 @@ fn cancel_cast_after_convoke_removes_payment_marker_and_untaps_creature() {
     apply_as_current(&mut state, GameAction::CancelCast).unwrap();
 
     assert!(!state.objects.get(&helper).unwrap().tapped);
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert!(state.players[0].hand.contains(&spell));
 }
 
@@ -24185,7 +24201,7 @@ fn successful_cast_after_extra_convoke_tap_removes_unused_marker_and_untaps_crea
     );
     assert!(state.objects.get(&helper).unwrap().tapped);
     assert!(!state.objects.get(&extra).unwrap().tapped);
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert_eq!(
         state.objects.get(&spell).unwrap().convoked_creatures,
         vec![helper]
@@ -24247,7 +24263,7 @@ fn cancel_cast_uses_stamped_convoked_creatures_when_pending_snapshot_is_empty() 
         .unwrap()
         .convoked_creatures
         .is_empty());
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -24287,7 +24303,7 @@ fn terminal_cancel_with_fresh_pending_cast_drops_delve_markers() {
 
     handle_cancel_cast(&mut state, &pending, &mut Vec::new());
 
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
     assert_eq!(state.objects[&fuel].zone, Zone::Graveyard);
 }
 
@@ -24757,6 +24773,7 @@ fn target_declaration_classifies_opponent_object_as_a_provisional_crime() {
         &[TargetRef::Object(target)],
         ObjectId(99),
         PlayerId(0),
+        None,
         &mut events,
     );
     assert!(events.iter().any(|e| matches!(
@@ -24796,6 +24813,7 @@ fn emit_targeting_events_own_object_no_crime() {
         &[TargetRef::Object(target)],
         ObjectId(99),
         PlayerId(0),
+        None,
         &mut events,
     );
     assert!(events
@@ -24815,6 +24833,7 @@ fn target_declaration_classifies_opponent_player_as_a_provisional_crime() {
         &[TargetRef::Player(PlayerId(1))],
         ObjectId(99),
         PlayerId(0),
+        None,
         &mut events,
     );
     assert!(events.iter().any(|e| matches!(
@@ -24914,6 +24933,7 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         &crate::game::ability_utils::flatten_targets_in_chain(&ability),
         object_id,
         PlayerId(0),
+        None,
         &mut events,
     );
 
@@ -26489,7 +26509,7 @@ fn target_dependent_battlefield_tax_is_paid_after_matching_target_selection() {
 
     assert!(matches!(waiting, WaitingFor::Priority { .. }));
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "target-dependent tax should consume the three generic mana"
     );
 }
@@ -28302,7 +28322,7 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
 
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         1,
         "the {{X}} activation mana cost should be paid after target selection"
     );
@@ -28989,6 +29009,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
     ];
@@ -29016,7 +29037,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
                 }
             )
     }));
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 #[test]
@@ -31502,6 +31523,7 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         }]),
     );
 
@@ -31621,6 +31643,7 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         }]),
     );
 
@@ -31700,6 +31723,7 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         }]),
     );
 
@@ -47278,8 +47302,7 @@ fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId)
         .iter_mut()
         .find(|p| p.id == player)
         .expect("player exists")
-        .mana_pool
-        .mana = vec![
+        .mana_pool = crate::types::mana::ManaPool::from_units(vec![
         crate::types::mana::ManaUnit::new(
             crate::types::mana::ManaType::Colorless,
             ObjectId(0),
@@ -47287,7 +47310,7 @@ fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId)
             vec![]
         );
         3
-    ];
+    ]);
     exiled
 }
 
@@ -47330,7 +47353,7 @@ fn an_alternative_rider_static_cannot_authorize_disguise() {
         "the alternative-rider source must never produce a face-down cast"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         3,
         "the pay-life alternative leaves the pool untouched"
     );
@@ -47409,7 +47432,7 @@ fn an_additional_rider_static_still_authorizes_disguise() {
         "disguise must remain reachable through the Additional-rider route"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "the {{3}} face-down cost is charged"
     );
@@ -47463,7 +47486,7 @@ fn an_earlier_alternative_rider_source_never_pays_for_the_face_down_cast() {
         "the eligible later source authorizes face down"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "exactly the {{3}} is charged — never zeroed by the earlier rider source"
     );
@@ -47525,7 +47548,7 @@ fn a_normal_cost_cast_grant_lets_disguise_cast_face_down() {
         "the disguise face-down cast must be reachable via the normal-cost grant"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "the {{3}} face-down cost is charged"
     );
@@ -47557,7 +47580,7 @@ fn a_normal_cost_play_grant_with_companion_lets_disguise_cast_face_down() {
         "the companion must not block the normal-cost grant's disguise route"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         0,
         "the {{3}} face-down cost is charged"
     );
@@ -47601,12 +47624,38 @@ fn play_from_exile_grant(
         single_use: false,
         cast_cost_modifier: None,
         alt_ability_cost: None,
+        without_paying_mana_cost: false,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         provenance: if companion {
             crate::types::ability::PlayFromExileProvenance::LandLookCompanion
         } else {
             crate::types::ability::PlayFromExileProvenance::Impulse
         },
+    }
+}
+
+/// Fire Lord Ozai-shape `PlayFromExile`: impulse provenance with the free
+/// channel ("you may play one of those cards without paying its mana cost") —
+/// an alternative-cost grant, never rider authority (CR 118.9a). Paid fields
+/// mirror `play_from_exile_grant`; only the free flag is set.
+fn free_play_from_exile_grant(player: PlayerId) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::PlayFromExile {
+        mode: CardPlayMode::Play,
+        duration: crate::types::ability::Duration::Permanent,
+        granted_to: player,
+        frequency: CastFrequency::Unlimited,
+        source_id: None,
+        invalidation: None,
+        exiled_by_ability_controller: None,
+        mana_spend_permission: None,
+        card_filter: None,
+        single_use_group: None,
+        single_use: false,
+        cast_cost_modifier: None,
+        alt_ability_cost: None,
+        without_paying_mana_cost: true,
+        land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
     }
 }
 
@@ -47846,6 +47895,317 @@ fn a_free_grant_keeps_the_prototype_election_from_exile() {
         Some(CastingVariant::Prototype),
     )
     .expect("a free grant plus the prototype election is one alternative cost (CR 718.2)");
+    assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
+}
+
+/// CR 118.9a + CR 601.2b (run boon-followup-20261013, R1): a FREE
+/// `PlayFromExile` grant (Fire Lord Ozai shape) is itself an alternative cost
+/// — it lends NO zone authority to an Evoke election, which would be a second
+/// alternative cost on the same cast. Ozai-shape sibling of
+/// `an_alternative_grant_lends_no_zone_authority_to_an_evoke_election`.
+#[test]
+fn free_play_from_exile_grant_lends_no_zone_authority_to_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(player));
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    );
+    assert!(
+        result.is_err(),
+        "a free play-from-exile grant must not authorize the evoke election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+
+    // Guard: the granted free cast itself stays intact (ordinary free cast).
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_eq!(prepared.casting_variant, CastingVariant::Normal);
+    assert_eq!(prepared.mana_cost, ManaCost::NoCost);
+
+    // Hostile: a free grant bound to ANOTHER player lends no authority either.
+    let mut foreign = setup_game_at_main_phase();
+    let foreign_exiled = exiled_evoker(&mut foreign, player);
+    foreign
+        .objects
+        .get_mut(&foreign_exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(PlayerId(1)));
+    add_mana(&mut foreign, player, ManaType::Colorless, 4);
+    let foreign_result = prepare_spell_cast_with_variant_override(
+        &foreign,
+        player,
+        foreign_exiled,
+        Some(CastingVariant::Evoke),
+    );
+    assert!(
+        foreign_result.is_err(),
+        "a foreign free grant must not authorize the evoke election, got {:?}",
+        foreign_result.map(|p| p.casting_variant)
+    );
+}
+
+/// CR 118.9a + CR 601.2b + CR 702.103a (R2): the same Ozai-shape denial for
+/// a Bestow election riding a free grant's zone authority.
+#[test]
+fn free_play_from_exile_grant_lends_no_zone_authority_to_a_bestow_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // A legal creature target for the would-be Aura.
+    add_creature_with_mv(&mut state, CardId(45_901), PlayerId(1), "Bear", 2);
+    let exiled = exiled_evoker(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.keywords.push(crate::types::keywords::Keyword::Bestow(
+            crate::types::keywords::BestowCost::Mana(ManaCost::generic(2)),
+        ));
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions
+            .push(free_play_from_exile_grant(player));
+    }
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Bestow),
+    );
+    assert!(
+        result.is_err(),
+        "a free play-from-exile grant must not authorize the bestow election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+
+    // Guard: the plain granted cast stays available.
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_ne!(prepared.casting_variant, CastingVariant::Bestow);
+}
+
+/// CR 118.9a + CR 601.2b (R3): the same Ozai-shape denial for the fixed
+/// face-down {3} through a free impulse grant (not just the companion-only
+/// shape the existing tests pin).
+#[test]
+fn free_play_from_exile_grant_lends_no_face_down_authority() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.casting_permissions
+        .push(free_play_from_exile_grant(player));
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        !has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "a free impulse grant is an alternative cost, not face-down zone authority (CR 118.9a)"
+    );
+    assert!(
+        !face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare must reject the free-grant route"
+    );
+    assert!(
+        has_exile_cast_permission(&state, &obj, player, state.turn_number, None),
+        "the granted free cast itself must stay available"
+    );
+}
+
+/// CR 702.96a + CR 118.9a (R4): the same Ozai-shape denial for an Overload
+/// election — an exiled sorcery with a printed Overload cost.
+fn exiled_overload_sorcery(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let exiled = add_exiled_card(state, player, "Exiled Overload Sorcery");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.card_types.core_types = vec![CoreType::Sorcery];
+    // Printed cost {2}{R}; overload cost {3}{R}{R}.
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 2,
+    };
+    obj.base_mana_cost = obj.mana_cost.clone();
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }),
+            cant_regenerate: true,
+        },
+    ));
+    obj.keywords.push(Keyword::Overload(ManaCost::Cost {
+        shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+        generic: 3,
+    }));
+    obj.base_keywords = obj.keywords.clone();
+    exiled
+}
+
+#[test]
+fn free_play_from_exile_grant_lends_no_zone_authority_to_an_overload_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_overload_sorcery(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(player));
+    add_mana(&mut state, player, ManaType::Red, 4);
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Overload),
+    );
+    assert!(
+        result.is_err(),
+        "a free play-from-exile grant must not authorize the overload election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+
+    // Guard: the plain granted cast stays available.
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_ne!(prepared.casting_variant, CastingVariant::Overload);
+}
+
+/// CR 118.9a + CR 601.2b (R5): an INDEPENDENT paid `PlayFromExile` on the
+/// same card keeps its authority — the Evoke election takes the paid slot at
+/// the evoke's own price, never the free slot's zero. Both vector orders
+/// (first-*satisfying*-wins search semantics, the `:5434` lesson).
+#[test]
+fn paid_play_from_exile_grant_keeps_the_evoke_election_at_its_own_price() {
+    for (label, free_first) in [("free-first", true), ("paid-first", false)] {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let exiled = exiled_evoker(&mut state, player);
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            let free = free_play_from_exile_grant(player);
+            let paid = play_from_exile_grant(player, false);
+            if free_first {
+                obj.casting_permissions.push(free);
+                obj.casting_permissions.push(paid);
+            } else {
+                obj.casting_permissions.push(paid);
+                obj.casting_permissions.push(free);
+            }
+        }
+        add_mana(&mut state, player, ManaType::Colorless, 4);
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            player,
+            exiled,
+            Some(CastingVariant::Evoke),
+        )
+        .expect("the paid grant must keep the evoke election");
+        assert_eq!(prepared.casting_variant, CastingVariant::Evoke);
+        assert_eq!(
+            prepared.mana_cost,
+            ManaCost::generic(1),
+            "{label}: the evoke election must pay its own {{1}} price, never the free slot's zero"
+        );
+        assert_eq!(
+            prepared.casting_permission_index,
+            Some(CastingPermissionIndex(if free_first { 1 } else { 0 })),
+            "{label}: the election must pin the paid slot"
+        );
+    }
+}
+
+/// CR 118.9 (R6): ordinary Ozai-shape free casts are unchanged — with a paid
+/// sibling present, the variant-less election still picks the free grant and
+/// pays nothing. Extends `a_free_grant_still_casts_the_evoker…` to the
+/// `PlayFromExile` shape.
+#[test]
+fn free_play_from_exile_grant_still_casts_the_evoker_without_the_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_play_from_exile_grant(player));
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(play_from_exile_grant(player, false));
+
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_eq!(prepared.casting_variant, CastingVariant::Normal);
+    assert_eq!(prepared.mana_cost, ManaCost::NoCost);
+    assert_eq!(
+        prepared.casting_permission_index,
+        Some(CastingPermissionIndex(0)),
+        "the variant-less election must still pick the free grant first"
+    );
+}
+
+/// CR 718.2 + CR 718.3b (R7, extension per plan review): prototyped casting
+/// swaps alternative CHARACTERISTICS, not cost — so the Ozai-shape free
+/// grant stacks with the Prototype election exactly like the
+/// `ExileWithAltCost`-free shape pinned by
+/// `a_free_grant_keeps_the_prototype_election_from_exile`.
+#[test]
+fn free_play_from_exile_grant_keeps_the_prototype_election_from_exile() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Prototype");
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.mana_cost = ManaCost::generic(7);
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.keywords
+            .push(crate::types::keywords::Keyword::Prototype {
+                cost: ManaCost::generic(2),
+                power: Some(1),
+                toughness: Some(1),
+            });
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions
+            .push(free_play_from_exile_grant(player));
+    }
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Prototype),
+    )
+    .expect(
+        "an Ozai-shape free grant plus the prototype election is one alternative cost (CR 718.2)",
+    );
     assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
 }
 
@@ -48519,6 +48879,7 @@ fn add_impulse_exiled_card(
             single_use: true,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
     exiled
@@ -48802,6 +49163,7 @@ fn grant_object_exile_land_play_permission(
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
 }
@@ -49056,6 +49418,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
 
@@ -49744,7 +50107,7 @@ fn exile_static_any_color_casts_off_color_for_authorized_controller_only() {
     let mut runner = crate::game::scenario::GameRunner::from_state(state);
     let outcome = runner.cast(spell).resolve();
     outcome.assert_zone(&[spell], Zone::Graveyard);
-    assert!(outcome.state().players[0].mana_pool.mana.is_empty());
+    assert!(outcome.state().players[0].mana_pool.is_empty());
 }
 
 /// CR 601.2a + CR 609.4b: two static permissions may authorize the same
@@ -49800,7 +50163,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
     )
     .expect("the elected AnyColor source must authorize the off-color payment");
     assert!(allowed.stack.iter().any(|entry| entry.source_id == spell));
-    assert!(allowed.players[0].mana_pool.mana.is_empty());
+    assert!(allowed.players[0].mana_pool.is_empty());
 }
 
 /// Build a Vizier-of-the-Menagerie-class permanent carrying the
@@ -52887,6 +53250,7 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            prepared_copy_source: None,
         }]
         .into(),
     );
@@ -52913,7 +53277,7 @@ fn seed_unit(state: &mut GameState, player: PlayerId, unit: ManaUnit) -> ManaPip
         .find(|p| p.id == player)
         .unwrap()
         .mana_pool
-        .mana
+        .units()
         .last()
         .unwrap()
         .pip_id
@@ -52998,8 +53362,7 @@ fn generic_cost_pin_honored() {
 
     let pool: Vec<ManaPipId> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id)
         .collect();
     // Exactly one colorless survives, and it is NOT the pinned unit — the pin
@@ -53101,8 +53464,7 @@ fn pin_preserves_z_eligible_unit() {
 
     let pool: Vec<ManaPipId> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id)
         .collect();
     assert!(
@@ -53244,7 +53606,7 @@ fn cancel_clears_pins() {
         PlayerId(0),
         plain_unit(ManaType::Colorless, ObjectId(22)),
     );
-    let pool_before = state.players[0].mana_pool.mana.len();
+    let pool_before = state.players[0].mana_pool.total();
 
     begin_manual_cast(&mut state, PlayerId(0), obj);
     apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: c })
@@ -53256,7 +53618,7 @@ fn cancel_clears_pins() {
         "CancelCast must tear down pending_cast (and its pins)"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         pool_before,
         "cancelling must leave the pool intact (pin is a hint, not a removal)"
     );
@@ -53354,8 +53716,7 @@ fn empty_pins_baseline_unchanged() {
     assert!(state.pending_cast.is_none(), "cast must finalize");
     let survivors: Vec<ManaPipId> = state.players[0]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|u| u.pip_id)
         .collect();
     assert_eq!(
@@ -53395,12 +53756,12 @@ fn phyrexian_shards_uncorrupted_by_pin() {
     );
 
     begin_manual_cast(&mut state, PlayerId(0), obj);
-    let pool_len_before = state.players[0].mana_pool.mana.len();
+    let pool_len_before = state.players[0].mana_pool.total();
     // Pin an unrelated colorless unit (eligible for the {1} generic).
     apply_as_current(&mut state, GameAction::SpendPoolMana { pip_id: extra })
         .expect("pin is legal");
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         pool_len_before,
         "pinning must not remove any unit — compute_phyrexian_shards must see the true pool"
     );
@@ -54525,6 +54886,7 @@ fn tinybones_3player_cast_restricted_to_damaged_player_graveyard() {
         player_id: damaged,
         source_amounts: vec![],
         total_damage: 1,
+        source_incarnations: vec![],
     });
 
     let ctx = crate::game::filter::FilterContext::neutral();
@@ -55346,7 +55708,7 @@ fn graveyard_paid_cast_accept_on_color_opens_manual_payment_then_stack() {
         "the paid spell must reach the stack after payment"
     );
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "the {{U}} must have been spent from the pool"
     );
 }
@@ -55388,7 +55750,7 @@ fn graveyard_paid_cast_accept_off_color_pays_via_any_type_concession() {
         "the off-color-paid spell must reach the stack"
     );
     assert!(
-        state.players[0].mana_pool.mana.is_empty(),
+        state.players[0].mana_pool.is_empty(),
         "the red mana must have been spent to pay the {{U}} pip off-color"
     );
 }
@@ -55450,7 +55812,7 @@ fn graveyard_paid_cast_any_color_survives_offer_and_pays_off_color() {
         state.stack.iter().any(|entry| entry.source_id == spell),
         "the off-color-paid spell must reach the stack"
     );
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 }
 
 /// CR 601.2a + CR 608.2g + CR 609.4b: accepting a during-resolution offer
@@ -55523,7 +55885,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
     apply_as_current(&mut state, GameAction::PassPriority)
         .expect("the accepted offer's AnyColor rider must pay {U} with red mana");
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
-    assert!(state.players[0].mana_pool.mana.is_empty());
+    assert!(state.players[0].mana_pool.is_empty());
 
     stack::resolve_top(&mut state, &mut Vec::new());
     assert_eq!(
@@ -56746,6 +57108,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             });
     }
@@ -56887,7 +57250,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
         "red mana must not pay the elected permission's blue cost"
     );
     assert_eq!(state.objects[&spell].zone, Zone::Exile);
-    assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+    assert_eq!(state.players[0].mana_pool.total(), 1);
 }
 
 /// TEST 6 (negative): a `without_paying` immediate graveyard free cast (Memory
@@ -57502,6 +57865,10 @@ fn push_cards_to_graveyard_this_turn(state: &mut GameState, owner: PlayerId, cou
                 mana_value: 1,
                 controller: owner,
                 owner,
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner,
+                    controller: owner,
+                },
                 is_token: false,
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                     ObjectId(40_000 + i as u64),

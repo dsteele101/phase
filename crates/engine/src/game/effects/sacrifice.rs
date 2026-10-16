@@ -52,6 +52,12 @@ fn resolve_sacrifice_scope(
             })
             .map(|pid| vec![pid])
             .unwrap_or_default(),
+        // CR 608.2c + CR 608.2b: the declared player, no one once that target is illegal.
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, group)
+                .into_iter()
+                .collect()
+        }
         Some(ControllerRef::ParentTargetController) => {
             crate::game::targeting::resolve_effect_player_ref(
                 state,
@@ -328,7 +334,10 @@ pub fn resolve(
         // carried by event context or attached host, not a target the controller chose,
         // so `ability.targets` is empty. Resolve through `resolve_event_context_target`
         // without falling back to `source_id` for unresolved ParentTarget.
-        if matches!(filter, TargetFilter::TriggeringSource) {
+        if matches!(
+            filter,
+            TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+        ) {
             if let Some(trig_obj) = ability.triggering_object {
                 // CR 400.7: If the object left and returned, it is a new object and must not be sacrificed.
                 if state.objects.get(&trig_obj.object_id).is_some_and(|obj| {
@@ -1429,6 +1438,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         });
         let ability = make_scoped_sacrifice_ability(ControllerRef::ParentTargetController, vec![]);
         let mut events = Vec::new();

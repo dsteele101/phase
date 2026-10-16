@@ -431,7 +431,6 @@ fn trailblazers_torch_deals_damage_to_blocking_creatures() {
             assignments: vec![(blocker, attacker)],
         })
         .expect("DeclareBlockers should succeed");
-
     // Drain stack: BecomesBlocked trigger fires and deals 2 damage to blocker
     while !runner.state().stack.is_empty() {
         runner.pass_both_players();
