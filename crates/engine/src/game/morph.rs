@@ -709,6 +709,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
         return Ok(state.waiting_for.clone());
     };
 
+    let events_before = events.len();
     for (index, &card_id) in chosen.iter().enumerate().skip(paused_at_index + 1) {
         match move_kind {
             crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand => {
@@ -740,6 +741,13 @@ pub(crate) fn resume_turn_face_up_cost_move(
                                 choice_player,
                             );
                         }
+                        // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
+                        // across the resumed interactive pause until priority can drain them.
+                        crate::game::triggers::park_observer_triggers_if_paused(
+                            state,
+                            events,
+                            events_before,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                     crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -776,6 +784,13 @@ pub(crate) fn resume_turn_face_up_cost_move(
                                 choice_player,
                             );
                         }
+                        // CR 603.2 + CR 603.3b: Retain ordinary discard observers
+                        // across the resumed interactive pause until priority can drain them.
+                        crate::game::triggers::park_observer_triggers_if_paused(
+                            state,
+                            events,
+                            events_before,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -801,6 +816,13 @@ pub(crate) fn resume_turn_face_up_cost_move(
                                 choice_player,
                             );
                         }
+                        // CR 603.2 + CR 603.3b: Retain ordinary sacrifice observers
+                        // across the resumed interactive pause until priority can drain them.
+                        crate::game::triggers::park_observer_triggers_if_paused(
+                            state,
+                            events,
+                            events_before,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                 }

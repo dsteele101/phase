@@ -756,7 +756,12 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
         PaymentOutcome::Paid => {
             super::morph::finish_paid_turn_face_up(state, player, source, cost_source, None, events)
         }
-        PaymentOutcome::Paused { .. } => Ok(state.waiting_for.clone()),
+        PaymentOutcome::Paused { .. } => {
+            // CR 603.2 + CR 603.3b: Retain ordinary cost observers across the
+            // interactive pause until priority can drain them.
+            crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+            Ok(state.waiting_for.clone())
+        }
         PaymentOutcome::Failed { reason } => Err(EngineError::ActionNotAllowed(reason.reason)),
     }
 }

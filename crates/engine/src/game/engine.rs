@@ -12653,6 +12653,13 @@ fn apply_non_priority_pass_action(
                                             choice_player,
                                         );
                                     }
+                                    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
+                                    // across the interactive pause until priority can drain them.
+                                    crate::game::triggers::park_observer_triggers_if_paused(
+                                        state,
+                                        &events,
+                                        0,
+                                    );
                                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                                 }
                                 crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -12697,6 +12704,13 @@ fn apply_non_priority_pass_action(
                                             choice_player,
                                         );
                                     }
+                                    // CR 603.2 + CR 603.3b: Retain ordinary discard observers
+                                    // across the interactive pause until priority can drain them.
+                                    crate::game::triggers::park_observer_triggers_if_paused(
+                                        state,
+                                        &events,
+                                        0,
+                                    );
                                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                                 }
                             }
@@ -12737,6 +12751,13 @@ fn apply_non_priority_pass_action(
                                             choice_player,
                                         );
                                     }
+                                    // CR 603.2 + CR 603.3b: Retain ordinary sacrifice observers
+                                    // across the interactive pause until priority can drain them.
+                                    crate::game::triggers::park_observer_triggers_if_paused(
+                                        state,
+                                        &events,
+                                        0,
+                                    );
                                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                                 }
                             }

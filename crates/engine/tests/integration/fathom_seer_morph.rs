@@ -1200,7 +1200,7 @@ fn zombie_cutthroat_deferred_life_cost_child_drain_before_flip() {
 fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
-        TargetSelectionMode,
+        TargetRef, TargetSelectionMode,
     };
     use engine::types::game_state::PendingCostMoveResume;
     use engine::types::replacements::ReplacementEvent;
@@ -1209,6 +1209,12 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     scenario.at_phase(Phase::PreCombatMain);
     let mountain1 = scenario.add_basic_land(P0, ManaColor::Red);
     let mountain2 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mayhem_devil = scenario
+        .add_creature(P0, "Mayhem Devil", 3, 3)
+        .from_oracle_text(
+            "Whenever a player sacrifices a permanent, Mayhem Devil deals 1 damage to any target.",
+        )
+        .id();
     let volcanist = scenario
         .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
         .from_oracle_text("Morph—Sacrifice two Mountains.")
@@ -1372,6 +1378,12 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
         "must be on first Mountain's NamedChoice prompt, got {:?}",
         runner.state().waiting_for
     );
+    // CR 603.2 + CR 603.3b: Exactly one Mayhem Devil sacrifice observer retained across initial pause
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        1,
+        "must retain exactly one observer trigger after first sacrifice pause"
+    );
     assert!(
         runner.state().objects[&volcanist].face_down,
         "permanent must remain face down while payment is paused"
@@ -1436,6 +1448,12 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
         "must be on second Mountain's NamedChoice prompt, got {:?}",
         runner.state().waiting_for
     );
+    // CR 603.2 + CR 603.3b: Exactly two Mayhem Devil sacrifice observers retained across second pause
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        2,
+        "must retain exactly two observer triggers after second sacrifice pause"
+    );
     assert!(
         runner.state().objects[&volcanist].face_down,
         "permanent must remain face down while second payment is paused"
@@ -1488,7 +1506,217 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
         runner.state().pending_cost_move_resume.is_none(),
         "pending_cost_move_resume must be cleared"
     );
+
+    // CR 603.2 + CR 603.3b: exactly two eventual triggered results after both child answers.
+    // The first Mayhem Devil trigger prompts for target selection:
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "must prompt for first Mayhem Devil trigger target, got {:?}",
+        runner.state().waiting_for
+    );
+    let target_res1 = runner.act(GameAction::SelectTargets {
+        targets: vec![TargetRef::Player(P1)],
+    });
+    assert!(
+        target_res1.is_ok(),
+        "first Mayhem Devil SelectTargets must succeed: {:?}",
+        target_res1.err()
+    );
+
+    // Second Mayhem Devil trigger prompts for target selection:
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "must prompt for second Mayhem Devil trigger target, got {:?}",
+        runner.state().waiting_for
+    );
+    let target_res2 = runner.act(GameAction::SelectTargets {
+        targets: vec![TargetRef::Player(P1)],
+    });
+    assert!(
+        target_res2.is_ok(),
+        "second Mayhem Devil SelectTargets must succeed: {:?}",
+        target_res2.err()
+    );
+
+    // Exactly two eventual triggered results are now on the stack
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "must have exactly two Mayhem Devil triggers on the stack"
+    );
+    for entry in &runner.state().stack {
+        assert_eq!(
+            entry.source_id, mayhem_devil,
+            "stack entry source must be Mayhem Devil"
+        );
+    }
+
     // At Priority
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "state must settle at Priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+// CR 702.37e + CR 603.2 + CR 603.3b: Paired unpaused control: Skirk Volcanist sacrificing
+// two Mountains without delivery-child replacement effects immediately triggers Mayhem Devil twice.
+#[test]
+fn turn_face_up_sacrifice_cost_unpaused_control_preserves_triggers_on_stack() {
+    use engine::types::ability::TargetRef;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mountain1 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mountain2 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mayhem_devil = scenario
+        .add_creature(P0, "Mayhem Devil", 3, 3)
+        .from_oracle_text(
+            "Whenever a player sacrifices a permanent, Mayhem Devil deals 1 damage to any target.",
+        )
+        .id();
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&volcanist].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: volcanist,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&volcanist].face_down);
+
+    // Public TurnFaceUp special action
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: volcanist,
+        x: 0,
+    });
+    assert!(res.is_ok(), "TurnFaceUp must succeed: {:?}", res.err());
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "must be WaitingFor::PayCost(Sacrifice), got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Submit SelectCards with the two Mountains (no replacement pause)
+    let res1 = runner.act(GameAction::SelectCards {
+        cards: vec![mountain1, mountain2],
+    });
+    assert!(res1.is_ok(), "SelectCards must succeed: {:?}", res1.err());
+
+    // Both Mountains are sacrificed to graveyard
+    assert_eq!(runner.state().objects[&mountain1].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Graveyard);
+
+    // Skirk Volcanist is turned face up
+    assert!(
+        !runner.state().objects[&volcanist].face_down,
+        "Skirk Volcanist must be turned face up"
+    );
+
+    // CR 603.2 + CR 603.3b: Both Mayhem Devil triggers are put onto the stack.
+    // Target prompt 1:
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "must prompt for first Mayhem Devil trigger target, got {:?}",
+        runner.state().waiting_for
+    );
+    let target_res1 = runner.act(GameAction::SelectTargets {
+        targets: vec![TargetRef::Player(P1)],
+    });
+    assert!(
+        target_res1.is_ok(),
+        "first Mayhem Devil SelectTargets must succeed: {:?}",
+        target_res1.err()
+    );
+
+    // Target prompt 2:
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "must prompt for second Mayhem Devil trigger target, got {:?}",
+        runner.state().waiting_for
+    );
+    let target_res2 = runner.act(GameAction::SelectTargets {
+        targets: vec![TargetRef::Player(P1)],
+    });
+    assert!(
+        target_res2.is_ok(),
+        "second Mayhem Devil SelectTargets must succeed: {:?}",
+        target_res2.err()
+    );
+
+    // Exactly two Mayhem Devil triggers on the stack
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "must have exactly two Mayhem Devil triggers on the stack"
+    );
+    for entry in &runner.state().stack {
+        assert_eq!(
+            entry.source_id, mayhem_devil,
+            "stack entry source must be Mayhem Devil"
+        );
+    }
+
+    // State settles at Priority
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "state must settle at Priority, got {:?}",
