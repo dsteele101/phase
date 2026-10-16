@@ -1910,3 +1910,196 @@ fn baneclaw_marauder_regeneration_survivor_sacrifice_later_no_trigger() {
         "P1 must not lose life from Marauder trigger because the blocker was removed from combat upon regenerating"
     );
 }
+
+#[test]
+fn baneclaw_marauder_umbra_paused_replacement_batch_retirement_and_post_combat_negative() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // CR 702.12: Indestructible Marauder so Day of Judgment does not destroy it.
+    let marauder = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Baneclaw Marauder",
+            3,
+            4,
+            "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        )
+        .with_keyword(engine::types::keywords::Keyword::Indestructible)
+        .id();
+
+    // P1: an additional destroyable creature Grizzly Bears (2/2) and Colossal Dreadmaw (6/6).
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let dreadmaw = scenario.add_creature(P1, "Colossal Dreadmaw", 6, 6).id();
+
+    // Day of Judgment with is_instant = true (modeling Vedalken Orrery flash timing during end combat)
+    let day_of_judgment = scenario
+        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", true, "Destroy all creatures.")
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+
+    // Diabolic Edict to sacrifice the survivor post-combat
+    let edict = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Diabolic Edict",
+            true,
+            "Target player sacrifices a creature of their choice.",
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Attach two Umbras (Totem Armor, CR 702.89a) to Colossal Dreadmaw
+    let hyena_umbra = engine::game::zones::create_object(
+        runner.state_mut(),
+        engine::types::identifiers::CardId(101),
+        P1,
+        "Hyena Umbra".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let aura = runner.state_mut().objects.get_mut(&hyena_umbra).unwrap();
+        aura.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Enchantment);
+        aura.card_types.subtypes.push("Aura".to_string());
+        aura.keywords
+            .push(engine::types::keywords::Keyword::TotemArmor);
+        aura.attached_to = Some(dreadmaw.into());
+    }
+    let bear_umbra = engine::game::zones::create_object(
+        runner.state_mut(),
+        engine::types::identifiers::CardId(102),
+        P1,
+        "Bear Umbra".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let aura = runner.state_mut().objects.get_mut(&bear_umbra).unwrap();
+        aura.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Enchantment);
+        aura.card_types.subtypes.push("Aura".to_string());
+        aura.keywords
+            .push(engine::types::keywords::Keyword::TotemArmor);
+        aura.attached_to = Some(dreadmaw.into());
+    }
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&dreadmaw)
+        .unwrap()
+        .attachments
+        .extend([hyena_umbra, bear_umbra]);
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(marauder, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Both Dreadmaw and Grizzly Bears block Marauder
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(dreadmaw, marauder), (bears, marauder)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Drain stack: BecomesBlocked trigger resolves (-1/-1 to blockers: Dreadmaw is 5/5, Bears is 1/1)
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Cast Day of Judgment during combat while Dreadmaw and Bears are blocking Marauder.
+    // In DestroyAll:
+    // - Marauder is Indestructible (filtered out of matching batch)
+    // - Bears and Dreadmaw form a simultaneous batch (matching.len() == 2)
+    // - Bears is destroyed (dies while blocking Marauder)
+    // - Dreadmaw has two Umbras, pausing on CR 616.1 choice between them
+    runner.cast(day_of_judgment).resolve();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::ReplacementChoice { .. }
+        ),
+        "Day of Judgment must pause on Umbra replacement choice for Dreadmaw"
+    );
+
+    // Positive blocker-death control: Grizzly Bears died while blocking Marauder
+    assert_eq!(
+        runner.state().objects.get(&bears).unwrap().zone,
+        Zone::Graveyard,
+        "Grizzly Bears must be in Graveyard"
+    );
+
+    // CR 616.1: P1 chooses the first Umbra to apply.
+    // CR 702.89a: Totem armor replaces destruction, destroys the Aura, and Dreadmaw survives.
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("ChooseReplacement should succeed");
+
+    assert_eq!(
+        runner.state().objects.get(&dreadmaw).unwrap().zone,
+        Zone::Battlefield,
+        "Dreadmaw must survive via Umbra armor"
+    );
+
+    // Drain stack: Marauder's dies trigger for Grizzly Bears resolves
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Positive blocker-death control reached: P1 lost 1 life from Grizzly Bears dying in combat
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        19,
+        "Reached positive control: P1 must lose 1 life when Grizzly Bears dies while blocking Marauder"
+    );
+
+    // Advance through CombatDamage into PostCombatMain, executing CR 511.3 end-combat teardown
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PostCombatMain);
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "Must advance to PostCombatMain"
+    );
+
+    // In PostCombatMain: P0 casts Diabolic Edict targeting P1.
+    // P1 sacrifices Dreadmaw (its only remaining creature).
+    runner.cast(edict).target_player(P1).resolve();
+
+    assert_eq!(
+        runner.state().objects.get(&dreadmaw).unwrap().zone,
+        Zone::Graveyard,
+        "Dreadmaw was sacrificed to graveyard"
+    );
+
+    // Drain stack
+    while !runner.state().stack.is_empty() {
+        runner.pass_both_players();
+    }
+
+    // Post-combat negative control:
+    // Dreadmaw died in PostCombatMain, AFTER combat ended and AFTER the simultaneous batch
+    // completed. The stale combat snapshot must have been retired at batch completion and combat teardown.
+    // Marauder dies trigger must NOT fire. P1's life remains 19.
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        19,
+        "Post-combat negative control: P1 must not lose life when Dreadmaw dies post-combat"
+    );
+}

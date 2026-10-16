@@ -2246,6 +2246,11 @@ pub(crate) fn capture_combat_status(
     state: &GameState,
     object_id: ObjectId,
 ) -> ZoneChangeCombatStatus {
+    // CR 511.3 + CR 506.4: If combat does not exist, no object is attacking or blocking.
+    let Some(combat) = &state.combat else {
+        return ZoneChangeCombatStatus::default();
+    };
+
     // CR 704.3 + CR 603.10a: If a pre-delivery simultaneous snapshot was captured,
     // use it so sequential deliveries within the same simultaneous batch do not
     // see earlier-delivered objects pruned from combat.
@@ -2256,10 +2261,6 @@ pub(crate) fn capture_combat_status(
             return snapshot.clone();
         }
     }
-
-    let Some(combat) = &state.combat else {
-        return ZoneChangeCombatStatus::default();
-    };
     let attacker = combat
         .attackers
         .iter()

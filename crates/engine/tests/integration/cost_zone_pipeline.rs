@@ -989,6 +989,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        simultaneous_combat_snapshots: Vec::new(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -4935,6 +4936,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        simultaneous_combat_snapshots: Vec::new(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,

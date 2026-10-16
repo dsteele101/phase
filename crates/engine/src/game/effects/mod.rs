@@ -13614,6 +13614,7 @@ fn perform_player_scope_sacrifices(
                     // terminal completion reunites this span with that event,
                     // stamps every actual departure together, and only then
                     // allows trigger collection to observe the batch.
+                    let announced_snapshots = completion.announced.clone();
                     completion
                         .deferred_events
                         .extend(events.drain(events_before_sacrifice..));
@@ -13625,6 +13626,9 @@ fn perform_player_scope_sacrifices(
                             selections,
                             completion,
                         });
+                    if let Some(pending) = state.pending_replacement.as_mut() {
+                        pending.simultaneous_combat_snapshots = announced_snapshots;
+                    }
                     state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(
                         choice_player,
                         state,

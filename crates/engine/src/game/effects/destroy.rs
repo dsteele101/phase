@@ -389,11 +389,17 @@ pub fn resolve_all(
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
                 if !apply_destroy_after_replacement(state, event, events) {
+                    if let Some(pending) = state.pending_replacement.as_mut() {
+                        pending.simultaneous_combat_snapshots = matching.clone();
+                    }
                     return Ok(());
                 }
             }
             ReplacementResult::Prevented => {} // Regenerated or other replacement
             ReplacementResult::NeedsChoice(player) => {
+                if let Some(pending) = state.pending_replacement.as_mut() {
+                    pending.simultaneous_combat_snapshots = matching.clone();
+                }
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }

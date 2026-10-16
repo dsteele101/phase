@@ -5676,6 +5676,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),

@@ -24212,6 +24212,11 @@ pub struct PendingReplacement {
     /// before the replacement is applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub may_cost_remaining: Option<AbilityCost>,
+    /// CR 704.3 + CR 603.10a: All original members of a simultaneous batch
+    /// whose combat snapshots were captured prior to delivery, preserved across
+    /// replacement pauses so every original member is retired upon terminal completion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub simultaneous_combat_snapshots: Vec<ObjectId>,
 }
 
 /// CR 701.21a: The subject and controller of a sacrifice whose inner zone

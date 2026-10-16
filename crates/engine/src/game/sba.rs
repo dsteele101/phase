@@ -1217,6 +1217,10 @@ fn perform_creature_deaths(
                         }
                         ReplacementResult::Prevented => {}
                         ReplacementResult::NeedsChoice(player) => {
+                            if let Some(pending) = state.pending_replacement.as_mut() {
+                                pending.simultaneous_combat_snapshots =
+                                    to_die.iter().map(|d| d.object_id()).collect();
+                            }
                             state.waiting_for =
                                 replacement::replacement_choice_waiting_for(player, state);
                             return;
@@ -1236,6 +1240,10 @@ fn perform_creature_deaths(
                 *any_performed = true;
             }
             ReplacementResult::NeedsChoice(player) => {
+                if let Some(pending) = state.pending_replacement.as_mut() {
+                    pending.simultaneous_combat_snapshots =
+                        to_die.iter().map(|d| d.object_id()).collect();
+                }
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 return;
             }
@@ -4619,6 +4627,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
         });
 
         // A concurrent player-loss SBA (P2 at 0 life) — the reason reconcile runs
@@ -4795,6 +4804,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            simultaneous_combat_snapshots: Vec::new(),
         });
 
         let mut events = Vec::new();
