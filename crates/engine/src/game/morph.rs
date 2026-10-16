@@ -755,10 +755,12 @@ pub(crate) fn resume_turn_face_up_cost_move(
                                 remaining_cost,
                             },
                         );
-                        super::costs::pause_cost_payment_for_replacement_choice(
-                            state,
-                            choice_player,
-                        );
+                        if state.pending_replacement.is_some() {
+                            super::costs::pause_cost_payment_for_replacement_choice(
+                                state,
+                                choice_player,
+                            );
+                        }
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -778,10 +780,12 @@ pub(crate) fn resume_turn_face_up_cost_move(
                                 remaining_cost,
                             },
                         );
-                        super::costs::pause_cost_payment_for_replacement_choice(
-                            state,
-                            choice_player,
-                        );
+                        if state.pending_replacement.is_some() {
+                            super::costs::pause_cost_payment_for_replacement_choice(
+                                state,
+                                choice_player,
+                            );
+                        }
                         return Ok(state.waiting_for.clone());
                     }
                 }

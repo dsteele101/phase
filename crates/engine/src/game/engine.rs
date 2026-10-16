@@ -12691,10 +12691,12 @@ fn apply_non_priority_pass_action(
                                             remaining_cost: remaining_cost.clone(),
                                         },
                                     );
-                                    super::costs::pause_cost_payment_for_replacement_choice(
-                                        state,
-                                        choice_player,
-                                    );
+                                    if state.pending_replacement.is_some() {
+                                        super::costs::pause_cost_payment_for_replacement_choice(
+                                            state,
+                                            choice_player,
+                                        );
+                                    }
                                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                                 }
                             }
@@ -12729,10 +12731,12 @@ fn apply_non_priority_pass_action(
                                             remaining_cost: remaining_cost.clone(),
                                         },
                                     );
-                                    super::costs::pause_cost_payment_for_replacement_choice(
-                                        state,
-                                        choice_player,
-                                    );
+                                    if state.pending_replacement.is_some() {
+                                        super::costs::pause_cost_payment_for_replacement_choice(
+                                            state,
+                                            choice_player,
+                                        );
+                                    }
                                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                                 }
                             }

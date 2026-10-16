@@ -1081,3 +1081,234 @@ fn zombie_cutthroat_deferred_life_cost_child_drain_before_flip() {
         runner.state().waiting_for
     );
 }
+
+// CR 702.37e + CR 601.2h + CR 614.6: Preserve ordinary delivery children across sacrifice cost payment
+#[test]
+fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
+        TargetSelectionMode,
+    };
+    use engine::types::game_state::PendingCostMoveResume;
+    use engine::types::replacements::ReplacementEvent;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mountain1 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mountain2 = scenario.add_basic_land(P0, ManaColor::Red);
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&volcanist].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: volcanist,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&volcanist].face_down);
+
+    // Install delivery-child replacement effect on each Mountain (moved to graveyard -> choose odd or even)
+    let delivery_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::OddOrEven,
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Graveyard);
+
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&mountain1)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(delivery_repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mountain1)
+        .unwrap()
+        .replacement_definitions
+        .push(delivery_repl.clone());
+
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&mountain2)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(delivery_repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mountain2)
+        .unwrap()
+        .replacement_definitions
+        .push(delivery_repl);
+
+    // Public TurnFaceUp special action
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: volcanist,
+        x: 0,
+    });
+    assert!(res.is_ok(), "TurnFaceUp must succeed: {:?}", res.err());
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "must be WaitingFor::PayCost(Sacrifice), got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Submit SelectCards with the two Mountains
+    let res = runner.act(GameAction::SelectCards {
+        cards: vec![mountain1, mountain2],
+    });
+    assert!(res.is_ok(), "SelectCards must succeed: {:?}", res.err());
+
+    // First mountain moved to graveyard; its delivery tail paused on NamedChoice (not clobbered by replacement_choice)
+    assert_eq!(runner.state().objects[&mountain1].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Battlefield);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::OddOrEven,
+                ..
+            }
+        ),
+        "must be on first Mountain's NamedChoice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().objects[&volcanist].face_down,
+        "permanent must remain face down while payment is paused"
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                paused_at_index: 0,
+                ..
+            })
+        ),
+        "must have TurnFaceUpCostMove paused at index 0"
+    );
+
+    // Answer first child prompt
+    let res = runner.act(GameAction::ChooseOption {
+        choice: "Odd".to_string(),
+    });
+    assert!(
+        res.is_ok(),
+        "first ChooseOption must succeed: {:?}",
+        res.err()
+    );
+
+    // Second mountain moved to graveyard; its delivery tail paused on second NamedChoice
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Graveyard);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::OddOrEven,
+                ..
+            }
+        ),
+        "must be on second Mountain's NamedChoice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().objects[&volcanist].face_down,
+        "permanent must remain face down while second payment is paused"
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                paused_at_index: 1,
+                ..
+            })
+        ),
+        "must have TurnFaceUpCostMove paused at index 1"
+    );
+
+    // Answer second child prompt
+    let res = runner.act(GameAction::ChooseOption {
+        choice: "Even".to_string(),
+    });
+    assert!(
+        res.is_ok(),
+        "second ChooseOption must succeed: {:?}",
+        res.err()
+    );
+
+    // Exactly one flip: permanent is turned face up
+    assert!(
+        !runner.state().objects[&volcanist].face_down,
+        "Skirk Volcanist must be turned face up after all costs and children finish"
+    );
+    // Roots cleared
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "pending_cost_move_resume must be cleared"
+    );
+    // At Priority
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "state must settle at Priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
