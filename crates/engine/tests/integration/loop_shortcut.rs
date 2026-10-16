@@ -5148,6 +5148,13 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // public, so neither the carrier vec nor the redaction loop changes.
     // 141 ⇒ 142 is ADJUDICATED: `ManaAbilityManaPayment { player, pending_mana_ability }`
     // holds no `DecisionTemplate`, so neither the carrier vec nor the redaction loop changes.
+    // 142 ⇒ 143 is ADJUDICATED: the one-time-boon token-host choice (CR 608.2d,
+    // Dunbarrow Revivalist) added `ChooseTokenHost { player, source_id,
+    // legal_targets, pending_ability }`. Measured, not inferred from the diff:
+    // that body holds NO `DecisionTemplate` (zero matches) — it is a
+    // resolution-choice prompt answered by `GameAction::ChooseTarget`, not a
+    // shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
 
     let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
     assert_eq!(

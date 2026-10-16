@@ -817,13 +817,19 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // activating the mana ability — and is classified by
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the window cannot close without that player's payment.
-    // 142 -> 143 is adjudicated: the Eye to Eye / Mouth to Mouth contest added
+    // 142 -> 143 is adjudicated: the one-time-boon token-host choice (CR
+    // 608.2d, Dunbarrow Revivalist) added `ChooseTokenHost`. It names one
+    // acting `player` — the resolving controller choosing among the stamped
+    // entrants — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::ChooseTarget`.
+    // 143 -> 144 is adjudicated: the Eye to Eye / Mouth to Mouth contest added
     // `PhysicalContest`. It is ACTORLESS — nobody submits a `GameAction` while it
     // runs — and is declared in `ACTORLESS` with `NoActor::HostContestDriver`,
     // advanced by `game::contest::advance_contest`.
-    if declared.len() != 143 {
+    if declared.len() != 144 {
         failures.push(format!(
-            "PIN declared.len()={} != 143.\n\
+            "PIN declared.len()={} != 144.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\
