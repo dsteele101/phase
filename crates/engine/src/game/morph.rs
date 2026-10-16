@@ -5,7 +5,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -93,13 +93,19 @@ pub(crate) fn turn_face_up_offer(
             })
         }
         TurnFaceUpCost::NonMana(ability_cost) => {
+            let source = ObjectIncarnationRef::from_object(
+                state
+                    .objects
+                    .get(&object_id)
+                    .expect("turn_face_up_prepare guaranteed object exists"),
+            );
             if super::costs::can_pay(
                 state,
                 player,
                 object_id,
                 &ability_cost,
                 &super::costs::PaymentScope::TurnFaceUp {
-                    object_id,
+                    source,
                     cost_source,
                 },
             ) {
@@ -565,6 +571,12 @@ pub(crate) fn handle_turn_face_up(
     // CR 116.2b: `turn_face_up_prepare` is the single legality and cost
     // authority, shared with the Priority offer enumeration.
     let (cost_source, cost) = turn_face_up_prepare(state, object_id, player)?;
+    let source = ObjectIncarnationRef::from_object(
+        state
+            .objects
+            .get(&object_id)
+            .expect("turn_face_up_prepare guaranteed object exists"),
+    );
     match cost {
         TurnFaceUpCost::Mana(cost) => {
             let mut cost = super::casting::apply_special_action_cost_reduction(
@@ -613,7 +625,7 @@ pub(crate) fn handle_turn_face_up(
             match pay_turn_face_up_cost(
                 state,
                 player,
-                object_id,
+                source,
                 &cost,
                 cost_source,
                 announced_x,
@@ -622,7 +634,7 @@ pub(crate) fn handle_turn_face_up(
                 super::casting::SpecialActionManaPayment::Paid => finish_paid_turn_face_up(
                     state,
                     player,
-                    object_id,
+                    source,
                     cost_source,
                     announced_x,
                     events,
@@ -646,7 +658,7 @@ pub(crate) fn handle_turn_face_up(
             super::costs::pay_ability_cost_for_turn_face_up(
                 state,
                 player,
-                object_id,
+                source,
                 cost_source,
                 &ability_cost,
                 events,
@@ -659,7 +671,7 @@ pub(crate) fn handle_turn_face_up(
 pub(crate) fn finish_or_continue_turn_face_up(
     state: &mut GameState,
     player: PlayerId,
-    object_id: ObjectId,
+    source: ObjectIncarnationRef,
     cost_source: TurnUpCostSource,
     remaining_cost: Option<Box<AbilityCost>>,
     events: &mut Vec<GameEvent>,
@@ -668,13 +680,13 @@ pub(crate) fn finish_or_continue_turn_face_up(
         super::costs::pay_ability_cost_for_turn_face_up(
             state,
             player,
-            object_id,
+            source,
             cost_source,
             &next_cost,
             events,
         )
     } else {
-        finish_paid_turn_face_up(state, player, object_id, cost_source, None, events)
+        finish_paid_turn_face_up(state, player, source, cost_source, None, events)
     }
 }
 
@@ -686,7 +698,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
 ) -> Result<WaitingFor, EngineError> {
     let Some(crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
         player,
-        object_id,
+        source,
         cost_source,
         move_kind,
         chosen,
@@ -705,7 +717,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
                     crate::game::zone_pipeline::ZoneMoveRequest::cost(
                         card_id,
                         Zone::Hand,
-                        object_id,
+                        source.object_id,
                     ),
                     events,
                 ) {
@@ -714,7 +726,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
                         state.pending_cost_move_resume = Some(
                             crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                 player,
-                                object_id,
+                                source,
                                 cost_source,
                                 move_kind,
                                 chosen,
@@ -740,7 +752,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
                     state,
                     card_id,
                     player,
-                    Some(object_id),
+                    Some(source.object_id),
                     events,
                 ) {
                     super::effects::discard::DiscardOutcome::Complete => {}
@@ -750,7 +762,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
                         state.pending_cost_move_resume = Some(
                             crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                 player,
-                                object_id,
+                                source,
                                 cost_source,
                                 move_kind,
                                 chosen,
@@ -775,7 +787,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
                         state.pending_cost_move_resume = Some(
                             crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                 player,
-                                object_id,
+                                source,
                                 cost_source,
                                 move_kind,
                                 chosen,
@@ -796,14 +808,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
         }
     }
 
-    finish_or_continue_turn_face_up(
-        state,
-        player,
-        object_id,
-        cost_source,
-        remaining_cost,
-        events,
-    )
+    finish_or_continue_turn_face_up(state, player, source, cost_source, remaining_cost, events)
 }
 
 /// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through
@@ -813,7 +818,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
 pub(crate) fn pay_turn_face_up_cost(
     state: &mut GameState,
     player: PlayerId,
-    object_id: ObjectId,
+    source: ObjectIncarnationRef,
     cost: &ManaCost,
     cost_source: TurnUpCostSource,
     announced_x: Option<u32>,
@@ -821,7 +826,7 @@ pub(crate) fn pay_turn_face_up_cost(
 ) -> Result<super::casting::SpecialActionManaPayment, EngineError> {
     let resume = crate::types::game_state::ManaAbilityResume::TurnFaceUp {
         player,
-        object_id,
+        source,
         cost: cost.clone(),
         announced_x,
         cost_source,
@@ -829,7 +834,7 @@ pub(crate) fn pay_turn_face_up_cost(
     super::casting::pay_special_action_mana_cost_with_resume(
         state,
         player,
-        Some(object_id),
+        Some(source.object_id),
         cost,
         crate::types::mana::SpecialAction::TurnFaceUp,
         Some(&resume),
@@ -843,7 +848,7 @@ pub(crate) fn pay_turn_face_up_cost(
 pub(crate) fn resume_turn_face_up_payment(
     state: &mut GameState,
     player: PlayerId,
-    object_id: ObjectId,
+    source: ObjectIncarnationRef,
     cost: ManaCost,
     cost_source: TurnUpCostSource,
     announced_x: Option<u32>,
@@ -855,14 +860,14 @@ pub(crate) fn resume_turn_face_up_payment(
     match pay_turn_face_up_cost(
         state,
         player,
-        object_id,
+        source,
         &cost,
         cost_source,
         announced_x,
         events,
     )? {
         super::casting::SpecialActionManaPayment::Paid => {
-            finish_paid_turn_face_up(state, player, object_id, cost_source, announced_x, events)
+            finish_paid_turn_face_up(state, player, source, cost_source, announced_x, events)
         }
         super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }
@@ -872,11 +877,24 @@ pub(crate) fn resume_turn_face_up_payment(
 pub(crate) fn finish_paid_turn_face_up(
     state: &mut GameState,
     player: PlayerId,
-    object_id: ObjectId,
+    source: ObjectIncarnationRef,
     cost_source: TurnUpCostSource,
     announced_x: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.37e + CR 400.7 + CR 101.3: If the permanent left the battlefield during
+    // cost payment (e.g. returned itself to hand via Raven Guild Initiate + Maskwood Nexus),
+    // it became a new object and the instruction to turn it face up is ignored.
+    // Costs were already paid, so settle cleanly at Priority without flipping.
+    let original_still_on_battlefield = state
+        .objects
+        .get(&source.object_id)
+        .is_some_and(|obj| obj.incarnation == source.incarnation && obj.zone == Zone::Battlefield);
+    if !original_still_on_battlefield {
+        state.waiting_for = WaitingFor::Priority { player };
+        return Ok(state.waiting_for.clone());
+    }
+
     // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
     // includes X, other abilities of that permanent may also refer to X. The
     // value of X in those abilities is equal to the value of X chosen as the
@@ -897,7 +915,7 @@ pub(crate) fn finish_paid_turn_face_up(
     // that value must survive. The carrier is cleared at the start of the next
     // `resolve_top`, so this publication cannot outlive the trigger it is for.
     if let Some(announced_x) = announced_x {
-        state.announced_source_x = Some((object_id, announced_x));
+        state.announced_source_x = Some((source.object_id, announced_x));
     }
 
     // CR 614.1e + CR 708.11 + CR 616.1: the "As ~ is turned face up" replacement
@@ -920,9 +938,9 @@ pub(crate) fn finish_paid_turn_face_up(
     // ordering prompt. The carrier is cleared at the next `resolve_top`, the
     // same lifecycle as `announced_source_x`; a following paid flip
     // overwrites it before ITS commit.
-    state.turn_up_paid_cost_source = Some((object_id, cost_source));
+    state.turn_up_paid_cost_source = Some((source.object_id, cost_source));
     state.waiting_for = WaitingFor::Priority { player };
-    turn_face_up(state, player, object_id, events)?;
+    turn_face_up(state, player, source.object_id, events)?;
     // CR 603.2 + CR 603.3b: when the pipeline paused, the reducer's settled
     // epilogue will not run for this action, so the `TurnedFaceUp` observer
     // triggers in `events` would be lost (measured: the "when turned face up"

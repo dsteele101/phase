@@ -354,10 +354,10 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
                     &pending.resume,
                     ManaAbilityResume::TurnFaceUp {
                         player,
-                        object_id,
+                        source,
                         announced_x: Some(0),
                         ..
-                    } if *player == P0 && *object_id == id
+                    } if *player == P0 && source.object_id == id
                 )
         ),
         "the typed continuation names the action to finish"

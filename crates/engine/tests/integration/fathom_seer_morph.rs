@@ -692,7 +692,7 @@ fn morph_cost_and_cost_resume_turn_face_up_serialization_round_trip() {
     assert_eq!(morph_cost, deserialized);
 
     let cost_resume = CostResume::TurnFaceUp {
-        object_id: ObjectId(42),
+        source: engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 1),
         cost_source: TurnUpCostSource::Morph,
         remaining_cost: Some(Box::new(AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 5 },
@@ -701,6 +701,14 @@ fn morph_cost_and_cost_resume_turn_face_up_serialization_round_trip() {
     let json = serde_json::to_string(&cost_resume).expect("serialize cost_resume");
     let deserialized: CostResume = serde_json::from_str(&json).expect("deserialize cost_resume");
     assert_eq!(cost_resume, deserialized);
+
+    // CR 702.37e: Legacy wire compatibility with bare object_id
+    let legacy_json = r#"{"type":"TurnFaceUp","object_id":42,"cost_source":"Morph"}"#;
+    let from_legacy: CostResume =
+        serde_json::from_str(legacy_json).expect("deserialize legacy cost_resume");
+    assert!(
+        matches!(from_legacy, CostResume::TurnFaceUp { source, cost_source: TurnUpCostSource::Morph, .. } if source.object_id == ObjectId(42))
+    );
 }
 
 // F3 + F5: Coverage check for MorphCost support
@@ -2213,5 +2221,233 @@ fn turn_face_up_rejects_unsupported_aggregate_and_random_discard_costs() {
     assert!(
         runner.state().objects[&src_morph].face_down,
         "must remain face down"
+    );
+}
+
+// CR 702.37e + CR 400.7 + CR 101.3 + CR 708.9: Settle a paid morph action when
+// its original permanent leaves the battlefield during payment.
+//
+// Raven Guild Initiate with Maskwood Nexus:
+// Initiate says "Morph—Return a Bird you control to its owner's hand."
+// Nexus says "Creatures you control are every creature type."
+// The face-down Initiate is an eligible Bird and may pay its morph cost by returning
+// itself to hand. Upon leaving the battlefield it becomes a new object (CR 400.7) and
+// reveals its identity (CR 708.9). The instruction to turn the departed permanent face up
+// is impossible and thus ignored (CR 101.3). Cost payment finishes cleanly without flipping
+// and restores priority.
+#[test]
+fn raven_guild_initiate_self_return_with_maskwood_nexus_settles_without_flip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Maskwood Nexus",
+        "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+    );
+
+    let initiate = scenario
+        .add_creature_to_hand(P0, "Raven Guild Initiate", 1, 4)
+        .from_oracle_text("Morph—Return a Bird you control to its owner's hand.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                initiate,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                initiate,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                initiate,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec![
+        "Bird".to_string(),
+        "Human".to_string(),
+        "Wizard".to_string(),
+    ];
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    cast_face_down(&mut runner, initiate);
+
+    // Turn face up
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: initiate,
+        x: 0,
+    });
+    assert!(res.is_ok(), "turn face up should succeed: {:?}", res.err());
+
+    // Prompted for PayCost::ReturnToHand including the face-down initiate itself
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                choices,
+                count: 1,
+                ..
+            } if choices.contains(&initiate)
+        ),
+        "must prompt for ReturnToHand including initiate itself (via Maskwood Nexus), got {:?}",
+        runner.state().waiting_for
+    );
+
+    // CR 702.37e + CR 400.7 + CR 101.3: Pay by returning the Initiate itself to hand.
+    let outcome = runner
+        .act(GameAction::SelectCards {
+            cards: vec![initiate],
+        })
+        .expect("selecting initiate as payment should succeed");
+
+    // Costs paid: Initiate is now in Hand
+    assert_eq!(runner.state().objects[&initiate].zone, Zone::Hand);
+    // CR 708.9: Restored face_down to false upon leaving the battlefield
+    assert!(!runner.state().objects[&initiate].face_down);
+
+    // No TurnedFaceUp event emitted
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, engine::types::events::GameEvent::TurnedFaceUp { .. })),
+        "TurnedFaceUp must NOT be emitted when original permanent left the battlefield during payment"
+    );
+
+    // Cleared roots
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(runner.state().pending_deferred_life_cost_resume.is_none());
+
+    // Restored priority to P0
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+}
+
+#[test]
+fn raven_guild_initiate_other_bird_payment_control_turns_face_up() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Maskwood Nexus",
+        "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+    );
+
+    let other_bird = scenario.add_creature(P0, "Storm Crow", 1, 2).id();
+
+    let initiate = scenario
+        .add_creature_to_hand(P0, "Raven Guild Initiate", 1, 4)
+        .from_oracle_text("Morph—Return a Bird you control to its owner's hand.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                initiate,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                initiate,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                initiate,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec![
+        "Bird".to_string(),
+        "Human".to_string(),
+        "Wizard".to_string(),
+    ];
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    cast_face_down(&mut runner, initiate);
+
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: initiate,
+        x: 0,
+    });
+    assert!(res.is_ok(), "turn face up should succeed: {:?}", res.err());
+
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                choices,
+                count: 1,
+                ..
+            } if choices.contains(&other_bird) && choices.contains(&initiate)
+        ),
+        "must prompt for ReturnToHand with both other_bird and initiate eligible, got {:?}",
+        runner.state().waiting_for
+    );
+
+    let outcome = runner
+        .act(GameAction::SelectCards {
+            cards: vec![other_bird],
+        })
+        .expect("selecting other_bird as payment should succeed");
+
+    // other_bird moved to Hand
+    assert_eq!(runner.state().objects[&other_bird].zone, Zone::Hand);
+
+    // initiate remains on Battlefield and is turned face up
+    assert_eq!(runner.state().objects[&initiate].zone, Zone::Battlefield);
+    assert!(!runner.state().objects[&initiate].face_down);
+    assert_eq!(
+        runner.state().objects[&initiate].name,
+        "Raven Guild Initiate"
+    );
+
+    // TurnedFaceUp event WAS emitted for initiate
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, engine::types::events::GameEvent::TurnedFaceUp { object_id, .. } if *object_id == initiate)),
+        "TurnedFaceUp MUST be emitted for initiate"
+    );
+
+    // Cleared roots and restored priority
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert!(runner.state().pending_deferred_life_cost_resume.is_none());
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
     );
 }

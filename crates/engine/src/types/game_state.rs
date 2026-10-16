@@ -7861,7 +7861,8 @@ pub enum DeferredLifeCostResume {
     /// face-down permanent face up after a life payment's replacement post-effect drains.
     TurnFaceUp {
         player: PlayerId,
-        object_id: ObjectId,
+        #[serde(alias = "object_id")]
+        source: ObjectIncarnationRef,
         cost_source: crate::types::ability::TurnUpCostSource,
         resume_at_resolution_depth: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -8274,7 +8275,8 @@ pub enum PendingCostMoveResume {
     /// replacement choice. Resumption continues at `paused_at_index + 1`.
     TurnFaceUpCostMove {
         player: PlayerId,
-        object_id: ObjectId,
+        #[serde(alias = "object_id")]
+        source: ObjectIncarnationRef,
         cost_source: crate::types::ability::TurnUpCostSource,
         move_kind: TurnFaceUpMoveKind,
         chosen: Vec<ObjectId>,
@@ -9108,7 +9110,8 @@ pub enum ManaAbilityResume {
     /// completes.
     TurnFaceUp {
         player: PlayerId,
-        object_id: ObjectId,
+        #[serde(alias = "object_id")]
+        source: ObjectIncarnationRef,
         cost: ManaCost,
         /// The announced value for a cost that contained X. `None` means the
         /// cost had no X; `Some(0)` remains a real CR 107.3d announcement and
@@ -10945,7 +10948,8 @@ pub enum CostResume {
     /// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Resumption context after paying a non-mana cost
     /// (e.g. ReturnToHand, Discard, PayLife, Reveal, Sacrifice) to turn a face-down permanent face up.
     TurnFaceUp {
-        object_id: ObjectId,
+        #[serde(alias = "object_id")]
+        source: ObjectIncarnationRef,
         cost_source: crate::types::ability::TurnUpCostSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_cost: Option<Box<AbilityCost>>,

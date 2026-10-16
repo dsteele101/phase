@@ -8920,14 +8920,14 @@ fn drain_pending_deferred_life_cost_resume(
             }
             crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
                 player,
-                object_id,
+                source,
                 cost_source,
                 resume_at_resolution_depth: _,
                 remaining_cost,
             } => super::morph::finish_or_continue_turn_face_up(
                 state,
                 player,
-                object_id,
+                source,
                 cost_source,
                 remaining_cost,
                 events,
@@ -12598,7 +12598,7 @@ fn apply_non_priority_pass_action(
                 }
             },
             CostResume::TurnFaceUp {
-                object_id,
+                source,
                 cost_source,
                 remaining_cost,
             } => {
@@ -12630,7 +12630,7 @@ fn apply_non_priority_pass_action(
                                 crate::game::zone_pipeline::ZoneMoveRequest::cost(
                                     id,
                                     Zone::Hand,
-                                    *object_id,
+                                    source.object_id,
                                 ),
                                 &mut events,
                             ) {
@@ -12639,7 +12639,7 @@ fn apply_non_priority_pass_action(
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
-                                            object_id: *object_id,
+                                            source: *source,
                                             cost_source: *cost_source,
                                             move_kind: crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand,
                                             chosen: chosen.clone(),
@@ -12663,7 +12663,7 @@ fn apply_non_priority_pass_action(
                         super::morph::finish_or_continue_turn_face_up(
                             state,
                             *player,
-                            *object_id,
+                            *source,
                             *cost_source,
                             remaining_cost.clone(),
                             &mut events,
@@ -12675,7 +12675,7 @@ fn apply_non_priority_pass_action(
                                 state,
                                 id,
                                 *player,
-                                Some(*object_id),
+                                Some(source.object_id),
                                 &mut events,
                             ) {
                                 super::effects::discard::DiscardOutcome::Complete => {}
@@ -12683,7 +12683,7 @@ fn apply_non_priority_pass_action(
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
-                                            object_id: *object_id,
+                                            source: *source,
                                             cost_source: *cost_source,
                                             move_kind: crate::types::game_state::TurnFaceUpMoveKind::Discard,
                                             chosen: chosen.clone(),
@@ -12704,7 +12704,7 @@ fn apply_non_priority_pass_action(
                         super::morph::finish_or_continue_turn_face_up(
                             state,
                             *player,
-                            *object_id,
+                            *source,
                             *cost_source,
                             remaining_cost.clone(),
                             &mut events,
@@ -12723,7 +12723,7 @@ fn apply_non_priority_pass_action(
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
-                                            object_id: *object_id,
+                                            source: *source,
                                             cost_source: *cost_source,
                                             move_kind: crate::types::game_state::TurnFaceUpMoveKind::Sacrifice,
                                             chosen: chosen.clone(),
@@ -12744,7 +12744,7 @@ fn apply_non_priority_pass_action(
                         super::morph::finish_or_continue_turn_face_up(
                             state,
                             *player,
-                            *object_id,
+                            *source,
                             *cost_source,
                             remaining_cost.clone(),
                             &mut events,
@@ -12763,7 +12763,7 @@ fn apply_non_priority_pass_action(
                         super::morph::finish_or_continue_turn_face_up(
                             state,
                             *player,
-                            *object_id,
+                            *source,
                             *cost_source,
                             remaining_cost.clone(),
                             &mut events,

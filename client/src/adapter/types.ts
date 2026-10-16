@@ -841,7 +841,8 @@ export type CostResume =
   | { type: "ManaAbility"; ManaAbility: unknown }
   | {
       type: "TurnFaceUp";
-      object_id: number;
+      source?: ObjectIncarnationRef;
+      object_id?: number;
       cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
       remaining_cost?: unknown;
     };

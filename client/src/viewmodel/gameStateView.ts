@@ -454,7 +454,7 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
     return undefined;
   }
   if (data.resume.type === "TurnFaceUp") {
-    return data.resume.object_id as ObjectId;
+    return (data.resume.source?.object_id ?? data.resume.object_id) as ObjectId;
   }
   if (data.resume.type === "SpellCost") {
     return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;

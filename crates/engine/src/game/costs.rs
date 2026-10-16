@@ -228,7 +228,7 @@ pub(crate) enum PaymentScope<'a> {
     /// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Turn a face-down permanent face up
     /// by paying its morph / megamorph / disguise cost as a special action.
     TurnFaceUp {
-        object_id: ObjectId,
+        source: ObjectIncarnationRef,
         cost_source: TurnUpCostSource,
     },
 }
@@ -735,7 +735,7 @@ pub(crate) fn pay_ability_cost_for_replacement_may_cost(
 pub(crate) fn pay_ability_cost_for_turn_face_up(
     state: &mut GameState,
     player: PlayerId,
-    object_id: ObjectId,
+    source: ObjectIncarnationRef,
     cost_source: TurnUpCostSource,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
@@ -743,24 +743,19 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
     let outcome = pay_ability_cost_inner(
         state,
         player,
-        object_id,
+        source.object_id,
         cost,
         events,
         &PaymentScope::TurnFaceUp {
-            object_id,
+            source,
             cost_source,
         },
         Some(cost),
     )?;
     match outcome {
-        PaymentOutcome::Paid => super::morph::finish_paid_turn_face_up(
-            state,
-            player,
-            object_id,
-            cost_source,
-            None,
-            events,
-        ),
+        PaymentOutcome::Paid => {
+            super::morph::finish_paid_turn_face_up(state, player, source, cost_source, None, events)
+        }
         PaymentOutcome::Paused { .. } => Ok(state.waiting_for.clone()),
         PaymentOutcome::Failed { reason } => Err(EngineError::ActionNotAllowed(reason.reason)),
     }
@@ -1093,7 +1088,7 @@ fn pay_ability_cost_inner(
             let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             if let PaymentScope::TurnFaceUp {
-                object_id,
+                source,
                 cost_source,
             } = scope
             {
@@ -1109,7 +1104,7 @@ fn pay_ability_cost_inner(
                         state.pending_deferred_life_cost_resume = Some(
                             crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
                                 player,
-                                object_id: *object_id,
+                                source: *source,
                                 cost_source: *cost_source,
                                 resume_at_resolution_depth,
                                 remaining_cost: None,
@@ -1153,7 +1148,7 @@ fn pay_ability_cost_inner(
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
         AbilityCost::Sacrifice(cost) => {
             if let PaymentScope::TurnFaceUp {
-                object_id,
+                source,
                 cost_source,
             } = scope
             {
@@ -1171,7 +1166,7 @@ fn pay_ability_cost_inner(
                 let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
                     state,
                     player,
-                    *object_id,
+                    source.object_id,
                     None,
                     &cost.target,
                     Some(scope),
@@ -1186,7 +1181,7 @@ fn pay_ability_cost_inner(
                     count,
                     min_count: 0,
                     resume: CostResume::TurnFaceUp {
-                        object_id: *object_id,
+                        source: *source,
                         cost_source: *cost_source,
                         remaining_cost: None,
                     },
@@ -1243,7 +1238,7 @@ fn pay_ability_cost_inner(
                 ));
             }
             let PaymentScope::TurnFaceUp {
-                object_id,
+                source,
                 cost_source,
             } = scope
             else {
@@ -1254,7 +1249,7 @@ fn pay_ability_cost_inner(
             let eligible = super::casting::find_eligible_discard_targets(
                 state,
                 player,
-                *object_id,
+                source.object_id,
                 None,
                 filter.as_ref(),
             );
@@ -1268,7 +1263,7 @@ fn pay_ability_cost_inner(
                 count: count_num,
                 min_count: 0,
                 resume: CostResume::TurnFaceUp {
-                    object_id: *object_id,
+                    source: *source,
                     cost_source: *cost_source,
                     remaining_cost: None,
                 },
@@ -2071,7 +2066,7 @@ fn pay_ability_cost_inner(
             from_zone,
         } if matches!(scope, PaymentScope::TurnFaceUp { .. }) => {
             let PaymentScope::TurnFaceUp {
-                object_id,
+                source,
                 cost_source,
             } = scope
             else {
@@ -2086,7 +2081,7 @@ fn pay_ability_cost_inner(
             let eligible = super::casting::find_eligible_return_to_hand_targets(
                 state,
                 player,
-                *object_id,
+                source.object_id,
                 None,
                 filter.as_ref(),
             );
@@ -2102,7 +2097,7 @@ fn pay_ability_cost_inner(
                 count: *count as usize,
                 min_count: 0,
                 resume: CostResume::TurnFaceUp {
-                    object_id: *object_id,
+                    source: *source,
                     cost_source: *cost_source,
                     remaining_cost: None,
                 },
@@ -2116,7 +2111,7 @@ fn pay_ability_cost_inner(
             if matches!(scope, PaymentScope::TurnFaceUp { .. }) =>
         {
             let PaymentScope::TurnFaceUp {
-                object_id,
+                source,
                 cost_source,
             } = scope
             else {
@@ -2126,7 +2121,7 @@ fn pay_ability_cost_inner(
                 Some(f) => super::casting::find_eligible_reveal_targets(
                     state,
                     player,
-                    *object_id,
+                    source.object_id,
                     None,
                     f,
                 ),
@@ -2149,7 +2144,7 @@ fn pay_ability_cost_inner(
                 count,
                 min_count: 0,
                 resume: CostResume::TurnFaceUp {
-                    object_id: *object_id,
+                    source: *source,
                     cost_source: *cost_source,
                     remaining_cost: None,
                 },
@@ -2361,8 +2356,8 @@ pub(crate) fn can_pay(
             true
         }
         PaymentScope::Resolution { ability, .. } => can_pay_resolution(state, payer, cost, ability),
-        PaymentScope::TurnFaceUp { object_id, .. } => {
-            can_pay_turn_face_up(state, payer, *object_id, cost)
+        PaymentScope::TurnFaceUp { source, .. } => {
+            can_pay_turn_face_up(state, payer, source.object_id, cost)
         }
     }
 }
@@ -2452,7 +2447,11 @@ pub(crate) fn can_pay_turn_face_up(
                 None,
                 &cost.target,
                 Some(&PaymentScope::TurnFaceUp {
-                    object_id,
+                    source: state
+                        .objects
+                        .get(&object_id)
+                        .map(ObjectIncarnationRef::from_object)
+                        .unwrap_or(ObjectIncarnationRef::of(object_id, 0)),
                     cost_source: TurnUpCostSource::Morph,
                 }),
             );
