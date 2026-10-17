@@ -247,7 +247,7 @@ fn conquerors_galleon_returns_transformed_after_end_of_combat_exile() {
     // in place; untapped proves it was exiled and returned.
     assert!(
         !foothold.tapped,
-        "CR 400.7: the returned permanent is a new, untapped object"
+        "CR 400.7 + CR 110.5b: the returned permanent is a new object and enters untapped"
     );
     assert_eq!(foothold.controller, P0);
 }
