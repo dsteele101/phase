@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::game::contest::{
     advance_contest, cancel_contest, contest_click, set_contest_connection, start_contest,
     ContestStep,
@@ -18,7 +17,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::player::PlayerId;
 use phase_ai::contest::AiContestants;
 
-use crate::session::{AiDriverFault, GameSession, RevisionedActionResult};
+use crate::session::{AiDriverFault, AiTransition, DecisionSnapshot, GameSession};
 
 /// Deployment-tunable contest settings. Defaults are chosen so ordinary fast
 /// clicking is never throttled while scripted floods are bounded.
@@ -123,7 +122,7 @@ pub struct ContestRuntime {
     /// Transitions produced since the last drain, in order. Every path that
     /// mutates contest state (a click that settles it, a tick, a disconnect)
     /// pushes here; the driver task is the single publisher.
-    outbox: Vec<RevisionedActionResult>,
+    outbox: Vec<AiTransition>,
     driver_running: bool,
     last_progress: Option<[(PlayerId, u32); 2]>,
     last_progress_ms: u64,
@@ -333,24 +332,17 @@ impl GameSession {
             return;
         }
         let log_entries = engine::game::log::resolve_log_entries(&events, &self.state, &self.state);
-        let (legal, spell_costs, by_object) = engine_legal_actions_full(&self.state);
-        let auto_pass = auto_pass_recommended(&self.state, &legal);
         let revision = self.advance_state_revision();
         self.observe_transition(&events, &self.state.clone());
         self.game_log
             .write_game_log_entries(&self.game_code, &log_entries);
-        self.contest.outbox.push((
-            revision,
-            (
-                self.state.clone(),
-                events,
-                legal,
-                log_entries,
-                auto_pass,
-                spell_costs,
-                by_object,
-            ),
-        ));
+        self.contest.outbox.push(AiTransition {
+            state_revision: revision,
+            state: self.state.clone(),
+            events,
+            log_entries,
+            decision: None,
+        });
     }
 
     /// Take every transition produced since the last drain. After a contest
@@ -363,6 +355,10 @@ impl GameSession {
             let outcome = self.run_ai();
             transitions.extend(outcome.transitions);
             ai_failure = outcome.fault;
+        }
+        if let Some(last) = transitions.last_mut() {
+            last.decision
+                .get_or_insert_with(|| DecisionSnapshot::from_state(&last.state));
         }
         ContestDrain {
             transitions,
@@ -397,7 +393,7 @@ impl GameSession {
 
 /// Everything the driver task must publish after one step.
 pub struct ContestDrain {
-    pub transitions: Vec<RevisionedActionResult>,
+    pub transitions: Vec<AiTransition>,
     pub ai_failure: Option<AiDriverFault>,
 }
 
@@ -454,6 +450,8 @@ mod tests {
     use crate::session::SessionManager;
     use engine::game::deck_loading::PlayerDeckPayload;
     use engine::types::contest::{ContestKind, ContestPhase, ContestState};
+    use engine::types::phase::Phase;
+    use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 
     const HOST: &str = "host-token";
     const GUEST: &str = "guest-token";
@@ -517,12 +515,144 @@ mod tests {
         let drain = session.drain_contest_outbox();
         assert_eq!(drain.transitions.len(), 1, "one transition for the start");
         assert!(matches!(
-            drain.transitions[0].1 .0.waiting_for,
+            drain.transitions[0].state.waiting_for,
             WaitingFor::PhysicalContest { .. }
         ));
         assert!(
             session.drain_contest_outbox().transitions.is_empty(),
             "drained once"
+        );
+    }
+
+    #[test]
+    fn draining_preserves_every_contest_snapshot_and_only_offers_the_final_decision() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let before_revision = session.state_revision;
+        let initial_life = session.state.players[0].life;
+        let first_events = vec![GameEvent::DebugActionUsed {
+            player_id: PlayerId(0),
+            description: "first contest transition".to_string(),
+        }];
+        session.publish_contest_step(ContestStep::Updated, first_events.clone());
+        session.state.players[0].life -= 1;
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let final_events = vec![GameEvent::DebugActionUsed {
+            player_id: PlayerId(0),
+            description: "contest settlement".to_string(),
+        }];
+        session.publish_contest_step(ContestStep::Settled, final_events.clone());
+        let expected_logs: Vec<_> = session
+            .contest
+            .outbox
+            .iter()
+            .map(|transition| transition.log_entries.clone())
+            .collect();
+        assert!(expected_logs.iter().all(|entries| !entries.is_empty()));
+        assert!(session
+            .contest
+            .outbox
+            .iter()
+            .all(|entry| entry.decision.is_none()));
+
+        let drain = session.drain_contest_outbox();
+
+        assert!(drain.ai_failure.is_none());
+        assert_eq!(drain.transitions.len(), 2);
+        let first = &drain.transitions[0];
+        let last = &drain.transitions[1];
+        assert_eq!(first.state_revision, before_revision + 1);
+        assert_eq!(last.state_revision, before_revision + 2);
+        assert_eq!(first.state.players[0].life, initial_life);
+        assert_eq!(last.state.players[0].life, initial_life - 1);
+        assert!(matches!(
+            first.state.waiting_for,
+            WaitingFor::PhysicalContest { .. }
+        ));
+        assert_eq!(last.state.waiting_for, session.state.waiting_for);
+        assert_eq!(first.events, first_events);
+        assert_eq!(last.events, final_events);
+        assert_eq!(first.log_entries, expected_logs[0]);
+        assert_eq!(last.log_entries, expected_logs[1]);
+        assert!(first.decision.is_none());
+        let decision = last
+            .decision
+            .as_ref()
+            .expect("final snapshot offers a decision");
+        let expected = DecisionSnapshot::from_state(&last.state);
+        assert_eq!(decision.legal_actions, expected.legal_actions);
+        assert_eq!(
+            decision.auto_pass_recommended,
+            expected.auto_pass_recommended
+        );
+        assert_eq!(decision.spell_costs, expected.spell_costs);
+        assert_eq!(
+            decision.legal_actions_by_object,
+            expected.legal_actions_by_object
+        );
+        assert!(session.drain_contest_outbox().transitions.is_empty());
+    }
+
+    #[test]
+    fn contest_settlement_keeps_ai_followup_history_and_its_final_decision() {
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+        let ai_player = PlayerId(0);
+        session.ai_seats.insert(ai_player);
+        session.ai_configs.insert(
+            ai_player,
+            create_config_for_players(AiDifficulty::Easy, Platform::Native, 2),
+        );
+        session.state.phase = Phase::PreCombatMain;
+        let mut events = Vec::new();
+        let step = cancel_contest(
+            &mut session.state,
+            ContestCancelReason::HostAborted,
+            0,
+            &mut events,
+        );
+        assert_eq!(step, ContestStep::Settled);
+        assert!(
+            matches!(session.state.waiting_for, WaitingFor::Priority { player } if player == ai_player)
+        );
+        session.publish_contest_step(step, events.clone());
+        let settlement = session.contest.outbox[0].clone();
+        assert!(!settlement.log_entries.is_empty());
+
+        let drain = session.drain_contest_outbox();
+
+        assert!(drain.ai_failure.is_none(), "{:?}", drain.ai_failure);
+        assert!(drain.transitions.len() >= 2, "AI acted after settlement");
+        let first = &drain.transitions[0];
+        assert_eq!(first.state_revision, settlement.state_revision);
+        assert_eq!(first.state.waiting_for, settlement.state.waiting_for);
+        assert_eq!(first.events, events);
+        assert_eq!(first.log_entries, settlement.log_entries);
+        let (last, intermediate) = drain.transitions.split_last().expect("nonempty drain");
+        assert!(intermediate.iter().all(|entry| entry.decision.is_none()));
+        for (index, transition) in drain.transitions.iter().enumerate() {
+            assert_eq!(
+                transition.state_revision,
+                settlement.state_revision + index as u64
+            );
+        }
+        assert_eq!(last.state.waiting_for, session.state.waiting_for);
+        let decision = last
+            .decision
+            .as_ref()
+            .expect("AI's final decision survives");
+        let expected = DecisionSnapshot::from_state(&last.state);
+        assert_eq!(decision.legal_actions, expected.legal_actions);
+        assert_eq!(
+            decision.auto_pass_recommended,
+            expected.auto_pass_recommended
+        );
+        assert_eq!(decision.spell_costs, expected.spell_costs);
+        assert_eq!(
+            decision.legal_actions_by_object,
+            expected.legal_actions_by_object
         );
     }
 
