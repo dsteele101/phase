@@ -2102,3 +2102,345 @@ fn baneclaw_marauder_umbra_paused_replacement_batch_retirement_and_post_combat_n
         "Post-combat negative control: P1 must not lose life when Dreadmaw dies post-combat"
     );
 }
+
+const LACCOLITH_RIG_ORACLE: &str =
+    "Enchant creature\nWhenever enchanted creature becomes blocked, you may have it deal damage equal to its power to target creature. If you do, the first creature assigns no combat damage this turn.";
+
+#[test]
+fn laccolith_rig_reads_power_from_attacker_not_blocker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // CR 608.2h + CR 509.3c: Attacker (power 4), Blocker (power 1), Recipient (power 2, toughness 5).
+    // Distinct powers discriminate attacker (4) from blocker (1) and recipient (2).
+    let attacker = scenario.add_creature(P0, "Attacker", 4, 4).id();
+    let blocker = scenario.add_creature(P1, "Blocker", 1, 2).id();
+    let recipient = scenario.add_creature(P1, "Recipient", 2, 5).id();
+
+    let rig = scenario
+        .add_creature(P0, "Laccolith Rig", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(LACCOLITH_RIG_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Attach Rig to attacker
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&rig)
+        .unwrap()
+        .attached_to = Some(engine::game::game_object::AttachTarget::Object(attacker));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&attacker)
+        .unwrap()
+        .attachments
+        .push(rig);
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), rig);
+
+    // Advance to DeclareAttackers
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    // Blocker blocks attacker
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker, attacker)],
+        })
+        .expect("DeclareBlockers should succeed");
+
+    // Target selection for Laccolith Rig trigger if waiting
+    if matches!(
+        runner.state().waiting_for,
+        engine::types::game_state::WaitingFor::TargetSelection { .. }
+            | engine::types::game_state::WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(recipient)),
+            })
+            .expect("ChooseTarget should succeed");
+    }
+
+    println!(
+        "after choose target: stack len = {}, waiting_for = {:?}",
+        runner.state().stack.len(),
+        runner.state().waiting_for
+    );
+
+    let mut steps = 0;
+    while (!runner.state().stack.is_empty()
+        || !matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::Priority { .. }
+        ))
+        && steps < 20
+    {
+        steps += 1;
+        println!(
+            "loop step {}: stack len = {}, waiting_for = {:?}",
+            steps,
+            runner.state().stack.len(),
+            runner.state().waiting_for
+        );
+        match &runner.state().waiting_for {
+            engine::types::game_state::WaitingFor::Priority { .. } => {
+                runner.pass_both_players();
+            }
+            engine::types::game_state::WaitingFor::TargetSelection { .. }
+            | engine::types::game_state::WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Object(recipient)),
+                    })
+                    .expect("ChooseTarget should succeed");
+            }
+            engine::types::game_state::WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("DecideOptionalEffect should succeed");
+            }
+            other => {
+                panic!("Unexpected waiting_for in loop: {:?}", other);
+            }
+        }
+    }
+
+    // Recipient took 4 damage from Attacker (power 4), NOT 1 damage from Blocker (power 1)
+    let recipient_obj = runner.state().objects.get(&recipient).unwrap();
+    assert_eq!(
+        recipient_obj.damage_marked, 4,
+        "Recipient must take 4 damage equal to attacker power, not 1 from blocker power"
+    );
+}
+
+#[test]
+fn laccolith_rig_changed_or_departed_host_controls() {
+    // Control 1: Departed host — attacker leaves battlefield before trigger resolves.
+    // CR 113.7a + CR 608.2h: Departed attacker deals damage equal to its power (4) via LKI.
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let attacker = scenario.add_creature(P0, "Attacker", 4, 4).id();
+        let blocker = scenario.add_creature(P1, "Blocker", 1, 2).id();
+        let recipient = scenario.add_creature(P1, "Recipient", 2, 5).id();
+
+        let rig = scenario
+            .add_creature(P0, "Laccolith Rig", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text(LACCOLITH_RIG_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rig)
+            .unwrap()
+            .attached_to = Some(engine::game::game_object::AttachTarget::Object(attacker));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .attachments
+            .push(rig);
+        engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), rig);
+
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("DeclareAttackers should succeed");
+
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: vec![(blocker, attacker)],
+            })
+            .expect("DeclareBlockers should succeed");
+
+        if matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::TargetSelection { .. }
+                | engine::types::game_state::WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Object(recipient)),
+                })
+                .expect("ChooseTarget should succeed");
+        }
+
+        // Trigger is on stack targeting recipient. Destroy attacker before trigger resolves.
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(
+            runner.state_mut(),
+            attacker,
+            Zone::Graveyard,
+            &mut events,
+        );
+
+        let mut steps = 0;
+        while (!runner.state().stack.is_empty()
+            || !matches!(
+                runner.state().waiting_for,
+                engine::types::game_state::WaitingFor::Priority { .. }
+            ))
+            && steps < 20
+        {
+            steps += 1;
+            match &runner.state().waiting_for {
+                engine::types::game_state::WaitingFor::Priority { .. } => {
+                    runner.pass_both_players();
+                }
+                engine::types::game_state::WaitingFor::TargetSelection { .. }
+                | engine::types::game_state::WaitingFor::TriggerTargetSelection { .. } => {
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(engine::types::ability::TargetRef::Object(recipient)),
+                        })
+                        .expect("ChooseTarget should succeed");
+                }
+                engine::types::game_state::WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .expect("DecideOptionalEffect should succeed");
+                }
+                other => {
+                    panic!("Unexpected waiting_for in departed host loop: {:?}", other);
+                }
+            }
+        }
+
+        let recipient_obj = runner.state().objects.get(&recipient).unwrap();
+        assert_eq!(
+            recipient_obj.damage_marked, 4,
+            "Departed attacker must deal 4 damage via LKI to recipient"
+        );
+    }
+
+    // Control 2: Changed host — moving the enchantment after triggering does not change affected creatures.
+    // Damage is still dealt by original attacker (power 4), not new host (power 7).
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let attacker = scenario.add_creature(P0, "Attacker", 4, 4).id();
+        let bystander = scenario.add_creature(P0, "Bystander", 7, 7).id();
+        let blocker = scenario.add_creature(P1, "Blocker", 1, 2).id();
+        let recipient = scenario.add_creature(P1, "Recipient", 2, 5).id();
+
+        let rig = scenario
+            .add_creature(P0, "Laccolith Rig", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text(LACCOLITH_RIG_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rig)
+            .unwrap()
+            .attached_to = Some(engine::game::game_object::AttachTarget::Object(attacker));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .attachments
+            .push(rig);
+        engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), rig);
+
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("DeclareAttackers should succeed");
+
+        runner.pass_both_players();
+        runner
+            .act(GameAction::DeclareBlockers {
+                assignments: vec![(blocker, attacker)],
+            })
+            .expect("DeclareBlockers should succeed");
+
+        if matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::TargetSelection { .. }
+                | engine::types::game_state::WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Object(recipient)),
+                })
+                .expect("ChooseTarget should succeed");
+        }
+
+        // Trigger is on stack targeting recipient. Move Rig to bystander (power 7).
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&rig)
+            .unwrap()
+            .attached_to = Some(engine::game::game_object::AttachTarget::Object(bystander));
+
+        let mut steps = 0;
+        while (!runner.state().stack.is_empty()
+            || !matches!(
+                runner.state().waiting_for,
+                engine::types::game_state::WaitingFor::Priority { .. }
+            ))
+            && steps < 20
+        {
+            steps += 1;
+            match &runner.state().waiting_for {
+                engine::types::game_state::WaitingFor::Priority { .. } => {
+                    runner.pass_both_players();
+                }
+                engine::types::game_state::WaitingFor::TargetSelection { .. }
+                | engine::types::game_state::WaitingFor::TriggerTargetSelection { .. } => {
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(engine::types::ability::TargetRef::Object(recipient)),
+                        })
+                        .expect("ChooseTarget should succeed");
+                }
+                engine::types::game_state::WaitingFor::OptionalEffectChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .expect("DecideOptionalEffect should succeed");
+                }
+                other => {
+                    panic!("Unexpected waiting_for in changed host loop: {:?}", other);
+                }
+            }
+        }
+
+        let recipient_obj = runner.state().objects.get(&recipient).unwrap();
+        assert_eq!(
+            recipient_obj.damage_marked, 4,
+            "Moving Rig to bystander must not change damage: original attacker still deals 4 damage"
+        );
+    }
+}

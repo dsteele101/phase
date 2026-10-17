@@ -9566,7 +9566,8 @@ fn passive_damage_source_subject(norm_lower: &str) -> Option<&str> {
     {
         return None;
     }
-    nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+    let clause = sentence_carrying_anchor(norm_lower, PREVENTION_VERB_ANCHOR).unwrap_or(norm_lower);
+    nom_primitives::scan_at_word_boundaries(clause, |input| {
         preceded(
             tag::<_, _, OracleError<'_>>("by "),
             take_damage_source_subject_clause,
@@ -9574,10 +9575,7 @@ fn passive_damage_source_subject(norm_lower: &str) -> Option<&str> {
         .parse(input)
     })
     .or_else(|| {
-        nom_primitives::scan_at_word_boundaries(
-            norm_lower,
-            take_recipient_then_damage_source_subject,
-        )
+        nom_primitives::scan_at_word_boundaries(clause, take_recipient_then_damage_source_subject)
     })
 }
 

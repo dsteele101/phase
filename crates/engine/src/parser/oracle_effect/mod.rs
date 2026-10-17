@@ -22969,7 +22969,7 @@ fn try_parse_target_subject_multi_target_damage_chain(
         is_optional: application.is_optional,
     };
     let clause = try_parse_multi_target_damage_chain_inner(predicate, &mut tentative_ctx)?;
-    let wrapped = wrap_target_subject_damage(clause, &subject)?;
+    let wrapped = wrap_target_subject_damage(clause, &subject, Some(&tentative_ctx))?;
     *ctx = tentative_ctx;
     Some(wrapped)
 }
@@ -27305,7 +27305,7 @@ fn lower_subject_predicate_ast_body(
             // authority for the source and inherited self-damage bindings.
             if subject.target.is_some() {
                 if let Some(clause) = try_parse_multi_target_damage_chain(&text, ctx) {
-                    if let Some(wrapped) = wrap_target_subject_damage(clause, &subject) {
+                    if let Some(wrapped) = wrap_target_subject_damage(clause, &subject, Some(ctx)) {
                         return wrapped;
                     }
                 }
@@ -27853,7 +27853,7 @@ fn lower_subject_predicate_ast_body(
             }
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
-            if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
+            if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject, Some(ctx)) {
                 return wrapped;
             }
             // CR 608.2c + CR 109.4 + CR 701.16a + CR 701.53a: Investigate and
@@ -29090,11 +29090,17 @@ fn head_carries_player_subject(head: &str, ctx: &ParseContext) -> bool {
 fn wrap_target_subject_damage(
     mut clause: ParsedEffectClause,
     subject: &SubjectPhraseAst,
+    ctx: Option<&ParseContext>,
 ) -> Option<ParsedEffectClause> {
-    if matches!(
-        subject.target.as_ref().or(subject.affected.as_ref()),
-        Some(TargetFilter::TriggeringSource | TargetFilter::ParentTarget)
-    ) {
+    let subject_filter = subject.target.as_ref().or(subject.affected.as_ref());
+    let is_triggering_antecedent = matches!(subject_filter, Some(TargetFilter::TriggeringSource))
+        || (matches!(subject_filter, Some(TargetFilter::ParentTarget))
+            && ctx.is_some_and(|c| {
+                c.condition_object_antecedent.is_some()
+                    || (c.in_trigger
+                        && matches!(c.object_pronoun_ref, Some(TargetFilter::TriggeringSource)))
+            }));
+    if is_triggering_antecedent {
         // CR 603.6 + CR 120.1 + CR 509.3c: "that creature deals damage equal to its
         // power" or "it deals N damage" under a trigger binds both the damage source and
         // anaphoric power reference to the triggering object / host (CR 113.7a, CR 608.2h).

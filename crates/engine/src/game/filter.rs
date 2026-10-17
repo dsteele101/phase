@@ -23310,6 +23310,7 @@ mod entry_projection_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            simultaneous_combat_snapshots: Vec::new(),
         };
 
         // An answer pins the boundary before it changes the proposal.
