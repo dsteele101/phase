@@ -211,11 +211,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 145 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
+ * 146 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
- *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 145` entry
- *      in crates/lobby-broker/src/protocol.rs. A v144 peer cannot parse them.
- *      Wire 127 moves with it.
+ *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 146` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v145 peer cannot parse them.
+ *      Wire 128 moves with it.
+ * 145 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *      on ResolvedAbility.parent_target_missing_reason; a v144 peer cannot
+ *      parse the tag. P2P moves in lockstep (wire 127); lobby messages unchanged.
  * 144 — One-time boons (#7495): new Effect.CreateBoon / Effect.NoteNumber tags,
  *       HasBoon conditions, and WaitingFor.ChooseTokenHost; the perpetual P/T
  *       edit retypes power_delta/toughness_delta to required QuantityExpr
@@ -885,7 +888,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 145;
+export const PROTOCOL_VERSION = 146;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

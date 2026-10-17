@@ -60,13 +60,17 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 145 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
+/// 146 — Online physical contests (Eye to Eye, Mouth to Mouth). `WaitingFor::
 ///      PhysicalContest` (serialized `ContestState` inside `GameState`),
 ///      `Effect::PhysicalContest`, `GameEvent::PhysicalContestStarted` /
 ///      `PhysicalContestResolved`, `ClientMessage::ContestClick` and
-///      `ServerMessage::ContestProgress`. A v144 peer cannot parse the new
+///      `ServerMessage::ContestProgress`. A v145 peer cannot parse the new
 ///      `WaitingFor`/`Effect`/`GameEvent` tags or either message. Full-game
-///      peers and P2P move in lockstep; no lobby carrier names it (wire 127).
+///      peers and P2P move in lockstep; no lobby carrier names it (wire 128).
+/// 145 — `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
+///      serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
+///      peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
+///      messages unchanged.
 ///
 /// 144 — One-time boons (#7495) add serialized `GameState` tags, and the
 ///      perpetual P/T edit is retyped. `Effect::CreateBoon` (with its granted
@@ -1096,7 +1100,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 145;
+pub const PROTOCOL_VERSION: u32 = 146;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the

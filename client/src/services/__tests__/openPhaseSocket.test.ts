@@ -297,6 +297,17 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it("rejects Full v144 before it can read the SearchLibrary missing-referent tag", async () => {
+    const promise = openPhaseSocket("ws://test");
+    const ws = MockWebSocket.instances[0];
+    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
+
+    await expect(promise).rejects.toMatchObject({
+      kind: "protocol_mismatch",
+    });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
   it("rejects Full v143 before it can read one-time boon tags", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
@@ -308,10 +319,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v144 before it can read a physical contest", async () => {
+  it("rejects Full v145 before it can read a physical contest", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 144 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 145 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -319,10 +330,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v145 physical contest protocol", async () => {
+  it("accepts the literal Full v146 physical contest and search missing-referent protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 145 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 146 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();
