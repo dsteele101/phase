@@ -760,6 +760,7 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
             // CR 603.2 + CR 603.3b: Retain ordinary cost observers across the
             // interactive pause until priority can drain them.
             crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+            crate::game::triggers::park_delayed_observer_triggers_if_paused(state, events, 0);
             Ok(state.waiting_for.clone())
         }
         PaymentOutcome::Failed { reason } => Err(EngineError::ActionNotAllowed(reason.reason)),

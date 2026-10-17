@@ -748,6 +748,11 @@ pub(crate) fn resume_turn_face_up_cost_move(
                             events,
                             events_before,
                         );
+                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
+                            state,
+                            events,
+                            events_before,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                     crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -791,6 +796,11 @@ pub(crate) fn resume_turn_face_up_cost_move(
                             events,
                             events_before,
                         );
+                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
+                            state,
+                            events,
+                            events_before,
+                        );
                         return Ok(state.waiting_for.clone());
                     }
                 }
@@ -819,6 +829,11 @@ pub(crate) fn resume_turn_face_up_cost_move(
                         // CR 603.2 + CR 603.3b: Retain ordinary sacrifice observers
                         // across the resumed interactive pause until priority can drain them.
                         crate::game::triggers::park_observer_triggers_if_paused(
+                            state,
+                            events,
+                            events_before,
+                        );
+                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
                             state,
                             events,
                             events_before,
@@ -970,6 +985,7 @@ pub(crate) fn finish_paid_turn_face_up(
     // established authority for exactly this shape — for the drain once the
     // interposed choice settles. A no-op when the flip completed undisturbed.
     crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+    crate::game::triggers::park_delayed_observer_triggers_if_paused(state, events, 0);
     Ok(state.waiting_for.clone())
 }
 

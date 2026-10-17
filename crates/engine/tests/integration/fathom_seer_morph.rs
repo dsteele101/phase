@@ -2679,3 +2679,342 @@ fn raven_guild_initiate_other_bird_payment_control_turns_face_up() {
         WaitingFor::Priority { player: P0 }
     );
 }
+
+const SAFFI_ERIKSDOTTER_ORACLE: &str =
+    "Sacrifice Saffi Eriksdotter: When target creature is put into your graveyard this turn, return that card to the battlefield.";
+
+// CR 702.37e + CR 603.2 + CR 603.7a-c: Preserve delayed-observer triggers across morph cost pauses.
+// When Saffi Eriksdotter's delayed return ability is active on a creature sacrificed to pay Gift of Doom's
+// morph cost, an interactive delivery-child replacement pause preserves the delayed trigger in deferred_triggers,
+// and upon completion the delayed ability triggers, reaches the stack, and returns the creature to the battlefield.
+#[test]
+fn turn_face_up_sacrifice_cost_preserves_delayed_triggers_across_child_pause() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
+        TargetSelectionMode,
+    };
+    use engine::types::game_state::PendingCostMoveResume;
+    use engine::types::replacements::ReplacementEvent;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let saffi = scenario
+        .add_creature_from_oracle(P0, "Saffi Eriksdotter", 2, 2, SAFFI_ERIKSDOTTER_ORACLE)
+        .id();
+    let victim = scenario.add_creature(P0, "Doomed Bear", 2, 2).id();
+    let gift = scenario
+        .add_creature_to_hand(P0, "Gift of Doom", 1, 1)
+        .from_oracle_text("Morph—Sacrifice another creature.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+
+    // Colorless mana to cast Gift of Doom face-down
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    // Cast Gift of Doom face down
+    let card_id = runner.state().objects[&gift].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: gift,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&gift].face_down);
+
+    // Activate Saffi targeting victim and resolve it
+    let activation = runner.activate(saffi, 0).target_object(victim).resolve();
+    assert_eq!(
+        activation.zone_of(saffi),
+        Zone::Graveyard,
+        "reach-guard: activating Saffi sacrifices her"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach-guard: Saffi's activation must install exactly one delayed trigger"
+    );
+
+    // Install delivery-child replacement effect on victim (moved to graveyard -> choose odd or even)
+    let delivery_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::OddOrEven,
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Graveyard);
+
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(delivery_repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&victim)
+        .unwrap()
+        .replacement_definitions
+        .push(delivery_repl);
+
+    // Public TurnFaceUp special action for Gift of Doom
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: gift,
+        x: 0,
+    });
+    assert!(res.is_ok(), "TurnFaceUp must succeed: {:?}", res.err());
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "must be WaitingFor::PayCost(Sacrifice), got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Submit SelectCards sacrificing the victim
+    let res1 = runner.act(GameAction::SelectCards {
+        cards: vec![victim],
+    });
+    assert!(res1.is_ok(), "SelectCards must succeed: {:?}", res1.err());
+
+    // Victim moved to graveyard; delivery tail paused on NamedChoice
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice {
+                choice_type: ChoiceType::OddOrEven,
+                ..
+            }
+        ),
+        "must be on victim's NamedChoice prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().objects[&gift].face_down,
+        "Gift of Doom must remain face down while payment is paused"
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                paused_at_index: 0,
+                ..
+            })
+        ),
+        "must have TurnFaceUpCostMove paused at index 0"
+    );
+
+    // CR 603.2 + CR 603.7c: Saffi's delayed return trigger must be retained in deferred_triggers
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        1,
+        "must retain delayed return trigger in deferred_triggers across cost pause"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        0,
+        "one-shot delayed trigger has fired and is no longer pending in delayed_triggers"
+    );
+
+    // Answer the child prompt
+    let res2 = runner.act(GameAction::ChooseOption {
+        choice: "Odd".to_string(),
+    });
+    assert!(res2.is_ok(), "ChooseOption must succeed: {:?}", res2.err());
+
+    // Flip committed: Gift of Doom is face up
+    assert!(
+        !runner.state().objects[&gift].face_down,
+        "Gift of Doom must be turned face up after cost and child finish"
+    );
+    // Cost root cleared
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "pending_cost_move_resume must be cleared"
+    );
+
+    // Saffi's delayed trigger has drained to the stack
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Saffi's delayed return trigger must be on the stack"
+    );
+
+    // Resolve Saffi's delayed return trigger
+    runner.resolve_top();
+
+    // Victim returned to battlefield!
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Battlefield,
+        "victim must be returned to the battlefield by Saffi's delayed trigger"
+    );
+
+    // At Priority
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "state must settle at Priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+// CR 702.37e + CR 603.2 + CR 603.7a-c: Paired unpaused control: Gift of Doom sacrificing
+// a Saffi-protected creature without delivery-child replacement effects immediately triggers
+// the delayed return ability.
+#[test]
+fn turn_face_up_sacrifice_cost_unpaused_control_preserves_delayed_triggers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let saffi = scenario
+        .add_creature_from_oracle(P0, "Saffi Eriksdotter", 2, 2, SAFFI_ERIKSDOTTER_ORACLE)
+        .id();
+    let victim = scenario.add_creature(P0, "Doomed Bear", 2, 2).id();
+    let gift = scenario
+        .add_creature_to_hand(P0, "Gift of Doom", 1, 1)
+        .from_oracle_text("Morph—Sacrifice another creature.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                gift,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&gift].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: gift,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&gift].face_down);
+
+    let activation = runner.activate(saffi, 0).target_object(victim).resolve();
+    assert_eq!(activation.zone_of(saffi), Zone::Graveyard);
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    let res = runner.act(GameAction::TurnFaceUp {
+        object_id: gift,
+        x: 0,
+    });
+    assert!(res.is_ok(), "TurnFaceUp must succeed");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ..
+        }
+    ));
+
+    let res1 = runner.act(GameAction::SelectCards {
+        cards: vec![victim],
+    });
+    assert!(res1.is_ok(), "SelectCards must succeed");
+
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert!(!runner.state().objects[&gift].face_down);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Saffi's delayed return trigger must be on the stack"
+    );
+
+    runner.resolve_top();
+
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Battlefield,
+        "victim must be returned to the battlefield"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
