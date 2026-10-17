@@ -8,18 +8,21 @@
 //! (CR 500.7) and which cards each round exiled (CR 701.13a). Mana values are
 //! read from the exiled cards (CR 202.3).
 
+use engine::game::scenario::GameRunner;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectKind, ReplacementDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, EffectKind, QuantityExpr, ReplacementDefinition,
+    TargetFilter, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ExtraTurn, WaitingFor};
+use engine::types::game_state::{ExtraTurn, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::{EtbTapState, Zone};
 
 const TIMESIFTER: &str = "At the beginning of each upkeep, each player exiles the top card of \
@@ -110,16 +113,27 @@ fn tied_players_repeat_until_the_tie_is_broken() {
 #[test]
 fn each_repeated_round_is_its_own_simultaneous_exile() {
     // CR 608.2e + CR 603.2c: each round's exiles happen simultaneously, so a
-    // "one or more cards" exile observer triggers once per round — three times
-    // for a contest decided in its third round.
+    // batched "one or more cards are put into exile" observer with no origin or
+    // owner restriction triggers once per round — three times for a contest
+    // decided in its third round. Splitting a round into per-card moves would
+    // trigger it six times.
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::Untap);
     scenario.add_artifact_from_oracle(P0, "Timesifter", TIMESIFTER);
-    scenario.add_artifact_from_oracle(
-        P0,
-        "Exile Watcher",
-        "Whenever one or more cards are put into exile from your library, you gain 1 life.",
-    );
+    let mut exile_observer = TriggerDefinition::new(TriggerMode::ChangesZoneAll)
+        .destination(Zone::Exile)
+        .trigger_zones(vec![Zone::Battlefield])
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ));
+    exile_observer.batched = true;
+    scenario
+        .add_creature(P0, "Exile Watcher", 0, 1)
+        .with_trigger_definition(exile_observer);
     stack_library(&mut scenario, P0, &[3, 1, 4]);
     stack_library(&mut scenario, P1, &[3, 1, 2]);
 
@@ -164,11 +178,17 @@ fn graveyard_redirect(card: ObjectId) -> ReplacementDefinition {
         .valid_card(TargetFilter::SpecificObject { id: card })
 }
 
-#[test]
-fn a_replacement_choice_resumes_the_contest() {
-    // CR 616.1 + CR 608.2c: P0's first card meets two applicable replacements,
-    // pausing the round before P1 and P2 exile. After the choice the round
-    // finishes, P1 and P2 tie, and the repeat round breaks the tie for P1.
+/// The staged cards of the replacement-pause fixture.
+struct PausedContest {
+    p0_cards: Vec<ObjectId>,
+    p1_cards: Vec<ObjectId>,
+    p2_cards: Vec<ObjectId>,
+}
+
+/// CR 616.1 + CR 608.2c: P0's first card meets two applicable replacements,
+/// pausing the round before P1 and P2 exile. Returns the runner parked on that
+/// replacement choice.
+fn pause_contest_on_replacement_choice() -> (GameRunner, PausedContest) {
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::Untap);
@@ -190,7 +210,20 @@ fn a_replacement_choice_resumes_the_contest() {
         ),
         "the redirected exile must pause for the replacement choice"
     );
+    (
+        runner,
+        PausedContest {
+            p0_cards,
+            p1_cards,
+            p2_cards,
+        },
+    )
+}
 
+/// Answers every pending replacement choice, finishes the upkeep, and checks
+/// that the round finished, P1 and P2 tied, and the repeat round broke the tie
+/// for P1.
+fn finish_paused_contest(mut runner: GameRunner, cards: &PausedContest) {
     let mut events = Vec::new();
     for _ in 0..8 {
         match runner.state().waiting_for {
@@ -215,10 +248,10 @@ fn a_replacement_choice_resumes_the_contest() {
         }]
     );
     // P0's card was not exiled, so P0 dropped out after round one.
-    assert_eq!(zone(&p0_cards[0]), Zone::Graveyard);
-    assert_eq!(zone(&p0_cards[1]), Zone::Library);
-    assert!(p1_cards.iter().all(|id| zone(id) == Zone::Exile));
-    assert!(p2_cards.iter().all(|id| zone(id) == Zone::Exile));
+    assert_eq!(zone(&cards.p0_cards[0]), Zone::Graveyard);
+    assert_eq!(zone(&cards.p0_cards[1]), Zone::Library);
+    assert!(cards.p1_cards.iter().all(|id| zone(id) == Zone::Exile));
+    assert!(cards.p2_cards.iter().all(|id| zone(id) == Zone::Exile));
     let contest_resolutions = events
         .iter()
         .filter(|event| {
@@ -232,4 +265,31 @@ fn a_replacement_choice_resumes_the_contest() {
         })
         .count();
     assert_eq!(contest_resolutions, 1);
+}
+
+#[test]
+fn a_replacement_choice_resumes_the_contest() {
+    let (runner, cards) = pause_contest_on_replacement_choice();
+    finish_paused_contest(runner, &cards);
+}
+
+#[test]
+fn a_paused_contest_survives_a_serialized_state_round_trip() {
+    // The paused state carries both new wire shapes: the contest effect in
+    // Timesifter's ability definitions and the parked round completion. A
+    // state restored from its JSON form must finish the contest exactly as the
+    // live state does.
+    let (runner, cards) = pause_contest_on_replacement_choice();
+    let json = serde_json::to_string(runner.state()).expect("paused contest state serializes");
+    assert!(json.contains("\"ExileTopCardContest\""));
+    assert!(json.contains("\"TopCardContestRoundComplete\""));
+
+    let restored: GameState =
+        serde_json::from_str(&json).expect("paused contest state deserializes");
+    assert_eq!(
+        serde_json::to_value(&restored).expect("restored state serializes"),
+        serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        "a serialized round trip must be lossless"
+    );
+    finish_paused_contest(GameRunner::from_state(restored), &cards);
 }
