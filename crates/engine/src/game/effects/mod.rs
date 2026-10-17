@@ -134,6 +134,7 @@ pub mod exchange_life_totals;
 pub mod exile_face_down_pile;
 pub mod exile_from_top_until;
 pub mod exile_top;
+pub mod exile_top_card_contest;
 pub mod exploit;
 pub mod explore;
 pub mod extra_turn;
@@ -5580,6 +5581,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -7964,6 +7966,9 @@ pub fn resolve_effect(
         Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
+        Effect::ExileTopCardContest { .. } => {
+            exile_top_card_contest::resolve(state, ability, events)
+        }
         Effect::Behold { .. } => behold::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
         Effect::Vote { .. } => vote::resolve(state, ability, events),

@@ -902,6 +902,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
@@ -1343,6 +1344,7 @@ fn collect_effects_in_effect<'a>(effect: &'a Effect, out: &mut Vec<&'a Effect>) 
                 collect_effects(outcome_template, out);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => collect_effects(winner_effect, out),
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,

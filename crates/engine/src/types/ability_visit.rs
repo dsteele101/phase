@@ -681,6 +681,9 @@ where
                 visit_nested_ability_def_scoped(outcome_template, scope, visit)?;
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            visit_nested_ability_def_scoped(winner_effect, scope, visit)?;
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,

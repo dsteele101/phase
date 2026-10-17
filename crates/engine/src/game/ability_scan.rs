@@ -1073,6 +1073,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::EndTheTurn => Axes::NONE,
         Effect::EndCombatPhase => Axes::NONE,
         Effect::Vote { .. } => Axes::CONSERVATIVE,
+        Effect::ExileTopCardContest { .. } => Axes::CONSERVATIVE,
         Effect::SeparateIntoPiles { .. } => Axes::CONSERVATIVE,
         Effect::SwitchPT { target } => {
             let mut acc = Axes::NONE;
@@ -6974,6 +6975,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -7395,6 +7397,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
