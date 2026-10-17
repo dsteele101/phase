@@ -31941,6 +31941,11 @@ fn render_net_reaches_every_nested_description_carrier() {
     }));
     tags.extend(["piles_chosen", "piles_unchosen"]);
 
+    parsed.abilities.push(carrier(Effect::ExileTopCardContest {
+        winner_effect: Box::new(ability("contest_winner")),
+    }));
+    tags.push("contest_winner");
+
     let mut token_static = static_def("token_static");
     token_static.modifications.push(granted("token_static_mod"));
     parsed.abilities.push(carrier(Effect::Token {
