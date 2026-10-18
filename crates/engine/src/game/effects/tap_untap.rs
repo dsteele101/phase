@@ -69,9 +69,10 @@ pub(super) fn tap_untap_target_ids(
         // Resolve the event-subject anaphors through the shared
         // permanent-referent authority: only the incarnation the event recorded
         // (CR 400.7), and only while it is a phased-in permanent (CR 110.1 +
-        // CR 701.26a + CR 702.26b). With no published event, `EventTarget`
-        // names nothing and `TriggeringSource` names only the Aura/Equipment
-        // source's attached host (CR 301.5a + CR 303.4b). Gated on empty
+        // CR 701.26a + CR 702.26b). With no published event, both anaphors
+        // name nothing; when a published event names no source object,
+        // `TriggeringSource` names the Aura/Equipment source's attached host
+        // (CR 301.5a + CR 303.4b). Gated on empty
         // targets so a chosen target keeps priority (CR 608.2b), and so a
         // delayed trigger whose referents were pinned into `targets`
         // (CR 603.7c) keeps the pinned-target arm below.
@@ -699,8 +700,8 @@ mod tests {
     /// CR 608.2b + CR 608.2k: class fence. A `SelfRef`-head → `TriggeringSource`
     /// sub-effect (Blistercoil Weird: SpellCast trigger `Pump{SelfRef}` →
     /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot resolves
-    /// the anaphor from the published trigger event. Here no event is published
-    /// and the source is attached to nothing, so the anaphor names no object
+    /// the anaphor from the published trigger event. Here no event is published,
+    /// so the anaphor names no object
     /// and per CR 608.2b it must stay an inert no-op — it must NOT untap the
     /// source.
     ///

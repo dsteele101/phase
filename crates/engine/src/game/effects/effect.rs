@@ -850,7 +850,7 @@ fn register_transient_effect(
                 );
             }
         }
-        // CR 608.2k + CR 400.7 + CR 611.2c: "it doesn't untap ..." after "tap that
+        // CR 608.2k + CR 400.7: "it doesn't untap ..." after "tap that
         // creature" names the trigger event's recipient — an untargeted referent, not
         // a battlefield population. Bind only the incarnation the event recorded and
         // only while it is a phased-in permanent, so a recipient that left and
