@@ -18,8 +18,9 @@
 //! GameRunner::cast + resolve) and asserts zone deltas.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -144,8 +145,59 @@ fn accepting_lets_the_countered_spells_controller_choose_a_creature_from_hand() 
     assert_eq!(
         outcome.zone_of(caster_creature),
         Zone::Hand,
-        "the caster's creature card is not a candidate: the choice is from \
-         the countered spell's controller's hand"
+        "the caster's creature card stays in hand"
+    );
+}
+
+/// CR 608.2d + CR 608.2h: the choice belongs to the countered spell's
+/// controller and is made among the creature cards in THEIR hand only.
+#[test]
+fn the_countered_spells_controller_chooses_among_their_own_creature_cards() {
+    let Board {
+        mut runner,
+        fold,
+        bears,
+        caster_creature,
+    } = setup(|_| {});
+    let spell = put_spell_on_stack(&mut runner, P1, CoreType::Instant);
+
+    let mut commit = runner.cast(fold).target_objects(&[spell]).commit();
+    for _ in 0..4 {
+        let action = match commit.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(player, P1, "the countered spell's controller decides");
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            _ => break,
+        };
+        commit.act(action).expect("the engine must accept the step");
+    }
+
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        zone,
+        destination,
+        ..
+    } = &commit.state().waiting_for
+    else {
+        panic!(
+            "accepting must open a card choice, got {:?}",
+            commit.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P1, "the countered spell's controller chooses");
+    assert_eq!(*zone, Zone::Hand);
+    assert_eq!(*destination, Some(Zone::Battlefield));
+    let mut offered = cards.clone();
+    offered.sort();
+    let mut expected = bears.to_vec();
+    expected.sort();
+    assert_eq!(
+        offered, expected,
+        "exactly P1's creature cards are offered — not the countered spell, \
+         and not the caster's creature card {caster_creature:?}"
     );
 }
 
