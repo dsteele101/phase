@@ -4498,7 +4498,8 @@ fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
 /// Whether a child owns an object-selection slot independent of its parent's
 /// already-bound object. Reflexive continuations retain their context-owned
 /// referent even when their effect is a resolution-time typed zone choice,
-/// unless the choice reads only the parent's controller or owner.
+/// unless that choice reads only parent metadata
+/// (`effect_refs_parent_target_metadata`).
 fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
     (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
         && !effect_requires_parent_target_object(&sub.effect)
