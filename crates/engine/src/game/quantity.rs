@@ -1588,6 +1588,7 @@ pub(crate) fn player_scope_is_source_context_previewable(scope: &PlayerScope) ->
         | PlayerScope::Target
         | PlayerScope::RecipientController
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::AnyTurn => false,
     }
@@ -1933,6 +1934,7 @@ fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::Opponent { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
@@ -1950,6 +1952,7 @@ fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
         | PlayerScope::Target
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
@@ -9192,6 +9195,10 @@ fn resolve_single_player_scope(
         PlayerScope::ParentObjectTargetController => {
             ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
         }
+        // CR 108.3: owner of the parent object target.
+        PlayerScope::ParentObjectTargetOwner => {
+            ability.and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
+        }
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx),
@@ -9302,6 +9309,11 @@ where
             .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 108.3 + CR 608.2c: owner of the parent object target.
+        PlayerScope::ParentObjectTargetOwner => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
@@ -9410,6 +9422,7 @@ where
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => {

@@ -5335,6 +5335,7 @@ fn duration_outlives_declined_gate(duration: &Duration) -> bool {
             | PlayerScope::RecipientController
             | PlayerScope::DefendingPlayer
             | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTargetOwner
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { id: _ } => false,
@@ -21520,6 +21521,7 @@ fn resolve_grant_next_spell_ability(
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer => ability.controller,
     };
     state

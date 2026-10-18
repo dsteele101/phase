@@ -527,6 +527,7 @@ fn permission_scope_is_keyable(scope: &PlayerScope) -> bool {
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer => false,
     }
 }
@@ -561,6 +562,7 @@ fn permission_scope_selects(
         | PlayerScope::RecipientController
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer => false,
     }
 }
@@ -1442,6 +1444,7 @@ impl ConditionContext {
             | PlayerScope::Opponent { .. }
             | PlayerScope::AllPlayers { .. }
             | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTargetOwner
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,
@@ -1532,6 +1535,7 @@ fn designation_player(
         | PlayerScope::Opponent { .. }
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
         | PlayerScope::SpecificPlayer { .. } => None,

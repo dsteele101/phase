@@ -587,6 +587,7 @@ fn parse_remaining_state_presence_conditions_tail(
         // controller's hand, library, or graveyard. The bounded "cards in your"
         // grammar distinguishes it from the following linked-exile arm.
         parse_no_cards_in_your_zone,
+        parse_no_cards_in_that_graveyard,
         parse_card_exiled_with_source_condition,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
@@ -9972,6 +9973,50 @@ fn parse_no_cards_in_your_zone(input: &str) -> OracleResult<'_, StaticCondition>
     ))
 }
 
+/// CR 108.3 + CR 404.1 + CR 608.2c: Absence of cards in the referenced graveyard
+/// ("no cards are in that graveyard" / "there are no cards in that graveyard" /
+/// "no cards are in that player's graveyard" / "there are no cards in that player's graveyard").
+///
+/// "That graveyard" / "that player's graveyard" refers to the graveyard of the
+/// owner of the parent instruction's object target (e.g. Nezumi Graverobber:
+/// "{1}{B}: Exile target card from an opponent's graveyard. If no cards are in
+/// that graveyard, flip Nezumi Graverobber.").
+fn parse_no_cards_in_that_graveyard(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, is_subject_first) =
+        alt((value(false, tag("there are no ")), value(true, tag("no ")))).parse(input)?;
+    let (rest, type_text) = if is_subject_first {
+        alt((
+            value("", tag("cards are in ")),
+            terminated(take_until(" cards are in "), tag(" cards are in ")),
+        ))
+        .parse(rest)?
+    } else {
+        alt((
+            value("", tag("cards in ")),
+            terminated(take_until(" cards in "), tag(" cards in ")),
+        ))
+        .parse(rest)?
+    };
+    let (rest, _) = alt((
+        tag("that graveyard"),
+        recognize((tag("that player"), parse_apostrophe_s, tag(" graveyard"))),
+    ))
+    .parse(rest)?;
+    if !type_text.is_empty() {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::GraveyardSize {
+                player: PlayerScope::ParentObjectTargetOwner,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
+}
+
 /// CR 406.6 + CR 607.2a + CR 603.4: presence/absence gate over the source's
 /// linked-exile pool. Two grammatical surfaces, one axis:
 ///   subject-first  — "a card is exiled with ~" / "one or more cards are exiled with ~"  → count >= 1
@@ -16057,6 +16102,48 @@ mod tests {
         assert!(parse_no_cards_in_your_zone("there are no creatures on the battlefield").is_err());
         assert!(parse_no_cards_in_your_zone("there are no cards in").is_err());
         assert!(parse_no_cards_in_your_zone("there are no card in your hand").is_err());
+    }
+
+    #[test]
+    fn test_parse_no_cards_in_that_graveyard() {
+        let cases = [
+            "no cards are in that graveyard",
+            "there are no cards in that graveyard",
+            "no cards are in that player's graveyard",
+            "there are no cards in that player's graveyard",
+            "no cards are in that player’s graveyard",
+            "there are no cards in that player’s graveyard",
+        ];
+        for text in cases {
+            let (rest, condition) = parse_no_cards_in_that_graveyard(text)
+                .unwrap_or_else(|err| panic!("must parse {text:?}: {err:?}"));
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::GraveyardSize {
+                            player: PlayerScope::ParentObjectTargetOwner,
+                        },
+                    },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                },
+                "expected GraveyardSize(ParentObjectTargetOwner) == 0 for {text:?}"
+            );
+
+            // Also verify parse_inner_condition dispatches to it end-to-end
+            let (rest2, condition2) = parse_inner_condition(text)
+                .unwrap_or_else(|err| panic!("parse_inner_condition must parse {text:?}: {err:?}"));
+            assert_eq!(rest2, "");
+            assert_eq!(condition2, condition);
+        }
+
+        assert!(parse_no_cards_in_that_graveyard("there are no cards in your graveyard").is_err());
+        assert!(parse_no_cards_in_that_graveyard("there are no cards in").is_err());
+        assert!(
+            parse_no_cards_in_that_graveyard("no creature cards are in that graveyard").is_err()
+        );
     }
 
     /// Production-path regression for Magmatic Scorchwing: the trigger parser

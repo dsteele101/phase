@@ -8525,6 +8525,12 @@ pub enum PlayerScope {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
+    /// CR 108.3 + CR 608.2c: The owner of the first object target of the
+    /// resolving ability ("that graveyard" anaphoring the owner of a targeted
+    /// card in a graveyard or exile). The player-scalar-axis analogue of
+    /// `PlayerFilter::ParentObjectTargetOwner` and `ControllerRef::ParentTargetOwner`.
+    /// Resolved via `ability_utils::parent_target_owner`.
+    ParentObjectTargetOwner,
     /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
     /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
     /// player" replacement). The player-scalar-axis analogue of
@@ -12385,6 +12391,7 @@ impl StaticMode {
             | PlayerScope::Opponent { .. }
             | PlayerScope::AllPlayers { .. }
             | PlayerScope::ParentObjectTargetController
+            | PlayerScope::ParentObjectTargetOwner
             | PlayerScope::SourceChosenPlayer
             | PlayerScope::AnyTurn
             | PlayerScope::SpecificPlayer { .. } => false,

@@ -5309,7 +5309,7 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
         }
         PlayerScope::RecipientController => Axes::NONE,
         PlayerScope::DefendingPlayer => Axes::NONE,
-        PlayerScope::ParentObjectTargetController => Axes {
+        PlayerScope::ParentObjectTargetController | PlayerScope::ParentObjectTargetOwner => Axes {
             event: true,
             sibling: false,
             projected: false,

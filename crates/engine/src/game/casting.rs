@@ -29038,7 +29038,9 @@ fn object_scope_reads_chosen_target(scope: &ObjectScope, read: TargetRead) -> bo
 
 fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> bool {
     match player {
-        PlayerScope::Target | PlayerScope::ParentObjectTargetController => read.includes_bindable(),
+        PlayerScope::Target
+        | PlayerScope::ParentObjectTargetController
+        | PlayerScope::ParentObjectTargetOwner => read.includes_bindable(),
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(|x| player_scope_reads_chosen_target(x, read)),
