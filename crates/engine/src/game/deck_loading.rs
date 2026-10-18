@@ -848,7 +848,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // signature spell is the second command-zone slot with the same "one
     // physical card" identity, and it is netted on the same axis rather than as
     // a special case. This is the rule-enforcement boundary, mirroring
-    // `sideboard_for` above.
+    // `drop_sideboard` above.
     //
     // Netting is bounded by occurrence: `min(command_zone_copies,
     // main_deck_copies)` per card, so a main deck holding more copies than the
