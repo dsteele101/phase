@@ -24,6 +24,7 @@ const NIGHTEYES: &str =
     "{4}{B}: Put target creature card from a graveyard onto the battlefield under your control.";
 const GRAVEROBBER: &str = "{1}{B}: Exile target card from an opponent's graveyard. If no cards are in that graveyard, flip this creature.";
 const PUMP: &str = "Target creature gets +1/+1 until end of turn.";
+const CALL_FOR_BLOOD: &str = "As an additional cost to cast this spell, sacrifice a creature.\nTarget creature gets -X/-X until end of turn, where X is the sacrificed creature's power.";
 
 fn pool(black: usize, generic: usize) -> Vec<ManaUnit> {
     let unit = |mana_type| ManaUnit::new(mana_type, ObjectId(0), false, vec![]);
@@ -130,5 +131,35 @@ fn battlefield_creature_target_triggers_horobi() {
         outcome.zone_of(bear),
         Zone::Graveyard,
         "Horobi destroys a creature permanent that becomes the target"
+    );
+}
+
+/// CR 601.2c + CR 601.2h: targets are chosen before costs are paid, so a
+/// creature that becomes the target while on the battlefield and is then
+/// sacrificed to pay that same spell's cost still triggers Horobi. The
+/// battlefield gate must not read the post-cost zone.
+#[test]
+fn target_sacrificed_as_cost_still_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Horobi, Death's Wail", 4, 4, HOROBI);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Call for Blood", true, CALL_FOR_BLOOD)
+        .id();
+    scenario.with_mana_pool(P0, pool(1, 4));
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(spell)
+        .target_object(bear)
+        .sacrifice_with(&[bear])
+        .resolve();
+
+    assert_eq!(outcome.zone_of(bear), Zone::Graveyard);
+    assert_eq!(
+        stack_pushes(outcome.events()),
+        2,
+        "the spell and Horobi's trigger both go on the stack"
     );
 }
