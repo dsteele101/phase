@@ -13,7 +13,7 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, EffectKind, EffectScope};
+use engine::types::ability::{Effect, EffectKind, EffectScope, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
 use engine::types::events::GameEvent;
@@ -29,6 +29,8 @@ const GODTOUCHER: &str = "{1}{W}, {T}: Prevent all damage that would be dealt to
 const REDEEM: &str =
     "Prevent all damage that would be dealt this turn to up to two target creatures.";
 const NOBLE_VESTIGE: &str = "Flying\n{T}: Prevent the next 1 damage that would be dealt to target player or planeswalker this turn.";
+const AVEN_REDEEMER: &str =
+    "Flying\n{T}: Prevent the next 2 damage that would be dealt to any target this turn.";
 const BLINDING_FOG: &str = "Prevent all damage that would be dealt to creatures this turn. Creatures you control gain hexproof until end of turn. (They can't be the targets of spells or abilities your opponents control.)";
 const DEFEND_THE_HEARTH: &str =
     "Prevent all combat damage that would be dealt to players this turn.";
@@ -735,5 +737,136 @@ fn kurbis_shields_only_the_chosen_countered_creature() {
         damage.damage_marked(unchosen),
         2,
         "reach guard: an eligible unchosen creature takes damage"
+    );
+}
+
+/// CR 115.1d + CR 115.4 + CR 615.7: Aven Redeemer ("Prevent the next 2 damage that would
+/// be dealt to any target this turn") must prompt for a target when activated (work item fix),
+/// and the shield must protect only the chosen creature.
+#[test]
+fn aven_redeemer_prompts_for_target_when_activated_and_shields_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let aven = scenario
+        .add_creature_from_oracle(P0, "Aven Redeemer", 2, 2, AVEN_REDEEMER)
+        .id();
+    let a = scenario.add_creature(P0, "A", 2, 2).id();
+    let b = scenario.add_creature(P0, "B", 2, 2).id();
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .id();
+    let mut runner = scenario.build();
+
+    // Work item assertion: activating Aven Redeemer must ask for a target.
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: aven,
+            ability_index: 0,
+        })
+        .expect("activate Aven Redeemer");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "CR 115.1d + CR 115.4: Aven Redeemer must prompt for a target when activated, got {:?}",
+        result.waiting_for
+    );
+
+    // Select creature A as the target.
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(a)),
+        })
+        .expect("choose target creature A");
+
+    // Pass priority until the ability resolves.
+    while !runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+
+    // Pyroclasm deals 2 damage to each creature.
+    let outcome = runner.cast(pyroclasm).resolve();
+    assert_eq!(
+        outcome.zone_of(a),
+        Zone::Battlefield,
+        "chosen creature A is shielded against 2 damage"
+    );
+    assert_eq!(
+        outcome.damage_marked(a),
+        0,
+        "all 2 damage dealt to A was prevented"
+    );
+    assert_eq!(
+        outcome.zone_of(b),
+        Zone::Graveyard,
+        "unchosen creature B is not shielded and dies"
+    );
+}
+
+/// CR 115.4: "any target" allows choosing a player; 2 damage dealt to the chosen
+/// player is prevented.
+#[test]
+fn aven_redeemer_prompts_for_target_and_shields_chosen_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let aven = scenario
+        .add_creature_from_oracle(P0, "Aven Redeemer", 2, 2, AVEN_REDEEMER)
+        .id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
+        .id();
+    let other_bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.activate(aven, 0).target_player(P0).resolve();
+
+    let other_hit = runner.cast(other_bolt).target_player(P1).resolve();
+    assert_eq!(
+        other_hit.life_delta(P1),
+        -3,
+        "the unchosen player takes full damage"
+    );
+
+    let outcome = runner.cast(bolt).target_player(P0).resolve();
+    assert_eq!(
+        outcome.life_delta(P0),
+        -1,
+        "the chosen player has 2 of the 3 damage prevented"
+    );
+}
+
+/// CR 615.7: Aven Redeemer's "next 2 damage" shield depletes after preventing 2 damage.
+#[test]
+fn aven_redeemer_shields_up_to_two_damage_and_depletes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let aven = scenario
+        .add_creature_from_oracle(P0, "Aven Redeemer", 2, 2, AVEN_REDEEMER)
+        .id();
+    let a = scenario.add_creature(P0, "A", 4, 4).id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, BOLT)
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.activate(aven, 0).target_object(a).resolve();
+
+    // Bolt deals 3 damage: 2 prevented, 1 marked. Shield is now depleted.
+    let outcome1 = runner.cast(bolt).target_object(a).resolve();
+    assert_eq!(
+        outcome1.damage_marked(a),
+        1,
+        "2 damage was prevented by the shield, 1 damage marked"
+    );
+
+    // Shock deals 2 damage: shield is depleted, so all 2 damage is marked (total 3).
+    let outcome2 = runner.cast(shock).target_object(a).resolve();
+    assert_eq!(
+        outcome2.damage_marked(a),
+        3,
+        "shield is depleted so full damage is marked"
     );
 }
