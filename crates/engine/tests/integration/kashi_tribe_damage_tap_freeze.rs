@@ -1,4 +1,4 @@
-//! CR 120.3 + CR 608.2k + CR 701.26a: "Whenever this creature deals combat
+//! CR 608.2k + CR 701.26a: "Whenever this creature deals combat
 //! damage to a creature, tap that creature and it doesn't untap during its
 //! controller's next untap step." (Kashi-Tribe Warriors, Kashi-Tribe Elite).
 //!

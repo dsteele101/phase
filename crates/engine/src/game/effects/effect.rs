@@ -2815,7 +2815,7 @@ mod tests {
             }));
     }
 
-    /// CR 608.2k + CR 400.7 + CR 611.2c: Kashi-Tribe Warriors' "it doesn't untap
+    /// CR 608.2k + CR 400.7: Kashi-Tribe Warriors' "it doesn't untap
     /// during its controller's next untap step" (`affected: EventTarget`, no
     /// chosen targets) binds exactly the damage recipient the trigger event
     /// recorded. A recipient that left the battlefield and returned before
