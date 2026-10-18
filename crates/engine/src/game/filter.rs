@@ -3942,6 +3942,24 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
     }
 }
 
+/// CR 109.2: does `filter` denote ONLY permanents on the battlefield? True
+/// when it describes its object by a permanent card type or subtype
+/// ([`filter_implies_battlefield_permanent`]) and names no zone of its own
+/// (`population_zones`, the union of both zone readers, so a stack or
+/// graveyard reference counts as one). "A creature" is such a description; "a
+/// creature card in a graveyard", "a creature spell", `SelfRef`, and a plain
+/// "card" filter are not.
+///
+/// Event-subject matchers pair this with a zone read on the event's object:
+/// the type reading alone cannot exclude a card in another zone, since a
+/// creature card in a graveyard still has the creature card type (CR 205.2a).
+/// Callers: `replacement::replacement_valid_card_matches` (counter
+/// replacements) and `trigger_matchers::match_becomes_target` (Horobi,
+/// Death's Wail's "Whenever a creature becomes the target...").
+pub(crate) fn filter_denotes_battlefield_permanent(filter: &TargetFilter) -> bool {
+    filter.population_zones().is_empty() && filter_implies_battlefield_permanent(filter)
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a
