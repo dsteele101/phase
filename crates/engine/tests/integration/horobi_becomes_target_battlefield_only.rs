@@ -23,8 +23,9 @@ const HOROBI: &str =
 const NIGHTEYES: &str =
     "{4}{B}: Put target creature card from a graveyard onto the battlefield under your control.";
 const GRAVEROBBER: &str = "{1}{B}: Exile target card from an opponent's graveyard. If no cards are in that graveyard, flip this creature.";
-const PUMP: &str = "Target creature gets +1/+1 until end of turn.";
+const PUMP: &str = "Target creature gets +3/+3 until end of turn.";
 const CALL_FOR_BLOOD: &str = "As an additional cost to cast this spell, sacrifice a creature.\nTarget creature gets -X/-X until end of turn, where X is the sacrificed creature's power.";
+const MOGG_FANATIC: &str = "Sacrifice Mogg Fanatic: It deals 1 damage to any target.";
 
 fn pool(black: usize, generic: usize) -> Vec<ManaUnit> {
     let unit = |mana_type| ManaUnit::new(mana_type, ObjectId(0), false, vec![]);
@@ -161,5 +162,30 @@ fn target_sacrificed_as_cost_still_triggers_horobi() {
         stack_pushes(outcome.events()),
         2,
         "the spell and Horobi's trigger both go on the stack"
+    );
+}
+
+/// CR 601.2c + CR 602.2b + CR 601.2h: targets are chosen before costs are paid.
+/// When Mogg Fanatic activates its ability targeting itself with Horobi on the
+/// battlefield, its automatic self-sacrifice moves it to the graveyard during
+/// cost payment, but it became the target while on the battlefield. Horobi must
+/// still trigger, and both the activated ability and Horobi's trigger reach the stack.
+#[test]
+fn mogg_fanatic_targeting_itself_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Horobi, Death's Wail", 4, 4, HOROBI);
+    let fanatic = scenario
+        .add_creature_from_oracle(P0, "Mogg Fanatic", 1, 1, MOGG_FANATIC)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.activate(fanatic, 0).target_object(fanatic).resolve();
+
+    assert_eq!(outcome.zone_of(fanatic), Zone::Graveyard);
+    assert_eq!(
+        stack_pushes(outcome.events()),
+        2,
+        "both Mogg Fanatic's ability and Horobi's trigger must reach the stack"
     );
 }

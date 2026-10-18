@@ -6849,7 +6849,9 @@ pub(super) fn push_activated_ability_to_stack(
     activation_residual: ActivationResidual,
     target_selection: ActivationTargetSelection,
     mut pending_loyalty_activation_player: Option<PlayerId>,
-    activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
+    mut activation_trigger_collection: Option<
+        Box<super::triggers::PendingActivationTriggerCollection>,
+    >,
     crime_candidate: bool,
     // CR 601.2f + CR 602.2b: the activation's cost-modifier carrier, handed to
     // every root this function rebuilds.
@@ -7071,6 +7073,33 @@ pub(super) fn push_activated_ability_to_stack(
             return Err(EngineError::ActionNotAllowed(
                 "Cannot activate loyalty ability".to_string(),
             ));
+        }
+        if activation_trigger_collection.is_none() {
+            activation_trigger_collection = Some(Box::new(
+                super::triggers::PendingActivationTriggerCollection::for_prepared_activated_ability(
+                    source_id,
+                    player,
+                    ability_index,
+                    &resolved,
+                ),
+            ));
+        }
+        if let Some(collection) = activation_trigger_collection.as_deref_mut() {
+            // CR 601.2c + CR 602.2b + CR 603.2: Targets have been declared and targeting
+            // events emitted before costs are paid. Collect any pre-payment announcement
+            // triggers now against the pre-payment game state so costs (such as sacrificing
+            // a creature target) do not alter the target's qualification or zone before
+            // becomes-target triggers are matched.
+            let unclaimed = super::announcement_triggers::unclaimed_events(state, events, 0);
+            if !unclaimed.is_empty() {
+                collection.collect(state, &unclaimed);
+                super::announcement_triggers::claim_ordinary_collected_span(
+                    state,
+                    events,
+                    0,
+                    events.len(),
+                );
+            }
         }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             super::casting::pay_ability_cost_for_activation(
