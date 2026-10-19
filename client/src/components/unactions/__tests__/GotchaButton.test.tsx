@@ -12,14 +12,14 @@ vi.mock("../../../hooks/useGameDispatch", () => ({
   useGameDispatch: () => dispatch,
 }));
 
-function offerGotcha(player: number) {
+function offerGotcha(player: number, id = 1) {
   act(() => {
     useGameStore.setState({
       gameMode: "ai",
       gameState: gameStateFactory.build({
         un_actions: {
           enabled_players: [0, 1],
-          gotcha_offers: [{ player, source_id: 9, returns: 9 }],
+          gotcha_offers: [{ id, player, source_id: 9, returns: 9 }],
         },
       }),
     });
@@ -80,5 +80,30 @@ describe("GotchaButton", () => {
     offerGotcha(0);
 
     expect(screen.getByRole("button", { name: /gotcha!/i })).toBeInTheDocument();
+  });
+
+  it("resets the two-second window when a new offer with a new id arrives", () => {
+    offerGotcha(0, 1);
+    render(<GotchaButton />);
+    expect(screen.getByRole("button", { name: /gotcha!/i })).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    // New offer arrives with a new id before the first window expires
+    offerGotcha(0, 2);
+    expect(screen.getAllByRole("button", { name: /gotcha!/i })[0]).toBeInTheDocument();
+
+    act(() => {
+      // 1000ms later: 2500ms since offer 1, but only 1000ms since offer 2
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getAllByRole("button", { name: /gotcha!/i })[0]).toBeInTheDocument();
+
+    act(() => {
+      // Advance remaining 1000ms to complete offer 2's 2000ms
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.queryByRole("button", { name: /gotcha!/i })).not.toBeInTheDocument();
   });
 });

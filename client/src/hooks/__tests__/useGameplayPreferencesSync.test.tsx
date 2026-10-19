@@ -46,7 +46,7 @@ describe("useGameplayPreferencesSync", () => {
     act(() => {
       useGameStore.setState({ gameState, engineCommitEpoch: 1 });
     });
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
     expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
       1,
       { type: "SetPhaseStops", data: { stops: [] } },
@@ -59,17 +59,23 @@ describe("useGameplayPreferencesSync", () => {
       adapter,
       expect.any(Number),
     );
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      3,
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      adapter,
+      expect.any(Number),
+    );
 
     act(() => {
       useGameStore.setState({ engineCommitEpoch: 2 });
     });
-    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
 
     act(() => {
       usePreferencesStore.getState().setPhaseStops([]);
       usePreferencesStore.getState().setPriorityPassingMode("Standard");
     });
-    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
 
     act(() => usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows"));
     await waitFor(() => {
@@ -78,7 +84,7 @@ describe("useGameplayPreferencesSync", () => {
         adapter,
         expect.any(Number),
       );
-      expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
+      expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4);
     });
 
     const firstGeneration = useGameStore.getState().gameSessionGeneration;
@@ -86,14 +92,14 @@ describe("useGameplayPreferencesSync", () => {
       useGameStore.setState({ gameSessionGeneration: nextGameSessionGeneration() });
     });
     expect(useGameStore.getState().gameSessionGeneration).toBeGreaterThan(firstGeneration);
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(7));
 
     const secondGeneration = useGameStore.getState().gameSessionGeneration;
     act(() => {
       useGameStore.setState({ gameSessionGeneration: nextGameSessionGeneration() });
     });
     expect(useGameStore.getState().gameSessionGeneration).toBeGreaterThan(secondGeneration);
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(7));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(10));
   });
 
   it("retries rejected sends without duplicating successful preferences", async () => {
@@ -106,7 +112,7 @@ describe("useGameplayPreferencesSync", () => {
     await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(1));
 
     act(() => usePreferencesStore.getState().setPhaseStops([]));
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4));
     expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
       2,
       { type: "SetPhaseStops", data: { stops: [] } },
@@ -119,16 +125,23 @@ describe("useGameplayPreferencesSync", () => {
       adapter,
       expect.any(Number),
     );
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      4,
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      adapter,
+      expect.any(Number),
+    );
 
     act(() => usePreferencesStore.getState().setPhaseStops([]));
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4));
   });
 
   it("overrides the synced mode while Full Control is on, and restores it when off", async () => {
     useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1 });
     renderHook(() => useGameplayPreferencesSync());
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
-    expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      2,
       { type: "SetPriorityPassingMode", data: { mode: "Standard" } },
       adapter,
       expect.any(Number),
@@ -160,16 +173,17 @@ describe("useGameplayPreferencesSync", () => {
       );
     });
   });
-  it("sends the Un-card actions opt-in only once it is enabled, and again when it is withdrawn", async () => {
+
+  it("explicitly syncs Un-card actions preference on session start, and updates when toggled", async () => {
     useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1 });
     renderHook(() => useGameplayPreferencesSync());
 
-    // Reach guard: the two standing preferences go out, the default-off opt-in does not.
-    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
-    expect(dispatchActionForGameSession).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "UnAction" }),
-      expect.anything(),
-      expect.anything(),
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      3,
+      { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+      adapter,
+      expect.any(Number),
     );
 
     act(() => usePreferencesStore.getState().setUnCardActionsEnabled(true));
@@ -180,7 +194,7 @@ describe("useGameplayPreferencesSync", () => {
         expect.any(Number),
       ),
     );
-    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4);
 
     act(() => usePreferencesStore.getState().setUnCardActionsEnabled(false));
     await waitFor(() =>
@@ -190,6 +204,6 @@ describe("useGameplayPreferencesSync", () => {
         expect.any(Number),
       ),
     );
-    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4);
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(5);
   });
 });

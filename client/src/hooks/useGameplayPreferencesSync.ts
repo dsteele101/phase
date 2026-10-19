@@ -146,9 +146,11 @@ async function drainGameplayPreferenceSync(): Promise<void> {
 
       // Un-card actions (silver-border sets): the engine prompts and offers
       // nothing to a player who has not opted in, so the opt-in is engine state.
-      // The engine default is off, so a never-enabled preference sends nothing.
+      // Explicitly synchronize the preference whenever it has not yet been sent
+      // for this session, ensuring a resumed session with un-card actions enabled
+      // honors an off preference.
       const unCardActions = usePreferencesStore.getState().unCardActionsEnabled;
-      if (unCardActions !== (successfulSendFor(adapter, generation).unCardActions ?? false)) {
+      if (unCardActions !== successfulSendFor(adapter, generation).unCardActions) {
         try {
           await dispatchActionForGameSession(
             { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: unCardActions } } } },

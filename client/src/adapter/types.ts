@@ -1181,6 +1181,7 @@ export type UnAction =
   | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } };
 
 export interface GotchaOffer {
+  id: number;
   player: PlayerId;
   source_id: ObjectId;
   returns: ObjectId;

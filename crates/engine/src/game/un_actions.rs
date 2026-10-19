@@ -22,7 +22,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::un_actions::{
-    spoken_words, GotchaCondition, GotchaOffer, UnAction, UnTell, UnTellKind,
+    spoken_words, word_matches, GotchaCondition, GotchaOffer, UnAction, UnTell, UnTellKind,
 };
 use crate::types::zones::Zone;
 
@@ -110,7 +110,8 @@ fn graveyard_cards_named_in(state: &GameState, player: PlayerId, tell: &UnTell) 
         .into_iter()
         .filter(|id| {
             state.objects.get(id).is_some_and(|card| {
-                spoken_words(&card.name).any(|name_word| spoken.contains(&name_word))
+                spoken_words(&card.name)
+                    .any(|name_word| spoken.iter().any(|sp| word_matches(&name_word, sp)))
             })
         })
         .collect()
@@ -144,6 +145,7 @@ pub fn open_gotcha_offers(
                         graveyard_cards_named_in(state, holder, tell)
                             .into_iter()
                             .map(|returns| GotchaOffer {
+                                id: 0,
                                 player: holder,
                                 source_id,
                                 returns,
@@ -152,6 +154,7 @@ pub fn open_gotcha_offers(
                 }
                 other if other.matches_without_zone_context(tell) => {
                     offers.push(GotchaOffer {
+                        id: 0,
                         player: holder,
                         source_id,
                         returns: source_id,
@@ -164,6 +167,54 @@ pub fn open_gotcha_offers(
     offers.sort_by_key(|o| (o.player, o.source_id.0, o.returns.0));
     offers.dedup();
     offers
+}
+
+/// Append newly opened Gotcha offers to existing offers in `state.un_actions.gotcha_offers`,
+/// minting a unique identifier for each new offer and preserving offers from earlier gestures.
+pub fn append_gotcha_offers(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
+    let new_offers = open_gotcha_offers(state, performer, tell);
+    if new_offers.is_empty() {
+        return;
+    }
+    for mut offer in new_offers {
+        offer.id = state.un_actions.mint_offer_id();
+        state.un_actions.gotcha_offers.push(offer);
+    }
+    // Sort so that newer offers (larger id) appear first for identical (player, source_id, returns),
+    // allowing dedup_by to keep the most recent offer.
+    state.un_actions.gotcha_offers.sort_by(|a, b| {
+        (
+            a.player,
+            a.source_id.0,
+            a.returns.0,
+            std::cmp::Reverse(a.id),
+        )
+            .cmp(&(
+                b.player,
+                b.source_id.0,
+                b.returns.0,
+                std::cmp::Reverse(b.id),
+            ))
+    });
+    state.un_actions.gotcha_offers.dedup_by(|b, a| {
+        a.player == b.player && a.source_id == b.source_id && a.returns == b.returns
+    });
+    state
+        .un_actions
+        .gotcha_offers
+        .sort_by_key(|o| (o.player, o.source_id.0, o.returns.0, o.id));
+}
+
+/// Drain any pending tells recorded outside priority and generate Gotcha offers
+/// once priority is settled.
+pub fn announce_pending_tells(state: &mut GameState) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let pending = std::mem::take(&mut state.un_actions.pending_tells);
+    for (player, tell) in pending {
+        append_gotcha_offers(state, player, &tell);
+    }
 }
 
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
@@ -212,28 +263,17 @@ pub fn apply_un_action(
                 player: actor,
                 tell: tell.clone(),
             }];
-            // A window opens only at a priority boundary: the reflexive trigger
-            // it feeds must be able to reach the stack right away.
-            state.un_actions.gotcha_offers =
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    open_gotcha_offers(state, actor, &tell)
-                } else {
-                    Vec::new()
-                };
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                append_gotcha_offers(state, actor, &tell);
+            } else {
+                state.un_actions.pending_tells.push((actor, tell));
+            }
             Ok(ActionResult::applied(events, state.waiting_for.clone()))
         }
         UnAction::SayGotcha { source_id, returns } => {
-            let offer = GotchaOffer {
-                player: actor,
-                source_id,
-                returns,
-            };
-            let Some(position) = state
-                .un_actions
-                .gotcha_offers
-                .iter()
-                .position(|o| *o == offer)
-            else {
+            let Some(position) = state.un_actions.gotcha_offers.iter().position(|o| {
+                o.player == actor && o.source_id == source_id && o.returns == returns
+            }) else {
                 return Err(EngineError::InvalidAction(
                     "No open Gotcha window for that card".to_string(),
                 ));

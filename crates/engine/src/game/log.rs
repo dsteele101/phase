@@ -1981,14 +1981,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!(" says \"{phrase}\"")),
         ],
 
-        GameEvent::GotchaSaid {
-            player, returns, ..
-        } => vec![
-            player_seg(state, *player),
-            text(" says \"Gotcha!\" and returns "),
-            card_seg(state, *returns),
-            text(" to hand"),
-        ],
+        GameEvent::GotchaSaid { player, .. } => {
+            vec![player_seg(state, *player), text(" says \"Gotcha!\"")]
+        }
 
         GameEvent::RingTemptsYou { player_id, .. } => {
             vec![text("The Ring tempts "), player_seg(state, *player_id)]

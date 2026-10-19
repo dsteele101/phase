@@ -9,13 +9,14 @@
 use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{AbilityCost, Effect, TargetRef, TriggerDefinition};
+use engine::types::ability::{AbilityCost, Effect, StaticDefinition, TargetRef, TriggerDefinition};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::statics::{StaticMode, TriggerCause};
 use engine::types::triggers::TriggerMode;
 use engine::types::un_actions::{GotchaCondition, PhysicalTell, UnAction, UnTell};
 use engine::types::zones::Zone;
@@ -406,6 +407,13 @@ fn a_player_cannot_gotcha_their_own_gesture() {
         runner.state().un_actions.gotcha_offers.is_empty(),
         "only opponents' gestures count"
     );
+    // Reach guard: the same gesture performed by an opponent produces an offer.
+    tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
+    assert_eq!(
+        runner.state().un_actions.gotcha_offers.len(),
+        1,
+        "opponent's gesture produces an offer"
+    );
 }
 
 #[test]
@@ -511,29 +519,38 @@ fn name_dropping_returns_the_graveyard_card_whose_name_the_opponent_said() {
 
 const INFERNIUS: &str = "When this creature enters, you may say \"I'm here.\" If you do, it deals 3 damage to target player.";
 
-/// Resolve Infernius's parsed ETB effect chain directly (P1 already chosen as
-/// the target) and return the runner at the first decision it asks for.
+/// Drive Infernius through the scenario runner's real ETB trigger (selecting P1
+/// as the target) and return the runner at the first decision it asks for.
 fn resolve_infernius_etb(opt_in: bool) -> GameRunner {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario
-        .add_creature_from_oracle(P0, "Infernius Spawnington III, Esq.", 6, 6, INFERNIUS)
+    let infernius = scenario
+        .add_creature_to_hand_from_oracle(P0, "Infernius Spawnington III, Esq.", 6, 6, INFERNIUS)
         .id();
     let mut runner = scenario.build();
     if opt_in {
         un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
     }
-    let parsed = parse("Infernius Spawnington III, Esq.", INFERNIUS, &["Creature"]);
-    let def = parsed.triggers[0]
-        .execute
-        .as_deref()
-        .expect("ETB effect")
-        .clone();
-    let mut ability = engine::game::ability_utils::build_resolved_from_def(&def, source, P0);
-    ability.targets = vec![TargetRef::Player(P1)];
-    let mut events = Vec::new();
-    engine::game::effects::resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
-        .expect("chain resolves");
+    runner.cast(infernius).commit();
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "Infernius ETB trigger opens TriggerTargetSelection, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("target P1 selected");
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        runner.resolve_top();
+    }
     runner
 }
 
@@ -552,10 +569,12 @@ fn infernius_deals_damage_only_when_its_controller_says_the_phrase() {
         );
     };
     assert_eq!(player, P0);
-    assert_eq!(
-        description.as_deref(),
-        Some("Say \"I'm here.\""),
-        "the prompt names the phrase"
+    assert!(
+        description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\"I'm here.\""),
+        "the prompt names the phrase: {description:?}"
     );
     let result = runner
         .act(GameAction::DecideOptionalEffect { accept: true })
@@ -641,4 +660,157 @@ fn the_menu_lists_only_the_gestures_some_gotcha_card_answers() {
         runner.state().un_actions.menu.is_empty(),
         "nobody opted in: no menu"
     );
+}
+
+const LOT_BOT: &str = "When this creature enters, you may say \"INCARCERATE!\" in a robot voice. If you do, exile another target artifact or enchantment until this creature leaves the battlefield.";
+
+#[test]
+fn impounding_lot_bot_exiles_target_only_when_saying_the_phrase() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sol_ring = scenario
+        .add_artifact_from_oracle(P1, "Sol Ring", "{T}: Add {C}{C}.")
+        .id();
+    let lot_bot = scenario
+        .add_creature_to_hand_from_oracle(P0, "Impounding Lot-Bot", 3, 3, LOT_BOT)
+        .id();
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+
+    runner
+        .cast(lot_bot)
+        .target_object(sol_ring)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+
+    let WaitingFor::OptionalEffectChoice {
+        player,
+        description,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected OptionalEffectChoice for robot voice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert!(
+        description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\"INCARCERATE!\""),
+        "the prompt names the phrase: {description:?}"
+    );
+
+    let result = runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("saying phrase accepted");
+    assert!(result.events.iter().any(|e| matches!(
+        e,
+        GameEvent::PhraseSaid { player, phrase } if *player == P0 && phrase == "INCARCERATE!"
+    )));
+    assert_eq!(
+        runner.state().objects[&sol_ring].zone,
+        Zone::Exile,
+        "Sol Ring is exiled"
+    );
+
+    // Declining leaves the target on the battlefield.
+    let mut scenario_decline = GameScenario::new();
+    scenario_decline.at_phase(Phase::PreCombatMain);
+    let sol_ring_2 = scenario_decline
+        .add_artifact_from_oracle(P1, "Sol Ring", "{T}: Add {C}{C}.")
+        .id();
+    let lot_bot_2 = scenario_decline
+        .add_creature_to_hand_from_oracle(P0, "Impounding Lot-Bot", 3, 3, LOT_BOT)
+        .id();
+    let mut runner_decline = scenario_decline.build();
+    un_action(
+        &mut runner_decline,
+        P0,
+        UnAction::SetEnabled { enabled: true },
+    );
+    runner_decline
+        .cast(lot_bot_2)
+        .target_object(sol_ring_2)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    runner_decline
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining is accepted");
+    assert_eq!(
+        runner_decline.state().objects[&sol_ring_2].zone,
+        Zone::Battlefield,
+        "unsaid: Sol Ring remains on battlefield"
+    );
+
+    // Opted-out player is never prompted and target remains on the battlefield.
+    let mut scenario_opt_out = GameScenario::new();
+    scenario_opt_out.at_phase(Phase::PreCombatMain);
+    let sol_ring_3 = scenario_opt_out
+        .add_artifact_from_oracle(P1, "Sol Ring", "{T}: Add {C}{C}.")
+        .id();
+    let lot_bot_3 = scenario_opt_out
+        .add_creature_to_hand_from_oracle(P0, "Impounding Lot-Bot", 3, 3, LOT_BOT)
+        .id();
+    let mut runner_opt_out = scenario_opt_out.build();
+    // P0 does not opt in.
+    runner_opt_out
+        .cast(lot_bot_3)
+        .target_object(sol_ring_3)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+    assert!(
+        matches!(
+            runner_opt_out.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ),
+        "no prompt without opt-in"
+    );
+    assert_eq!(
+        runner_opt_out.state().objects[&sol_ring_3].zone,
+        Zone::Battlefield,
+        "opted out: Sol Ring remains on battlefield"
+    );
+}
+
+#[test]
+fn gotcha_triggers_are_not_doubled_by_trigger_doublers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario
+        .add_spell_to_graveyard(P0, "Touch and Go", false)
+        .from_oracle_text(TOUCH_AND_GO)
+        .id();
+    scenario
+        .add_creature(P0, "Trigger Doubler", 2, 2)
+        .with_static_definition(StaticDefinition::new(StaticMode::DoubleTriggers {
+            cause: TriggerCause::Any,
+        }));
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+
+    tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
+    assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);
+
+    un_action(
+        &mut runner,
+        P0,
+        UnAction::SayGotcha {
+            source_id: card,
+            returns: card,
+        },
+    );
+    // CR 603.2d: reflexive/delayed Gotcha triggers are exempt from trigger doubling.
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Gotcha trigger must not be doubled"
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
 }

@@ -1891,7 +1891,9 @@ impl GameAction {
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
-                | GameAction::UnAction { .. }
+                | GameAction::UnAction {
+                    action: super::un_actions::UnAction::SetEnabled { .. },
+                }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
         )
@@ -1917,6 +1919,7 @@ impl GameAction {
                 GameAction::Debug(_)
                     | GameAction::GrantDebugPermission { .. }
                     | GameAction::RevokeDebugPermission { .. }
+                    | GameAction::UnAction { .. }
             )
     }
 

@@ -710,6 +710,11 @@ pub(super) fn handle_unless_payment_choose_cost(
                         .to_string(),
                 ));
             }
+            if crate::game::un_actions::cost_requires_unavailable_speech(state, player, &picked) {
+                return Err(EngineError::InvalidAction(
+                    "Player has not opted in to Un-card spoken actions".to_string(),
+                ));
+            }
             // strict-failure: CR 118.12a disjunctive unless-costs with a counter branch are
             // refused at the pick, not removed from the offered `costs` list;
             // `legal_actions` already excludes the refused index.
@@ -1913,6 +1918,8 @@ fn finish_unless_payment(
                     *p,
                     &poll_cost,
                     pending_effect.as_ref(),
+                ) && !crate::game::un_actions::cost_requires_unavailable_speech(
+                    state, *p, &poll_cost,
                 )
             })
             .and_then(|head| remaining[head..].split_first())

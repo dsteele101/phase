@@ -31,7 +31,7 @@ export function GotchaButton() {
     () => (offers ?? []).filter((offer) => offer.player === playerId),
     [offers, playerId],
   );
-  const windowKey = mine.map((o) => `${o.source_id}:${o.returns}`).join("|");
+  const windowKey = mine.map((o) => `${o.id}`).join("|");
 
   useEffect(() => {
     if (!windowKey) {
@@ -50,7 +50,7 @@ export function GotchaButton() {
       <AnimatePresence>
         {mine.map((offer) => (
           <motion.button
-            key={`${offer.source_id}:${offer.returns}`}
+            key={offer.id}
             type="button"
             className="relative overflow-hidden rounded-2xl border-4 border-yellow-200 bg-rose-600 px-8 py-4 text-3xl font-black uppercase tracking-widest text-white shadow-[0_0_40px_rgba(244,63,94,0.8)]"
             initial={{ scale: 0, rotate: -20 }}

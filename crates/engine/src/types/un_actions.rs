@@ -92,10 +92,16 @@ pub enum UnTellKind {
     SaysNumber,
 }
 
+#[inline]
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
 /// A live opportunity for `player` to call "Gotcha!" for the Gotcha ability on
 /// `source_id`, returning `returns` to hand when the reflexive trigger resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GotchaOffer {
+    pub id: u64,
     pub player: PlayerId,
     /// The object carrying the Gotcha ability.
     pub source_id: ObjectId,
@@ -118,9 +124,21 @@ pub struct UnActionState {
     /// ordinary action, so a window never outlives the moment it was offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gotcha_offers: Vec<GotchaOffer>,
+    /// Spoken or physical gestures that occurred while not at a priority boundary,
+    /// waiting to be processed when priority is next reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tells: Vec<(PlayerId, UnTell)>,
+    /// Next unique identifier minted for a [`GotchaOffer`].
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub next_offer_id: u64,
 }
 
 impl UnActionState {
+    pub fn mint_offer_id(&mut self) -> u64 {
+        self.next_offer_id += 1;
+        self.next_offer_id
+    }
+
     pub fn is_enabled(&self, player: PlayerId) -> bool {
         self.enabled_players.contains(&player)
     }
@@ -133,7 +151,11 @@ impl UnActionState {
     }
 
     pub fn is_default(&self) -> bool {
-        self.enabled_players.is_empty() && self.gotcha_offers.is_empty() && self.menu.is_empty()
+        self.enabled_players.is_empty()
+            && self.gotcha_offers.is_empty()
+            && self.menu.is_empty()
+            && self.pending_tells.is_empty()
+            && self.next_offer_id == 0
     }
 }
 
@@ -188,11 +210,51 @@ const NUMBER_WORDS: &[&str] = &[
     "billion",
 ];
 
-/// Split spoken text into lowercase words (letters and digits only).
+/// Split spoken text into lowercase words. Hyphenated words are preserved as single words.
 pub fn spoken_words(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
+        .map(|w| w.trim_matches(|c| c == '-' || c == '\''))
         .filter(|w| !w.is_empty())
         .map(|w| w.to_lowercase())
+}
+
+/// Check if a spoken word matches a watched word: exact match or valid plural forms (+s, +es, y->ies).
+pub fn word_matches(watched: &str, spoken: &str) -> bool {
+    let w = watched.trim().to_lowercase();
+    let s = spoken.trim().to_lowercase();
+    if w.is_empty() || s.is_empty() {
+        return false;
+    }
+    if w == s {
+        return true;
+    }
+    // 1. y -> ies (e.g. "cherry" -> "cherries", "ability" -> "abilities"; but not vowel+y like "guy")
+    if w.ends_with('y') && w.len() > 1 {
+        let prev = w.as_bytes()[w.len() - 2] as char;
+        let is_vowel = matches!(prev, 'a' | 'e' | 'i' | 'o' | 'u');
+        if !is_vowel {
+            let base = &w[..w.len() - 1];
+            if s.len() == base.len() + 3 && s.starts_with(base) && s.ends_with("ies") {
+                return true;
+            }
+        }
+    }
+    // 2. +es for words ending in s, x, z, ch, sh (e.g. "box" -> "boxes", "match" -> "matches")
+    if w.ends_with('s')
+        || w.ends_with('x')
+        || w.ends_with('z')
+        || w.ends_with("ch")
+        || w.ends_with("sh")
+    {
+        if s.len() == w.len() + 2 && s.starts_with(&w) && s.ends_with("es") {
+            return true;
+        }
+    }
+    // 3. +s for regular words (e.g. "guy" -> "guys", "creature" -> "creatures")
+    if !w.ends_with('s') && s.len() == w.len() + 1 && s.starts_with(&w) && s.ends_with('s') {
+        return true;
+    }
+    false
 }
 
 fn is_number_word(word: &str) -> bool {
@@ -215,9 +277,8 @@ impl GotchaCondition {
     pub fn matches_without_zone_context(&self, tell: &UnTell) -> bool {
         match (self, tell) {
             (Self::Physical(expected), UnTell::Physical(actual)) => expected == actual,
-            (Self::SaysAnyOf { words }, UnTell::Said { text }) => {
-                spoken_words(text).any(|spoken| words.contains(&spoken))
-            }
+            (Self::SaysAnyOf { words }, UnTell::Said { text }) => spoken_words(text)
+                .any(|spoken| words.iter().any(|watched| word_matches(watched, &spoken))),
             (Self::SaysNumber, UnTell::Said { text }) => {
                 spoken_words(text).any(|spoken| is_number_word(&spoken))
             }
@@ -243,8 +304,27 @@ mod tests {
             words: vec!["creature".into(), "guy".into()],
         };
         assert!(cond.matches_without_zone_context(&said("What a Guy!")));
+        assert!(cond.matches_without_zone_context(&said("Those guys are cool")));
         assert!(!cond.matches_without_zone_context(&said("guyed")));
         assert!(!cond.matches_without_zone_context(&UnTell::Physical(PhysicalTell::Laugh)));
+    }
+
+    #[test]
+    fn word_matches_accepts_plurals_and_rejects_arbitrary_extensions() {
+        assert!(word_matches("guy", "guys"));
+        assert!(word_matches("creature", "creatures"));
+        assert!(word_matches("box", "boxes"));
+        assert!(word_matches("cherry", "cherries"));
+        assert!(!word_matches("guy", "guyed"));
+        assert!(!word_matches("life", "lifeline"));
+        assert!(!word_matches("stop", "stopping"));
+    }
+
+    #[test]
+    fn spoken_words_preserves_hyphenated_words() {
+        let words: Vec<String> = spoken_words("This is a touch-and-go scenario - right?").collect();
+        assert!(words.contains(&"touch-and-go".to_string()));
+        assert!(!words.contains(&"-".to_string()));
     }
 
     #[test]

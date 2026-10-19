@@ -857,10 +857,21 @@ fn pay_ability_cost_inner(
     match cost {
         // Un-card (no CR entry): saying the phrase is the whole payment.
         AbilityCost::SayPhrase { phrase } => {
+            if !super::un_actions::player_can_say_phrases(state, player) {
+                return Ok(payment_failed(
+                    "Player has not opted in to Un-card spoken actions".to_string(),
+                ));
+            }
             events.push(GameEvent::PhraseSaid {
                 player,
                 phrase: phrase.clone(),
             });
+            state.un_actions.pending_tells.push((
+                player,
+                crate::types::un_actions::UnTell::Said {
+                    text: phrase.clone(),
+                },
+            ));
         }
         AbilityCost::Tap => {
             let obj = state

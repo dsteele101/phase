@@ -18328,15 +18328,36 @@ fn resolve_chain_body(
                 // `handle_unless_payment_choose_cost`. This keeps the
                 // single-cost branch in `handle_unless_payment` unchanged.
                 state.waiting_for = match resolved_cost {
-                    AbilityCost::OneOf { costs } => WaitingFor::UnlessPaymentChooseCost {
-                        player: payer,
-                        costs,
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                        remaining_choices: vec![],
-                        chosen: vec![],
-                    },
+                    AbilityCost::OneOf { costs } => {
+                        let available_costs: Vec<_> = costs
+                            .into_iter()
+                            .filter(|c| {
+                                !crate::game::un_actions::cost_requires_unavailable_speech(
+                                    state, payer, c,
+                                )
+                            })
+                            .collect();
+                        if available_costs.len() == 1 {
+                            WaitingFor::UnlessPayment {
+                                player: payer,
+                                cost: available_costs.into_iter().next().unwrap(),
+                                pending_effect: Box::new(pending),
+                                trigger_event: state.current_trigger_event.clone(),
+                                effect_description: ability.description.clone(),
+                                remaining: remaining_payers.to_vec(),
+                            }
+                        } else {
+                            WaitingFor::UnlessPaymentChooseCost {
+                                player: payer,
+                                costs: available_costs,
+                                pending_effect: Box::new(pending),
+                                trigger_event: state.current_trigger_event.clone(),
+                                effect_description: ability.description.clone(),
+                                remaining_choices: vec![],
+                                chosen: vec![],
+                            }
+                        }
+                    }
                     // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
                     // what `expand_per_counter` produces from a `OneOf` base
                     // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
@@ -18355,7 +18376,14 @@ fn resolve_chain_body(
                         let mut queue: Vec<Vec<AbilityCost>> = costs
                             .into_iter()
                             .map(|c| match c {
-                                AbilityCost::OneOf { costs } => costs,
+                                AbilityCost::OneOf { costs } => costs
+                                    .into_iter()
+                                    .filter(|sub| {
+                                        !crate::game::un_actions::cost_requires_unavailable_speech(
+                                            state, payer, sub,
+                                        )
+                                    })
+                                    .collect(),
                                 _ => unreachable!("matched all-OneOf guard above"),
                             })
                             .collect();
