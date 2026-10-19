@@ -34463,7 +34463,7 @@ fn tidehollow_sculler_ltb_returns_linked_exile_without_duration() {
     assert!(
         matches!(
             execute.effect.as_ref(),
-            Effect::ChangeZone {
+            Effect::ChangeZoneAll {
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::ExiledBySource,
@@ -34473,4 +34473,73 @@ fn tidehollow_sculler_ltb_returns_linked_exile_without_duration() {
         "LTB must return the linked exiled card to hand, got {:?}",
         execute.effect
     );
+}
+
+/// CR 607.2a: an exiled card published by an outer instruction remains the
+/// antecedent when its hand-return consumer is parsed in a nested body.
+#[test]
+fn nested_exiled_card_returns_keep_the_enclosing_chain_binding() {
+    fn ability_contains_tracked_return(def: &crate::types::ability::AbilityDefinition) -> bool {
+        fn effect_contains_tracked_return(effect: &Effect) -> bool {
+            match effect {
+                Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+                | Effect::ChangeZoneAll {
+                    destination: Zone::Hand,
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+                | Effect::Bounce {
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                } => true,
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    ability_contains_tracked_return(effect)
+                }
+                _ => false,
+            }
+        }
+
+        effect_contains_tracked_return(&def.effect)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_contains_tracked_return)
+    }
+
+    let cases = [
+        (
+            "delayed",
+            "When this creature enters, exile target creature. At the beginning of the next end step, return the exiled card to its owner's hand.",
+        ),
+        (
+            "reflexive",
+            "When this creature enters, exile target creature. When you do, return the exiled card to its owner's hand.",
+        ),
+        (
+            "continuation",
+            "When this creature enters, exile target creature. If you do, return the exiled card to its owner's hand.",
+        ),
+    ];
+
+    for (form, oracle) in cases {
+        let result = parse(oracle, "Nested Exile Return", &[], &["Creature"], &[]);
+        let has_tracked_return = result.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(ability_contains_tracked_return)
+        });
+        assert!(
+            has_tracked_return,
+            "{form} return must retain the enclosing TrackedSet binding; parsed: {:#?}",
+            result.triggers
+        );
+    }
 }

@@ -13,8 +13,9 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ExileLinkKind, WaitingFor};
+use engine::types::game_state::{ExileLinkKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -25,6 +26,9 @@ const MESMERIC_FIEND: &str = "When this creature enters, target opponent reveals
 When this creature leaves the battlefield, return the exiled card to its owner's hand.";
 
 const MURDER: &str = "Destroy target creature.";
+const STRIONIC_RESONATOR: &str = "{2}, {T}: Copy target triggered ability you control. You may \
+choose new targets for the copy. (A triggered ability uses the words \"when,\" \"whenever,\" or \
+\"at.\")";
 
 fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
     runner.state().objects.get(&id).unwrap().zone
@@ -90,6 +94,105 @@ fn tidehollow_sculler_returns_exiled_card_to_hand_when_it_leaves_play() {
         runner.state().exile_links.is_empty(),
         "ExileLink must be consumed"
     );
+}
+
+/// CR 607.3: copying Sculler's ETB trigger can exile two cards with
+/// the same source. Its singular linked-return wording must process the full set.
+#[test]
+fn copied_tidehollow_sculler_etb_returns_both_linked_cards() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let sculler = scenario
+        .add_creature_to_hand_from_oracle(P0, "Tidehollow Sculler", 2, 2, TIDEHOLLOW_SCULLER)
+        .id();
+    let first_card = scenario.add_card_to_hand(P1, "Doom Blade");
+    let second_card = scenario.add_card_to_hand(P1, "Counterspell");
+    let resonator = scenario
+        .add_artifact_from_oracle(P0, "Strionic Resonator", STRIONIC_RESONATOR)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    drop(runner.cast(sculler).commit());
+    for _ in 0..12 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.last().is_some_and(|entry| {
+                matches!(entry.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == sculler)
+            })
+        {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![engine::types::ability::TargetRef::Player(P1)],
+                    })
+                    .expect("choose the opponent for Sculler's ETB");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority until Sculler's ETB is on the stack");
+            }
+            ref waiting => panic!("unexpected state before Sculler's ETB: {waiting:?}"),
+        }
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let etb = runner.state().stack.last().expect("ETB on stack").id;
+    let activation = runner.activate(resonator, 0).target_object(etb).resolve();
+    if matches!(
+        activation.final_waiting_for(),
+        WaitingFor::CopyRetarget { .. }
+    ) {
+        runner
+            .act(GameAction::KeepAllCopyTargets)
+            .expect("keep the copied ETB's existing opponent target");
+    }
+
+    pass_until(&mut runner, "the copied ETB's exile choice", |r| {
+        matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
+    });
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![first_card],
+        })
+        .expect("choose the first linked card");
+    pass_until(&mut runner, "the original ETB's exile choice", |r| {
+        matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
+    });
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![second_card],
+        })
+        .expect("choose the second linked card");
+
+    for card in [first_card, second_card] {
+        assert_eq!(zone_of(&runner, card), Zone::Exile);
+        assert!(runner.state().exile_links.iter().any(|link| {
+            link.exiled_id == card
+                && link.source_id == sculler
+                && link.kind == ExileLinkKind::TrackedBySource
+        }));
+    }
+
+    runner.cast(destroy).target_object(sculler).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, first_card), Zone::Hand);
+    assert_eq!(zone_of(&runner, second_card), Zone::Hand);
 }
 
 #[test]
@@ -282,6 +385,22 @@ fn tidehollow_sculler_leaving_before_etb_resolves_exiles_indefinitely() {
 
     // Respond to the ETB trigger by destroying Sculler.
     drop(runner.cast(destroy).target_object(sculler).commit());
+    pass_until(
+        &mut runner,
+        "both Sculler triggers with its leaves trigger above its ETB trigger",
+        |r| {
+            zone_of(r, sculler) == Zone::Graveyard
+                && r.state().stack.len() == 2
+                && r.state().stack[0].source_id == sculler
+                && r.state().stack[1].source_id == sculler
+                && r.state().stack[1].ability().is_some_and(|ability| {
+                    matches!(
+                        ability.effect,
+                        engine::types::ability::Effect::ChangeZoneAll { .. }
+                    )
+                })
+        },
+    );
     pass_until(&mut runner, "the exile choice", |r| {
         matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
     });
