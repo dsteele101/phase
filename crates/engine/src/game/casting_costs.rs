@@ -7090,13 +7090,17 @@ pub(super) fn push_activated_ability_to_stack(
             // triggers now against the pre-payment game state so costs (such as sacrificing
             // a creature target) do not alter the target's qualification or zone before
             // becomes-target triggers are matched.
-            let unclaimed = super::announcement_triggers::unclaimed_events(state, events, 0);
+            let start = match state.announcement_event_scope {
+                crate::types::game_state::AnnouncementEventScope::From { start } => start,
+                crate::types::game_state::AnnouncementEventScope::Unowned => events.len(),
+            };
+            let unclaimed = super::announcement_triggers::unclaimed_events(state, events, start);
             if !unclaimed.is_empty() {
                 collection.collect(state, &unclaimed);
                 super::announcement_triggers::claim_ordinary_collected_span(
                     state,
                     events,
-                    0,
+                    start,
                     events.len(),
                 );
             }
