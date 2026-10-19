@@ -17561,7 +17561,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
     // is the same "any target" player-chosen slot as `DealDamage` — surface it so
     // the cast/trigger-time target slot is built.
-    // CR 115.1d + CR 115.4 + CR 615.7: `PreventDamage` with a declared `Single`
+    // CR 115.1a/c/d + CR 115.4 + CR 615.7: `PreventDamage` with a declared `Single`
     // recipient, `TargetFilter::Any`, and no `damage_source_filter` ("prevent the
     // next 2 damage that would be dealt to any target this turn", Aven Redeemer,
     // Healing Salve) is a player-chosen target slot over creatures, planeswalkers,
@@ -34967,7 +34967,7 @@ pub mod tests {
         );
     }
 
-    /// CR 115.1d + CR 115.4 + CR 615.7: `PreventDamage { recipient_scope: Single, target: Any }`
+    /// CR 115.1c + CR 115.4 + CR 615.7: `PreventDamage { recipient_scope: Single, target: Any }`
     /// ("prevent the next 2 damage that would be dealt to any target this turn", Aven Redeemer)
     /// is a declared target over creatures, players, and planeswalkers — must generate a slot.
     #[test]

@@ -37,6 +37,8 @@ const DEFEND_THE_HEARTH: &str =
 const FYLGJA: &str = "Enchant creature\nThis Aura enters with four healing counters on it.\nRemove a healing counter from this Aura: Prevent the next 1 damage that would be dealt to enchanted creature this turn.\n{2}{W}: Put a healing counter on this Aura.";
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
 const BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+const REVERED_ELDER: &str =
+    "{1}: Prevent the next 1 damage that would be dealt to this creature this turn.";
 const SHOCK: &str = "Shock deals 2 damage to any target.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
 
@@ -740,7 +742,7 @@ fn kurbis_shields_only_the_chosen_countered_creature() {
     );
 }
 
-/// CR 115.1d + CR 115.4 + CR 615.7: Aven Redeemer ("Prevent the next 2 damage that would
+/// CR 115.1c + CR 115.4 + CR 615.7: Aven Redeemer ("Prevent the next 2 damage that would
 /// be dealt to any target this turn") must prompt for a target when activated (work item fix),
 /// and the shield must protect only the chosen creature.
 #[test]
@@ -766,7 +768,7 @@ fn aven_redeemer_prompts_for_target_when_activated_and_shields_chosen_creature()
         .expect("activate Aven Redeemer");
     assert!(
         matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
-        "CR 115.1d + CR 115.4: Aven Redeemer must prompt for a target when activated, got {:?}",
+        "CR 115.1c + CR 115.4: Aven Redeemer must prompt for a target when activated, got {:?}",
         result.waiting_for
     );
 
@@ -868,5 +870,77 @@ fn aven_redeemer_shields_up_to_two_damage_and_depletes() {
         outcome2.damage_marked(a),
         3,
         "shield is depleted so full damage is marked"
+    );
+}
+
+/// CR 115.1c + CR 115.10a + CR 201.5: Revered Elder ("{1}: Prevent the next 1 damage that
+/// would be dealt to this creature this turn.") is a self-only prevention ability without
+/// the "target" keyword. Activating it must NOT prompt for a target, and the resulting shield
+/// must protect only Revered Elder (the source), leaving other creatures unshielded.
+#[test]
+fn revered_elder_raises_no_target_prompt_when_activated_and_shields_only_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let elder = scenario
+        .add_creature_from_oracle(P0, "Revered Elder", 1, 2, REVERED_ELDER)
+        .id();
+    let other = scenario.add_creature(P0, "Other", 2, 2).id();
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", true, PYROCLASM)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+
+    // Activating Revered Elder must NOT prompt for a target (CR 115.1c, CR 115.10a).
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: elder,
+            ability_index: 0,
+        })
+        .expect("activate Revered Elder");
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "CR 115.10a: Revered Elder must not prompt for a target when activated, got {:?}",
+        result.waiting_for
+    );
+
+    // Pay mana if in ManaPayment window.
+    if matches!(result.waiting_for, WaitingFor::ManaPayment { .. }) {
+        let _ = runner
+            .act(GameAction::PassPriority)
+            .expect("pay activation mana");
+    }
+
+    // Pass priority until the activated ability resolves on the stack.
+    while !runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+
+    // Pyroclasm deals 2 damage to each creature.
+    // Revered Elder (1/2) has 1 damage prevented, taking 1 damage, and survives.
+    // Other creature (2/2) has no damage prevented, taking 2 damage, and dies.
+    let outcome = runner.cast(pyroclasm).resolve();
+    assert_eq!(
+        outcome.damage_marked(elder),
+        1,
+        "CR 201.5 + CR 615.1: 1 of 2 damage to Revered Elder was prevented by its self-shield"
+    );
+    assert_eq!(
+        outcome.zone_of(elder),
+        Zone::Battlefield,
+        "Revered Elder survives with 1 damage marked on 2 toughness"
+    );
+    assert_eq!(
+        outcome.zone_of(other),
+        Zone::Graveyard,
+        "Other creature received no prevention and died from 2 damage"
     );
 }

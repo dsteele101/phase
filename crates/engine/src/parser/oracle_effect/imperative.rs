@@ -7576,29 +7576,27 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 /// 0. A source-anaphoric gendered pronoun ("him"/"her"/"himself"/"herself") →
 ///    `SelfRef`, UNGATED (CR 201.5 + CR 109.5). Magic templating uses a
 ///    gendered pronoun only as the printed-name self-reference, so unlike the
-///    neuter "it" it needs no `parent_target_available` gate. This tier must
-///    run FIRST: with the gate closed, tier 1 declines and tier 2's
-///    `is_broadcast_population_filter` check rejects `SelfRef`, so without it
-///    "prevent all damage that would be dealt to him this turn" (Gideon Jura,
-///    Gideon of the Trials) fell through to the `Any` default — a shield with
-///    NO recipient constraint, i.e. a turn-long Fog over every damage event in
-///    the game rather than a shield on the Gideon.
+///    neuter "it" it needs no `parent_target_available` gate.
 /// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
 ///    gated on `parent_target_available` (CR 608.2c, issue #1094).
-/// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
-///    mass typed recipients ("creatures"/"players"/"creatures you control" —
-///    Blinding Fog, Defend the Hearth) AND "those permanents"/"those
-///    creatures", which `parse_target` already maps to a `TrackedSet`
-///    sentinel. The sentinel is resolved to a concrete, FROZEN set id at
-///    shield-creation time by `prevent_damage::resolve` — never left as a
-///    live filter — because the antecedent population must be locked in at
-///    resolution regardless of whether it came from a chosen-target clause
-///    (Energy Arc's untapped creatures) or a Continuous-mode static grant
-///    (Mutational Advantage's countered permanents: the resolution-time
-///    population is enumerated once by the widened `GenericEffect` arm in
+/// 2. If no parent target is available, a bare pronoun "it" is a self-reference
+///    to the ability source (CR 201.5; Balduvian Hydra).
+/// 3. Any other recipient phrase `parse_target` recognizes as a real filter —
+///    including self-references ("this creature", "~", "itself" → `SelfRef`,
+///    `EffectScope::Single` per CR 201.5), mass typed recipients
+///    ("creatures"/"players"/"creatures you control" — Blinding Fog, Defend the
+///    Hearth) AND "those permanents"/"those creatures", which `parse_target`
+///    already maps to a `TrackedSet` sentinel. The sentinel is resolved to a
+///    concrete, FROZEN set id at shield-creation time by
+///    `prevent_damage::resolve` — never left as a live filter — because the
+///    antecedent population must be locked in at resolution regardless of
+///    whether it came from a chosen-target clause (Energy Arc's untapped
+///    creatures) or a Continuous-mode static grant (Mutational Advantage's
+///    countered permanents: the resolution-time population is enumerated once by
+///    the widened `GenericEffect` arm in
 ///    `game::effects::affected_objects_from_events`). Mutational Advantage's
-///    official ruling: "The set of permanents affected by Mutational
-///    Advantage is determined at the time Mutational Advantage resolves."
+///    official ruling: "The set of permanents affected by Mutational Advantage
+///    is determined at the time Mutational Advantage resolves."
 ///
 /// Returns `None` only when neither tier recognizes the phrase — the caller
 /// then falls back to the pre-existing `Any` default.
@@ -7625,15 +7623,26 @@ pub(super) fn resolve_prevent_recipient(
     {
         return Some((filter, EffectScope::Single));
     }
-    // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`/`SelfRef`
+    // CR 201.5: If no parent target is available, a bare pronoun "it" in the
+    // recipient position is a self-reference to the ability source (e.g.
+    // Balduvian Hydra: "Prevent the next 1 damage that would be dealt to it this turn").
+    if !parent_target_available && parse_word_bounded(recipient.lower, "it").is_ok() {
+        return Some((TargetFilter::SelfRef, EffectScope::Single));
+    }
+    // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`
     // are inherited-reference filters naming a specific already-established
     // object — exclusively tier 1's gated domain (`parent_target_available`).
     // `parse_target` resolves these unconditionally, with no such gate, so
     // this tier must reject them explicitly — otherwise a standalone recipient
     // anaphor with `parent_target_available == false` would leak through here
     // as an ungated `ParentTarget` binding to a nonexistent chosen target.
+    // CR 201.5: Self-references ("this creature", "~", "itself") name only the
+    // source object and are valid self-only recipients (`EffectScope::Single`).
     let (filter, _, syntax) =
         parse_target_with_syntax(recipient.original, &mut ParseContext::default());
+    if matches!(filter, TargetFilter::SelfRef) {
+        return Some((TargetFilter::SelfRef, EffectScope::Single));
+    }
     if matches!(filter, TargetFilter::Any) || !super::is_broadcast_population_filter(&filter) {
         return None;
     }
@@ -27221,6 +27230,38 @@ mod tests {
                 EffectScope::Single
             )),
             "\"those creatures\" must bind via parse_target's tracked-set dispatch"
+        );
+
+        // CR 201.5: Self-referential phrases resolve to SelfRef with Single scope.
+        for self_phrase in [
+            "this creature this turn.",
+            "~ this turn.",
+            "itself this turn.",
+        ] {
+            let lower = self_phrase.to_lowercase();
+            let tp = TextPair::new(self_phrase, &lower);
+            assert_eq!(
+                resolve_prevent_recipient(tp, false),
+                Some((TargetFilter::SelfRef, EffectScope::Single)),
+                "\"{self_phrase}\" must resolve to SelfRef"
+            );
+        }
+
+        // CR 201.5: Without a parent target, bare "it" refers to the source (SelfRef).
+        let text = "it this turn.";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        assert_eq!(
+            resolve_prevent_recipient(tp, false),
+            Some((TargetFilter::SelfRef, EffectScope::Single)),
+            "bare \"it\" without parent target must resolve to SelfRef (CR 201.5)"
+        );
+
+        // CR 608.2c: With a parent target, bare "it" is an anaphor to the chosen target.
+        assert_eq!(
+            resolve_prevent_recipient(tp, true),
+            Some((TargetFilter::ParentTarget, EffectScope::Single)),
+            "bare \"it\" with parent target must resolve to ParentTarget (CR 608.2c)"
         );
 
         // Neither tier recognizes a genuinely unclassified recipient phrase —
