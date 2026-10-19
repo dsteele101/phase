@@ -47,6 +47,19 @@ fn gotcha_trigger(parsed: &engine::parser::oracle::ParsedAbilities) -> &TriggerD
     trigger
 }
 
+/// The engine finished the action: priority is settled and nothing waits on the stack.
+fn assert_settled(runner: &GameRunner, context: &str) {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{context}: expected settled priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "{context}: the stack is empty"
+    );
+}
+
 fn un_action(runner: &mut GameRunner, actor: engine::types::player::PlayerId, action: UnAction) {
     apply(runner.state_mut(), actor, GameAction::UnAction { action })
         .expect("Un actions are legal in any state");
@@ -525,10 +538,16 @@ fn a_spoken_unless_payment_opens_a_verbal_gotcha_for_the_opponent() {
         let rod = scenario
             .add_artifact_from_oracle(P0, "Rod of Spanking", ROD)
             .id();
+        // Printed Name Dropping text; the graveyard card is a synthetic fixture
+        // whose name shares a word ("another") with the Rod's spoken phrase.
         let card = scenario
-            .add_spell_to_graveyard(P0, "Kill! Destroy!", true)
-            .from_oracle_text("Destroy target nonblack creature.\nGotcha — If an opponent says \"another\" or \"destroy,\" you may say \"Gotcha!\" When you do, return Kill! Destroy! from your graveyard to your hand.")
+            .add_enchantment_from_oracle(
+                P0,
+                "Name Dropping",
+                "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.",
+            )
             .id();
+        scenario.add_spell_to_graveyard(P0, "Another Round", true);
         scenario.with_mana_pool(P0, generic_mana(2));
         (scenario.build(), (rod, card))
     };
@@ -627,12 +646,22 @@ fn infernius_deals_damage_only_when_its_controller_says_the_phrase() {
         17,
         "'If you do': 3 damage to the target player"
     );
+    assert_settled(&runner, "Infernius accepted");
 
     let mut declined = resolve_infernius_etb(true);
+    assert!(
+        matches!(
+            declined.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+        ),
+        "the optional say-it prompt appears before it is declined, got {:?}",
+        declined.state().waiting_for
+    );
     declined
         .act(GameAction::DecideOptionalEffect { accept: false })
         .expect("declining is accepted");
     assert_eq!(declined.life(P1), 20, "unsaid: no damage");
+    assert_settled(&declined, "Infernius declined");
 }
 
 #[test]
@@ -644,6 +673,7 @@ fn infernius_never_asks_a_player_who_did_not_opt_in() {
         runner.state().waiting_for
     );
     assert_eq!(runner.life(P1), 20, "unsaid: no damage");
+    assert_settled(&runner, "Infernius opted out");
 }
 
 #[test]
@@ -755,6 +785,7 @@ fn impounding_lot_bot_exiles_target_only_when_saying_the_phrase() {
         Zone::Exile,
         "Sol Ring is exiled"
     );
+    assert_settled(&runner, "Lot-Bot accepted");
 
     // Declining leaves the target on the battlefield.
     let mut scenario_decline = GameScenario::new();
@@ -785,6 +816,7 @@ fn impounding_lot_bot_exiles_target_only_when_saying_the_phrase() {
         Zone::Battlefield,
         "unsaid: Sol Ring remains on battlefield"
     );
+    assert_settled(&runner_decline, "Lot-Bot declined");
 
     // Opted-out player is never prompted and target remains on the battlefield.
     let mut scenario_opt_out = GameScenario::new();
@@ -815,6 +847,7 @@ fn impounding_lot_bot_exiles_target_only_when_saying_the_phrase() {
         Zone::Battlefield,
         "opted out: Sol Ring remains on battlefield"
     );
+    assert_settled(&runner_opt_out, "Lot-Bot opted out");
 }
 
 #[test]
@@ -852,4 +885,128 @@ fn gotcha_triggers_are_not_doubled_by_trigger_doublers() {
     );
     runner.resolve_top();
     assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+}
+
+/// Name Dropping with P0's Lightning Bolt in `zone`, and Rod of Spanking
+/// waiting on P1's spoken payment. P0 and P1 are both opted in.
+fn name_dropping_during_unless_prompt(bolt_zone: Zone) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rod = scenario
+        .add_artifact_from_oracle(P0, "Rod of Spanking", ROD)
+        .id();
+    let name_dropping = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Name Dropping",
+            "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.",
+        )
+        .id();
+    let bolt = match bolt_zone {
+        Zone::Graveyard => scenario
+            .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+            .id(),
+        _ => scenario.add_spell_to_hand(P0, "Lightning Bolt", true).id(),
+    };
+    scenario.with_mana_pool(P0, generic_mana(2));
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    spank_p1(&mut runner, rod);
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "reach guard: P1's payment decision is pending, got {:?}",
+        runner.state().waiting_for
+    );
+    (runner, name_dropping, bolt)
+}
+
+#[test]
+fn a_tell_matches_cards_in_the_graveyard_when_it_is_made_not_when_announced() {
+    // CR 603.10: the word "bolt" is said while Lightning Bolt is still in hand;
+    // the discard-like move that follows must not retroactively match it.
+    let (mut runner, _name_dropping, bolt) = name_dropping_during_unless_prompt(Zone::Hand);
+    tell(
+        &mut runner,
+        P1,
+        UnTell::Said {
+            text: "bolt".to_string(),
+        },
+    );
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), bolt, Zone::Graveyard, &mut events);
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining the payment is accepted");
+    assert_settled(&runner, "after the prompt");
+    assert!(
+        runner.state().un_actions.gotcha_offers.is_empty(),
+        "a card that was not in the graveyard when the word was said is never offered"
+    );
+}
+
+#[test]
+fn a_tell_made_during_a_decision_is_announced_once_priority_settles() {
+    let (mut runner, name_dropping, bolt) = name_dropping_during_unless_prompt(Zone::Graveyard);
+    tell(
+        &mut runner,
+        P1,
+        UnTell::Said {
+            text: "bolt".to_string(),
+        },
+    );
+    assert!(
+        runner.state().un_actions.gotcha_offers.is_empty(),
+        "the announcement waits for the decision to finish"
+    );
+    for _ in 0..5 {
+        tell(
+            &mut runner,
+            P1,
+            UnTell::Said {
+                text: "bolt".to_string(),
+            },
+        );
+    }
+    assert_eq!(
+        runner.state().un_actions.pending_offers.len(),
+        1,
+        "repeated gestures coalesce into one pending offer per card"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining the payment is accepted");
+    let offers = &runner.state().un_actions.gotcha_offers;
+    assert_eq!(offers.len(), 1);
+    assert_eq!(
+        (offers[0].source_id, offers[0].returns),
+        (name_dropping, bolt)
+    );
+    assert!(runner.state().un_actions.pending_offers.is_empty());
+}
+
+#[test]
+fn a_tell_by_another_player_leaves_a_pending_decision_answerable() {
+    let (mut runner, _name_dropping, _bolt) = name_dropping_during_unless_prompt(Zone::Graveyard);
+    engine::game::interaction::bind_interaction_authority(
+        runner.state_mut(),
+        engine::types::interaction::InteractionSessionId("un-tell".to_string()),
+    )
+    .expect("the interaction authority binds");
+    let slots_before = runner.state().active_interaction_slots.clone();
+    assert!(
+        !slots_before.is_empty(),
+        "reach guard: the pending payment holds a bound interaction slot"
+    );
+    let waiting_before = runner.state().waiting_for.clone();
+    tell(&mut runner, P0, UnTell::Physical(PhysicalTell::TouchFace));
+    assert_eq!(
+        runner.state().active_interaction_slots,
+        slots_before,
+        "a gesture does not rebind the open interaction"
+    );
+    assert_eq!(runner.state().waiting_for, waiting_before);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1's payment answer is still accepted after P0's gesture");
 }

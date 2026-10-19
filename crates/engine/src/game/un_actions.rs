@@ -169,52 +169,61 @@ pub fn open_gotcha_offers(
     offers
 }
 
-/// Append newly opened Gotcha offers to existing offers in `state.un_actions.gotcha_offers`,
-/// minting a unique identifier for each new offer and preserving offers from earlier gestures.
-pub fn append_gotcha_offers(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
-    let new_offers = open_gotcha_offers(state, performer, tell);
-    if new_offers.is_empty() {
-        return;
-    }
+/// Append `new_offers` to `state.un_actions.gotcha_offers`, minting a unique
+/// identifier for each and preserving offers from earlier gestures. An offer
+/// identical (player, source, returned card) to an existing one replaces it, so
+/// the window stays one-per-card.
+fn append_gotcha_offers(state: &mut GameState, new_offers: Vec<GotchaOffer>) {
     for mut offer in new_offers {
         offer.id = state.un_actions.mint_offer_id();
+        state.un_actions.gotcha_offers.retain(|o| {
+            !(o.player == offer.player
+                && o.source_id == offer.source_id
+                && o.returns == offer.returns)
+        });
         state.un_actions.gotcha_offers.push(offer);
     }
-    // Sort so that newer offers (larger id) appear first for identical (player, source_id, returns),
-    // allowing dedup_by to keep the most recent offer.
-    state.un_actions.gotcha_offers.sort_by(|a, b| {
-        (
-            a.player,
-            a.source_id.0,
-            a.returns.0,
-            std::cmp::Reverse(a.id),
-        )
-            .cmp(&(
-                b.player,
-                b.source_id.0,
-                b.returns.0,
-                std::cmp::Reverse(b.id),
-            ))
-    });
-    state.un_actions.gotcha_offers.dedup_by(|b, a| {
-        a.player == b.player && a.source_id == b.source_id && a.returns == b.returns
-    });
     state
         .un_actions
         .gotcha_offers
         .sort_by_key(|o| (o.player, o.source_id.0, o.returns.0, o.id));
 }
 
-/// Drain any pending tells recorded outside priority and generate Gotcha offers
-/// once priority is settled.
+/// Record that `performer` just performed `tell`.
+///
+/// CR 603.10: objects that exist immediately after an event are checked against
+/// the trigger conditions that event matched, so the eligible Gotcha sources and
+/// cards are resolved *now*, when the tell happens. Outside a Priority boundary
+/// only the *announcement* is deferred: the already-matched offers wait in
+/// `pending_offers` (one per player/source/card, so a spammed gesture coalesces
+/// instead of growing the state) and open once priority settles.
+pub fn record_tell(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
+    let offers = open_gotcha_offers(state, performer, tell);
+    if offers.is_empty() {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        append_gotcha_offers(state, offers);
+        return;
+    }
+    for offer in offers {
+        let already_pending = state.un_actions.pending_offers.iter().any(|o| {
+            o.player == offer.player && o.source_id == offer.source_id && o.returns == offer.returns
+        });
+        if !already_pending {
+            state.un_actions.pending_offers.push(offer);
+        }
+    }
+}
+
+/// Open the Gotcha offers matched while a decision was pending, once priority is
+/// next settled.
 pub fn announce_pending_tells(state: &mut GameState) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
-    let pending = std::mem::take(&mut state.un_actions.pending_tells);
-    for (player, tell) in pending {
-        append_gotcha_offers(state, player, &tell);
-    }
+    let pending = std::mem::take(&mut state.un_actions.pending_offers);
+    append_gotcha_offers(state, pending);
 }
 
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
@@ -263,11 +272,7 @@ pub fn apply_un_action(
                 player: actor,
                 tell: tell.clone(),
             }];
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                append_gotcha_offers(state, actor, &tell);
-            } else {
-                state.un_actions.pending_tells.push((actor, tell));
-            }
+            record_tell(state, actor, &tell);
             Ok(ActionResult::applied(events, state.waiting_for.clone()))
         }
         UnAction::SayGotcha { source_id, returns } => {

@@ -1559,7 +1559,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         filtered.un_actions.enabled_players.clear();
         filtered.un_actions.gotcha_offers.clear();
     }
-    filtered.un_actions.pending_tells.clear();
+    filtered.un_actions.pending_offers.clear();
 
     // Hidden-information + fairness integrity: the game's RNG is a deterministic
     // ChaCha20 stream seeded from `rng_seed`, and that seed is a serialized field

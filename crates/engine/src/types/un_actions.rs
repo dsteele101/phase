@@ -124,10 +124,11 @@ pub struct UnActionState {
     /// ordinary action, so a window never outlives the moment it was offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gotcha_offers: Vec<GotchaOffer>,
-    /// Spoken or physical gestures that occurred while not at a priority boundary,
-    /// waiting to be processed when priority is next reached.
+    /// Gotcha offers already matched by a gesture made while not at a priority
+    /// boundary, waiting to be announced when priority is next reached. One per
+    /// (player, source, returned card), so the list is bounded by the cards in play.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_tells: Vec<(PlayerId, UnTell)>,
+    pub pending_offers: Vec<GotchaOffer>,
     /// Next unique identifier minted for a [`GotchaOffer`].
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_offer_id: u64,
@@ -154,7 +155,7 @@ impl UnActionState {
         self.enabled_players.is_empty()
             && self.gotcha_offers.is_empty()
             && self.menu.is_empty()
-            && self.pending_tells.is_empty()
+            && self.pending_offers.is_empty()
             && self.next_offer_id == 0
     }
 }
@@ -174,41 +175,8 @@ pub enum UnAction {
     },
 }
 
-/// Spelled-out number words recognised by [`GotchaCondition::SaysNumber`].
-const NUMBER_WORDS: &[&str] = &[
-    "zero",
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "eleven",
-    "twelve",
-    "thirteen",
-    "fourteen",
-    "fifteen",
-    "sixteen",
-    "seventeen",
-    "eighteen",
-    "nineteen",
-    "twenty",
-    "thirty",
-    "forty",
-    "fifty",
-    "sixty",
-    "seventy",
-    "eighty",
-    "ninety",
-    "hundred",
-    "thousand",
-    "million",
-    "billion",
-];
+/// Magnitude words the shared number grammar (`parse_number`) does not cover.
+const EXTRA_NUMBER_WORDS: &[&str] = &["zero", "hundred", "thousand", "million", "billion"];
 
 /// Split spoken text into lowercase words. Hyphenated words are preserved as single words.
 pub fn spoken_words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -240,15 +208,16 @@ pub fn word_matches(watched: &str, spoken: &str) -> bool {
         }
     }
     // 2. +es for words ending in s, x, z, ch, sh (e.g. "box" -> "boxes", "match" -> "matches")
-    if w.ends_with('s')
+    if (w.ends_with('s')
         || w.ends_with('x')
         || w.ends_with('z')
         || w.ends_with("ch")
-        || w.ends_with("sh")
+        || w.ends_with("sh"))
+        && s.len() == w.len() + 2
+        && s.starts_with(&w)
+        && s.ends_with("es")
     {
-        if s.len() == w.len() + 2 && s.starts_with(&w) && s.ends_with("es") {
-            return true;
-        }
+        return true;
     }
     // 3. +s for regular words (e.g. "guy" -> "guys", "creature" -> "creatures")
     if !w.ends_with('s') && s.len() == w.len() + 1 && s.starts_with(&w) && s.ends_with('s') {
@@ -257,8 +226,17 @@ pub fn word_matches(watched: &str, spoken: &str) -> bool {
     false
 }
 
+/// Whether a single spoken word names a number. Delegates to the shared number
+/// grammar (digits, "seven", hyphenated "twenty-one"), rejecting the articles
+/// "a"/"an" it also reads as one.
 fn is_number_word(word: &str) -> bool {
-    word.chars().all(|c| c.is_ascii_digit()) || NUMBER_WORDS.contains(&word)
+    if EXTRA_NUMBER_WORDS.contains(&word) {
+        return true;
+    }
+    if matches!(word, "a" | "an") {
+        return false;
+    }
+    crate::parser::oracle_nom::primitives::parse_number(word).is_ok_and(|(rest, _)| rest.is_empty())
 }
 
 impl GotchaCondition {
@@ -333,6 +311,12 @@ mod tests {
         assert!(cond.matches_without_zone_context(&said("42")));
         assert!(cond.matches_without_zone_context(&said("I have Seven cats")));
         assert!(!cond.matches_without_zone_context(&said("none of them")));
+        assert!(cond.matches_without_zone_context(&said("twenty-one")));
+        assert!(cond.matches_without_zone_context(&said("Forty-Two!")));
+        assert!(cond.matches_without_zone_context(&said("a thousand")));
+        assert!(!cond.matches_without_zone_context(&said("a")));
+        assert!(!cond.matches_without_zone_context(&said("an apple")));
+        assert!(!cond.matches_without_zone_context(&said("twenty-apple")));
     }
 
     #[test]

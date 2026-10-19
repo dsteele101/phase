@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GotchaOffer } from "../../adapter/types.ts";
@@ -25,30 +25,56 @@ export function GotchaButton() {
   const spectator = useSpectatorMode();
   const offers = useGameStore((s) => s.gameState?.un_actions?.gotcha_offers);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const [expiredKey, setExpiredKey] = useState<string | null>(null);
+  // Each engine-issued offer id carries its own two-second fuse, so a new offer
+  // never revives an expired one and claiming one never restarts the others.
+  const [expiredIds, setExpiredIds] = useState<ReadonlySet<number>>(new Set());
+  const timers = useRef(new Map<number, number>());
 
   const mine = useMemo<GotchaOffer[]>(
     () => (offers ?? []).filter((offer) => offer.player === playerId),
     [offers, playerId],
   );
-  const windowKey = mine.map((o) => `${o.id}`).join("|");
 
   useEffect(() => {
-    if (!windowKey) {
-      // The window closed: forget the expiry so an identical later window shows again.
-      setExpiredKey(null);
-      return;
+    const live = new Set(mine.map((offer) => offer.id));
+    for (const [id, timer] of timers.current) {
+      if (!live.has(id)) {
+        window.clearTimeout(timer);
+        timers.current.delete(id);
+      }
     }
-    const timer = window.setTimeout(() => setExpiredKey(windowKey), GOTCHA_BUTTON_MS);
-    return () => window.clearTimeout(timer);
-  }, [windowKey]);
+    // Forget expiries of closed windows so an identical later window shows again.
+    setExpiredIds((prev) => {
+      const kept = [...prev].filter((id) => live.has(id));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+    for (const id of live) {
+      if (timers.current.has(id)) continue;
+      timers.current.set(
+        id,
+        window.setTimeout(
+          () => setExpiredIds((prev) => new Set(prev).add(id)),
+          GOTCHA_BUTTON_MS,
+        ),
+      );
+    }
+  }, [mine]);
 
-  if (spectator || mine.length === 0 || expiredKey === windowKey) return null;
+  useEffect(() => {
+    const active = timers.current;
+    return () => {
+      for (const timer of active.values()) window.clearTimeout(timer);
+      active.clear();
+    };
+  }, []);
+
+  const visible = mine.filter((offer) => !expiredIds.has(offer.id));
+  if (spectator || visible.length === 0) return null;
 
   return (
     <div className="fixed inset-x-0 bottom-40 z-[54] flex flex-wrap justify-center gap-3">
       <AnimatePresence>
-        {mine.map((offer) => (
+        {visible.map((offer) => (
           <motion.button
             key={offer.id}
             type="button"
@@ -71,7 +97,7 @@ export function GotchaButton() {
             }
           >
             {t("unActions.gotcha.button")}
-            {mine.length > 1 && objects?.[offer.returns] && (
+            {visible.length > 1 && objects?.[offer.returns] && (
               <span className="block text-sm font-semibold normal-case tracking-normal">
                 {objects[offer.returns].name}
               </span>

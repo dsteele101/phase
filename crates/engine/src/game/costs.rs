@@ -866,12 +866,13 @@ fn pay_ability_cost_inner(
                 player,
                 phrase: phrase.clone(),
             });
-            state.un_actions.pending_tells.push((
+            super::un_actions::record_tell(
+                state,
                 player,
-                crate::types::un_actions::UnTell::Said {
+                &crate::types::un_actions::UnTell::Said {
                     text: phrase.clone(),
                 },
-            ));
+            );
         }
         AbilityCost::Tap => {
             let obj = state

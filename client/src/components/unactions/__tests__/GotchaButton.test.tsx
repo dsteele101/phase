@@ -8,19 +8,48 @@ import { GOTCHA_BUTTON_MS, GotchaButton } from "../GotchaButton";
 
 const { dispatch } = vi.hoisted(() => ({ dispatch: vi.fn() }));
 
+// Exit animations are not under test; unmount immediately so the DOM mirrors the visible offers.
+vi.mock("framer-motion", async () => {
+  const React = await import("react");
+  const MOTION_PROPS = new Set([
+    "initial",
+    "animate",
+    "exit",
+    "transition",
+    "whileHover",
+    "whileTap",
+  ]);
+  const motion = new Proxy(
+    {},
+    {
+      get: (_target, tag: string) =>
+        function MotionStub({ children, ...props }: Record<string, unknown>) {
+          const dom = Object.fromEntries(
+            Object.entries(props).filter(([key]) => !MOTION_PROPS.has(key)),
+          );
+          return React.createElement(tag, dom, children as React.ReactNode);
+        },
+    },
+  );
+  return { motion, AnimatePresence: ({ children }: { children: React.ReactNode }) => children };
+});
+
 vi.mock("../../../hooks/useGameDispatch", () => ({
   useGameDispatch: () => dispatch,
 }));
 
 function offerGotcha(player: number, id = 1) {
+  offerGotchas([{ id, player, source_id: 9, returns: 9 }]);
+}
+
+function offerGotchas(
+  offers: { id: number; player: number; source_id: number; returns: number }[],
+) {
   act(() => {
     useGameStore.setState({
       gameMode: "ai",
       gameState: gameStateFactory.build({
-        un_actions: {
-          enabled_players: [0, 1],
-          gotcha_offers: [{ id, player, source_id: 9, returns: 9 }],
-        },
+        un_actions: { enabled_players: [0, 1], gotcha_offers: offers },
       }),
     });
   });
@@ -103,6 +132,38 @@ describe("GotchaButton", () => {
     act(() => {
       // Advance remaining 1000ms to complete offer 2's 2000ms
       vi.advanceTimersByTime(1000);
+    });
+    expect(screen.queryByRole("button", { name: /gotcha!/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps an expired offer hidden when an unrelated offer arrives, and times each offer separately", () => {
+    const a = { id: 1, player: 0, source_id: 9, returns: 9 };
+    const b = { id: 2, player: 0, source_id: 10, returns: 10 };
+    offerGotchas([a]);
+    render(<GotchaButton />);
+
+    act(() => {
+      vi.advanceTimersByTime(GOTCHA_BUTTON_MS);
+    });
+    expect(screen.queryByRole("button", { name: /gotcha!/i })).not.toBeInTheDocument();
+
+    // B arrives while A is still in engine state: only B is shown.
+    offerGotchas([a, b]);
+    expect(screen.getAllByRole("button", { name: /gotcha!/i })).toHaveLength(1);
+
+    // A third offer arrives mid-fuse: B keeps its own clock.
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    const c = { id: 3, player: 0, source_id: 11, returns: 11 };
+    offerGotchas([a, b, c]);
+    act(() => {
+      // B's fuse (2000ms from t=2000) runs out; let its exit animation finish.
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getAllByRole("button", { name: /gotcha!/i })).toHaveLength(1);
+    act(() => {
+      vi.advanceTimersByTime(1100);
     });
     expect(screen.queryByRole("button", { name: /gotcha!/i })).not.toBeInTheDocument();
   });
