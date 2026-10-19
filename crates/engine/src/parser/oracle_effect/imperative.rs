@@ -7815,6 +7815,7 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
     // CR 115.1a + CR 115.10a: only a declared recipient is Single here;
     // untargeted descriptors are classified by resolve_prevent_recipient.
     let mut recipient_scope = EffectScope::Single;
+    let mut undeclared_recipient = false;
     let target = if let Some((filter, _)) = declared_recipient {
         filter
     } else if let Some(conjunct) = parse_compound_you_and_permanents(text, &lower) {
@@ -7849,13 +7850,37 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         // prior `Any` fallback: a recipient phrase that no tier recognizes
         // still falls through to `Any` below.
         filter
+    } else if parent_target_available
+        && matches!(amount, PreventionAmount::Next(_))
+        && !nom_primitives::scan_contains(rest, "would")
+    {
+        // CR 608.2c + CR 115.10a: a bare "prevent the next N damage" shorthand
+        // ("If it's a green creature, prevent the next 2 damage instead" — Elvish
+        // Healer) names no recipient of its own; it continues the antecedent
+        // clause's declared recipient rather than declaring a new one.
+        TargetFilter::ParentTarget
     } else {
-        // Default: "that would be dealt" with no specific target → Any
+        // CR 115.10a: no recipient phrase names a target, so the recipient is
+        // not declared; `Any` is a broadcast fallback, never an "any target" slot.
+        undeclared_recipient = true;
         TargetFilter::Any
     };
 
     let damage_source_filter = parse_prevent_damage_source_filter(text, &lower)
         .or_else(|| parse_prevent_that_would_deal_source_filter(text, &lower));
+
+    // CR 115.10a: a counted shield ("prevent the next N damage") whose recipient
+    // phrase declares nothing and that has no source scope or inherited parent
+    // target is a broadcast, not an "any target" slot. Source-scoped shields
+    // (Barbed Wire) and prevent-all shields (Sewers of Estark) keep `Single` so
+    // inherited chain targets can still host them.
+    if undeclared_recipient
+        && matches!(amount, PreventionAmount::Next(_))
+        && damage_source_filter.is_none()
+        && !parent_target_available
+    {
+        recipient_scope = EffectScope::All;
+    }
 
     // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
     // <quantity>" override) is populated at chunk level by
@@ -7990,6 +8015,10 @@ fn parse_compound_you_and_permanents(
 fn parse_prevent_damage_source_filter(_text: &str, lower: &str) -> Option<TargetFilter> {
     let (_, (_, after_by)) = nom_primitives::split_once_on(lower, " by ").ok()?;
     let subject = after_by.trim().trim_end_matches('.').trim();
+    // CR 615.3: a trailing duration window ("by this artifact this turn" —
+    // Barbed Wire) bounds the shield, not the source phrase.
+    let subject = nom_primitives::split_once_on(subject, " this turn")
+        .map_or(subject, |(_, (source, _))| source.trim());
     crate::parser::oracle_replacement::parse_damage_source_subject_filter(subject)
 }
 

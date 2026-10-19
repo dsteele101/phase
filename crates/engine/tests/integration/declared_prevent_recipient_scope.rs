@@ -31,6 +31,9 @@ const REDEEM: &str =
 const NOBLE_VESTIGE: &str = "Flying\n{T}: Prevent the next 1 damage that would be dealt to target player or planeswalker this turn.";
 const AVEN_REDEEMER: &str =
     "Flying\n{T}: Prevent the next 2 damage that would be dealt to any target this turn.";
+const ELVISH_HEALER: &str = "{T}: Prevent the next 1 damage that would be dealt to any target this turn. If it's a green creature, prevent the next 2 damage instead.";
+const BARBED_WIRE: &str =
+    "{2}: Prevent the next 1 damage that would be dealt by this artifact this turn.";
 const BLINDING_FOG: &str = "Prevent all damage that would be dealt to creatures this turn. Creatures you control gain hexproof until end of turn. (They can't be the targets of spells or abilities your opponents control.)";
 const DEFEND_THE_HEARTH: &str =
     "Prevent all combat damage that would be dealt to players this turn.";
@@ -942,5 +945,87 @@ fn revered_elder_raises_no_target_prompt_when_activated_and_shields_only_source(
         outcome.zone_of(other),
         Zone::Graveyard,
         "Other creature received no prevention and died from 2 damage"
+    );
+}
+
+/// CR 115.10a: Barbed Wire's "dealt by this artifact" names a damage source, not a
+/// recipient, so activating it must not prompt for a target.
+#[test]
+fn barbed_wire_raises_no_target_prompt_when_activated() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wire = scenario
+        .add_creature_from_oracle(P0, "Barbed Wire", 1, 1, BARBED_WIRE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: wire,
+            ability_index: 0,
+        })
+        .expect("activate Barbed Wire");
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "CR 115.10a: Barbed Wire must not prompt for a target, got {:?}",
+        result.waiting_for
+    );
+}
+
+/// CR 115.1d + CR 608.2c: Elvish Healer declares one "any target" recipient; the
+/// "prevent the next 2 damage instead" shorthand reuses it and adds no second prompt.
+#[test]
+fn elvish_healer_prompts_once_and_shields_only_the_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let healer = scenario
+        .add_creature_from_oracle(P0, "Elvish Healer", 1, 2, ELVISH_HEALER)
+        .id();
+    let a = scenario.add_creature(P0, "A", 2, 2).id();
+    let b = scenario.add_creature(P0, "B", 2, 2).id();
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .id();
+    let mut runner = scenario.build();
+
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: healer,
+            ability_index: 0,
+        })
+        .expect("activate Elvish Healer");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "Elvish Healer must prompt for its any-target recipient, got {:?}",
+        result.waiting_for
+    );
+    let result = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(a)),
+        })
+        .expect("choose target creature A");
+    assert!(
+        !matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "the instead-shorthand must not prompt for a second target, got {:?}",
+        result.waiting_for
+    );
+    while !runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+
+    let outcome = runner.cast(pyroclasm).resolve();
+    assert_eq!(outcome.damage_marked(a), 1, "1 of 2 damage to A prevented");
+    assert_eq!(outcome.zone_of(a), Zone::Battlefield);
+    assert_eq!(
+        outcome.zone_of(b),
+        Zone::Graveyard,
+        "unchosen B is unshielded"
     );
 }
