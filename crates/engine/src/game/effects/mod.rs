@@ -5305,6 +5305,26 @@ fn declined_search_parent_controller_available(
     }
 }
 
+// CR 108.3 + CR 608.2h: mirror `parent_target_owner` — the first object target
+// whose owner is known (live or LKI), else the propagated effect-context object.
+fn declined_search_parent_owner_available(state: &GameState, ability: &ResolvedAbility) -> bool {
+    ability
+        .target_occurrences()
+        .into_iter()
+        .enumerate()
+        .find_map(|(position, (target, _))| match target {
+            TargetRef::Object(id)
+                if state.objects.contains_key(&id) || state.lki_cache.contains_key(&id) =>
+            {
+                Some(declined_search_selected_object(
+                    state, ability, position, id,
+                ))
+            }
+            TargetRef::Object(_) | TargetRef::Player(_) => None,
+        })
+        .unwrap_or_else(|| ability.effect_context_object.is_some())
+}
+
 // CR 608.2c: each scope keeps the identity/fallback its ordinary reader consumes.
 fn declined_search_player_scope_dependency(
     state: &GameState,
@@ -5327,6 +5347,9 @@ fn declined_search_player_scope_dependency(
         }),
         PlayerScope::ParentObjectTargetController => !context
             .is_some_and(|ability| declined_search_parent_controller_available(state, ability)),
+        PlayerScope::ParentObjectTargetOwner => {
+            !context.is_some_and(|ability| declined_search_parent_owner_available(state, ability))
+        }
         PlayerScope::RecipientController => context.is_some_and(|ability| {
             ability
                 .target_occurrences()
