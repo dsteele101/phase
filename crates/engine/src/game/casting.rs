@@ -26131,7 +26131,9 @@ mod starting_life_board_state_tests {
             PlayerScope::Target,
             PlayerScope::ScopedPlayer,
             PlayerScope::RecipientController,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            },
         ] {
             assert!(!ability_condition_is_board_state_evaluable(&condition(
                 scope
@@ -29038,9 +29040,7 @@ fn object_scope_reads_chosen_target(scope: &ObjectScope, read: TargetRead) -> bo
 
 fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> bool {
     match player {
-        PlayerScope::Target
-        | PlayerScope::ParentObjectTargetController
-        | PlayerScope::ParentObjectTargetOwner => read.includes_bindable(),
+        PlayerScope::Target | PlayerScope::ParentObjectTarget { .. } => read.includes_bindable(),
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(|x| player_scope_reads_chosen_target(x, read)),

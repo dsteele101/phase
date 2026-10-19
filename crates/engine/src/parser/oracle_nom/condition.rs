@@ -4462,7 +4462,9 @@ fn parse_more_life_than_you_comparison(input: &str) -> OracleResult<'_, StaticCo
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::ParentObjectTargetController,
+                    player: PlayerScope::ParentObjectTarget {
+                        possession: crate::types::ability::PossessionAxis::Controller,
+                    },
                 },
             },
             comparator: Comparator::GT,
@@ -9974,10 +9976,9 @@ fn parse_no_cards_in_your_zone(input: &str) -> OracleResult<'_, StaticCondition>
 }
 
 /// CR 108.3 + CR 404.1 + CR 608.2c: Absence of cards in the referenced graveyard
-/// ("no cards are in that graveyard" / "there are no cards in that graveyard" /
-/// "no cards are in that player's graveyard" / "there are no cards in that player's graveyard").
+/// ("no cards are in that graveyard" / "there are no cards in that graveyard").
 ///
-/// "That graveyard" / "that player's graveyard" refers to the graveyard of the
+/// "That graveyard" refers to the graveyard of the
 /// owner of the parent instruction's object target (e.g. Nezumi Graverobber:
 /// "{1}{B}: Exile target card from an opponent's graveyard. If no cards are in
 /// that graveyard, flip Nezumi Graverobber.").
@@ -9997,11 +9998,7 @@ fn parse_no_cards_in_that_graveyard(input: &str) -> OracleResult<'_, StaticCondi
         ))
         .parse(rest)?
     };
-    let (rest, _) = alt((
-        tag("that graveyard"),
-        recognize((tag("that player"), parse_apostrophe_s, tag(" graveyard"))),
-    ))
-    .parse(rest)?;
+    let (rest, _) = tag("that graveyard").parse(rest)?;
     if !type_text.is_empty() {
         return Err(oracle_err(input));
     }
@@ -10009,7 +10006,9 @@ fn parse_no_cards_in_that_graveyard(input: &str) -> OracleResult<'_, StaticCondi
         rest,
         make_quantity_comparison(
             QuantityRef::GraveyardSize {
-                player: PlayerScope::ParentObjectTargetOwner,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Owner,
+                },
             },
             Comparator::EQ,
             0,
@@ -16109,10 +16108,6 @@ mod tests {
         let cases = [
             "no cards are in that graveyard",
             "there are no cards in that graveyard",
-            "no cards are in that player's graveyard",
-            "there are no cards in that player's graveyard",
-            "no cards are in that player’s graveyard",
-            "there are no cards in that player’s graveyard",
         ];
         for text in cases {
             let (rest, condition) = parse_no_cards_in_that_graveyard(text)
@@ -16123,7 +16118,9 @@ mod tests {
                 StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::GraveyardSize {
-                            player: PlayerScope::ParentObjectTargetOwner,
+                            player: PlayerScope::ParentObjectTarget {
+                                possession: crate::types::ability::PossessionAxis::Owner
+                            },
                         },
                     },
                     comparator: Comparator::EQ,
@@ -19086,7 +19083,7 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::ParentObjectTargetController,
+                        player: PlayerScope::ParentObjectTarget { possession: crate::types::ability::PossessionAxis::Controller },
                     },
                 },
                 comparator: Comparator::GT,
