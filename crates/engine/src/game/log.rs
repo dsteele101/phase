@@ -496,6 +496,9 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::DieRollIgnored { .. }
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::CoinFlipped { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::RoomDoorUnlocked { .. }
@@ -570,6 +573,9 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DieRolled { .. }
         | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
@@ -1038,6 +1044,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::DieRolled { .. }
         | GameEvent::DieRollIgnored { .. }
         | GameEvent::CoinFlipped { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
         | GameEvent::RingTemptsYou { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::Firebend { .. }
@@ -1952,6 +1961,26 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" flips a coin: "),
             text(if *won { "wins" } else { "loses" }),
+        ],
+
+        // Un-card actions (no CR entry): narrate the gestures and spoken phrases.
+        GameEvent::UnTellPerformed { player, tell } => vec![
+            player_seg(state, *player),
+            text(&format!(" {}", tell.log_phrase())),
+        ],
+
+        GameEvent::PhraseSaid { player, phrase } => vec![
+            player_seg(state, *player),
+            text(&format!(" says \"{phrase}\"")),
+        ],
+
+        GameEvent::GotchaSaid {
+            player, returns, ..
+        } => vec![
+            player_seg(state, *player),
+            text(" says \"Gotcha!\" and returns "),
+            card_seg(state, *returns),
+            text(" to hand"),
         ],
 
         GameEvent::RingTemptsYou { player_id, .. } => {

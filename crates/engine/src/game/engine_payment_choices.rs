@@ -1139,7 +1139,8 @@ pub(super) fn handle_unless_payment(
             // Phase 3). Resolution scope auto-taps via `pay_effect_mana_cost`
             // — the same final mana path the old `pay_unless_cost` shim used —
             // and maps an unpayable cost to the "unless" branch fall-through.
-            AbilityCost::Mana { .. } => {
+            // Un-card: `SayPhrase` pays through the same authority (no resources move).
+            AbilityCost::Mana { .. } | AbilityCost::SayPhrase { .. } => {
                 match costs::pay_ability_cost_for_resolution(
                     state,
                     player,

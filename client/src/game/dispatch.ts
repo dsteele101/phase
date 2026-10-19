@@ -15,6 +15,7 @@ import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { flashCompletedScry, flashInGameRolls } from "./diceContest";
+import { flashUnActionEvents } from "./unActions";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
@@ -96,7 +97,7 @@ type BoundGameSession = {
 
 type GameSessionPreferenceAction = Extract<
   GameAction,
-  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" }
+  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" } | { type: "UnAction" }
 >;
 
 /** Module-level mutex — replaces useRef from the hook version. */
@@ -261,6 +262,7 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     || next.action.type === "CancelAutoPass"
     || next.action.type === "SetMayTriggerAutoChoice"
     || next.action.type === "SetReplacementAutoChoice"
+    || next.action.type === "UnAction"
   ) {
     return true;
   }
@@ -583,6 +585,7 @@ async function processAction(
   // NON_VISUAL so normalizeEvents skips them below.
   flashInGameRolls(events);
   flashCompletedScry(events);
+  flashUnActionEvents(events);
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
@@ -967,6 +970,7 @@ async function processRemoteUpdateInner(
 
   flashInGameRolls(events);
   flashCompletedScry(events);
+  flashUnActionEvents(events);
 
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;

@@ -11610,8 +11610,10 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             target: TargetFilter::SelfRef,
             ..
         } => transform_effect::optional_self_transform_is_impossible(state, ability),
+        // Un-card: a spoken payment is infeasible for a payer who has not opted in
+        // to Un-card actions (`can_pay_resolution`), so no "you may say" prompt opens.
         Effect::PayCost {
-            cost: cost @ AbilityCost::TapCreatures { .. },
+            cost: cost @ (AbilityCost::TapCreatures { .. } | AbilityCost::SayPhrase { .. }),
             payer,
             ..
         } => {
@@ -16746,7 +16748,11 @@ fn resolve_chain_body(
             return Ok(());
         }
 
-        let description = ability.description.clone();
+        // Un-card: a "you may say ..." prompt names the phrase it asks for.
+        let description = ability
+            .description
+            .clone()
+            .or_else(|| crate::game::un_actions::say_phrase_prompt(&ability.effect));
         // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
         // not a duplicated authority: the KEY is what has to be built in one place, and it
         // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
@@ -16869,6 +16875,10 @@ fn resolve_chain_body(
                         *p,
                         &resolved_cost,
                         ability,
+                    ) && !crate::game::un_actions::cost_requires_unavailable_speech(
+                        state,
+                        *p,
+                        &resolved_cost,
                     )
                 })
                 .and_then(|head| unless_payers[head..].split_first())
@@ -19692,7 +19702,9 @@ fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
             mana_cost: cost, ..
         } => *cost == ManaCost::NoCost,
         AbilityCost::PerCounter { base, .. } => unless_cost_is_unpayable(base),
-        AbilityCost::ManaDynamic { .. }
+        // Un-card: a spoken phrase is always payable by an opted-in player.
+        AbilityCost::SayPhrase { .. }
+        | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }

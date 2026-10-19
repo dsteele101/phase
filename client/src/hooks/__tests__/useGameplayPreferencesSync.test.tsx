@@ -22,6 +22,7 @@ describe("useGameplayPreferencesSync", () => {
     usePreferencesStore.setState({
       phaseStops: [],
       priorityPassingMode: "Standard",
+      unCardActionsEnabled: false,
     });
     useGameStore.setState({
       adapter: null,
@@ -158,5 +159,37 @@ describe("useGameplayPreferencesSync", () => {
         expect.any(Number),
       );
     });
+  });
+  it("sends the Un-card actions opt-in only once it is enabled, and again when it is withdrawn", async () => {
+    useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1 });
+    renderHook(() => useGameplayPreferencesSync());
+
+    // Reach guard: the two standing preferences go out, the default-off opt-in does not.
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(2));
+    expect(dispatchActionForGameSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "UnAction" }),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    act(() => usePreferencesStore.getState().setUnCardActionsEnabled(true));
+    await waitFor(() =>
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: true } } } },
+        adapter,
+        expect.any(Number),
+      ),
+    );
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3);
+
+    act(() => usePreferencesStore.getState().setUnCardActionsEnabled(false));
+    await waitFor(() =>
+      expect(dispatchActionForGameSession).toHaveBeenLastCalledWith(
+        { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: false } } } },
+        adapter,
+        expect.any(Number),
+      ),
+    );
+    expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4);
   });
 });

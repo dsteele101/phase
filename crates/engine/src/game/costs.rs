@@ -764,6 +764,13 @@ fn pay_ability_cost_inner(
         ));
     }
     match cost {
+        // Un-card (no CR entry): saying the phrase is the whole payment.
+        AbilityCost::SayPhrase { phrase } => {
+            events.push(GameEvent::PhraseSaid {
+                player,
+                phrase: phrase.clone(),
+            });
+        }
         AbilityCost::Tap => {
             let obj = state
                 .objects
@@ -2099,6 +2106,8 @@ pub(crate) fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope, QuantityExpr};
 
     match cost {
+        // Un-card: "you may say \"...\". If you do" is a direct optional payment.
+        AbilityCost::SayPhrase { .. } => true,
         AbilityCost::Mana { cost } => !super::casting_costs::cost_has_x(cost),
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value },
@@ -2188,6 +2197,7 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::PayLife { .. }
         | AbilityCost::PayEnergy { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
@@ -2395,6 +2405,7 @@ pub(crate) fn resolution_cost_includes_impossible_event(
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::PayLife { .. }
@@ -2439,6 +2450,8 @@ fn can_pay_resolution(
 ) -> bool {
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
+        // Un-card: saying a phrase needs no resources, only a player who opted in.
+        AbilityCost::SayPhrase { .. } => state.un_actions.is_enabled(payer),
         AbilityCost::Mana { cost: mana_cost } => {
             can_pay_effect_mana_cost_after_auto_tap(
                 state,
@@ -2808,6 +2821,9 @@ mod tests {
             },
             AbilityCost::Tap => AbilityCost::Tap,
             AbilityCost::Untap => AbilityCost::Untap,
+            AbilityCost::SayPhrase { .. } => AbilityCost::SayPhrase {
+                phrase: "Gotcha!".to_string(),
+            },
             AbilityCost::Loyalty { .. } => AbilityCost::Loyalty { amount: 1 },
             AbilityCost::Sacrifice(_) => {
                 AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))

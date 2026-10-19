@@ -2727,6 +2727,8 @@ pub(crate) fn extract_source_from_event(
             Some(saga.identity.reference.object_id)
         }
         GameEvent::Evolved { object_id } => Some(*object_id),
+        // Un-card Gotcha: "that card" is the card being returned.
+        GameEvent::GotchaSaid { returns, .. } => Some(*returns),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),
@@ -2884,6 +2886,9 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
+        | GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::TokenCreated { .. }
         | GameEvent::ExtraTurnCreated { .. }

@@ -6728,6 +6728,7 @@ fn validate_x_mana_sacrifice_residual(
             AbilityCost::Sacrifice(_)
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Loyalty { .. }
