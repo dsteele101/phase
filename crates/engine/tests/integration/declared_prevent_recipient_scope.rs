@@ -19,7 +19,7 @@ use engine::types::counter::{parse_counter_type, CounterType};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -34,6 +34,7 @@ const AVEN_REDEEMER: &str =
 const ELVISH_HEALER: &str = "{T}: Prevent the next 1 damage that would be dealt to any target this turn. If it's a green creature, prevent the next 2 damage instead.";
 const BARBED_WIRE: &str =
     "{2}: Prevent the next 1 damage that would be dealt by this artifact this turn.";
+const BARBED_WIRE_DAMAGE: &str = "{T}: This artifact deals 1 damage to target player.";
 const BLINDING_FOG: &str = "Prevent all damage that would be dealt to creatures this turn. Creatures you control gain hexproof until end of turn. (They can't be the targets of spells or abilities your opponents control.)";
 const DEFEND_THE_HEARTH: &str =
     "Prevent all combat damage that would be dealt to players this turn.";
@@ -757,10 +758,18 @@ fn aven_redeemer_prompts_for_target_when_activated_and_shields_chosen_creature()
         .id();
     let a = scenario.add_creature(P0, "A", 2, 2).id();
     let b = scenario.add_creature(P0, "B", 2, 2).id();
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+    let artifact = scenario.add_artifact_from_oracle(P0, "Bauble", "").id();
+    let battle = scenario.add_enchantment_from_oracle(P1, "Battle", "").id();
     let pyroclasm = scenario
         .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
         .id();
     let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&battle).unwrap();
+        object.card_types.core_types = vec![engine::types::card_type::CoreType::Battle];
+        object.base_card_types = object.card_types.clone();
+    }
 
     // Work item assertion: activating Aven Redeemer must ask for a target.
     let result = runner
@@ -773,6 +782,22 @@ fn aven_redeemer_prompts_for_target_when_activated_and_shields_chosen_creature()
         matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
         "CR 115.1c + CR 115.4: Aven Redeemer must prompt for a target when activated, got {:?}",
         result.waiting_for
+    );
+    let WaitingFor::TargetSelection { target_slots, .. } = &result.waiting_for else {
+        panic!("Aven Redeemer target prompt must expose its legal target slot");
+    };
+    let legal = &target_slots[0].legal_targets;
+    assert!(
+        legal.contains(&TargetRef::Object(battle)),
+        "CR 115.4: battles are legal any-targets"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(land)),
+        "CR 115.4: lands are not legal any-targets"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(artifact)),
+        "CR 115.4: noncreature artifacts are not legal any-targets"
     );
 
     // Select creature A as the target.
@@ -954,8 +979,17 @@ fn revered_elder_raises_no_target_prompt_when_activated_and_shields_only_source(
 fn barbed_wire_raises_no_target_prompt_when_activated() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // The second ability is a fixture that lets the artifact be a damage
+    // source; the prevention ability uses Barbed Wire's exact Oracle text.
     let wire = scenario
-        .add_creature_from_oracle(P0, "Barbed Wire", 1, 1, BARBED_WIRE)
+        .add_artifact_from_oracle(
+            P0,
+            "Barbed Wire",
+            &format!("{BARBED_WIRE}\n{BARBED_WIRE_DAMAGE}"),
+        )
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", false, SHOCK)
         .id();
     scenario.with_mana_pool(
         P0,
@@ -965,8 +999,19 @@ fn barbed_wire_raises_no_target_prompt_when_activated() {
         ],
     );
     let mut runner = scenario.build();
+    assert!(
+        matches!(
+            runner.state().objects[&wire].abilities[0].effect.as_ref(),
+            Effect::PreventDamage {
+                damage_source_filter: Some(_),
+                ..
+            }
+        ),
+        "Barbed Wire must retain its printed source restriction: {:#?}",
+        runner.state().objects[&wire].abilities[0].effect
+    );
 
-    let result = runner
+    let mut result = runner
         .act(GameAction::ActivateAbility {
             source_id: wire,
             ability_index: 0,
@@ -977,9 +1022,95 @@ fn barbed_wire_raises_no_target_prompt_when_activated() {
         "CR 115.10a: Barbed Wire must not prompt for a target, got {:?}",
         result.waiting_for
     );
+    let mut events = std::mem::take(&mut result.events);
+    if matches!(result.waiting_for, WaitingFor::ManaPayment { .. }) {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pay activation mana")
+                .events,
+        );
+    }
+    while !runner.state().stack.is_empty() {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Barbed Wire")
+                .events,
+        );
+    }
+    assert!(
+        prevention_resolved(&events),
+        "reach guard: the untargeted spell installed a PreventDamage effect"
+    );
+
+    let outcome = runner.cast(shock).target_player(P1).resolve();
+    assert_eq!(
+        outcome.life_delta(P1),
+        -2,
+        "damage from a different source must not consume Barbed Wire's shield"
+    );
+
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: wire,
+            ability_index: 1,
+        })
+        .expect("activate Barbed Wire's test damage ability");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "the fixture ability should target a player"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("target the opponent with Barbed Wire");
+    let mut events = Vec::new();
+    while !runner.state().stack.is_empty() {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Barbed Wire damage")
+                .events,
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamagePrevented { amount: 1, .. })),
+        "Barbed Wire's own damage should be prevented"
+    );
 }
 
-/// CR 115.1d + CR 608.2c: Elvish Healer declares one "any target" recipient; the
+/// CR 608.2k + CR 120.1: a passive damage trigger's bare "it" refers to the
+/// damaged object captured from the trigger condition throughout parsing and
+/// lowering.
+#[test]
+fn passive_damage_trigger_prevention_bare_it_binds_the_damaged_object() {
+    let parsed = parse_oracle_text(
+        "Whenever a creature is dealt damage, prevent the next 1 damage that would be dealt to it this turn.",
+        "Damage Recipient Preventer",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("damage trigger parses");
+    let execute = trigger.execute.as_deref().expect("trigger has a body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::PreventDamage {
+                target: engine::types::ability::TargetFilter::EventTarget,
+                ..
+            }
+        ),
+        "the prevention recipient must remain the damaged object through the production parser: {:#?}",
+        execute.effect
+    );
+}
+
+/// CR 115.1c + CR 608.2c: Elvish Healer declares one "any target" recipient; the
 /// "prevent the next 2 damage instead" shorthand reuses it and adds no second prompt.
 #[test]
 fn elvish_healer_prompts_once_and_shields_only_the_chosen_creature() {
@@ -988,12 +1119,28 @@ fn elvish_healer_prompts_once_and_shields_only_the_chosen_creature() {
     let healer = scenario
         .add_creature_from_oracle(P0, "Elvish Healer", 1, 2, ELVISH_HEALER)
         .id();
-    let a = scenario.add_creature(P0, "A", 2, 2).id();
+    let a = scenario
+        .add_creature(P0, "A", 2, 2)
+        .with_color(vec![ManaColor::Green])
+        .id();
     let b = scenario.add_creature(P0, "B", 2, 2).id();
     let pyroclasm = scenario
         .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
         .id();
     let mut runner = scenario.build();
+
+    assert!(
+        matches!(
+            runner.state().objects[&healer].abilities[0]
+                .sub_ability
+                .as_deref()
+                .and_then(|branch| branch.condition.as_ref()),
+            Some(engine::types::ability::AbilityCondition::ConditionInstead { inner })
+                if matches!(inner.as_ref(), engine::types::ability::AbilityCondition::TargetMatchesFilter { .. })
+        ),
+        "Elvish Healer must parse its green-creature instead rider as a target condition: {:#?}",
+        runner.state().objects[&healer].abilities[0]
+    );
 
     let result = runner
         .act(GameAction::ActivateAbility {
@@ -1021,7 +1168,11 @@ fn elvish_healer_prompts_once_and_shields_only_the_chosen_creature() {
     }
 
     let outcome = runner.cast(pyroclasm).resolve();
-    assert_eq!(outcome.damage_marked(a), 1, "1 of 2 damage to A prevented");
+    assert_eq!(
+        outcome.damage_marked(a),
+        0,
+        "CR 608.2c: the green target receives the 2-damage instead shield"
+    );
     assert_eq!(outcome.zone_of(a), Zone::Battlefield);
     assert_eq!(
         outcome.zone_of(b),

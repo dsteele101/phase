@@ -10169,6 +10169,24 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 }
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
+    // CR 608.2c + CR 615.2: source-scoped prevention can name its own source
+    // with a deictic object phrase (Barbed Wire: "by this artifact").
+    if all_consuming(alt((
+        value(
+            TargetFilter::SelfRef,
+            tag::<_, _, OracleError<'_>>("this artifact"),
+        ),
+        value(TargetFilter::SelfRef, tag("this creature")),
+        value(TargetFilter::SelfRef, tag("this permanent")),
+        value(TargetFilter::SelfRef, tag("this source")),
+        value(TargetFilter::SelfRef, tag("~")),
+    )))
+    .parse(subject)
+    .is_ok()
+    {
+        return Some(TargetFilter::SelfRef);
+    }
+
     // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
     // "enchanted creature") resolve to the attached object before the generic
     // typed-source grammar, which would otherwise treat "creature" as a type.
@@ -35378,5 +35396,24 @@ mod damage_source_union {
             vec![TypeFilter::Subtype("Giant".to_string())]
         );
         assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 608.2c + CR 615.2: source deictics bind to the object hosting the
+    /// effect, including Barbed Wire's "this artifact" wording.
+    #[test]
+    fn source_deictics_bind_the_source_object() {
+        for phrase in [
+            "this artifact",
+            "this creature",
+            "this permanent",
+            "this source",
+            "~",
+        ] {
+            assert_eq!(
+                parse_damage_source_subject_filter(phrase),
+                Some(TargetFilter::SelfRef),
+                "{phrase}"
+            );
+        }
     }
 }

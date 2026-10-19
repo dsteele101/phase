@@ -6549,6 +6549,9 @@ pub(super) fn parse_utility_imperative_ast(
                 // to. This is the one construction site where `ParseContext` is
                 // live; downstream lowering has only the captured flag.
                 parent_target_available: ctx.parent_target_available,
+                // CR 608.2k + CR 120.1: preserve a condition-derived object
+                // referent for bare `it` in passive damage triggers.
+                object_pronoun_ref: ctx.object_pronoun_ref.clone(),
             }),
             "regenerate" => Some(UtilityImperativeAst::Regenerate {
                 text: text.to_string(),
@@ -7488,7 +7491,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Prevent {
             text,
             parent_target_available,
-        } => parse_prevent_effect(&text, parent_target_available),
+            object_pronoun_ref,
+        } => parse_prevent_effect_with_context(&text, parent_target_available, object_pronoun_ref),
         UtilityImperativeAst::Regenerate { text } => {
             let lower = text.to_lowercase();
             let rest = tag::<_, _, OracleError<'_>>("regenerate ")
@@ -7579,11 +7583,11 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 ///    neuter "it" it needs no `parent_target_available` gate.
 /// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
 ///    gated on `parent_target_available` (CR 608.2c, issue #1094).
-/// 2. If no parent target is available, a bare pronoun "it" is a self-reference
-///    to the ability source (CR 201.5; Balduvian Hydra).
+/// 2. If no parent or condition-derived reference is available, a bare "it"
+///    is interpreted contextually as the ability source (CR 608.2c; Balduvian Hydra).
 /// 3. Any other recipient phrase `parse_target` recognizes as a real filter —
 ///    including self-references ("this creature", "~", "itself" → `SelfRef`,
-///    `EffectScope::Single` per CR 201.5), mass typed recipients
+///    `EffectScope::Single` per CR 608.2c), mass typed recipients
 ///    ("creatures"/"players"/"creatures you control" — Blinding Fog, Defend the
 ///    Hearth) AND "those permanents"/"those creatures", which `parse_target`
 ///    already maps to a `TrackedSet` sentinel. The sentinel is resolved to a
@@ -7612,6 +7616,14 @@ pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
 ) -> Option<(TargetFilter, EffectScope)> {
+    resolve_prevent_recipient_with_context(recipient, parent_target_available, None)
+}
+
+fn resolve_prevent_recipient_with_context(
+    recipient: TextPair<'_>,
+    parent_target_available: bool,
+    object_pronoun_ref: Option<TargetFilter>,
+) -> Option<(TargetFilter, EffectScope)> {
     // CR 201.5 + CR 109.5: tier 0 — the ungated printed-name self-reference.
     if let Some((filter, _)) =
         crate::parser::oracle_target::parse_source_anaphoric_pronoun_ref(recipient.original)
@@ -7623,11 +7635,16 @@ pub(super) fn resolve_prevent_recipient(
     {
         return Some((filter, EffectScope::Single));
     }
-    // CR 201.5: If no parent target is available, a bare pronoun "it" in the
-    // recipient position is a self-reference to the ability source (e.g.
-    // Balduvian Hydra: "Prevent the next 1 damage that would be dealt to it this turn").
-    if !parent_target_available && parse_word_bounded(recipient.lower, "it").is_ok() {
-        return Some((TargetFilter::SelfRef, EffectScope::Single));
+    // CR 608.2k + CR 120.1: a bare `it` can refer to the object named by the
+    // trigger condition (the damage recipient). Use that antecedent after a
+    // nearer parent target, and before the source-self shorthand.
+    if parse_word_bounded(recipient.lower, "it").is_ok() {
+        if let Some(object_pronoun_ref) = object_pronoun_ref {
+            return Some((object_pronoun_ref, EffectScope::Single));
+        }
+        if !parent_target_available {
+            return Some((TargetFilter::SelfRef, EffectScope::Single));
+        }
     }
     // CR 608.2c: `ParentTarget`/`TriggeringSource`/`CostPaidObject`
     // are inherited-reference filters naming a specific already-established
@@ -7636,7 +7653,7 @@ pub(super) fn resolve_prevent_recipient(
     // this tier must reject them explicitly — otherwise a standalone recipient
     // anaphor with `parent_target_available == false` would leak through here
     // as an ungated `ParentTarget` binding to a nonexistent chosen target.
-    // CR 201.5: Self-references ("this creature", "~", "itself") name only the
+    // CR 608.2c: Self-references ("this creature", "~", "itself") name only the
     // source object and are valid self-only recipients (`EffectScope::Single`).
     let (filter, _, syntax) =
         parse_target_with_syntax(recipient.original, &mut ParseContext::default());
@@ -7694,7 +7711,16 @@ fn prevent_recipient_phrase(lower: &str) -> Option<(&str, &str)> {
 /// the same effect chain selected a target that a trailing anaphor ("that
 /// creature" / "the creature" / "it") can bind to via `ParentTarget`. When
 /// false the anaphor recognizer is a no-op and the target falls back to `Any`.
+#[cfg(test)]
 fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
+    parse_prevent_effect_with_context(text, parent_target_available, None)
+}
+
+fn parse_prevent_effect_with_context(
+    text: &str,
+    parent_target_available: bool,
+    object_pronoun_ref: Option<TargetFilter>,
+) -> Effect {
     let lower = text.to_lowercase();
     let rest = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(&*lower)
@@ -7840,7 +7866,13 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         TargetFilter::Controller
     } else if let Some(filter) = TextPair::new(text, &lower)
         .strip_after("dealt to ")
-        .and_then(|tp| resolve_prevent_recipient(tp, parent_target_available))
+        .and_then(|tp| {
+            resolve_prevent_recipient_with_context(
+                tp,
+                parent_target_available,
+                object_pronoun_ref.clone(),
+            )
+        })
     {
         let (filter, scope) = filter;
         recipient_scope = scope;
@@ -15596,6 +15628,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             UtilityImperativeAst::Prevent {
                 ref text,
                 parent_target_available,
+                ref object_pronoun_ref,
             },
         )) => {
             // CR 615 + CR 608.2c (issue #1094): a bidirectional "dealt to and
@@ -15617,6 +15650,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             let effect = lower_utility_imperative_ast(UtilityImperativeAst::Prevent {
                 text: text.clone(),
                 parent_target_available,
+                object_pronoun_ref: object_pronoun_ref.clone(),
             });
             // CR 601.2c + CR 115.6: only a declared recipient carries an announced
             // count ("up to two target creatures" — Redeem).
@@ -27261,7 +27295,8 @@ mod tests {
             "\"those creatures\" must bind via parse_target's tracked-set dispatch"
         );
 
-        // CR 201.5: Self-referential phrases resolve to SelfRef with Single scope.
+        // CR 201.5 + CR 109.5: printed-name and reflexive self references resolve
+        // to the source with Single scope.
         for self_phrase in [
             "this creature this turn.",
             "~ this turn.",
@@ -27276,14 +27311,15 @@ mod tests {
             );
         }
 
-        // CR 201.5: Without a parent target, bare "it" refers to the source (SelfRef).
+        // CR 608.2c: In this utility context with no earlier target or event
+        // object, bare "it" defaults to the source (SelfRef).
         let text = "it this turn.";
         let lower = text.to_lowercase();
         let tp = TextPair::new(text, &lower);
         assert_eq!(
             resolve_prevent_recipient(tp, false),
             Some((TargetFilter::SelfRef, EffectScope::Single)),
-            "bare \"it\" without parent target must resolve to SelfRef (CR 201.5)"
+            "bare \"it\" without parent target must resolve to SelfRef (CR 608.2c)"
         );
 
         // CR 608.2c: With a parent target, bare "it" is an anaphor to the chosen target.
@@ -27302,6 +27338,30 @@ mod tests {
             resolve_prevent_recipient(tp, false),
             None,
             "an unclassified recipient phrase must fall through, not silently guess"
+        );
+    }
+
+    #[test]
+    fn prevent_bare_it_uses_condition_object_after_parent_target() {
+        let recipient = TextPair::new("it", "it");
+        assert_eq!(
+            resolve_prevent_recipient_with_context(
+                recipient,
+                false,
+                Some(TargetFilter::EventTarget),
+            ),
+            Some((TargetFilter::EventTarget, EffectScope::Single)),
+            "CR 608.2k + CR 120.1: a passive damage trigger's bare it is its damaged recipient"
+        );
+
+        assert_eq!(
+            resolve_prevent_recipient_with_context(
+                recipient,
+                true,
+                Some(TargetFilter::EventTarget),
+            ),
+            Some((TargetFilter::ParentTarget, EffectScope::Single)),
+            "CR 608.2c: a nearer chosen parent target takes precedence"
         );
     }
 
