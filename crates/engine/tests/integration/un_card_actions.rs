@@ -517,6 +517,45 @@ fn name_dropping_returns_the_graveyard_card_whose_name_the_opponent_said() {
     );
 }
 
+#[test]
+fn a_spoken_unless_payment_opens_a_verbal_gotcha_for_the_opponent() {
+    let (mut runner_setup, rod) = {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let rod = scenario
+            .add_artifact_from_oracle(P0, "Rod of Spanking", ROD)
+            .id();
+        let card = scenario
+            .add_spell_to_graveyard(P0, "Kill! Destroy!", true)
+            .from_oracle_text("Destroy target nonblack creature.\nGotcha — If an opponent says \"another\" or \"destroy,\" you may say \"Gotcha!\" When you do, return Kill! Destroy! from your graveyard to your hand.")
+            .id();
+        scenario.with_mana_pool(P0, generic_mana(2));
+        (scenario.build(), (rod, card))
+    };
+    let (rod, card) = rod;
+    un_action(
+        &mut runner_setup,
+        P0,
+        UnAction::SetEnabled { enabled: true },
+    );
+    un_action(
+        &mut runner_setup,
+        P1,
+        UnAction::SetEnabled { enabled: true },
+    );
+    spank_p1(&mut runner_setup, rod);
+    assert!(
+        runner_setup.state().un_actions.gotcha_offers.is_empty(),
+        "reach guard: nothing was said yet"
+    );
+    runner_setup
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("saying the phrase is accepted");
+    let offers = &runner_setup.state().un_actions.gotcha_offers;
+    assert_eq!(offers.len(), 1, "P1 saying the phrase opens P0's Gotcha");
+    assert_eq!((offers[0].player, offers[0].source_id), (P0, card));
+}
+
 const INFERNIUS: &str = "When this creature enters, you may say \"I'm here.\" If you do, it deals 3 damage to target player.";
 
 /// Drive Infernius through the scenario runner's real ETB trigger (selecting P1
