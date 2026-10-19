@@ -26262,6 +26262,59 @@ fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
     );
 }
 
+/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Tidehollow Sculler / Mesmeric Fiend
+/// hand-reveal exile paired with an LTB return to owner's hand. The ETB exile
+/// is a sub-ability under `Effect::RevealHand`, and the LTB return is `Effect::Bounce`
+/// (return to hand). The two-trigger exile-return synthesis must pair them,
+/// stamping `Duration::UntilHostLeavesPlay` on the ETB exile sub-ability so the
+/// engine's `ExileLink::UntilSourceLeaves` mechanism returns the card to its
+/// owner's hand when the creature leaves the battlefield.
+#[test]
+fn tidehollow_sculler_etb_exile_gets_until_host_leaves_duration() {
+    let oracle = "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card.\n\
+                  When this creature leaves the battlefield, return the exiled card to its owner's hand.";
+    let result = parse(
+        oracle,
+        "Tidehollow Sculler",
+        &[],
+        &["Artifact", "Creature"],
+        &[],
+    );
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .expect("must have ETB trigger");
+
+    let execute = etb.execute.as_deref().expect("ETB must have execute");
+    assert_eq!(
+        execute.duration,
+        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+        "ETB trigger root must carry UntilHostLeavesPlay"
+    );
+
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("ETB execute must have sub_ability for exile");
+    assert_eq!(
+        sub.duration,
+        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+        "ETB exile sub-ability must carry UntilHostLeavesPlay so the engine returns the card"
+    );
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "ETB sub-ability must be ChangeZone→Exile"
+    );
+}
+
 /// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: the mass-exile arm of the
 /// two-trigger exile-return class. Worldgorger Dragon ("exile all other
 /// permanents you control") parses its ETB to `Effect::ChangeZoneAll`→Exile,
