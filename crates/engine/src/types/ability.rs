@@ -8526,7 +8526,15 @@ pub enum PlayerScope {
     /// or exile. The player-scalar-axis analogue of
     /// `ControllerRef::ParentTargetController` / `ParentTargetOwner`. Resolved
     /// via `ability_utils::parent_target_controller` / `parent_target_owner`.
-    ParentObjectTarget { possession: PossessionAxis },
+    ///
+    /// Backward-compat: deserializes from the legacy tag
+    /// `ParentObjectTargetController` (no fields) via `#[serde(alias)]`,
+    /// defaulting `possession = PossessionAxis::Controller`.
+    #[serde(alias = "ParentObjectTargetController")]
+    ParentObjectTarget {
+        #[serde(default = "default_parent_object_target_possession")]
+        possession: PossessionAxis,
+    },
     /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
     /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
     /// player" replacement). The player-scalar-axis analogue of
@@ -21241,6 +21249,12 @@ fn default_counter_transfer_mode() -> CounterTransferMode {
 
 fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
+}
+
+/// Backward-compat default for the legacy `PlayerScope::ParentObjectTargetController` unit tag.
+/// Old saves carried no `possession` field; the tag itself meant the controller.
+fn default_parent_object_target_possession() -> PossessionAxis {
+    PossessionAxis::Controller
 }
 
 /// Backward-compat default for the legacy
@@ -40910,6 +40924,18 @@ mod tests {
                 filter: TargetFilter::Any,
                 comparator: Comparator::GE,
                 count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }
+        );
+    }
+
+    #[test]
+    fn player_scope_legacy_parent_object_target_controller_alias_defaults_to_controller() {
+        let json = r#"{"type": "ParentObjectTargetController"}"#;
+        let deserialized: PlayerScope = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            deserialized,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
             }
         );
     }

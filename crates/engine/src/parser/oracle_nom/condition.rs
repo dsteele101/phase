@@ -16126,7 +16126,7 @@ mod tests {
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },
                 },
-                "expected GraveyardSize(ParentObjectTargetOwner) == 0 for {text:?}"
+                "expected GraveyardSize(ParentObjectTarget {{ Owner }}) == 0 for {text:?}"
             );
 
             // Also verify parse_inner_condition dispatches to it end-to-end
