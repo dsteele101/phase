@@ -851,12 +851,17 @@ mod tests {
         scope: PreventionScope,
         targets: Vec<TargetRef>,
     ) -> ResolvedAbility {
+        let recipient_scope = if targets.is_empty() {
+            EffectScope::All
+        } else {
+            EffectScope::Single
+        };
         ResolvedAbility::new(
             Effect::PreventDamage {
                 amount,
                 amount_dynamic: None,
                 target: TargetFilter::Any,
-                recipient_scope: EffectScope::Single,
+                recipient_scope,
                 scope,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -1004,7 +1009,7 @@ mod tests {
                 amount: PreventionAmount::Next(1),
                 amount_dynamic: Some(QuantityExpr::Fixed { value: 4 }),
                 target: TargetFilter::Any,
-                recipient_scope: EffectScope::Single,
+                recipient_scope: EffectScope::All,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
@@ -4176,7 +4181,7 @@ mod tests {
             source,
             PlayerId(0),
             TargetFilter::Any,
-            EffectScope::Single,
+            EffectScope::All,
             None,
             PreventionAmount::Next(1),
         );
@@ -4333,7 +4338,7 @@ mod tests {
                 shield_source,
                 PlayerId(0),
                 TargetFilter::Any,
-                EffectScope::Single,
+                EffectScope::All,
                 None,
                 PreventionAmount::Next(1),
             );
