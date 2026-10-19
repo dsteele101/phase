@@ -24119,7 +24119,9 @@ mod tests {
                 player: PlayerScope::Target,
             },
             QuantityRef::HandSize {
-                player: PlayerScope::ParentObjectTargetController,
+                player: PlayerScope::ParentObjectTarget {
+                    possession: PossessionAxis::Controller,
+                },
             },
             QuantityRef::TargetControllerCounter {
                 kind: crate::types::player::PlayerCounterKind::Poison,
@@ -24407,7 +24409,9 @@ mod tests {
             },
         ]));
         let attr = QuantityRef::BattlefieldEntriesThisTurn {
-            player: PlayerScope::ParentObjectTargetController,
+            player: PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             filter,
         };
         assert_eq!(
@@ -24835,14 +24839,18 @@ mod tests {
                 exclude: Some(Box::new(PlayerScope::RecipientController)),
             },
             PlayerScope::Target,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
             PlayerScope::AllPlayers {
                 aggregate: crate::types::ability::AggregateFunction::Sum,
                 exclude: Some(Box::new(PlayerScope::Target)),
             },
             PlayerScope::AllPlayers {
                 aggregate: crate::types::ability::AggregateFunction::Sum,
-                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                    possession: PossessionAxis::Controller,
+                })),
             },
         ] {
             let needs_parent = match &scope {
