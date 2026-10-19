@@ -189,3 +189,36 @@ fn mogg_fanatic_targeting_itself_triggers_horobi() {
         "both Mogg Fanatic's ability and Horobi's trigger must reach the stack"
     );
 }
+
+/// CR 601.2c + CR 601.2g + CR 602.2b: targets are announced before mana costs
+/// are paid. When Bonesplitter's equip ability targets Blood Pet with an empty
+/// mana pool, the automatic mana payment sacrifices Blood Pet to pay the {1}
+/// equip cost. Because Blood Pet was a legal battlefield creature target when
+/// announced, Horobi must trigger, and both the equip ability and Horobi's
+/// trigger reach the stack.
+#[test]
+fn bonesplitter_targeting_sacrificed_blood_pet_mana_source_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Horobi, Death's Wail", 4, 4, HOROBI);
+    let pet = scenario
+        .add_creature_from_oracle(P0, "Blood Pet", 1, 1, "Sacrifice this creature: Add {B}.")
+        .id();
+    let bonesplitter = scenario
+        .add_artifact_from_oracle(P0, "Bonesplitter", "Equip {1}")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .activate(bonesplitter, 0)
+        .target_object(pet)
+        .resolve();
+
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert_eq!(
+        stack_pushes(outcome.events()),
+        2,
+        "both Bonesplitter's equip ability and Horobi's trigger must reach the stack"
+    );
+}
