@@ -901,7 +901,7 @@ fn aven_redeemer_shields_up_to_two_damage_and_depletes() {
     );
 }
 
-/// CR 115.1c + CR 115.10a + CR 201.5: Revered Elder ("{1}: Prevent the next 1 damage that
+/// CR 115.1c + CR 115.10a + CR 608.2c: Revered Elder ("{1}: Prevent the next 1 damage that
 /// would be dealt to this creature this turn.") is a self-only prevention ability without
 /// the "target" keyword. Activating it must NOT prompt for a target, and the resulting shield
 /// must protect only Revered Elder (the source), leaving other creatures unshielded.
@@ -959,7 +959,7 @@ fn revered_elder_raises_no_target_prompt_when_activated_and_shields_only_source(
     assert_eq!(
         outcome.damage_marked(elder),
         1,
-        "CR 201.5 + CR 615.1: 1 of 2 damage to Revered Elder was prevented by its self-shield"
+        "CR 608.2c + CR 615.1: 1 of 2 damage to Revered Elder was prevented by its self-shield"
     );
     assert_eq!(
         outcome.zone_of(elder),
