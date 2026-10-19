@@ -8283,6 +8283,11 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_cost: Option<Box<AbilityCost>>,
+        /// CR 603.10a: `zone_changes_this_turn` indices of the battlefield
+        /// departures already performed by this payment, so the whole selection
+        /// is stamped as one simultaneous departure across replacement pauses.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        departure_record_indices: Vec<usize>,
     },
 }
 

@@ -12624,6 +12624,7 @@ fn apply_non_priority_pass_action(
                 }
                 match kind {
                     PayCostKind::ReturnToHand => {
+                        let mut departure_record_indices = Vec::new();
                         for (index, &id) in chosen.iter().enumerate() {
                             match crate::game::zone_pipeline::move_object(
                                 state,
@@ -12636,6 +12637,13 @@ fn apply_non_priority_pass_action(
                             ) {
                                 crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                                 crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                    super::morph::stamp_cost_move_departures(
+                                        state,
+                                        &mut events,
+                                        0,
+                                        &chosen,
+                                        &mut departure_record_indices,
+                                    );
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
@@ -12645,6 +12653,7 @@ fn apply_non_priority_pass_action(
                                             chosen: chosen.clone(),
                                             paused_at_index: index,
                                             remaining_cost: remaining_cost.clone(),
+                                        departure_record_indices,
                                         },
                                     );
                                     if state.pending_replacement.is_some() {
@@ -12672,6 +12681,13 @@ fn apply_non_priority_pass_action(
                                 }
                             }
                         }
+                        super::morph::stamp_cost_move_departures(
+                            state,
+                            &mut events,
+                            0,
+                            &chosen,
+                            &mut departure_record_indices,
+                        );
                         super::morph::finish_or_continue_turn_face_up(
                             state,
                             *player,
@@ -12682,6 +12698,7 @@ fn apply_non_priority_pass_action(
                         )?
                     }
                     PayCostKind::Discard => {
+                        let mut departure_record_indices = Vec::new();
                         for (index, &id) in chosen.iter().enumerate() {
                             match super::effects::discard::discard_as_cost_with_source(
                                 state,
@@ -12692,6 +12709,13 @@ fn apply_non_priority_pass_action(
                             ) {
                                 super::effects::discard::DiscardOutcome::Complete => {}
                                 super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                                    super::morph::stamp_cost_move_departures(
+                                        state,
+                                        &mut events,
+                                        0,
+                                        &chosen,
+                                        &mut departure_record_indices,
+                                    );
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
@@ -12701,6 +12725,7 @@ fn apply_non_priority_pass_action(
                                             chosen: chosen.clone(),
                                             paused_at_index: index,
                                             remaining_cost: remaining_cost.clone(),
+                                        departure_record_indices,
                                         },
                                     );
                                     if state.pending_replacement.is_some() {
@@ -12709,7 +12734,7 @@ fn apply_non_priority_pass_action(
                                             choice_player,
                                         );
                                     }
-                                    // CR 603.2 + CR 603.3b: Retain ordinary discard observers
+                                    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
                                     // across the interactive pause until priority can drain them.
                                     crate::game::triggers::park_observer_triggers_if_paused(
                                         state,
@@ -12735,6 +12760,7 @@ fn apply_non_priority_pass_action(
                         )?
                     }
                     PayCostKind::Sacrifice => {
+                        let mut departure_record_indices = Vec::new();
                         for (index, &id) in chosen.iter().enumerate() {
                             match super::sacrifice::sacrifice_permanent(
                                 state,
@@ -12744,6 +12770,13 @@ fn apply_non_priority_pass_action(
                             )? {
                                 super::sacrifice::SacrificeOutcome::Complete => {}
                                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                                    super::morph::stamp_cost_move_departures(
+                                        state,
+                                        &mut events,
+                                        0,
+                                        &chosen,
+                                        &mut departure_record_indices,
+                                    );
                                     state.pending_cost_move_resume = Some(
                                         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
                                             player: *player,
@@ -12753,6 +12786,7 @@ fn apply_non_priority_pass_action(
                                             chosen: chosen.clone(),
                                             paused_at_index: index,
                                             remaining_cost: remaining_cost.clone(),
+                                        departure_record_indices,
                                         },
                                     );
                                     if state.pending_replacement.is_some() {
@@ -12761,7 +12795,7 @@ fn apply_non_priority_pass_action(
                                             choice_player,
                                         );
                                     }
-                                    // CR 603.2 + CR 603.3b: Retain ordinary sacrifice observers
+                                    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
                                     // across the interactive pause until priority can drain them.
                                     crate::game::triggers::park_observer_triggers_if_paused(
                                         state,
@@ -12777,6 +12811,13 @@ fn apply_non_priority_pass_action(
                                 }
                             }
                         }
+                        super::morph::stamp_cost_move_departures(
+                            state,
+                            &mut events,
+                            0,
+                            &chosen,
+                            &mut departure_record_indices,
+                        );
                         super::morph::finish_or_continue_turn_face_up(
                             state,
                             *player,
