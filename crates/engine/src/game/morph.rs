@@ -695,6 +695,7 @@ pub(crate) fn finish_or_continue_turn_face_up(
 pub(crate) fn resume_turn_face_up_cost_move(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    action_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
     let Some(crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
         player,
@@ -709,7 +710,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
         return Ok(state.waiting_for.clone());
     };
 
-    let events_before = events.len();
+    let events_before = action_event_start.unwrap_or_else(|| events.len());
     for (index, &card_id) in chosen.iter().enumerate().skip(paused_at_index + 1) {
         match move_kind {
             crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand => {
