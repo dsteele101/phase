@@ -2212,17 +2212,43 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             BounceSelection::Targeted
         };
+        // CR 607.2a + CR 406.6: "return the exiled card to its owner's hand" in
+        // a printed ability linked to an earlier exile ability (Tidehollow
+        // Sculler, Mesmeric Fiend, Ashiok's Erasure) names the card exiled by the
+        // linked ability, which resolved separately. Bind it durably to
+        // `ExiledBySource` so it resolves from the source's linked-exile ledger
+        // (LKI-snapshotted on leaving the battlefield, CR 603.10a) rather than the
+        // chain-local `TrackedSet(0)` sentinel. A return to the battlefield keeps
+        // its binding: that class is paired with its ETB exile by
+        // `detect_etb_exile_ltb_return`, which keys on the `TrackedSet` shape.
+        let returns_to_battlefield = matches!(dest, Some(ref d) if d.zone == Zone::Battlefield);
+        let target = if !returns_to_battlefield
+            && ctx.current_ability_exile_cost_zone.is_none()
+            && target_text.trim().eq_ignore_ascii_case("the exiled card")
+        {
+            resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+        } else {
+            target
+        };
         let is_mass = is_mass || count.is_some();
-        let origin = super::infer_origin_zone(rest_lower).or_else(|| {
-            matches!(
-                target,
-                TargetFilter::TrackedSetFiltered {
-                    caused_by: Some(ThisWayCause::Exiled),
-                    ..
-                }
-            )
-            .then_some(crate::types::zones::Zone::Exile)
-        });
+        let origin = super::infer_origin_zone(rest_lower)
+            .or_else(|| {
+                matches!(
+                    target,
+                    TargetFilter::TrackedSetFiltered {
+                        caused_by: Some(ThisWayCause::Exiled),
+                        ..
+                    }
+                )
+                .then_some(crate::types::zones::Zone::Exile)
+            })
+            // CR 406.6 + CR 607.2a: a card linked as "exiled with" the source lives in
+            // exile, so the return is a `ChangeZone` out of exile — `Effect::Bounce`
+            // only moves battlefield/graveyard/stack objects.
+            .or_else(|| {
+                matches!(target, TargetFilter::ExiledBySource)
+                    .then_some(crate::types::zones::Zone::Exile)
+            });
         // CR 400.7: A returned card's target filter must be scoped to its origin
         // zone. Without this, "return target ... card from your graveyard to the
         // battlefield" enumerates legal targets on the battlefield (the default

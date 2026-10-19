@@ -4644,9 +4644,6 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
 /// contradicting its printed text).
 fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
     match effect {
-        Effect::Bounce { destination, .. } => {
-            destination.is_none() || *destination == Some(Zone::Hand)
-        }
         Effect::ChangeZone {
             owner_library: false,
             enter_transformed: false,
@@ -4663,36 +4660,30 @@ fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
     }
 }
 
-/// The LTB "return the exiled card(s)" trigger *shape*, with no entry-modifier
-/// gate: mode `LeavesBattlefield` whose execute is a `ChangeZone` (to battlefield
-/// or hand) or `Bounce` of a `TrackedSet` or `ExiledBySource`. This is the raw
+/// The LTB "return the exiled card(s) to the battlefield" trigger *shape*, with
+/// no entry-modifier gate: mode `LeavesBattlefield` whose execute is a
+/// `ChangeZone` of a `TrackedSet` back to the battlefield. This is the raw
 /// pairing signal; whether the automatic return path can actually carry the
 /// printed return is decided by `change_zone_return_has_no_entry_modifiers`
 /// (see `trigger_is_ltb_return` / `trigger_is_ltb_return_with_entry_modifier`).
 fn trigger_is_ltb_return_shape(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::LeavesBattlefield
-        && def
-            .execute
-            .as_deref()
-            .is_some_and(|ex| match ex.effect.as_ref() {
+        && def.execute.as_deref().is_some_and(|ex| {
+            matches!(
+                ex.effect.as_ref(),
                 Effect::ChangeZone {
-                    destination: Zone::Battlefield | Zone::Hand,
-                    target: TargetFilter::TrackedSet { .. } | TargetFilter::ExiledBySource,
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::TrackedSet { .. },
                     ..
-                } => true,
-                Effect::Bounce {
-                    target: TargetFilter::TrackedSet { .. } | TargetFilter::ExiledBySource,
-                    destination,
-                    ..
-                } => destination.is_none() || *destination == Some(Zone::Hand),
-                _ => false,
-            })
+                }
+            )
+        })
 }
 
-/// Whether a trigger is the LTB "return the exiled card" side that the automatic
-/// `ExileLink::UntilSourceLeaves` return path can carry — the shape matches and the
-/// return has no entry modifiers. Journey to Nowhere, Oblivion Ring, Worldgorger
-/// Dragon, and Tidehollow Sculler all pass here.
+/// Whether a trigger is the LTB "return the exiled card to the battlefield" side
+/// that the automatic `ExileLink::UntilSourceLeaves` return path can carry — the
+/// shape matches and the return has no entry modifiers. Journey to Nowhere,
+/// Oblivion Ring, and Worldgorger Dragon all pass here.
 fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
     trigger_is_ltb_return_shape(def)
         && def
@@ -4716,45 +4707,32 @@ fn trigger_is_ltb_return_with_entry_modifier(def: &TriggerDefinition) -> bool {
             .is_some_and(|ex| !change_zone_return_has_no_entry_modifiers(&ex.effect))
 }
 
-fn ability_has_exile_pending_duration(ability: &AbilityDefinition) -> bool {
-    let mut cursor = Some(ability);
-    while let Some(def) = cursor {
-        if matches!(
-            def.effect.as_ref(),
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                ..
-            } | Effect::ChangeZoneAll {
-                destination: Zone::Exile,
-                ..
-            }
-        ) {
-            return def.duration.is_none();
-        }
-        cursor = def.sub_ability.as_deref();
-    }
-    false
-}
-
 /// CR 610.3: Whether a trigger is the ETB "exile ..." side with no printed
 /// duration (the side that must gain `Duration::UntilHostLeavesPlay`). Covers
-/// the single-target exile (`Effect::ChangeZone`, Journey to Nowhere /
-/// Oblivion Ring), the mass exile (`Effect::ChangeZoneAll`, "exile all other
-/// permanents you control" — Worldgorger Dragon), and chained exiles under a
-/// hand reveal (`Effect::RevealHand` chaining to `Effect::ChangeZone`,
-/// Tidehollow Sculler / Mesmeric Fiend). The effect variants share the CR 610.3
-/// "until"-duration vehicle, so the duration stamp applies identically to
-/// each — gated, in `trigger_is_ltb_return`, on the paired LTB return having no
-/// entry modifiers (a card like Realm Razer, "return the exiled cards to the
-/// battlefield TAPPED," is excluded from this synthesis rather than silently
-/// dropping its tapped rider).
+/// both the single-target exile (`Effect::ChangeZone`, Journey to Nowhere /
+/// Oblivion Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all
+/// other permanents you control" — Worldgorger Dragon). The two effect
+/// variants share the CR 610.3 "until"-duration vehicle, so the duration
+/// stamp applies identically to either — gated, in `trigger_is_ltb_return`,
+/// on the paired LTB return having no entry modifiers (a card like Realm
+/// Razer, "return the exiled cards to the battlefield TAPPED," is excluded
+/// from this synthesis rather than silently dropping its tapped rider).
 fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::ChangesZone
         && def.destination == Some(Zone::Battlefield)
-        && def
-            .execute
-            .as_deref()
-            .is_some_and(ability_has_exile_pending_duration)
+        && def.execute.as_deref().is_some_and(|ex| {
+            ex.duration.is_none()
+                && matches!(
+                    ex.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    } | Effect::ChangeZoneAll {
+                        destination: Zone::Exile,
+                        ..
+                    }
+                )
+        })
 }
 
 /// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Pair each ETB "exile ..."
@@ -4805,34 +4783,6 @@ fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<Docum
     }
 }
 
-/// CR 610.3: Stamp `Duration::UntilHostLeavesPlay` on the exile node (and the
-/// trigger root if unstamped) so the engine's `ExileLink::UntilSourceLeaves`
-/// mechanism returns the card(s) when the source leaves the battlefield.
-fn stamp_etb_exile_pending_duration(execute: &mut AbilityDefinition) {
-    if execute.duration.is_none() {
-        execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
-    }
-    let mut cursor = execute.sub_ability.as_deref_mut();
-    while let Some(def) = cursor {
-        if matches!(
-            def.effect.as_ref(),
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                ..
-            } | Effect::ChangeZoneAll {
-                destination: Zone::Exile,
-                ..
-            }
-        ) {
-            if def.duration.is_none() {
-                def.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
-            }
-            break;
-        }
-        cursor = def.sub_ability.as_deref_mut();
-    }
-}
-
 /// CR 610.3: Apply an ETB-exile / LTB-return pair. `DurationStamped` stamps
 /// `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the existing
 /// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card(s).
@@ -4858,7 +4808,10 @@ fn apply_etb_exile_ltb_return(
                     continue;
                 };
                 if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
-                    stamp_etb_exile_pending_duration(execute);
+                    if execute.duration.is_none() {
+                        execute.duration =
+                            Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+                    }
                 }
             }
             LinkedReturnOutcome::ModifierUnsupported { fragment } => {
