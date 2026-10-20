@@ -4203,6 +4203,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -4300,6 +4301,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -9980,13 +9982,12 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     .is_ok();
             // CR 506.3: "the player or planeswalker it's attacking" identifies the
             // attack target (Player, Planeswalker, or Battle) of the source creature.
-            let references_source_attack_target =
-                nom::combinator::all_consuming(alt((
-                    tag::<_, _, OracleError<'_>>("the player or planeswalker it's attacking"),
-                    tag::<_, _, OracleError<'_>>("player or planeswalker it's attacking"),
-                )))
-                .parse(target_phrase)
-                .is_ok();
+            let references_source_attack_target = nom::combinator::all_consuming(alt((
+                tag::<_, _, OracleError<'_>>("the player or planeswalker it's attacking"),
+                tag::<_, _, OracleError<'_>>("player or planeswalker it's attacking"),
+            )))
+            .parse(target_phrase)
+            .is_ok();
             // CR 120.3: "deals damage to each player equal to the number of [X]
             // THEY control" — the third-person "they" binds to the iterating
             // player (DamageEachPlayer resolves per recipient), NOT the caster.

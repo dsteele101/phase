@@ -1745,6 +1745,7 @@ fn subject_anchored_optional_actor(
             // ability's own firing event.
             TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer => None,
@@ -1800,6 +1801,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::HasChosenName
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -1812,6 +1814,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ParentTargetOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer

@@ -12877,7 +12877,7 @@ fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
-        | TargetFilter::SourceAttackTarget
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTarget
             | TargetFilter::StackSpell

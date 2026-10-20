@@ -7962,7 +7962,10 @@ pub fn defending_player_for_attacker(state: &GameState, attacker: ObjectId) -> O
 
 /// CR 506.3: Returns the attack target (Player, Planeswalker, or Battle) for the
 /// given attacker, if it is currently an attacking creature.
-pub(crate) fn attack_target_for_attacker(state: &GameState, attacker: ObjectId) -> Option<AttackTarget> {
+pub(crate) fn attack_target_for_attacker(
+    state: &GameState,
+    attacker: ObjectId,
+) -> Option<AttackTarget> {
     state.combat.as_ref()?.attackers.iter().find_map(|info| {
         if info.object_id == attacker {
             Some(info.attack_target)

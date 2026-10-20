@@ -4208,7 +4208,9 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTargetOwner => (true, false),
         // "any target" and player-or-object filters ⇒ both recipients.
-        TargetFilter::Any | TargetFilter::Or { .. } | TargetFilter::SourceAttackTarget => (true, true),
+        TargetFilter::Any | TargetFilter::Or { .. } | TargetFilter::SourceAttackTarget => {
+            (true, true)
+        }
         // Everything else is object-scoped for damage purposes.
         _ => (false, true),
     }
