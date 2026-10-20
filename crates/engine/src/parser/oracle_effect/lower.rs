@@ -9978,6 +9978,15 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 nom::combinator::all_consuming(tag::<_, _, OracleError<'_>>("defending player"))
                     .parse(target_phrase)
                     .is_ok();
+            // CR 506.3: "the player or planeswalker it's attacking" identifies the
+            // attack target (Player, Planeswalker, or Battle) of the source creature.
+            let references_source_attack_target =
+                nom::combinator::all_consuming(alt((
+                    tag::<_, _, OracleError<'_>>("the player or planeswalker it's attacking"),
+                    tag::<_, _, OracleError<'_>>("player or planeswalker it's attacking"),
+                )))
+                .parse(target_phrase)
+                .is_ok();
             // CR 120.3: "deals damage to each player equal to the number of [X]
             // THEY control" — the third-person "they" binds to the iterating
             // player (DamageEachPlayer resolves per recipient), NOT the caster.
@@ -10144,6 +10153,16 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             excess: None,
                         },
                         ecr_rem,
+                    ));
+                } else if references_source_attack_target {
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target: TargetFilter::SourceAttackTarget,
+                            damage_source: None,
+                            excess: None,
+                        },
+                        "",
                     ));
                 } else {
                     let (target, remainder) = ctx.with_player_antecedents(|scoped| {

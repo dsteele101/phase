@@ -329,6 +329,11 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // protector of the battle / controller of the planeswalker) that the
             // attacking creature is attacking.
             value(TargetFilter::DefendingPlayer, tag("defending player")),
+            // CR 506.3: "the player or planeswalker it's attacking" — the attack
+            // target (Player, Planeswalker, or Battle) of the source creature.
+            value(TargetFilter::SourceAttackTarget, tag("the player or planeswalker it's attacking")),
+            // CR 506.3: same as above but without "the" article.
+            value(TargetFilter::SourceAttackTarget, tag("player or planeswalker it's attacking")),
         ))
         .parse(input)
     })

@@ -2319,6 +2319,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 })
                 .map(TargetRef::Player)
         }
+        TargetFilter::SourceAttackTarget => {
+            crate::game::combat::attack_target_for_attacker(state, source_id).map(|target| {
+                match target {
+                    crate::game::combat::AttackTarget::Player(player) => TargetRef::Player(player),
+                    crate::game::combat::AttackTarget::Planeswalker(pw_id) => TargetRef::Object(pw_id),
+                    crate::game::combat::AttackTarget::Battle(battle_id) => TargetRef::Object(battle_id),
+                }
+            })
+        }
         TargetFilter::AttachedTo => {
             let host = resolve_source_attached_to(state, source_id)?;
             match host {

@@ -6001,6 +6001,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -12876,6 +12877,7 @@ fn hydratable_event_context_filter(filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTarget
             | TargetFilter::StackSpell

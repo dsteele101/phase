@@ -214,6 +214,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -456,6 +457,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -611,6 +613,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::Owner
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
@@ -1001,6 +1004,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -2200,6 +2204,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -2466,6 +2471,7 @@ pub(crate) fn filter_contains_filter_prop(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -3442,6 +3448,7 @@ fn rewrite_filter_props(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -6824,6 +6831,7 @@ fn zone_change_filter_inner(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
@@ -7162,6 +7170,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
@@ -7486,6 +7495,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }

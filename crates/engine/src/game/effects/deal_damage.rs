@@ -135,6 +135,7 @@ fn bound_player_context_target(
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner
