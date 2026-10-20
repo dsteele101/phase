@@ -264,7 +264,7 @@ describe("keyword detail over the engine's keyword payload golden", () => {
   const manaBearing = samples.filter((kw) => manaCostsIn(payloadOf(kw)).length > 0);
 
   it("reaches every mana-cost-bearing Keyword variant", () => {
-    // 41 bare ManaCost + 9 Mana/NonMana wrappers + 9 structs with a cost field
+    // 40 bare ManaCost + 10 Mana/NonMana wrappers + 9 structs with a cost field
     // + Disguise + Ward + 2 AbilityCost keywords.
     expect(new Set(manaBearing.map(keyOf)).size).toBe(63);
   });
@@ -298,6 +298,8 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     expect(detailOf("Ward", isType("Waterbend"))).toBe("Ward waterbend {4}");
     expect(detailOf("Blitz", isType("NonMana"))).toBe("Blitz Pay 3 life");
     expect(detailOf("Blitz", isType("Mana"))).toBe("Blitz {2}{R}");
+    expect(detailOf("Entwine", isType("NonMana"))).toBe("Entwine Pay 3 life");
+    expect(detailOf("Entwine", isType("Mana"))).toBe("Entwine {2}{R}");
     expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
       "Foretell its mana cost reduced by {2}",
     );

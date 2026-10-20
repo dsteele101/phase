@@ -1021,7 +1021,8 @@ fn parse_entwine_cost(cost_text: &str) -> Option<EntwineCost> {
     match cost {
         AbilityCost::Mana { cost: mana_cost } => Some(EntwineCost::Mana(mana_cost)),
         AbilityCost::Unimplemented { .. } => None,
-        other => Some(EntwineCost::NonMana(other)),
+        other if ability_cost_is_fully_typed(&other) => Some(EntwineCost::NonMana(other)),
+        _ => None,
     }
 }
 
@@ -1693,7 +1694,8 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // ("Entwine {2}{G}") is handled by the direct `FromStr` path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("entwine\u{2014}").parse(text) {
         if let Some(entwine_cost) = parse_entwine_cost(rest) {
-            return Some((Keyword::Entwine(entwine_cost), ""));
+            let after_sentence = split_once_on(rest, ".").map_or("", |(_, (_, after))| after);
+            return Some((Keyword::Entwine(entwine_cost), after_sentence));
         }
     }
 
@@ -2141,7 +2143,7 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
 /// than declining, because the line then renders as supported.
 fn ability_cost_is_fully_typed(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Unimplemented { .. } => false,
+        AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. } => false,
         // The only nesting variant; a composite is typed iff every part is.
         AbilityCost::Composite { costs, .. } => costs.iter().all(ability_cost_is_fully_typed),
         _ => true,
@@ -3230,6 +3232,28 @@ mod tests {
             parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
                 .is_none(),
             "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    #[test]
+    fn parse_router_keyword_line_entwine_rejects_unconsumed_condition() {
+        let res = parse_router_keyword_line("Entwine—Pay 2 life if you control an artifact");
+        assert!(
+            res.is_none(),
+            "entwine with unconsumed conditional text must be rejected, got: {res:?}"
+        );
+        assert!(
+            parse_router_keyword_line("Entwine—Sacrifice two lands. If you control an artifact")
+                .is_none(),
+            "entwine with trailing conditional text after period must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_entwine_cost_rejects_composite_with_unimplemented_leg() {
+        assert!(
+            parse_entwine_cost("Pay 2 life, frobnicate a permanent").is_none(),
+            "composite entwine cost with unimplemented leg must return None"
         );
     }
 

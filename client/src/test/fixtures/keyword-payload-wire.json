@@ -506,11 +506,14 @@
     },
     {
       "Entwine": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -1002,6 +1005,18 @@
     },
     {
       "Blitz": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
+      "Entwine": {
         "data": {
           "generic": 2,
           "shards": [

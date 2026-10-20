@@ -5766,7 +5766,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
             Keyword::Casualty(3),
             Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
-            Keyword::Entwine(EntwineCost::Mana(mc("{2}{R}"))),
+            Keyword::Entwine(EntwineCost::NonMana(pay_life_cost())),
             Keyword::Outlast(mc("{2}{R}")),
             Keyword::Scavenge(mc("{2}{R}")),
             Keyword::Reinforce {
@@ -6320,6 +6320,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
             Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
             Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
+            Keyword::Entwine(EntwineCost::Mana(mc("{2}{R}"))),
             Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
             Keyword::Ward(WardCost::Mana(mc("{2}"))),
             Keyword::Ward(WardCost::Waterbend(mc("{4}"))),

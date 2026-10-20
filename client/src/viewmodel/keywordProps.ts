@@ -341,7 +341,7 @@ const MANA_COST_KEYWORDS = new Set([
   "Unearth", "Reconfigure", "Kicker", "Equip", "Ninjutsu", "CommanderNinjutsu",
   "Prowl", "Morph", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
   "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
-  "Spectacle", "Surge", "Encore", "Entwine", "Outlast", "Scavenge", "Fortify",
+  "Spectacle", "Surge", "Encore", "Outlast", "Scavenge", "Fortify",
   "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
   "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
   "MoreThanMeetsTheEye", "Freerunning", "Specialize",
@@ -353,7 +353,7 @@ const MANA_COST_KEYWORDS = new Set([
  */
 const MANA_OR_NON_MANA_COST_KEYWORDS = new Set([
   "Bestow", "Embalm", "Eternalize", "Cycling", "Flashback", "Escape", "Evoke",
-  "Buyback", "Echo", "Blitz",
+  "Buyback", "Echo", "Blitz", "Entwine",
 ]);
 
 /** Keywords whose payload is an AbilityCost. */
