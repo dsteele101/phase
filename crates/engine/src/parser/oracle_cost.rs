@@ -1464,6 +1464,14 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 let trailing = after_tail.trim().trim_end_matches(['.', ',']);
                 if trailing.is_empty() {
                     let filter_raw = before.trim();
+                    // CR 107.3a: an announced X is not a fixed 0; decline until modeled.
+                    if nom_on_lower(filter_raw, filter_raw, |i| value((), tag("x ")).parse(i))
+                        .is_some()
+                    {
+                        return AbilityCost::Unimplemented {
+                            description: text.to_string(),
+                        };
+                    }
                     let (count, filter_text) = if let Some((n, rem)) = parse_number(filter_raw) {
                         (n, rem.trim())
                     } else {
@@ -2293,6 +2301,10 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         }
     }
 
+    // CR 107.3a: decline an X count rather than encoding it as 0.
+    if nom_on_lower(filter_text, filter_text, |i| value((), tag("x ")).parse(i)).is_some() {
+        return None;
+    }
     let (count, subject_text) = if let Some((n, rem)) = parse_number(filter_text) {
         (n, rem.trim_start())
     } else {
@@ -2312,6 +2324,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         if folded_rem.trim().is_empty() {
             folded_filter
         } else if count == 1
+            && subject_text.trim() == filter_text.trim()
             && folded_rem.trim() == subject_text.trim()
             && match &folded_filter {
                 TargetFilter::Any => true,
@@ -5622,6 +5635,54 @@ mod tests {
             valid,
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 5 }
+            }
+        ));
+    }
+
+    /// CR 107.3a: an announced X is chosen and announced, never a fixed 0.
+    /// A standalone X count must decline rather than silently become zero.
+    #[test]
+    fn x_count_cost_is_declined_instead_of_zero() {
+        assert!(!matches!(
+            parse_oracle_cost("Reveal x blue card in your hand"),
+            AbilityCost::Reveal { .. }
+        ));
+        assert!(try_parse_return_to_hand_cost(
+            "return x creatures you control to their owner's hand"
+        )
+        .is_none());
+
+        let valid = parse_oracle_cost("Reveal a blue card in your hand.");
+        assert!(matches!(
+            valid,
+            AbilityCost::Reveal {
+                count: 1,
+                filter: Some(_)
+            }
+        ));
+    }
+
+    /// CR 201.5: a by-name reference ("Return Recurring Nightmare ...") still
+    /// resolves to the source, but an article-led subject the grammar cannot
+    /// fold must not collapse to SelfRef just because count == 1.
+    #[test]
+    fn by_name_self_ref_requires_complete_subject_text() {
+        let cost = parse_oracle_cost("Return Recurring Nightmare to its owner's hand");
+        assert!(matches!(
+            cost,
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+
+        assert!(!matches!(
+            parse_oracle_cost(
+                "Return a nonland card with mana value 3 or less to its owner's hand"
+            ),
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
             }
         ));
     }
