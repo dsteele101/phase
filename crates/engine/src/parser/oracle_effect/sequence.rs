@@ -174,10 +174,19 @@ fn strip_search_result_subject(lower: &str) -> &str {
 }
 
 fn is_search_result_reveal_clause(lower: &str) -> bool {
-    matches!(
-        lower.trim().trim_end_matches('.'),
-        "reveal that card" | "reveal those cards" | "reveal the card" | "reveal them" | "reveal it"
-    )
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("reveal "),
+        alt((
+            tag("that card"),
+            tag("those cards"),
+            tag("the card"),
+            tag("them"),
+            tag("it"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
 }
 
 /// CR 701.23a + CR 406.3: compose the optional continuation connector, the
@@ -211,6 +220,16 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
     .map(|(_, face_down)| face_down)
 }
 
+fn parse_search_result_referent(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("that card "),
+        tag("it "),
+        tag("them "),
+        tag("those cards "),
+    ))
+    .parse(input)
+}
+
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
 /// after a search compound — library-only (Assassin's Trophy comma-split) or
 /// multi-zone (The Hunger Tide Rises: "library and/or graveyard … and put it
@@ -221,13 +240,7 @@ fn parse_search_result_put_onto_battlefield_restatement(
     input: &str,
 ) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (input, _) = alt((tag::<_, _, OracleError<'_>>("put "), tag("puts "))).parse(input)?;
-    let (input, _) = alt((
-        tag("that card "),
-        tag("it "),
-        tag("them "),
-        tag("those cards "),
-    ))
-    .parse(input)?;
+    let (input, _) = parse_search_result_referent(input)?;
     let (input, _) = tag("onto the battlefield").parse(input)?;
     let (input, _) = opt(tag(" tapped")).parse(input)?;
     Ok((input, ()))
@@ -292,11 +305,27 @@ fn has_search_result_library_position_restatement(lower: &str) -> bool {
 fn has_conditional_search_result_destination(lower: &str) -> bool {
     fn parse_clause(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         let (input, _) = parse_search_result_put_onto_battlefield_restatement(input)?;
-        let (input, _) = alt((tag(" if it's "), tag(" if it is "))).parse(input)?;
-        let (input, _) = take_until(" card").parse(input)?;
-        let (input, _) = tag(" card").parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
-        Ok((input, ()))
+        alt((
+            value(
+                (),
+                (
+                    alt((tag(" if it's "), tag(" if it is "))),
+                    take_until(" card"),
+                    tag(" card"),
+                    opt(tag(".")),
+                ),
+            ),
+            value(
+                (),
+                (
+                    opt(preceded(tag(" if "), is_not("."))),
+                    tag(". otherwise, put "),
+                    parse_search_result_referent,
+                    tag("into your hand"),
+                ),
+            ),
+        ))
+        .parse(input)
     }
 
     let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
@@ -1559,6 +1588,14 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && remainder_trimmed_starts_with_compound_subject_each(
                                 remainder_trimmed,
                             );
+                        // Eye to Eye / Mouth to Mouth: "you and <player> have a <kind>
+                        // contest" is one compound-subject clause with no " each ".
+                        let compound_subject_each = compound_subject_each
+                            || (first_subject_token == "you"
+                                && super::parse_physical_contest_tail(
+                                    &remainder_trimmed.to_ascii_lowercase(),
+                                )
+                                .is_ok());
                         if compound_subject_each {
                             compound_subject_each_sticky = true;
                         }
@@ -2807,6 +2844,15 @@ fn starts_clause_text_lower(s: &str) -> bool {
         return false;
     }
 
+    // CR 608.2c + CR 107.7: a loyalty symbol written in effect text ("[−2]") is an
+    // instruction of its own — "..., then [−2]." puts or removes loyalty counters
+    // after the instruction before it (Comet, Stellar Pup's face-4/5 row) — so it
+    // starts a clause, and the ", then" before it is a clause boundary. The symbol
+    // combinator is the detector: the verb lexicon below holds words, not notation.
+    if nom_primitives::parse_loyalty_symbol_delta(s).is_ok() {
+        return true;
+    }
+
     // CR 708.7 + CR 708.8: "turn <object> face up|down" face-toggle clause-starter
     // (Yarus, Roar of the Old Gods). A complete toggle shape is always its own
     // clause ("..., then turn it face up"), so it must split off to reach the
@@ -3024,6 +3070,12 @@ fn current_ends_with_bare_and(current: &str) -> bool {
 ///
 /// Subject-prefixed verb patterns ("you gain", "you lose", etc.) are safe because
 /// "you" + verb is never a noun phrase — it always starts an independent clause.
+///
+/// Targeted-player-subject patterns ("target opponent <player-action>",
+/// including the optional modal "target opponent may draw …") are likewise safe:
+/// a "target <player>" subject followed by a player-action predicate opens its
+/// own announced target (CR 601.2c) and is never a noun-phrase continuation — see
+/// `starts_targeted_opponent_predicate_clause_lower`.
 pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     starts_bare_and_clause_lower(&lower)
@@ -3154,6 +3206,18 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
         tag("each other player "),
     ))
     .parse(s)?;
+    value((), parse_conjugated_player_action_verb).parse(rest)
+}
+
+/// CR 121.1 + CR 119.3 + CR 701.9a + CR 701.17a + CR 701.21a + CR 701.13a +
+/// CR 608.2c: the third-person-singular player-action verb axis shared by the
+/// player-subject clause splitters (`starts_each_player_predicate_clause_lower`
+/// and `starts_targeted_opponent_predicate_clause_lower`). Every verb is a
+/// player-only action — drawing (CR 121.1), gaining/losing life (CR 119.3),
+/// discarding (CR 701.9a), milling (CR 701.17a), sacrificing (CR 701.21a),
+/// exiling (CR 701.13a) — so ending a bare-`" and "` conjunct with one of them is
+/// unambiguous: a player-subject predicate, never a noun-phrase continuation.
+fn parse_conjugated_player_action_verb(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -3164,6 +3228,37 @@ fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
             tag("mills "),
             tag("sacrifices "),
             tag("exiles "),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 601.2c + CR 115.1 + CR 608.2c: a fresh `"target opponent <player-action>"` conjunct joined
+/// by a bare `" and "` opens its OWN announced player target (each instance of
+/// the word "target" is a distinct target — CR 601.2c) and is a complete
+/// subject-predicate clause, never a noun-phrase continuation of the prior
+/// conjunct. Tataru Taru: "you draw a card and target opponent may draw a
+/// card."; Mindculling: "You draw two cards and target opponent discards two
+/// cards."; Brink of Madness: "… sacrifice ~ and target opponent discards their
+/// hand." Without this arm the conjunct is swallowed by the first effect and the
+/// player-scoped half is dropped (Tataru/Mindculling) or mis-bound as a
+/// controller-scoped sub-ability (Brink).
+///
+/// The predicate axis is the optional modal (`may draw`, pinned by
+/// `subject::parse_player_action_verb` to the corpus-proven may-axis verb) or a
+/// third-person player-action verb. A genuine noun-phrase continuation ("… and
+/// target opponent") has no such predicate and is left un-split. Player-scope
+/// sibling of `starts_target_continuous_clause_lower`.
+fn starts_targeted_opponent_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("target opponent ").parse(s)?;
+    value(
+        (),
+        alt((
+            value(
+                (),
+                preceded(tag("may "), super::subject::parse_player_action_verb),
+            ),
+            value((), parse_conjugated_player_action_verb),
         )),
     )
     .parse(rest)
@@ -3728,6 +3823,13 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
     // under nom's 21-arm limit.
     .or(value((), starts_each_player_predicate_clause_lower))
+    // CR 601.2c + CR 115.1 + CR 608.2c: a fresh "target opponent <player-action>"
+    // conjunct (optional "may draw …" or a conjugated player-action verb) opens
+    // its OWN announced player target (Tataru Taru, Mindculling, Brink of
+    // Madness). Trailing `.or()` arm (mirroring
+    // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
+    // under nom's 21-arm limit.
+    .or(value((), starts_targeted_opponent_predicate_clause_lower))
     // CR 608.2c + CR 122.1: a bare "remove <quantity> <type> counter[s] …"
     // conjunct is an independent counter-removal instruction (Amy Pond). Trailing
     // `.or()` arm (mirroring `starts_target_continuous_clause_lower`) so the
@@ -6286,8 +6388,15 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            // CR 122.6a: Patch the preceding Token effect to enter with counters.
+            // CR 122.6 + CR 614.12: an entry-counter rider patches the preceding
+            // producer's entry counters — a created token (CR 122.6a), or every object a
+            // battlefield mover puts onto the battlefield.
             if let Effect::Token {
+                enter_with_counters,
+                ..
+            }
+            | Effect::ChangeZone {
+                destination: Zone::Battlefield,
                 enter_with_counters,
                 ..
             } = &mut *previous.effect
@@ -6892,7 +7001,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
     ctx: &ParseContext,
 ) -> Option<ContinuationAst> {
     match effect {
-        Effect::SearchLibrary { split, .. } => {
+        Effect::SearchLibrary { split, reveal, .. } => {
             // CR 701.23a + CR 608.2c: When the search carries a split destination
             // (cultivate-class "put one onto the battlefield tapped and the other
             // into your hand"), the partition is handled at resolution by the
@@ -6948,9 +7057,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // "enters tapped" modifier is detected even when the put-step is
             // in a sibling clause (Assassin's Trophy-style split).
             let enter_tapped = nom_primitives::scan_contains(&full_lower, "battlefield tapped");
-            let reveal = nom_primitives::scan_contains(&lower, "reveal")
-                || nom_primitives::scan_contains(&full_lower, "reveal that card")
-                || nom_primitives::scan_contains(&full_lower, "reveal it");
+
             // Safety net: verify the clause splitter correctly separated all boundaries.
             // If this fires, a verb is missing from starts_clause_text() or the splitter's
             // search_start guard is incorrectly suppressing a split.
@@ -6999,7 +7106,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                     fold_control_clauses(&full_lower),
                     name_entry_control_antecedent(None, ctx),
                 ),
-                reveal,
+                reveal: *reveal,
                 attach_host,
             })
         }
@@ -7949,6 +8056,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Behold { .. }
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::CastCopyOfCard { .. }
@@ -8066,6 +8174,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ExileFromTopUntil { .. }
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::Cascade
@@ -8233,6 +8342,32 @@ fn parse_change_zone_enters_tapped_attacking(
     })
 }
 
+/// CR 614.12 + CR 122.6 + CR 608.2c: an UNCONDITIONAL entry-counter rider after a
+/// battlefield mover — "<it | that creature | each of them> enters with <an
+/// additional | N additional> <+1/+1 | -1/-1> counter(s) on it" (Aberrant Return).
+/// The rider modifies how each object the mover puts onto the battlefield enters
+/// (a replacement effect from another source, CR 614.12), so it lowers onto the
+/// mover's `enter_with_counters`, which the resolver applies to every moved object
+/// at move time. The grammar is the single rider authority
+/// (`try_parse_enters_this_way_additional_counter`): anchored at the subject and
+/// required to consume the whole sentence, so a gated rider ("If a Hero enters
+/// this way, …", "… if it's a creature") or a trailing quantity ("… for each …")
+/// declines here and keeps its existing handling.
+fn parse_moved_object_entry_counters_continuation(lower: &str) -> Option<ContinuationAst> {
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        ..
+    } = super::try_parse_enters_this_way_additional_counter(lower)?
+    else {
+        return None;
+    };
+    Some(ContinuationAst::TokenEntersWithCounters {
+        counter_type,
+        count,
+    })
+}
+
 /// CR 614.12: returns true when `sentence` is a moved-object type-conditional
 /// enters-modifier clause — a leading "if that card is a/an <type>" (or
 /// "it's/it is a/an <type>") gating an "enters tapped and attacking" tail
@@ -8268,13 +8403,18 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
 /// `is_moved_object_enters_modifier_clause`: it keys on the entry-this-way
 /// condition AND a "counter" payoff tail so it drops only the represented clause.
 ///
-/// CLAUSE VOICES accepted (all three are represented by the same typed slot):
+/// CLAUSE VOICES accepted (all four are represented by the same typed slot):
 ///   * active — "If you put an artifact onto the battlefield this way, put two
 ///     +1/+1 counters on it" (Oviya, Automech Artisan);
 ///   * present-tense typed — "If a Hero enters this way, it enters with two
 ///     additional +1/+1 counters on it" (Heroic Return, Recommission, Winter
 ///     Soldier Reborn Avenger);
-///   * passive typed — "If an Equipment is put onto the battlefield this way, …".
+///   * passive typed — "If an Equipment is put onto the battlefield this way, …";
+///   * anaphoric — "It enters with two additional +1/+1 counters on it if it's a
+///     creature" / "If it's an artifact, it enters with an additional +1/+1
+///     counter on it" (What Must Be Done), represented once
+///     `parse_effect_chain_ir_body` converts its `if it's a <type>` gate to the
+///     entry-this-way gate after a battlefield move.
 ///
 /// CONDITIONAL VOICE is deliberately held at `if ` only, POLARITY at affirmative
 /// only, and the SUBJECT at typed-filter-carrying only — all three are enforced by
@@ -8294,12 +8434,40 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
 pub(crate) fn is_moved_object_entry_this_way_counters_clause(sentence: &str) -> bool {
     let lower = sentence.to_lowercase();
     let lower = lower.trim();
-    let Ok((body, _)) =
+    if let Ok((body, _)) =
         crate::parser::oracle_nom::condition::parse_conditional_entry_this_way_rider(lower)
-    else {
-        return false;
+    {
+        return nom_primitives::scan_contains(body, "counter");
+    }
+    is_anaphoric_entry_counters_clause(sentence)
+}
+
+/// CR 614.1c + CR 614.12: the anaphoric voices of the entry-counter rider — "It
+/// enters with two additional +1/+1 counters on it if it's a creature" (trailing)
+/// and "If it's an artifact, it enters with an additional +1/+1 counter on it"
+/// (leading). Decided by the same strippers the effect-chain parser uses, in its
+/// order, and the same predicate its guard conversion uses
+/// (`conditions::anaphoric_entry_counter_gate`), so a sentence is recognized
+/// exactly when that conversion represents it.
+fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
+    let represented = |cond: &AbilityCondition, body: &str| {
+        super::conditions::anaphoric_entry_counter_gate(cond, body).is_some()
     };
-    nom_primitives::scan_contains(body, "counter")
+    let (leading, body) = super::conditions::strip_routed_leading_general_conditional(
+        sentence,
+        &mut ParseContext::default(),
+    );
+    if let Some((cond, _)) = leading {
+        return represented(&cond, &body);
+    }
+    if let (Some(cond), body) = super::conditions::strip_card_type_conditional(sentence) {
+        return represented(&cond, &body);
+    }
+    match super::conditions::strip_routed_suffix_conditional(sentence, &mut ParseContext::default())
+    {
+        (Some((cond, _)), body) => represented(&cond, &body),
+        (None, _) => false,
+    }
 }
 
 /// CR 120.4a + CR 608.2c + CR 702: Parse an excess-damage redirect rider,
@@ -9161,6 +9329,14 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         } if matches_put_rest_on_bottom_line(&lower) =>
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
+        }
+        // CR 614.12 + CR 122.6: an unconditional "… enters with … counter(s) on it"
+        // rider after a battlefield mover becomes that mover's own entry counters.
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        } if let Some(continuation) = parse_moved_object_entry_counters_continuation(&lower) => {
+            Some(continuation)
         }
         // CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." (plural,
         // Cyber-Controller) or "It's a/an [types] [subtype] <core-type>." (singular,
@@ -10139,6 +10315,205 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
+
+    /// SHAPE — CR 608.2c: a conditional destination owns movement; this
+    /// detector suppresses only the earlier search's synthesized default.
+    #[test]
+    fn conditional_search_destination_grammar_composes_independent_axes() {
+        for verb in ["put", "puts"] {
+            for referent in ["that card", "it", "them", "those cards"] {
+                for tapped in ["", " tapped"] {
+                    for subject in ["", "that player ", "each player ", "those players "] {
+                        for (leading, trailing) in [
+                            ("if an opponent controls more lands than you, ", ""),
+                            ("", " if its mana value is 2 or less"),
+                        ] {
+                            let text = format!("search your library for an artifact card and reveal it. {leading}{subject}{verb} {referent} onto the battlefield{tapped}{trailing}. otherwise, put {referent} into your hand. then shuffle.");
+                            assert!(has_conditional_search_result_destination(&text), "{text}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(has_conditional_search_result_destination(
+            "search your library for a basic land card and reveal it. you may put that card onto the battlefield tapped if you control a land named wastes. otherwise, put that card into your hand. then shuffle."
+        ), "optional put after the search is a destination, not an unconditional default");
+        assert!(has_conditional_search_result_destination(
+            "search your library for a creature or land card and reveal it. put it onto the battlefield tapped if it's a land card. then shuffle."
+        ), "the existing trailing type tail does not require otherwise");
+    }
+
+    /// SHAPE: negatives have a real search head and a retained legitimate
+    /// destination; a non-search otherwise pair cannot create a search intrinsic.
+    #[test]
+    fn conditional_search_destination_grammar_preserves_other_search_defaults() {
+        for text in [
+            "Search your library for an artifact card, reveal it, then shuffle. Put that card into your hand if you control an Assassin. Otherwise, put that card on top of your library.",
+            "Search your library for a basic land card and put it onto the battlefield tapped. Then shuffle.",
+            "Search your library for a card. Put it into your hand. Then shuffle.",
+        ] {
+            assert!(!has_conditional_search_result_destination(&text.to_ascii_lowercase()), "{text}");
+            let parsed = super::super::parse_effect_chain(text, AbilityKind::Spell);
+            assert!(matches!(parsed.effect.as_ref(), Effect::SearchLibrary { .. }));
+            assert!(parsed.sub_ability.is_some(), "a legitimate destination/tail remains: {parsed:?}");
+            assert!(!crate::parser::oracle::has_unimplemented(&parsed), "{parsed:?}");
+        }
+        for (text, destination) in [
+            ("Search your library for a basic land card and put it onto the battlefield tapped. Then shuffle.", Zone::Battlefield),
+            ("Search your library for a card. Put it into your hand. Then shuffle.", Zone::Hand),
+        ] {
+            let parsed = super::super::parse_effect_chain(text, AbilityKind::Spell);
+            let default_put = parsed.sub_ability.as_deref().expect("ordinary search default");
+            assert!(matches!(default_put.effect.as_ref(), Effect::ChangeZone {
+                destination: actual, ..
+            } if *actual == destination), "ordinary default remains: {parsed:?}");
+        }
+        for text in [
+            "put a counter onto the battlefield. otherwise, put it into your hand",
+            "put it into your hand. otherwise, put it into your hand",
+            "otherwise, put it into your hand",
+            "put the card onto the battlefield. otherwise, put the card into your hand",
+        ] {
+            assert!(!has_conditional_search_result_destination(text), "{text}");
+        }
+        let parsed = super::super::parse_effect_chain(
+            "You gain 2 life. If you control a creature, draw a card. Otherwise, you lose 1 life.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(parsed.effect.as_ref(), Effect::GainLife { .. }));
+        assert!(matches!(
+            parsed
+                .sub_ability
+                .as_deref()
+                .expect("draw gate")
+                .effect
+                .as_ref(),
+            Effect::Draw { .. }
+        ));
+        assert!(parse_intrinsic_continuation_ast(
+            "You gain 2 life.",
+            &parsed.effect,
+            "You gain 2 life. If you control a creature, draw a card. Otherwise, you lose 1 life.",
+            &ParseContext::default(),
+        )
+        .is_none());
+    }
+
+    /// SHAPE: the pure-result grammar consumes only the reveal instruction.
+    #[test]
+    fn search_result_reveal_grammar_is_composed_and_all_consuming() {
+        for referent in ["that card", "those cards", "the card", "them", "it"] {
+            for punctuation in ["", "."] {
+                assert!(is_search_result_reveal_clause(&format!(
+                    "reveal {referent}{punctuation}"
+                )));
+            }
+        }
+        for text in [
+            "reveal a creature card",
+            "reveal it and gain 2 life",
+            "reveal it..",
+            "reveal that card if you control a creature",
+        ] {
+            assert!(!is_search_result_reveal_clause(text), "{text}");
+        }
+        let search = super::super::parse_effect_chain(
+            "Search your library for a basic land card.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*search.effect, Effect::SearchLibrary { .. }));
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "Reveal it.",
+                &search.effect,
+                &mut ParseContext::default()
+            ),
+            Some(ContinuationAst::SearchRevealResult)
+        );
+    }
+
+    /// SHAPE: ClauseId ownership keeps independent searches separate; only
+    /// declared FoldSearchIntoElse edges carry a common reveal to alternatives.
+    #[test]
+    fn search_result_reveal_owns_the_actual_intrinsic_and_fold_chain() {
+        for (text, expected, folds) in [
+            ("Search your library for a basic land card and put it onto the battlefield tapped. Search your library and graveyard for a card named Nissa, Nature's Artisan, reveal it, put it into your hand, then shuffle.", vec![false, true], 0),
+            ("Search your library for a Plains card, an Island card, a Swamp card, and a Mountain card. Reveal those cards, put them into your hand, then shuffle.", vec![true], 0),
+            ("Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.", vec![true, true], 1),
+            ("Search your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle. You gain 2 life.", vec![true, true], 1),
+            ("Search your library for an artifact card. Search your library for a basic land card. Reveal it, put it into your hand, then shuffle.", vec![false, true], 0),
+            ("Search your library for an artifact card. Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. Reveal that card, put it into your hand, then shuffle.", vec![false, true, true], 1),
+            ("Search your library for a basic land card. If evidence was collected, instead search your library for a creature or land card. If this spell was kicked, instead search your library for an artifact card. Reveal that card, put it into your hand, then shuffle.", vec![true, true, true], 2),
+        ] {
+            let ir = super::super::parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+            assert!(ir.clauses.iter().all(|c| !matches!(c.parsed.effect, Effect::Unimplemented { .. })), "{text}: {ir:?}");
+            let searches: Vec<_> = ir.clauses.iter().filter(|c| matches!(c.parsed.effect, Effect::SearchLibrary { .. })).collect();
+            assert_eq!(searches.len(), expected.len(), "{text}");
+            assert_eq!(searches.iter().filter(|c| matches!(c.disposition, crate::parser::oracle_ir::effect_chain::ClauseDisposition::FoldSearchIntoElse { .. })).count(), folds, "{text}");
+            for (clause, reveal_expected) in searches.iter().zip(expected) {
+                let Some(ContinuationAst::SearchDestination { reveal, .. }) = clause.disposition.intrinsic() else { panic!("missing intrinsic: {clause:?}"); };
+                assert_eq!(*reveal, reveal_expected, "owner {:?}: {text}", clause.id);
+            }
+        }
+    }
+
+    /// SHAPE: guarded and independently scoped riders must not become an
+    /// unconditional modifier on an earlier search's intrinsic continuation.
+    #[test]
+    fn search_result_reveal_does_not_borrow_a_guarded_or_intervening_result() {
+        for tail in [
+            "If you control a creature, reveal it.",
+            "You may reveal it.",
+            "At the beginning of your next upkeep, reveal it.",
+            "Each player reveals it.",
+            "Draw a card. Reveal it.",
+        ] {
+            let text = format!("Search your library for a basic land card. {tail}");
+            let ir = super::super::parse_effect_chain_ir(
+                &text,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let search = ir
+                .clauses
+                .iter()
+                .find(|c| matches!(c.parsed.effect, Effect::SearchLibrary { .. }))
+                .expect("positive search head");
+            let Some(ContinuationAst::SearchDestination { reveal, .. }) =
+                search.disposition.intrinsic()
+            else {
+                panic!("positive intrinsic: {text}");
+            };
+            assert!(!reveal, "{text}: {ir:?}");
+        }
+        // CR 608.2c: the existing splitter separates this conjunction, so the
+        // pure reveal may bind while its independent life-gain instruction stays.
+        let ir = super::super::parse_effect_chain_ir(
+            "Search your library for a basic land card. Reveal it and gain 2 life.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(ir.clauses.len(), 3);
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::SearchLibrary { .. }
+        ));
+        assert!(matches!(
+            ir.clauses[0].disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination { reveal: true, .. })
+        ));
+        assert!(matches!(
+            ir.clauses[1].disposition.followup(),
+            Some(ContinuationAst::SearchResultClauseHandled)
+        ));
+        assert!(matches!(
+            ir.clauses[2].parsed.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            }
+        ));
+    }
 
     /// The sacrifice-rest domains admit "they control", "you control" and "that
     /// player controls".
@@ -16337,6 +16712,37 @@ mod tests {
             "reflexive attach gate must not re-patch the Dig, got {result:?}"
         );
     }
+
+    /// CR 614.1c + CR 614.12 (V-L7): the swallow recognizer accepts the
+    /// anaphoric entry-counter voices the guard conversion represents, a
+    /// multi-type gate among them (an any-of entry gate), keeps the existing
+    /// voices, and rejects the "put" instruction, which the conversion does not
+    /// represent whatever its type list.
+    #[test]
+    fn entry_counters_clause_recognizes_anaphoric_voices() {
+        for represented in [
+            "It enters with two additional +1/+1 counters on it if it's a creature.",
+            "If it's an artifact, it enters with an additional +1/+1 counter on it.",
+            "It enters with two additional +1/+1 counters on it if it's an artifact or creature.",
+            "If it's an artifact or creature, it enters with two additional +1/+1 counters on it.",
+            "If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
+            "If you put an artifact onto the battlefield this way, put two +1/+1 counters on it.",
+        ] {
+            assert!(
+                is_moved_object_entry_this_way_counters_clause(represented),
+                "{represented}"
+            );
+        }
+        for unrepresented in [
+            "Put two +1/+1 counters on it if it's a creature.",
+            "Put two +1/+1 counters on it if it's an artifact or creature.",
+        ] {
+            assert!(
+                !is_moved_object_entry_this_way_counters_clause(unrepresented),
+                "{unrepresented}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -16574,5 +16980,85 @@ mod leading_duration_guard_tests_7923 {
             1,
             "a serial-list subject is one clause"
         );
+    }
+}
+
+/// CR 608.2c + CR 107.7: a loyalty symbol written in effect text ("[−2]") starts a
+/// clause of its own, so "..., then [−2]." splits into the instruction and the
+/// symbol and the instruction's amount is read before the counters are removed.
+#[cfg(test)]
+mod loyalty_symbol_clause_start_tests {
+    use super::super::parse_effect_chain;
+    use super::*;
+
+    /// The face-4/5 row of Comet, Stellar Pup with the name normalized.
+    const DAMAGE_THEN_SYMBOL: &str = "~ deals damage equal to the number of loyalty counters on him to a creature or player, then [\u{2212}2].";
+
+    /// The symbol starts a clause; the notation that is not the symbol does not.
+    /// The first assertion is the reach-guard: the verb lexicon still answers.
+    #[test]
+    fn a_loyalty_symbol_starts_a_clause_and_only_the_symbol_does() {
+        assert!(starts_clause_text("create a token"), "reach-guard");
+        for symbol in [
+            "[\u{2212}2]",
+            "[\u{2212}2].",
+            "[+1], and you may activate ~'s loyalty ability two more times this turn.",
+            "[-1]",
+        ] {
+            assert!(starts_clause_text(symbol), "{symbol:?}");
+        }
+        for not_a_clause in [
+            "[0]",
+            "[1]",
+            "[+x]",
+            "[",
+            "[]",
+            "plus [\u{2212}2]",
+            "(\u{2212}2)",
+        ] {
+            assert!(!starts_clause_text(not_a_clause), "{not_a_clause:?}");
+        }
+    }
+
+    /// ", then [−2]" is a clause boundary: the damage clause and the symbol are two
+    /// chunks. The paired positive is the same sentence ending in a verb clause,
+    /// which splits the same way, so the symbol is no special case of the splitter.
+    #[test]
+    fn then_a_loyalty_symbol_is_its_own_chunk() {
+        let verb = split_clause_sequence(
+            "~ deals damage equal to the number of loyalty counters on him to a creature or player, then draw a card.",
+        );
+        assert_eq!(verb.len(), 2, "reach-guard: {verb:?}");
+
+        let symbol = split_clause_sequence(DAMAGE_THEN_SYMBOL);
+        assert_eq!(symbol.len(), 2, "{symbol:?}");
+    }
+
+    /// The face-4/5 chain: the damage reads Comet's loyalty when it is applied and
+    /// the `[−2]` that follows is the next node (CR 608.2c + CR 608.2h), removing
+    /// exactly two (never the "remove all" sentinel).
+    #[test]
+    fn the_damage_clause_is_followed_by_the_symbol_as_its_sub_ability() {
+        let def = parse_effect_chain(DAMAGE_THEN_SYMBOL, AbilityKind::Spell);
+        assert!(
+            matches!(&*def.effect, Effect::DealDamage { .. }),
+            "{def:#?}"
+        );
+        let removal = def
+            .sub_ability
+            .as_deref()
+            .expect("the symbol is its own clause");
+        assert!(
+            matches!(
+                &*removal.effect,
+                Effect::RemoveCounter {
+                    counter_type: Some(CounterType::Loyalty),
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::SelfRef,
+                }
+            ),
+            "{def:#?}"
+        );
+        assert!(removal.sub_ability.is_none(), "{def:#?}");
     }
 }

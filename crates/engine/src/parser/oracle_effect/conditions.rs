@@ -1616,6 +1616,61 @@ pub(super) fn card_type_condition_as_target_match(
     })
 }
 
+/// CR 614.1c + CR 614.12: an anaphoric "if it's a <type>" gate on an "enters with …
+/// counters" rider names the characteristics of the permanent an earlier instruction
+/// moved onto the battlefield, as it would exist there — the gate the "if a <type>
+/// enters this way" voice already expresses. Several types ("if it's an artifact or
+/// creature") → an any-of gate (CR 614.1c + CR 614.12), matching the condition's
+/// any-of reading. `None` for any other condition (no type, an additional or subtype
+/// filter, a negation), which stays a later gate.
+pub(super) fn card_type_condition_as_entry_this_way(
+    cond: &AbilityCondition,
+) -> Option<AbilityCondition> {
+    let AbilityCondition::RevealedHasCardType {
+        card_types,
+        additional_filter: None,
+        subtype_filter: None,
+    } = cond
+    else {
+        return None;
+    };
+    let type_filter = match card_types.as_slice() {
+        [] => return None,
+        [core] => core_type_to_type_filter(*core),
+        types => TypeFilter::AnyOf(
+            types
+                .iter()
+                .copied()
+                .map(core_type_to_type_filter)
+                .collect(),
+        ),
+    };
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
+        destination: Some(Zone::Battlefield),
+    })
+}
+
+/// CR 614.1c + CR 614.12: the typed entry gate for an anaphoric entry-counter rider —
+/// `Some` exactly when `body` is the singular-subject rider (all-consuming, optional
+/// final ".") and `cond` converts through `card_type_condition_as_entry_this_way`.
+/// The distributive plural subject ("each of them enters with …") is not admitted:
+/// no printed rider gates it in a form this conversion represents (Semester's End's
+/// compound creature/planeswalker rider is not consumed whole), so it stays a later gate.
+pub(super) fn anaphoric_entry_counter_gate(
+    cond: &AbilityCondition,
+    body: &str,
+) -> Option<AbilityCondition> {
+    nom_parse_lower(&body.trim().to_lowercase(), |i| {
+        all_consuming(terminated(
+            super::parse_single_moved_object_enters_with_counters,
+            opt(tag(".")),
+        ))
+        .parse(i)
+    })?;
+    card_type_condition_as_entry_this_way(cond)
+}
+
 /// CR 701.20a: `"If a[n] <types> card [<property>] is revealed this way, …"` —
 /// gates a sub_ability on the card the preceding look/reveal step produced.
 /// CR 701.20a ("To reveal a card, show that card to all players…") is the
@@ -3199,7 +3254,9 @@ pub(super) fn strip_player_property_superlative_conditional(
     let lhs = QuantityExpr::Ref {
         qty: nom_quantity::player_property_quantity(
             lhs_property,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            },
         ),
     };
     let rhs = QuantityExpr::Ref {
@@ -3207,7 +3264,9 @@ pub(super) fn strip_player_property_superlative_conditional(
             lhs_property,
             PlayerScope::AllPlayers {
                 aggregate,
-                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+                exclude: Some(Box::new(PlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                })),
             },
         ),
     };
@@ -5990,6 +6049,9 @@ pub(crate) fn static_condition_to_ability_condition(
 ) -> Option<AbilityCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn),
+        // CR 500.8 + CR 506.1 + CR 608.2c: the shared phase-occurrence gate
+        // bridges 1:1 (the possessive composition arrives as an `And`).
+        StaticCondition::FirstCombatPhaseOfTurn => Some(AbilityCondition::FirstCombatPhaseOfTurn),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -7162,12 +7224,12 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         return Some(AbilityCondition::DayNightIsNeither);
     }
 
-    if tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn")
-        .parse(lower.as_str())
-        .is_ok()
-    {
-        return Some(AbilityCondition::FirstCombatPhaseOfTurn);
-    }
+    // CR 500.8 + CR 506.1 + CR 109.5 + CR 608.2c: "it's the first combat phase
+    // of [the|your] turn" is recognized by the shared `parse_inner_condition`
+    // authority (`parse_first_combat_phase_of_turn`) and lowered through the
+    // generic fallback below, which requires the whole condition to be
+    // consumed. The possessive axis composes `IsYourTurn` there (CR 109.5), so
+    // no effect-local arm is needed.
 
     // CR 500.8 + CR 513.1: "it's the first end step of the turn" — end-step
     // sibling of the combat-phase gate above (Y'shtola Rhul's loop guard).
@@ -13913,5 +13975,72 @@ mod tests {
             })
             .collect();
         assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 614.1c + CR 614.12 (V-L6): only a single-core-type, unqualified,
+    /// affirmative "if it's a <type>" gate converts to the entry-this-way gate.
+    #[test]
+    fn card_type_condition_as_entry_this_way_cases() {
+        let revealed = |card_types: Vec<CoreType>| AbilityCondition::RevealedHasCardType {
+            card_types,
+            additional_filter: None,
+            subtype_filter: None,
+        };
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![CoreType::Creature])),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Some(Zone::Battlefield),
+            })
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: Some(FilterProp::Token),
+                subtype_filter: None,
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::RevealedHasCardType {
+                card_types: vec![CoreType::Creature],
+                additional_filter: None,
+                subtype_filter: Some(Box::new(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Subtype("Hero".to_string()),
+                )))),
+            }),
+            None
+        );
+        // CR 614.1c + CR 614.12: several types fold into an any-of entry gate.
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![
+                CoreType::Artifact,
+                CoreType::Creature
+            ])),
+            Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ]))),
+                destination: Some(Zone::Battlefield),
+            })
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&revealed(vec![])),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::Not {
+                condition: Box::new(revealed(vec![CoreType::Creature])),
+            }),
+            None
+        );
+        assert_eq!(
+            card_type_condition_as_entry_this_way(&AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                destination: Some(Zone::Battlefield),
+            }),
+            None
+        );
     }
 }
