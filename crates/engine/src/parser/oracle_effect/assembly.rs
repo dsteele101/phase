@@ -1801,7 +1801,6 @@ fn subject_anchored_optional_actor(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::HasChosenName
-            | TargetFilter::SourceAttackTarget
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
             | TargetFilter::Owner

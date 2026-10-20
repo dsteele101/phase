@@ -34144,3 +34144,31 @@ fn ir_facade_demotes_a_refused_granter_name() {
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
 }
+
+#[test]
+fn temp_rakdos_parse_dump() {
+    use crate::types::ability::{Effect, TargetFilter};
+    const ORACLE: &str = "Whenever this creature becomes blocked, it deals 1 damage to the player or planeswalker it's attacking.";
+    let parsed = parse(ORACLE, "Rakdos Roustabout", &[], &["Creature"], &["Ogre"]);
+    eprintln!(
+        "TEMP: abilities={} triggers={} unimplemented={:?}",
+        parsed.abilities.len(),
+        parsed.triggers.len(),
+        parsed_has_unimplemented(&parsed)
+    );
+    for t in &parsed.triggers {
+        eprintln!(
+            "TEMP TRIGGER: mode={:?} valid_card={:?} valid_target={:?}",
+            t.mode, t.valid_card, t.valid_target
+        );
+        if let Some(ex) = &t.execute {
+            let eff = format!("{:?}", ex.effect.as_ref());
+            eprintln!("TEMP EXECUTE effect={}", eff);
+            eprintln!(
+                "TEMP IS_DEALDAMAGE_SOURCEATTACKTARGET={}",
+                eff.contains("DealDamage") && eff.contains("SourceAttackTarget")
+            );
+        }
+    }
+    assert_eq!(parsed.triggers.len(), 1);
+}
