@@ -14,7 +14,10 @@ use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+const P2: PlayerId = PlayerId(2);
 
 const SAVANTS_ORACLE: &str = "Morph—Reveal a blue card in your hand. (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)\nWhen this creature is turned face up, look at target opponent's hand.";
 
@@ -24,10 +27,11 @@ struct Setup {
     blue_card: Option<ObjectId>,
     red_card: ObjectId,
     opponent_card: ObjectId,
+    third_player_card: ObjectId,
 }
 
 fn setup(with_blue_card: bool) -> Setup {
-    let mut scenario = GameScenario::new();
+    let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
 
     let savants = scenario
@@ -57,6 +61,9 @@ fn setup(with_blue_card: bool) -> Setup {
     let opponent_card = scenario
         .add_creature_to_hand(P1, "Opponent Card", 1, 1)
         .id();
+    let third_player_card = scenario
+        .add_creature_to_hand(P2, "Third Player Card", 1, 1)
+        .id();
 
     // Three colorless mana: only the {3} face-down cast is affordable.
     scenario.with_mana_pool(
@@ -75,6 +82,7 @@ fn setup(with_blue_card: bool) -> Setup {
         blue_card,
         red_card,
         opponent_card,
+        third_player_card,
     }
 }
 
@@ -117,6 +125,7 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
         blue_card,
         red_card,
         opponent_card,
+        third_player_card,
     } = setup(true);
     let blue_card = blue_card.unwrap();
 
@@ -168,8 +177,15 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
     assert_eq!(obj.power, Some(0));
     assert_eq!(obj.toughness, Some(6));
 
-    // CR 708.8: "When this creature is turned face up" triggers; the only
-    // opponent is the sole legal target.
+    // CR 708.8: "When this creature is turned face up" triggers.
+    // In a 3-player game, choose P1 as the target opponent.
+    if let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![engine::types::ability::TargetRef::Player(P1)],
+            })
+            .expect("target P1");
+    }
     assert!(
         !runner.state().stack.is_empty(),
         "turned-face-up trigger must be on the stack"
@@ -180,8 +196,35 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
     assert_eq!(runner.state().private_look_player, Some(P0));
     assert!(runner.state().private_look_ids.contains(&opponent_card));
     assert!(!runner.state().private_look_ids.contains(&blue_card));
+    assert!(!runner.state().private_look_ids.contains(&third_player_card));
     assert_eq!(runner.state().objects[&opponent_card].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&third_player_card].zone, Zone::Hand);
     assert!(runner.state().stack.is_empty());
+
+    // CR 701.20e: Verify player-visible projections through filter_state_for_viewer:
+    // P0 (looker) sees the privately looked-at card in P1's hand, but not P2's card.
+    let p0_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+    assert_eq!(p0_view.objects[&opponent_card].name, "Opponent Card");
+    assert!(!p0_view.objects[&opponent_card].face_down);
+    assert_eq!(p0_view.objects[&third_player_card].name, "Hidden Card");
+    assert!(p0_view.objects[&third_player_card].face_down);
+
+    // P2 (uninvolved third player) does NOT see P1's card.
+    let p2_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P2);
+    assert_eq!(p2_view.objects[&opponent_card].name, "Hidden Card");
+    assert!(p2_view.objects[&opponent_card].face_down);
+    assert_eq!(
+        p2_view.objects[&third_player_card].name,
+        "Third Player Card"
+    );
+    assert!(!p2_view.objects[&third_player_card].face_down);
+
+    // P1 (owner of opponent_card) continues to see their own card.
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert_eq!(p1_view.objects[&opponent_card].name, "Opponent Card");
+    assert!(!p1_view.objects[&opponent_card].face_down);
+    assert_eq!(p1_view.objects[&third_player_card].name, "Hidden Card");
+    assert!(p1_view.objects[&third_player_card].face_down);
 }
 
 #[test]

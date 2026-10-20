@@ -993,9 +993,14 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     }
                 }
                 // Flat "Pay N life" — no " for each " tail.
-                return AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: n as i32 },
-                };
+                if all_consuming(tag::<_, _, E<'_>>("life"))
+                    .parse(after_n.trim().trim_end_matches(['.', ',']))
+                    .is_ok()
+                {
+                    return AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    };
+                }
             }
         }
         // Pay speed: "pay x speed" / "pay N speed"
@@ -1453,22 +1458,24 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         ))
         .parse(&rest_lower);
         if let Ok((rem, before)) = res {
-            let tail_matched = alt((tag::<_, _, E<'_>>(" from your hand"), tag(" in your hand")))
-                .parse(rem)
-                .is_ok();
-            if tail_matched {
-                let filter_raw = before.trim();
-                let (count, filter_text) = if let Some((n, rem)) = parse_number(filter_raw) {
-                    (n, rem.trim())
-                } else {
-                    (1, strip_article(filter_raw, filter_raw).trim())
-                };
-                let (filter, remainder) = parse_type_phrase_folding(filter_text);
-                if remainder.trim().is_empty() {
-                    return AbilityCost::Reveal {
-                        count,
-                        filter: Some(filter),
+            let tail_res: Result<(&str, &str), _> =
+                alt((tag::<_, _, E<'_>>(" from your hand"), tag(" in your hand"))).parse(rem);
+            if let Ok((after_tail, _)) = tail_res {
+                let trailing = after_tail.trim().trim_end_matches(['.', ',']);
+                if trailing.is_empty() {
+                    let filter_raw = before.trim();
+                    let (count, filter_text) = if let Some((n, rem)) = parse_number(filter_raw) {
+                        (n, rem.trim())
+                    } else {
+                        (1, strip_article(filter_raw, filter_raw).trim())
                     };
+                    let (filter, remainder) = parse_type_phrase_folding(filter_text);
+                    if remainder.trim().is_empty() {
+                        return AbilityCost::Reveal {
+                            count,
+                            filter: Some(filter),
+                        };
+                    }
                 }
             }
         }
@@ -2228,6 +2235,10 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
 /// CR 118.1: Parse "return a land you control to its owner's hand" /
 /// "return two Islands you control to their owner's hand" style bounce costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
+    let rest_lower = rest_lower
+        .trim()
+        .strip_prefix("return ")
+        .unwrap_or(rest_lower.trim());
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let filter_text = alt((
         all_consuming(terminated(
@@ -2297,8 +2308,26 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase_folding(subject_text);
-        filter
+        let (folded_filter, folded_rem) = parse_type_phrase_folding(subject_text);
+        if folded_rem.trim().is_empty() {
+            folded_filter
+        } else if count == 1
+            && folded_rem.trim() == subject_text.trim()
+            && match &folded_filter {
+                TargetFilter::Any => true,
+                TargetFilter::Typed(tf) => {
+                    tf.type_filters.is_empty()
+                        && tf.properties.is_empty()
+                        && tf.controller.is_none()
+                }
+                _ => false,
+            }
+        {
+            // CR 201.5: By-name self-reference fallback (e.g. "Recurring Nightmare")
+            folded_filter
+        } else {
+            return None;
+        }
     };
     let filter = match filter {
         TargetFilter::Any => {
@@ -5553,5 +5582,47 @@ mod tests {
         let fow = parse_oracle_cost("pay 1 life and exile a blue card from your hand");
         assert!(matches!(&fow, AbilityCost::Composite { costs } if costs.len() == 2));
         assert!(!fow.contains_unimplemented());
+    }
+
+    #[test]
+    fn qualified_reveal_cost_is_rejected_without_dropping_condition() {
+        let cost = parse_oracle_cost("Reveal a black card in your hand if you control an artifact");
+        assert!(!matches!(cost, AbilityCost::Reveal { .. }));
+
+        let valid = parse_oracle_cost("Reveal a blue card in your hand.");
+        assert!(matches!(
+            valid,
+            AbilityCost::Reveal {
+                count: 1,
+                filter: Some(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn incomplete_return_to_hand_cost_filter_is_rejected() {
+        assert!(try_parse_return_to_hand_cost(
+            "return two creatures you control with different names to their owners' hands"
+        )
+        .is_none());
+
+        let cost = parse_oracle_cost(
+            "Return two creatures you control with different names to their owners' hands",
+        );
+        assert!(!matches!(cost, AbilityCost::ReturnToHand { .. }));
+    }
+
+    #[test]
+    fn qualified_pay_life_cost_is_rejected() {
+        let cost = parse_oracle_cost("Pay 5 life if you control an artifact");
+        assert!(!matches!(cost, AbilityCost::PayLife { .. }));
+
+        let valid = parse_oracle_cost("Pay 5 life");
+        assert!(matches!(
+            valid,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 }
+            }
+        ));
     }
 }

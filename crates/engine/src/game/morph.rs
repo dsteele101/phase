@@ -690,6 +690,223 @@ pub(crate) fn finish_or_continue_turn_face_up(
     }
 }
 
+/// CR 702.37e + CR 614.6 + CR 616.1: Park state for interactive replacement choice
+/// during a turn-face-up cost move.
+#[allow(clippy::too_many_arguments)]
+fn park_turn_face_up_cost_move(
+    state: &mut GameState,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+    cost_source: TurnUpCostSource,
+    move_kind: crate::types::game_state::TurnFaceUpMoveKind,
+    chosen: Vec<ObjectId>,
+    paused_at_index: usize,
+    remaining_cost: Option<Box<AbilityCost>>,
+    choice_player: PlayerId,
+    events: &[GameEvent],
+    events_before: usize,
+) {
+    state.pending_cost_move_resume = Some(
+        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+            player,
+            source,
+            cost_source,
+            move_kind,
+            chosen,
+            paused_at_index,
+            remaining_cost,
+        },
+    );
+    if state.pending_replacement.is_some() {
+        super::costs::pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
+    // across the interactive pause until priority can drain them.
+    crate::game::triggers::park_observer_triggers_if_paused(state, events, events_before);
+    crate::game::triggers::park_delayed_observer_triggers_if_paused(state, events, events_before);
+}
+
+/// CR 702.37e + CR 118.1 + CR 118.3: Handle player selection of cards/permanents
+/// to pay a turn-face-up non-mana cost (return to hand, discard, sacrifice, reveal).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_turn_face_up_cost_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    kind: &crate::types::game_state::PayCostKind,
+    choices: &[ObjectId],
+    count: usize,
+    chosen: &[ObjectId],
+    source: ObjectIncarnationRef,
+    cost_source: TurnUpCostSource,
+    remaining_cost: Option<Box<AbilityCost>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must choose exactly {} permanent(s)/card(s)",
+            count
+        )));
+    }
+    // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
+    let mut seen = std::collections::HashSet::new();
+    for &id in chosen.iter() {
+        if !seen.insert(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected cards/permanents must be distinct".into(),
+            ));
+        }
+        if !choices.contains(&id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card or permanent is not eligible".to_string(),
+            ));
+        }
+    }
+    match kind {
+        crate::types::game_state::PayCostKind::ReturnToHand => {
+            for (index, &id) in chosen.iter().enumerate() {
+                match crate::game::zone_pipeline::move_object(
+                    state,
+                    crate::game::zone_pipeline::ZoneMoveRequest::cost(
+                        id,
+                        Zone::Hand,
+                        source.object_id,
+                    ),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                        park_turn_face_up_cost_move(
+                            state,
+                            player,
+                            source,
+                            cost_source,
+                            crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand,
+                            chosen.to_vec(),
+                            index,
+                            remaining_cost,
+                            choice_player,
+                            events,
+                            0,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        unreachable!("a cost move to Hand cannot require Aura attachment");
+                    }
+                }
+            }
+            finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            )
+        }
+        crate::types::game_state::PayCostKind::Discard => {
+            for (index, &id) in chosen.iter().enumerate() {
+                match super::effects::discard::discard_as_cost_with_source(
+                    state,
+                    id,
+                    player,
+                    Some(source.object_id),
+                    events,
+                ) {
+                    super::effects::discard::DiscardOutcome::Complete => {}
+                    super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
+                        choice_player,
+                    ) => {
+                        park_turn_face_up_cost_move(
+                            state,
+                            player,
+                            source,
+                            cost_source,
+                            crate::types::game_state::TurnFaceUpMoveKind::Discard,
+                            chosen.to_vec(),
+                            index,
+                            remaining_cost,
+                            choice_player,
+                            events,
+                            0,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
+            finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            )
+        }
+        crate::types::game_state::PayCostKind::Sacrifice => {
+            for (index, &id) in chosen.iter().enumerate() {
+                match super::sacrifice::sacrifice_permanent(state, id, player, events)? {
+                    super::sacrifice::SacrificeOutcome::Complete => {}
+                    super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                        park_turn_face_up_cost_move(
+                            state,
+                            player,
+                            source,
+                            cost_source,
+                            crate::types::game_state::TurnFaceUpMoveKind::Sacrifice,
+                            chosen.to_vec(),
+                            index,
+                            remaining_cost,
+                            choice_player,
+                            events,
+                            0,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
+            finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            )
+        }
+        crate::types::game_state::PayCostKind::Reveal => {
+            let revealed_names = chosen
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect();
+            events.push(GameEvent::CardsRevealed {
+                player,
+                card_ids: chosen.to_vec(),
+                card_names: revealed_names,
+            });
+            finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            )
+        }
+        crate::types::game_state::PayCostKind::ExileFromZone { .. }
+        | crate::types::game_state::PayCostKind::ExilePermanent { .. }
+        | crate::types::game_state::PayCostKind::UnattachFrom { .. }
+        | crate::types::game_state::PayCostKind::ExileMaterials { .. }
+        | crate::types::game_state::PayCostKind::ExileAggregate { .. }
+        | crate::types::game_state::PayCostKind::RemoveCounter { .. }
+        | crate::types::game_state::PayCostKind::TapCreatures { .. }
+        | crate::types::game_state::PayCostKind::Behold { .. }
+        | crate::types::game_state::PayCostKind::ExileFromManaZone { .. } => Err(
+            EngineError::InvalidAction("Cost kind cannot resume a turn-face-up PayCost".into()),
+        ),
+    }
+}
+
 /// CR 702.37e + CR 614.6 + CR 616.1: Resume paying a turn-face-up cost move
 /// after a replacement choice settles.
 pub(crate) fn resume_turn_face_up_cost_move(
@@ -724,32 +941,16 @@ pub(crate) fn resume_turn_face_up_cost_move(
                 ) {
                     crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                     crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
-                        state.pending_cost_move_resume = Some(
-                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                player,
-                                source,
-                                cost_source,
-                                move_kind,
-                                chosen,
-                                paused_at_index: index,
-                                remaining_cost,
-                            },
-                        );
-                        if state.pending_replacement.is_some() {
-                            super::costs::pause_cost_payment_for_replacement_choice(
-                                state,
-                                choice_player,
-                            );
-                        }
-                        // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                        // across the resumed interactive pause until priority can drain them.
-                        crate::game::triggers::park_observer_triggers_if_paused(
+                        park_turn_face_up_cost_move(
                             state,
-                            events,
-                            events_before,
-                        );
-                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                            state,
+                            player,
+                            source,
+                            cost_source,
+                            move_kind,
+                            chosen,
+                            index,
+                            remaining_cost,
+                            choice_player,
                             events,
                             events_before,
                         );
@@ -772,32 +973,16 @@ pub(crate) fn resume_turn_face_up_cost_move(
                     super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
                         choice_player,
                     ) => {
-                        state.pending_cost_move_resume = Some(
-                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                player,
-                                source,
-                                cost_source,
-                                move_kind,
-                                chosen,
-                                paused_at_index: index,
-                                remaining_cost,
-                            },
-                        );
-                        if state.pending_replacement.is_some() {
-                            super::costs::pause_cost_payment_for_replacement_choice(
-                                state,
-                                choice_player,
-                            );
-                        }
-                        // CR 603.2 + CR 603.3b: Retain ordinary discard observers
-                        // across the resumed interactive pause until priority can drain them.
-                        crate::game::triggers::park_observer_triggers_if_paused(
+                        park_turn_face_up_cost_move(
                             state,
-                            events,
-                            events_before,
-                        );
-                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                            state,
+                            player,
+                            source,
+                            cost_source,
+                            move_kind,
+                            chosen,
+                            index,
+                            remaining_cost,
+                            choice_player,
                             events,
                             events_before,
                         );
@@ -809,32 +994,16 @@ pub(crate) fn resume_turn_face_up_cost_move(
                 match super::sacrifice::sacrifice_permanent(state, card_id, player, events)? {
                     super::sacrifice::SacrificeOutcome::Complete => {}
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                        state.pending_cost_move_resume = Some(
-                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                player,
-                                source,
-                                cost_source,
-                                move_kind,
-                                chosen,
-                                paused_at_index: index,
-                                remaining_cost,
-                            },
-                        );
-                        if state.pending_replacement.is_some() {
-                            super::costs::pause_cost_payment_for_replacement_choice(
-                                state,
-                                choice_player,
-                            );
-                        }
-                        // CR 603.2 + CR 603.3b: Retain ordinary sacrifice observers
-                        // across the resumed interactive pause until priority can drain them.
-                        crate::game::triggers::park_observer_triggers_if_paused(
+                        park_turn_face_up_cost_move(
                             state,
-                            events,
-                            events_before,
-                        );
-                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                            state,
+                            player,
+                            source,
+                            cost_source,
+                            move_kind,
+                            chosen,
+                            index,
+                            remaining_cost,
+                            choice_player,
                             events,
                             events_before,
                         );
