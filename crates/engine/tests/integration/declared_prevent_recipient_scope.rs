@@ -1110,6 +1110,109 @@ fn passive_damage_trigger_prevention_bare_it_binds_the_damaged_object() {
     );
 }
 
+/// CR 608.2k + CR 120.1 + CR 615.1: a passive damage trigger's bare "it"
+/// installs a shield on the damaged creature itself, not on its controller.
+#[test]
+fn passive_damage_trigger_prevention_shields_damaged_creature_not_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let preventer_oracle =
+        "Whenever a creature is dealt damage, prevent the next 1 damage that would be dealt to it this turn.";
+    let shock_oracle = "Shock deals 2 damage to any target.";
+    scenario.add_enchantment_from_oracle(P0, "Damage Shield", preventer_oracle);
+    let creature = scenario.add_creature(P0, "Shielded Creature", 2, 4).id();
+    let shock1 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock 1", false, shock_oracle)
+        .id();
+    let shock2 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock 2", false, shock_oracle)
+        .id();
+    let shock3 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock 3", false, shock_oracle)
+        .id();
+    let mut runner = scenario.build();
+
+    // Deal 2 damage to the creature.
+    let outcome = runner.cast(shock1).target_object(creature).resolve();
+    assert_eq!(outcome.damage_marked(creature), 2);
+
+    // The trigger went onto the stack. Resolve it.
+    while !runner.state().stack.is_empty() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve trigger");
+    }
+
+    // Now Creature should have a 1-damage prevention shield.
+    // Cast Shock 2 on the creature: 2 damage - 1 prevented = 1 dealt (total marked: 3).
+    let outcome = runner.cast(shock2).target_object(creature).resolve();
+    assert_eq!(
+        outcome.damage_marked(creature),
+        3,
+        "1 of the 2 damage to the creature should have been prevented by the shield"
+    );
+
+    // Cast Shock 3 on the creature's controller (P0): controller must take full 2 damage (shield was on creature, not player).
+    let outcome = runner.cast(shock3).target_player(P0).resolve();
+    assert_eq!(
+        outcome.life_delta(P0),
+        -2,
+        "creature's prevention shield must not protect controller"
+    );
+}
+
+/// CR 400.7 + CR 608.2b: when a creature is destroyed by the triggering damage,
+/// the prevention trigger resolving for bare "it" does not install a floating shield
+/// that protects other creatures or players.
+#[test]
+fn passive_damage_trigger_prevention_on_lethal_damage_does_not_install_floating_shield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let preventer_oracle =
+        "Whenever a creature is dealt damage, prevent the next 1 damage that would be dealt to it this turn.";
+    let shock_oracle = "Shock deals 2 damage to any target.";
+    scenario.add_enchantment_from_oracle(P0, "Damage Shield", preventer_oracle);
+    let dead_creature = scenario.add_creature(P0, "Dead Creature", 2, 2).id();
+    let survivor = scenario.add_creature(P0, "Survivor", 2, 4).id();
+    let shock1 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock 1", false, shock_oracle)
+        .id();
+    let shock2 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock 2", false, shock_oracle)
+        .id();
+    let shock3 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock 3", false, shock_oracle)
+        .id();
+    let mut runner = scenario.build();
+
+    // Deal lethal damage to the 2/2 creature.
+    let outcome = runner.cast(shock1).target_object(dead_creature).resolve();
+    assert_eq!(outcome.zone_of(dead_creature), Zone::Graveyard);
+
+    // The trigger went onto the stack. Resolve it.
+    while !runner.state().stack.is_empty() {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve trigger");
+    }
+
+    // Shock survivor: must take full 2 damage (no floating shield was created).
+    let outcome = runner.cast(shock2).target_object(survivor).resolve();
+    assert_eq!(
+        outcome.damage_marked(survivor),
+        2,
+        "survivor must not be shielded by the dead creature's prevention trigger"
+    );
+
+    // Shock P0: must take full 2 damage.
+    let outcome = runner.cast(shock3).target_player(P0).resolve();
+    assert_eq!(
+        outcome.life_delta(P0),
+        -2,
+        "controller must not be shielded by the dead creature's prevention trigger"
+    );
+}
+
 /// CR 115.1c + CR 608.2c: Elvish Healer declares one "any target" recipient; the
 /// "prevent the next 2 damage instead" shorthand reuses it and adds no second prompt.
 #[test]
