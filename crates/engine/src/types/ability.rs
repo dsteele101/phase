@@ -27378,7 +27378,7 @@ pub struct ModalChoice {
     pub mode_pawprints: Vec<u8>,
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entwine_cost: Option<AbilityCost>,
+    pub entwine_cost: Option<Box<AbilityCost>>,
     /// CR 700.2e: The player who chooses the mode(s). Defaults to the
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]

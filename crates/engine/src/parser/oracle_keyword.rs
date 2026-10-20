@@ -1007,8 +1007,7 @@ fn parse_echo_cost(cost_text: &str) -> Option<crate::types::keywords::EchoCost> 
 /// "entwine {2}{G}"). Mirrors `parse_echo_cost`: reminder-strip, delegate to
 /// `parse_oracle_cost`, wrap a single `Mana` cost in `Mana`, anything
 /// composite/non-mana in `NonMana`, and reject `Unimplemented`.
-fn parse_entwine_cost(cost_text: &str) -> Option<crate::types::keywords::EntwineCost> {
-    use crate::types::keywords::EntwineCost;
+fn parse_entwine_cost(cost_text: &str) -> Option<EntwineCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
         .parse(trimmed)

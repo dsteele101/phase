@@ -2771,7 +2771,11 @@ impl FromStr for Keyword {
                     )))
                 }
                 "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
-                "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
+                "entwine" => {
+                    return Ok(Keyword::Entwine(EntwineCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "affinity" => {
                     if let Some(tf) = parse_affinity_type(p) {
                         return Ok(Keyword::Affinity(tf));
@@ -5762,7 +5766,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
             Keyword::Casualty(3),
             Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
-            Keyword::Entwine(mc("{2}{R}")),
+            Keyword::Entwine(EntwineCost::Mana(mc("{2}{R}"))),
             Keyword::Outlast(mc("{2}{R}")),
             Keyword::Scavenge(mc("{2}{R}")),
             Keyword::Reinforce {

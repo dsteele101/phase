@@ -608,12 +608,13 @@ pub(crate) fn compute_modal_total_cost(
 
     // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
     if indices.len() == modal.mode_count {
-        if let Some(ref entwine_cost) = modal.entwine_cost {
-            // Only mana costs can be added to the total mana cost.
-            // Non-mana costs (e.g., "Sacrifice two lands") are handled as additional costs.
-            if let AbilityCost::Mana { cost: mana_cost } = entwine_cost {
-                total = restrictions::add_mana_cost(&total, mana_cost);
-            }
+        // Only mana costs can be added to the total mana cost.
+        // Non-mana costs (e.g., "Sacrifice two lands") are handled as additional costs.
+        if let Some(AbilityCost::Mana {
+            cost: ref mana_cost,
+        }) = modal.entwine_cost.as_deref()
+        {
+            total = restrictions::add_mana_cost(&total, mana_cost);
         }
     }
 
@@ -626,7 +627,7 @@ pub(crate) fn extract_entwine_additional_cost(
     indices: &[usize],
 ) -> Option<AbilityCost> {
     if indices.len() == modal.mode_count {
-        if let Some(ref entwine_cost) = modal.entwine_cost {
+        if let Some(entwine_cost) = modal.entwine_cost.as_deref() {
             // Return non-mana costs only; mana costs are already folded into
             // the computed mana total by `compute_modal_total_cost`.
             match entwine_cost {
@@ -863,7 +864,9 @@ mod tests {
             min_choices: 1,
             max_choices: 2,
             mode_count: 2,
-            entwine_cost: Some(ManaCost::generic(2)),
+            entwine_cost: Some(Box::new(AbilityCost::Mana {
+                cost: ManaCost::generic(2),
+            })),
             ..ModalChoice::default()
         };
         let base = ManaCost::zero();

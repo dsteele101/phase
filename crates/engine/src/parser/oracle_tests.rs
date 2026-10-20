@@ -5356,20 +5356,19 @@ fn solar_tide_entwine_non_mana_cost() {
 
     let modal = r.modal.expect("Solar Tide is a modal spell");
     assert_eq!(modal.mode_count, 2, "Solar Tide must have exactly 2 modes");
-    assert_eq!(
-        modal.max_choices, 2,
-        "Entwine must allow choosing all modes, so max_choices should be 2"
-    );
-
-    // Check that entwine_cost is present and is a non-mana cost
+    // CR 702.42a: the em-dash cost is extracted as a non-mana Entwine keyword;
+    // `synthesize_entwine` later copies it onto the ModalChoice.
     assert!(
-        modal.entwine_cost.is_some(),
-        "Modal should have an entwine_cost"
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Entwine(crate::types::keywords::EntwineCost::NonMana(
+                AbilityCost::Sacrifice { .. }
+            ))
+        )),
+        "expected non-mana Entwine keyword, got {:?}",
+        r.extracted_keywords
     );
 
-    // The entwine_cost should be an AbilityCost::Sacrifice
-    // We can't directly match on the internal structure here without importing more,
-    // but we can verify it's not a mana-only cost by checking the modal was set up correctly
     assert_eq!(
         r.abilities.len(),
         2,

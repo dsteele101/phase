@@ -3000,13 +3000,13 @@ pub fn synthesize_entwine(face: &mut CardFace) {
 
     // Convert EntwineCost to AbilityCost
     let ability_cost = match cost {
-        EntwineCost::Mana(mc) => AbilityCost::PayMana(mc),
+        EntwineCost::Mana(mc) => AbilityCost::Mana { cost: mc },
         EntwineCost::NonMana(ac) => ac,
     };
 
     // Set entwine_cost on the face's modal choice + allow all-mode selection
     if let Some(ref mut modal) = face.modal {
-        modal.entwine_cost = Some(ability_cost);
+        modal.entwine_cost = Some(Box::new(ability_cost));
         // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
         modal.max_choices = modal.mode_count;
     }
