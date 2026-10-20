@@ -74,3 +74,68 @@ fn elixir_shuffles_entire_graveyard_without_targeting() {
         "an opponent's graveyard is untouched"
     );
 }
+
+/// CR 701.24c + CR 400.3: when the artifact's owner differs from its controller,
+/// the terminal shuffle must fan over BOTH owners — the artifact's owner (for
+/// the artifact itself) and the graveyard cards' owner (for the graveyard
+/// cards) — not just the controller's library.
+#[test]
+fn elixir_shuffles_all_affected_owners_when_owner_differs_from_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Elixir is owned by P1 but controlled by P0: "your graveyard" is P0's,
+    // the artifact goes to P1's library.
+    let elixir = scenario
+        .add_artifact_from_oracle(P1, "Elixir of Immortality", ELIXIR)
+        .controlled_by(P0)
+        .id();
+    let mine_a = scenario.add_creature_to_graveyard(P0, "Mine A", 1, 1).id();
+    let theirs = scenario.add_creature_to_graveyard(P1, "Theirs", 3, 3).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 2],
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+
+    // P0 controls the Elixir, so P0 activates it. No target selection is supplied.
+    let outcome = runner.activate(elixir, 0).resolve();
+
+    // Both owners' libraries must be shuffled by the terminal fan-out.
+    let terminal_shuffles = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        terminal_shuffles, 2,
+        "one terminal shuffle per affected owner (P0 graveyard cards + P1 artifact)"
+    );
+
+    let state = outcome.state();
+    assert_eq!(state.players[0].life, life_before + 5);
+    // The artifact goes to ITS owner (P1), not the controller's library.
+    assert_eq!(
+        state.objects[&elixir].zone,
+        Zone::Library,
+        "Elixir must go to its owner's (P1's) library"
+    );
+    assert_eq!(
+        state.objects[&mine_a].zone,
+        Zone::Library,
+        "P0's graveyard card must go to P0's library"
+    );
+    assert_eq!(
+        state.objects[&theirs].zone,
+        Zone::Graveyard,
+        "P1's graveyard card is untouched (not in P0's graveyard)"
+    );
+}

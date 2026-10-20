@@ -1,6 +1,7 @@
 use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
+use crate::game::effects::change_zone::publish_finalized_owner_library_subjects;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
@@ -562,6 +563,14 @@ pub fn resolve(
         }),
         events,
     );
+
+    // CR 400.3 + CR 701.24c: Publish each moved object's owner as a library
+    // shuffle subject so a chained `Shuffle { target: ScopedPlayer }` with
+    // `TrackedSetPossessor` fans over every affected owner — e.g. Elixir of
+    // Immortality, where the artifact's owner differs from the graveyard
+    // cards' owner. The publication is a no-op unless a downstream owner
+    // library shuffle consumer exists (tracked_set_publication_mode).
+    publish_finalized_owner_library_subjects(state, ability, &collected_targets);
 
     Ok(())
 }

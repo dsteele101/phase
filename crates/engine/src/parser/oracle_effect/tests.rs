@@ -19,7 +19,7 @@ use crate::types::ability::{
     CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
     ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    PossessionAxis, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -91169,11 +91169,10 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
     );
     assert!(matches!(
         &*def.effect,
-        Effect::ChangeZone {
-            destination: Zone::Library,
+        Effect::PutAtLibraryPosition {
             target: TargetFilter::SelfRef,
-            owner_library: true,
-            ..
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
         }
     ));
     let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
@@ -91182,7 +91181,7 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
         Effect::ChangeZoneAll {
             origin: Some(Zone::Graveyard),
             destination: Zone::Library,
-            target: TargetFilter::Controller,
+            target: TargetFilter::ScopedPlayer,
             ..
         }
     ));
@@ -91190,7 +91189,16 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
     assert!(matches!(
         &*shuffle.effect,
         Effect::Shuffle {
-            target: TargetFilter::Controller
+            target: TargetFilter::ScopedPlayer
         }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
     ));
 }

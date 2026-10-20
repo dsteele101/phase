@@ -260,11 +260,7 @@ pub(crate) fn change_zone_all_player_scope(
             ability,
             &TargetFilter::ParentTargetOwner,
         ),
-        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ScopedPlayer,
-        ),
+        TargetFilter::ScopedPlayer => ability.scoped_player.or(Some(ability.controller)),
         _ => None,
     }
 }
@@ -592,7 +588,7 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
-fn publish_finalized_owner_library_subjects(
+pub(super) fn publish_finalized_owner_library_subjects(
     state: &mut GameState,
     ability: &ResolvedAbility,
     objects: &[ObjectId],

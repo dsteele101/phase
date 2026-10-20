@@ -9765,22 +9765,35 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
         // every card in the named zone(s) follows, and the terminal shuffle
         // closes the chain.
         ShuffleImperativeAst::SelfAndZonesToLibrary { origins } => {
-            let mut clause = parsed_clause(Effect::ChangeZone {
-                origin: None,
-                destination: Zone::Library,
+            let mut clause = parsed_clause(Effect::PutAtLibraryPosition {
                 target: TargetFilter::SelfRef,
-                owner_library: true,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Bottom,
             });
-            let zones = lower_change_zone_all_to_library(origins);
+            let mut zones = lower_change_zone_all_to_library(origins);
+            // CR 701.24c: the terminal shuffle must fan over every owner whose
+            // cards are being shuffled into their library, not just the ability
+            // controller. Replace the sentinel `TargetFilter::Controller` with
+            // a scoped-player shuffle driven by the tracked-set owner
+            // population (`TrackedSetPossessor` / `OwnerLibraryShuffleSubject`),
+            // matching the pattern in `with_shuffle_sub_ability`.
+            if let Some(mut tail) = zones.sub_ability.as_mut() {
+                loop {
+                    if tail.sub_ability.is_none() {
+                        if let Effect::Shuffle { ref mut target } = *tail.effect {
+                            *target = TargetFilter::ScopedPlayer;
+                        }
+                        tail.player_scope = Some(PlayerFilter::TrackedSetPossessor {
+                            relation: PlayerRelation::All,
+                            possession: PossessionAxis::Owner,
+                            filter: TargetFilter::Any,
+                            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+                        });
+                        break;
+                    }
+                    tail = tail.sub_ability.as_mut().unwrap();
+                }
+            }
             let mut zones_def = AbilityDefinition::new(AbilityKind::Spell, zones.effect);
             zones_def.sub_ability = zones.sub_ability;
             clause.sub_ability = Some(Box::new(zones_def));
