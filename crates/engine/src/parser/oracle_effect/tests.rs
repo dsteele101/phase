@@ -91157,3 +91157,34 @@ mod targeted_opponent_optional_tests {
         }
     }
 }
+
+/// CR 701.24c + CR 400.6: "Shuffle ~ and your graveyard into their owner's
+/// library" moves the source and the WHOLE graveyard (Elixir of Immortality),
+/// not a single chosen graveyard card.
+#[test]
+fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+}

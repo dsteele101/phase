@@ -9262,6 +9262,33 @@ fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
     Some(origins)
 }
 
+/// Parse "shuffle ~ and {possessive} {zone-list} into {their owner's|possessive}
+/// library" and return the origin zones.
+///
+/// CR 701.24c + CR 400.6: Elixir of Immortality — "Shuffle this artifact and
+/// your graveyard into their owner's library." The second operand names the
+/// whole zone (no targeting, no choice), so it lowers to a `ChangeZoneAll`
+/// mass move preceded by the source's own zone change, not to a single-card
+/// `ChangeZone` with a graveyard-card target.
+fn parse_self_and_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ~ and ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = parse_possessive_determiner(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
+    let (rest, origins) = parse_shuffle_origin_zones(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" into ").parse(rest).ok()?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("their owner's")),
+        parse_possessive_determiner,
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" library").parse(rest).ok()?;
+    let (_, _) = eof::<_, OracleError<'_>>(rest.trim_end_matches('.')).ok()?;
+    Some(origins)
+}
+
 /// Parse "the cards {in|from} {possessive} hand on the bottom/top [of
 /// {possessive} library] [in any order]" and return the target library position.
 ///
@@ -9439,6 +9466,11 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     // into your library" fall through to the zone-change parser below.
     if let Ok((_, target)) = parse_shuffle_library_target(lower) {
         return Some(ShuffleImperativeAst::ShuffleLibrary { target });
+    }
+    // Must precede the descriptive-target path below, which would read
+    // "~ and your graveyard" as one object phrase.
+    if let Some(origins) = parse_self_and_zones_to_library(lower) {
+        return Some(ShuffleImperativeAst::SelfAndZonesToLibrary { origins });
     }
     if let Some(target) = parse_compound_all_subjects_to_library(lower) {
         return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
@@ -9728,6 +9760,31 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // (Jace's ultimate) — otherwise the resolver treats it as "the
             // ability controller's cards".
             lower_change_zone_all_to_library(origins)
+        }
+        // CR 701.24c + CR 400.3: the source moves to its owner's library, then
+        // every card in the named zone(s) follows, and the terminal shuffle
+        // closes the chain.
+        ShuffleImperativeAst::SelfAndZonesToLibrary { origins } => {
+            let mut clause = parsed_clause(Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            });
+            let zones = lower_change_zone_all_to_library(origins);
+            let mut zones_def = AbilityDefinition::new(AbilityKind::Spell, zones.effect);
+            zones_def.sub_ability = zones.sub_ability;
+            clause.sub_ability = Some(Box::new(zones_def));
+            clause
         }
         // CR 701.24a: Targeted zone change to library with implicit shuffle sub_ability.
         ShuffleImperativeAst::TargetedChangeZoneToLibrary {
