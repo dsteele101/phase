@@ -91182,9 +91182,15 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
         Effect::ChangeZoneAll {
             origin: Some(Zone::Graveyard),
             destination: Zone::Library,
+            target: TargetFilter::Controller,
             ..
         }
     ));
     let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
-    assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    ));
 }

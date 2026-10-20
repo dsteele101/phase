@@ -11,6 +11,8 @@
 //!   - CR 115.1: only words "target" on the ability create targets.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::EffectKind;
+use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -37,6 +39,25 @@ fn elixir_shuffles_entire_graveyard_without_targeting() {
 
     // No target selection is supplied: a graveyard-card target slot would stall here.
     let outcome = runner.activate(elixir, 0).resolve();
+
+    // The terminal library shuffle must resolve through the production event path.
+    let terminal_shuffles = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        terminal_shuffles, 1,
+        "the terminal library shuffle must resolve"
+    );
 
     let state = outcome.state();
     assert_eq!(state.players[0].life, life_before + 5);
