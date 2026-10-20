@@ -231,6 +231,20 @@ describe("llmStore", () => {
     expect(profileForSeat(state, 0, CATALOG)).toBeUndefined();
   });
 
+  it("preserves unrelated seat bindings when removing a non-default profile with null default opponent", () => {
+    const id = addUsable("Claude");
+    const other = addUsable("Other");
+    useLlmStore.getState().bindSeat(0, id);
+    useLlmStore.getState().bindSeat(1, other);
+    useLlmStore.getState().bindSeat(2, null);
+
+    useLlmStore.getState().removeProfile(id);
+
+    const state = useLlmStore.getState();
+    expect(state.seatBindings).toEqual({ 1: other, 2: null });
+    expect(profileForSeat(state, 1, CATALOG)?.id).toBe(other);
+  });
+
   it("keeps drafting heuristic until it is explicitly enabled", () => {
     const id = addUsable("Claude");
     expect(draftProfile(useLlmStore.getState(), CATALOG)).toBeUndefined();

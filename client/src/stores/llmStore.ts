@@ -343,18 +343,18 @@ export const useLlmStore = create<LlmState>()(
         const { seatBindings, draftProfileId, defaultOpponentProfileId } = get();
         // Drop every binding to the removed profile in the same commit, so no
         // seat is left pointing at a profile that no longer exists. If the
-        // default opponent was this profile, unselecting the default also
-        // scrubs any lingering LLM seat bindings.
-        const nextDefault = defaultOpponentProfileId === id ? null : defaultOpponentProfileId;
+        // removed profile was the default opponent, unselecting the default
+        // also scrubs any lingering LLM seat bindings.
+        const removedWasDefault = defaultOpponentProfileId === id;
         const remainingBindings = Object.fromEntries(
           Object.entries(seatBindings).filter(([, profileId]) =>
-            profileId !== id && (nextDefault !== null || profileId === null),
+            profileId !== id && (!removedWasDefault || profileId === null),
           ),
         );
         set((state) => ({
           profiles: state.profiles.filter((profile) => profile.id !== id),
           seatBindings: remainingBindings,
-          defaultOpponentProfileId: nextDefault,
+          defaultOpponentProfileId: removedWasDefault ? null : defaultOpponentProfileId,
           draftProfileId: draftProfileId === id ? null : draftProfileId,
         }));
       },
