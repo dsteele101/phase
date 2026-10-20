@@ -217,13 +217,33 @@ pub fn record_tell(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
 }
 
 /// Open the Gotcha offers matched while a decision was pending, once priority is
-/// next settled.
+/// next settled. Re-validates each queued offer against the live board before
+/// announcing it: a source that left play, a player that opted out, or a returned
+/// card that moved zones no longer gets a window.
 pub fn announce_pending_tells(state: &mut GameState) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
     let pending = std::mem::take(&mut state.un_actions.pending_offers);
-    append_gotcha_offers(state, pending);
+    let validated: Vec<GotchaOffer> = pending
+        .into_iter()
+        .filter(|offer| offer_is_still_valid(state, offer))
+        .collect();
+    append_gotcha_offers(state, validated);
+}
+
+/// Whether a queued Gotcha offer still matches the live game state. The offer was
+/// matched when the tell was made; between then and the next priority boundary the
+/// source may have left play, its controller may have opted out, or the returned
+/// card may have moved zones — each of which invalidates the window.
+fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
+    // The source must still exist and still carry a functioning Gotcha ability in
+    // its current zone (gotcha_definitions applies both checks).
+    gotcha_definitions(state, offer.source_id).next().is_some()
+        // The recipient must still be opted in to Un-card actions.
+        && player_can_say_phrases(state, offer.player)
+        // The returned card must still exist.
+        && state.objects.get(&offer.returns).is_some()
 }
 
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
@@ -264,10 +284,19 @@ pub fn apply_un_action(
             state.un_actions.set_enabled(actor, enabled);
             if !enabled {
                 state.un_actions.gotcha_offers.retain(|o| o.player != actor);
+                state
+                    .un_actions
+                    .pending_offers
+                    .retain(|o| o.player != actor);
             }
             Ok(ActionResult::applied(vec![], state.waiting_for.clone()))
         }
         UnAction::PerformTell { tell } => {
+            if !state.un_actions.is_enabled(actor) {
+                return Err(EngineError::InvalidAction(
+                    "Player has not opted in to Un-card actions".to_string(),
+                ));
+            }
             let events = vec![GameEvent::UnTellPerformed {
                 player: actor,
                 tell: tell.clone(),

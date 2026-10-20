@@ -338,6 +338,7 @@ fn touch_and_go_scenario() -> (GameRunner, ObjectId) {
 #[test]
 fn touch_and_go_returns_to_hand_when_gotcha_is_called_after_the_opponent_touches_their_face() {
     let (mut runner, card) = touch_and_go_scenario();
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
     tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
     let offers = runner.state().un_actions.gotcha_offers.clone();
     assert_eq!(offers.len(), 1, "the gesture opens one Gotcha window");
@@ -368,6 +369,7 @@ fn touch_and_go_returns_to_hand_when_gotcha_is_called_after_the_opponent_touches
 #[test]
 fn gotcha_is_not_offered_for_a_different_gesture_or_to_a_player_who_did_not_opt_in() {
     let (mut runner, card) = touch_and_go_scenario();
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
     tell(&mut runner, P1, UnTell::Physical(PhysicalTell::Laugh));
     assert!(
         runner.state().un_actions.gotcha_offers.is_empty(),
@@ -404,6 +406,7 @@ fn gotcha_is_not_offered_for_a_different_gesture_or_to_a_player_who_did_not_opt_
 #[test]
 fn a_gotcha_window_closes_at_the_next_game_action() {
     let (mut runner, _card) = touch_and_go_scenario();
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
     tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
     assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);
     runner
@@ -415,6 +418,7 @@ fn a_gotcha_window_closes_at_the_next_game_action() {
 #[test]
 fn a_player_cannot_gotcha_their_own_gesture() {
     let (mut runner, _card) = touch_and_go_scenario();
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
     tell(&mut runner, P0, UnTell::Physical(PhysicalTell::TouchFace));
     assert!(
         runner.state().un_actions.gotcha_offers.is_empty(),
@@ -439,6 +443,7 @@ fn spoken_gotchas_match_whole_words_and_numbers() {
         .id();
     let mut runner = scenario.build();
     un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
 
     tell(
         &mut runner,
@@ -490,6 +495,7 @@ fn name_dropping_returns_the_graveyard_card_whose_name_the_opponent_said() {
         .id();
     let mut runner = scenario.build();
     un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
 
     tell(
         &mut runner,
@@ -686,6 +692,7 @@ fn a_gotcha_holder_without_priority_can_still_call_it() {
         .id();
     let mut runner = scenario.build();
     un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
         "reach guard: P0 holds priority while P1 holds the Gotcha card"
@@ -865,6 +872,7 @@ fn gotcha_triggers_are_not_doubled_by_trigger_doublers() {
         }));
     let mut runner = scenario.build();
     un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
 
     tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
     assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);

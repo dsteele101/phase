@@ -3836,7 +3836,7 @@ function formatUnlessCost(
 }
 
 /** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */
-function SayPhrasePanel({ phrase }: { phrase: string }) {
+function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
 
@@ -3853,6 +3853,9 @@ function SayPhrasePanel({ phrase }: { phrase: string }) {
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("unActions.sayPhrase.title")}
           </h3>
+          {effect && (
+            <p className="mb-2 text-center text-xs text-gray-400">{effect}</p>
+          )}
           <div className="flex flex-col items-center gap-3">
             <motion.button
               type="button"
@@ -3872,7 +3875,7 @@ function SayPhrasePanel({ phrase }: { phrase: string }) {
               onClick={() =>
                 dispatch({ type: "PayUnlessCost", data: { pay: false } })
               }
-              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+              className="min-h-11 rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
             >
               {t("unActions.sayPhrase.stayQuiet")}
             </button>
@@ -3896,7 +3899,7 @@ function UnlessPaymentPanel() {
   // Un-card say-it payment (Rod of Spanking's "unless that player says ..."):
   // the "payment" is a spoken phrase, so it gets its own button and gag.
   if (waitingFor.data.cost.type === "SayPhrase") {
-    return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} />;
+    return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
   }
 
   const costDisplay = formatUnlessCost(waitingFor.data.cost, t);

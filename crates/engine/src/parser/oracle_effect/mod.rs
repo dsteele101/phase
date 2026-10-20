@@ -26097,18 +26097,6 @@ fn damage_clause_has_self_ref_recipient(effect: &Effect) -> bool {
     )
 }
 
-/// CR 120.3a + CR 608.2c: a damage clause whose recipient is a player scope
-/// ("to target player", "to you", "to target opponent") declares its own
-/// recipient and must never be clobbered to `ParentTarget`.
-fn damage_clause_has_player_recipient(effect: &Effect) -> bool {
-    match effect {
-        Effect::DealDamage { target, .. } | Effect::DamageAll { target, .. } => {
-            target.is_player_scope()
-        }
-        _ => false,
-    }
-}
-
 #[derive(Clone, Copy)]
 enum SourceRefRebind {
     AllObjectRefs,
@@ -45915,7 +45903,7 @@ fn parse_effect_chain_ir_body(
                 &mut clause.effect,
             )
             && !bind_self_ref_damage_subject(&mut clause.effect)
-            && !damage_clause_has_player_recipient(&clause.effect)
+            && !bind_anaphoric_damage_subject_keep_recipient(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
         }

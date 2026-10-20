@@ -1,10 +1,8 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GotchaOffer } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
@@ -21,7 +19,6 @@ export const GOTCHA_BUTTON_MS = 2000;
 export function GotchaButton() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const playerId = usePlayerId();
   const spectator = useSpectatorMode();
   const offers = useGameStore((s) => s.gameState?.un_actions?.gotcha_offers);
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -30,13 +27,8 @@ export function GotchaButton() {
   const [expiredIds, setExpiredIds] = useState<ReadonlySet<number>>(new Set());
   const timers = useRef(new Map<number, number>());
 
-  const mine = useMemo<GotchaOffer[]>(
-    () => (offers ?? []).filter((offer) => offer.player === playerId),
-    [offers, playerId],
-  );
-
   useEffect(() => {
-    const live = new Set(mine.map((offer) => offer.id));
+    const live = new Set((offers ?? []).map((offer) => offer.id));
     for (const [id, timer] of timers.current) {
       if (!live.has(id)) {
         window.clearTimeout(timer);
@@ -58,7 +50,7 @@ export function GotchaButton() {
         ),
       );
     }
-  }, [mine]);
+  }, [offers]);
 
   useEffect(() => {
     const active = timers.current;
@@ -68,7 +60,7 @@ export function GotchaButton() {
     };
   }, []);
 
-  const visible = mine.filter((offer) => !expiredIds.has(offer.id));
+  const visible = (offers ?? []).filter((offer) => !expiredIds.has(offer.id));
   if (spectator || visible.length === 0) return null;
 
   return (
