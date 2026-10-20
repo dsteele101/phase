@@ -22,7 +22,8 @@ use crate::types::ability::{
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
-    EmbalmCost, EmergeCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword,
+    WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -1002,6 +1003,29 @@ fn parse_echo_cost(cost_text: &str) -> Option<crate::types::keywords::EchoCost> 
     }
 }
 
+/// CR 702.42a: Parse an Entwine em-dash cost ("entwine—sacrifice two lands" or
+/// "entwine {2}{G}"). Mirrors `parse_echo_cost`: reminder-strip, delegate to
+/// `parse_oracle_cost`, wrap a single `Mana` cost in `Mana`, anything
+/// composite/non-mana in `NonMana`, and reject `Unimplemented`.
+fn parse_entwine_cost(cost_text: &str) -> Option<crate::types::keywords::EntwineCost> {
+    use crate::types::keywords::EntwineCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(EntwineCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EntwineCost::NonMana(other)),
+    }
+}
+
 fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
@@ -1662,6 +1686,15 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
         if let Some(echo_cost) = parse_echo_cost(rest) {
             return Some((Keyword::Echo(echo_cost), ""));
+        }
+    }
+
+    // CR 702.42a: Entwine with em-dash cost — non-mana costs like
+    // "entwine—sacrifice two lands" (Solar Tide). Pure-mana entwine
+    // ("Entwine {2}{G}") is handled by the direct `FromStr` path above.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("entwine\u{2014}").parse(text) {
+        if let Some(entwine_cost) = parse_entwine_cost(rest) {
+            return Some((Keyword::Entwine(entwine_cost), ""));
         }
     }
 

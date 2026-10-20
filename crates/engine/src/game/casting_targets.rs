@@ -136,9 +136,28 @@ pub(crate) fn handle_select_modes(
             );
         }
     }
+    // CR 702.42a: Add non-mana entwine cost as additional cost when all modes are chosen.
+    // Collect both entwine and escalate costs
+    let mut additional_costs = Vec::new();
+    if let Some(entwine_cost) = extract_entwine_additional_cost(&modal, &indices) {
+        additional_costs.push(entwine_cost);
+    }
     if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
     {
-        pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
+        additional_costs.push(cost);
+    }
+
+    // If we have additional costs, combine them
+    if !additional_costs.is_empty() {
+        let combined = if additional_costs.len() == 1 {
+            additional_costs.into_iter().next().unwrap()
+        } else {
+            // Combine multiple additional costs into a Composite
+            AbilityCost::Composite {
+                costs: additional_costs,
+            }
+        };
+        pending.additional_cost_flow = Some(AdditionalCost::Required(combined));
     }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
@@ -590,11 +609,36 @@ pub(crate) fn compute_modal_total_cost(
     // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
     if indices.len() == modal.mode_count {
         if let Some(ref entwine_cost) = modal.entwine_cost {
-            total = restrictions::add_mana_cost(&total, entwine_cost);
+            // Only mana costs can be added to the total mana cost.
+            // Non-mana costs (e.g., "Sacrifice two lands") are handled as additional costs.
+            if let AbilityCost::Mana { cost: mana_cost } = entwine_cost {
+                total = restrictions::add_mana_cost(&total, mana_cost);
+            }
         }
     }
 
     total
+}
+
+/// CR 702.42a: Returns the non-mana portion of the entwine cost if present.
+pub(crate) fn extract_entwine_additional_cost(
+    modal: &ModalChoice,
+    indices: &[usize],
+) -> Option<AbilityCost> {
+    if indices.len() == modal.mode_count {
+        if let Some(ref entwine_cost) = modal.entwine_cost {
+            // Return non-mana costs only; mana costs are already folded into
+            // the computed mana total by `compute_modal_total_cost`.
+            match entwine_cost {
+                AbilityCost::Mana { .. } => None,
+                other => Some(other.clone()),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 fn escalate_cost_for_selected_modes(

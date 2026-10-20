@@ -99,6 +99,18 @@ pub enum EchoCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.42a: Entwine cost — pay additional cost to choose all modes of a modal spell.
+/// Most Entwine cards use a pure mana cost (e.g., Voidslime "Entwine {2}{B}"),
+/// but some use non-mana costs (e.g., Solar Tide "Entwine—Sacrifice two lands.").
+/// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
+/// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EntwineCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
 /// card as an Aura. Classic Theros bestow uses a pure mana cost (e.g. Boon Satyr
 /// "Bestow {3}{G}{G}"). Murders at Karlov Manor reprints introduced compound
@@ -854,7 +866,7 @@ pub enum Keyword {
     /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
     Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
-    Entwine(ManaCost),
+    Entwine(EntwineCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
     /// CR 702.77a: Reinforce N—[cost] means "[Cost], Discard this card:
@@ -3652,7 +3664,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.153a
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
-        "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        "Entwine" => {
+            // Accept both legacy ManaCost format and new EntwineCost tagged format.
+            if let Ok(entwine_cost) = serde_json::from_value::<EntwineCost>(data.clone()) {
+                Ok(Keyword::Entwine(entwine_cost))
+            } else {
+                Ok(Keyword::Entwine(EntwineCost::Mana(mana(data)?)))
+            }
+        }
         // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
         "Escalate" => {
             if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
