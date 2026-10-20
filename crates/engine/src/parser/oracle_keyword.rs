@@ -2144,8 +2144,10 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
 fn ability_cost_is_fully_typed(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. } => false,
-        // The only nesting variant; a composite is typed iff every part is.
-        AbilityCost::Composite { costs, .. } => costs.iter().all(ability_cost_is_fully_typed),
+        // Nesting variants (AND / OR composition); typed iff every part is.
+        AbilityCost::Composite { costs, .. } | AbilityCost::OneOf { costs } => {
+            costs.iter().all(ability_cost_is_fully_typed)
+        }
         _ => true,
     }
 }
@@ -3247,6 +3249,17 @@ mod tests {
                 .is_none(),
             "entwine with trailing conditional text after period must be rejected"
         );
+    }
+
+    #[test]
+    fn ability_cost_is_fully_typed_recurses_into_one_of() {
+        assert!(!ability_cost_is_fully_typed(&AbilityCost::OneOf {
+            costs: vec![AbilityCost::Composite {
+                costs: vec![AbilityCost::Unimplemented {
+                    description: "frobnicate".to_string()
+                }]
+            }],
+        }));
     }
 
     #[test]

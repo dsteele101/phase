@@ -105,10 +105,38 @@ pub enum EchoCost {
 /// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
 /// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", content = "data", from = "EntwineCostWire")]
 pub enum EntwineCost {
     Mana(ManaCost),
     NonMana(AbilityCost),
+}
+
+/// Deserialization shape for `EntwineCost`. Entwine was previously stored as a
+/// bare `ManaCost`; previously exported card data (and fixtures) still carry
+/// that form, so it is read as `EntwineCost::Mana`. Serialization always emits
+/// the tagged `Mana`/`NonMana` wrapper.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntwineCostWire {
+    Tagged(EntwineCostTagged),
+    LegacyMana(ManaCost),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum EntwineCostTagged {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<EntwineCostWire> for EntwineCost {
+    fn from(wire: EntwineCostWire) -> Self {
+        match wire {
+            EntwineCostWire::Tagged(EntwineCostTagged::Mana(cost))
+            | EntwineCostWire::LegacyMana(cost) => EntwineCost::Mana(cost),
+            EntwineCostWire::Tagged(EntwineCostTagged::NonMana(cost)) => EntwineCost::NonMana(cost),
+        }
+    }
 }
 
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
@@ -4013,6 +4041,21 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
+    /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
+    #[test]
+    fn entwine_cost_reads_legacy_bare_mana_cost() {
+        let tagged = EntwineCost::Mana(ManaCost::generic(2));
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["type"], "Mana");
+        let legacy = serde_json::to_value(ManaCost::generic(2)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EntwineCost>(legacy).unwrap(),
+            tagged
+        );
+        assert_eq!(serde_json::from_value::<EntwineCost>(json).unwrap(), tagged);
+    }
     use crate::types::ability::Effect;
 
     // SHAPE: CR 702.5a + CR 205.3m: the single-leg adapter must retain the
