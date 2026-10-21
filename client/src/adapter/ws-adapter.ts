@@ -942,7 +942,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 160;
+export const PROTOCOL_VERSION = 161;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

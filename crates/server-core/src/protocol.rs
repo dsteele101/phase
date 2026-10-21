@@ -3736,8 +3736,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_160_for_un_card_actions() {
-        assert_eq!(PROTOCOL_VERSION, 160);
+    fn protocol_version_is_161_for_un_card_actions() {
+        assert_eq!(PROTOCOL_VERSION, 161);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
