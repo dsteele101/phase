@@ -32,11 +32,6 @@ fn resolve_blocked_trigger(runner: &mut GameRunner) {
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
                     if empty_stack_passes > 2 {
-                        eprintln!(
-                            "TEMP state: waiting_for={:?} stack_len={}",
-                            runner.state().waiting_for,
-                            runner.state().stack.len()
-                        );
                         return;
                     }
                     empty_stack_passes += 1;
@@ -53,19 +48,15 @@ fn resolve_blocked_trigger(runner: &mut GameRunner) {
             other => panic!("unexpected waiting state during blocked trigger: {other:?}"),
         }
     }
-    eprintln!(
-        "TEMP final state: waiting_for={:?} stack_len={} life_p1={}",
-        runner.state().waiting_for,
-        runner.state().stack.len(),
-        runner.life(P1)
-    );
     panic!("Rakdos Roustabout blocked trigger did not resolve");
 }
 
-/// CR 509.1h + CR 120.1: When Rakdos Roustabout becomes blocked, it deals 1 damage
-/// to the player it's attacking (P1).
-#[test]
-fn rakdos_roustabout_deals_damage_when_blocked() {
+/// Attack with Rakdos Roustabout (at P1, or at a P1 planeswalker when
+/// `with_planeswalker`), block it, and resolve the blocked trigger. Returns the
+/// runner and the attacked planeswalker's id when one was added.
+fn attack_and_block(
+    with_planeswalker: bool,
+) -> (GameRunner, Option<engine::types::identifiers::ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -75,14 +66,23 @@ fn rakdos_roustabout_deals_damage_when_blocked() {
     let blocker = scenario
         .add_creature_from_oracle(P1, "Blocker", 2, 2, "")
         .id();
+    let walker = with_planeswalker.then(|| {
+        scenario
+            .add_planeswalker_from_oracle(P1, "Test Walker", "Jace", 5, "")
+            .id()
+    });
+    let attack_target = match walker {
+        Some(pw) => AttackTarget::Planeswalker(pw),
+        None => AttackTarget::Player(P1),
+    };
 
     let mut runner = scenario.build();
     runner.advance_to_combat();
 
-    // Rakdos attacks P1 (CR 508.1); its attack target is P1 (CR 506.3).
+    // CR 508.1: Rakdos attacks; its attack target is recorded (CR 506.3).
     runner
-        .declare_attackers(&[(roustabout, AttackTarget::Player(P1))])
-        .expect("declare Rakdos attacking P1");
+        .declare_attackers(&[(roustabout, attack_target)])
+        .expect("declare Rakdos attacking");
 
     // Both players pass through the declare-attackers priority window until the
     // declare-blockers step opens (CR 508.1g).
@@ -105,24 +105,41 @@ fn rakdos_roustabout_deals_damage_when_blocked() {
     );
 
     // P1 blocks Rakdos (CR 509.1a). Rakdos becomes blocked (CR 509.1h), and its
-    // triggered ability goes on the stack to deal 1 damage to P1.
+    // triggered ability goes on the stack.
     runner
         .declare_blockers(&[(blocker, roustabout)])
         .expect("declare blocker");
 
-    eprintln!(
-        "DEBUG after declare_blockers: waiting_for={:?} stack_len={}",
-        runner.state().waiting_for,
-        runner.state().stack.len()
-    );
-
     resolve_blocked_trigger(&mut runner);
+    (runner, walker)
+}
 
-    // The triggered damage resolves: P1 (the player Rakdos is attacking) drops
-    // from 20 to 19.
+/// CR 509.1h + CR 120.1: When Rakdos Roustabout becomes blocked while attacking
+/// a player, it deals 1 damage to that player (P1).
+#[test]
+fn rakdos_roustabout_deals_damage_when_blocked() {
+    let (runner, _) = attack_and_block(false);
     assert_eq!(
         runner.life(P1),
         19,
         "Rakdos Roustabout must deal 1 damage to the player it's attacking"
+    );
+}
+
+/// CR 506.3 + CR 120.3c: When it is attacking a planeswalker, the damage goes
+/// to that planeswalker (as loyalty loss), not to the planeswalker's controller.
+#[test]
+fn rakdos_roustabout_damages_attacked_planeswalker_when_blocked() {
+    let (runner, walker) = attack_and_block(true);
+    let walker = walker.expect("planeswalker was added");
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "the planeswalker's controller is untouched"
+    );
+    assert_eq!(
+        runner.state().objects[&walker].loyalty,
+        Some(4),
+        "Rakdos Roustabout must deal 1 damage to the planeswalker it's attacking"
     );
 }

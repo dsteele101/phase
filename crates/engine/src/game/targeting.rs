@@ -801,6 +801,7 @@ pub fn resolve_event_context_target(
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
         TargetFilter::DefendingPlayer
+        | TargetFilter::SourceAttackTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner => {
@@ -1653,6 +1654,7 @@ pub(crate) fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
             | TargetFilter::DefendingPlayer
+            | TargetFilter::SourceAttackTarget
             | TargetFilter::AttachedTo
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner

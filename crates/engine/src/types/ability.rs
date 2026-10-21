@@ -22986,6 +22986,9 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSource
                 | TargetFilter::EventTarget
                 | TargetFilter::DefendingPlayer
+                // CR 506.3: the source attacker's recorded attack target is read
+                // from combat state at resolution, never declared as a target.
+                | TargetFilter::SourceAttackTarget
                 // CR 608.2c + CR 115.1: "that token" / "those tokens"
                 // continuations bind to objects created earlier in the same
                 // resolution; they are never declared as player-chosen targets.
