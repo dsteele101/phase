@@ -12,7 +12,7 @@
 //! back to the controller's own creature count instead of the chosen
 //! opponent's.
 
-use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
+use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -78,6 +78,56 @@ fn cast_canker_abomination(opponent: PlayerId, p1_creatures: usize) -> (CastOutc
     (outcome, canker)
 }
 
+/// Cast Canker Abomination for P0 in a two-player game, assert that entry
+/// pauses on the as-enters `ChoiceType::Opponent` prompt offering only P1
+/// (CR 614.12a: the choice is made before the permanent enters), answer it
+/// with P1, and let entry complete.
+fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
+    runner
+        .act(GameAction::CastSpell {
+            object_id: canker,
+            card_id: runner.state().objects[&canker].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Canker Abomination");
+    runner.advance_until_stack_empty();
+
+    // The as-enters replacement must pause on the fronted opponent choice.
+    let WaitingFor::NamedChoice {
+        choice_type,
+        options,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "as-enters must pause on ChoiceType::Opponent, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert!(
+        matches!(
+            choice_type,
+            engine::types::ability::ChoiceType::Opponent { .. }
+        ),
+        "the fronted choice must be Choose(Opponent), got {:?}",
+        choice_type
+    );
+    assert_eq!(
+        options,
+        vec![P1.0.to_string()],
+        "only P1 is a legal opponent"
+    );
+
+    // Answer the choice and let entry complete.
+    runner
+        .act(GameAction::ChooseOption {
+            choice: P1.0.to_string(),
+        })
+        .expect("choose opponent P1");
+    runner.advance_until_stack_empty();
+}
+
 /// Positive: P1 controls 2 creatures; P0 chooses P1 → Abomination enters with
 /// 2 -1/-1 counters.
 #[test]
@@ -86,13 +136,51 @@ fn chosen_opponent_creatures_determine_minus_one_counters() {
     outcome.assert_counters(canker, CounterType::Minus1Minus1, 2);
 }
 
-/// Negative polarity: P1 controls 0 creatures → Abomination enters with no
-/// counters. Discriminates the counter count from an unconditional "enters
-/// with at least one counter" reading.
+/// Negative polarity: the chosen opponent P1 controls no creatures while the
+/// controller P0 controls two → Abomination enters with no counters. The
+/// controller's creatures make this discriminate the chosen-player binding: a
+/// count that fell back to the controller's board would put two counters on it.
+/// The opponent prompt is asserted and answered explicitly, so the test cannot
+/// pass without reaching the as-enters choice.
 #[test]
 fn no_opponent_creatures_no_counters() {
-    let (outcome, canker) = cast_canker_abomination(P1, 0);
-    outcome.assert_counters(canker, CounterType::Minus1Minus1, 0);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for i in 0..2 {
+        scenario.add_creature(P0, &format!("Controller Creature {i}"), 3, 3);
+    }
+
+    let canker = scenario
+        .add_creature_to_hand_from_oracle(P0, "Canker Abomination", 6, 6, CANKER_ABOMINATION)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::BlackGreen, ManaCostShard::BlackGreen],
+        })
+        .id();
+    scenario.with_mana_pool(P0, bg_pool());
+
+    let mut runner = scenario.build();
+    cast_and_answer_opponent_prompt(&mut runner, canker);
+
+    let abomination = &runner.state().objects[&canker];
+    assert_eq!(
+        abomination.zone,
+        Zone::Battlefield,
+        "Canker Abomination must resolve onto the battlefield"
+    );
+    assert_eq!(
+        abomination
+            .counters
+            .get(&CounterType::Minus1Minus1)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the chosen opponent controls no creatures, so no -1/-1 counters"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "entry must complete back to Priority"
+    );
 }
 
 /// The choice genuinely binds to the chosen opponent: with P1 controlling 2
@@ -162,49 +250,7 @@ fn surfaces_opponent_choice_before_entry_completes() {
     scenario.with_mana_pool(P0, bg_pool());
 
     let mut runner = scenario.build();
-    runner
-        .act(GameAction::CastSpell {
-            object_id: canker,
-            card_id: runner.state().objects[&canker].card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("cast Canker Abomination");
-    runner.advance_until_stack_empty();
-
-    // The as-enters replacement must pause on the fronted opponent choice.
-    let WaitingFor::NamedChoice {
-        choice_type,
-        options,
-        ..
-    } = runner.state().waiting_for.clone()
-    else {
-        panic!(
-            "as-enters must pause on ChoiceType::Opponent, got {}",
-            runner.waiting_for_kind()
-        );
-    };
-    assert!(
-        matches!(
-            choice_type,
-            engine::types::ability::ChoiceType::Opponent { .. }
-        ),
-        "the fronted choice must be Choose(Opponent), got {:?}",
-        choice_type
-    );
-    assert_eq!(
-        options,
-        vec![P1.0.to_string()],
-        "only P1 is a legal opponent"
-    );
-
-    // Answer the choice and let entry complete.
-    runner
-        .act(GameAction::ChooseOption {
-            choice: P1.0.to_string(),
-        })
-        .expect("choose opponent P1");
-    runner.advance_until_stack_empty();
+    cast_and_answer_opponent_prompt(&mut runner, canker);
 
     let abomination = &runner.state().objects[&canker];
     assert_eq!(
