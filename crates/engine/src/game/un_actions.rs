@@ -193,10 +193,17 @@ fn append_gotcha_offers(state: &mut GameState, new_offers: Vec<GotchaOffer>) {
 ///
 /// CR 603.10: objects that exist immediately after an event are checked against
 /// the trigger conditions that event matched, so the eligible Gotcha sources and
-/// cards are resolved *now*, when the tell happens. Outside a Priority boundary
-/// only the *announcement* is deferred: the already-matched offers wait in
-/// `pending_offers` (one per player/source/card, so a spammed gesture coalesces
-/// instead of growing the state) and open once priority settles.
+/// cards are resolved *now*, when the tell happens. This check validates three
+/// live-state conditions that were established at tell time:
+///   1. The source still exists and carries a functioning Gotcha ability in its
+///      current zone (CR 603.10 look-back + CR 701.26a object existence).
+///   2. The performer (and each offered recipient) remains opted in to Un-card
+///      actions via `state.un_actions.is_enabled()` (CR 118.12 opt-in gate).
+///   3. The returned card still exists in its zone (CR 107.1 object existence).
+/// Outside a Priority boundary only the *announcement* is deferred: the already-
+/// matched offers wait in `pending_offers` (one per player/source/card, so a
+/// spammed gesture coalesces instead of growing the state) and open once priority
+/// settles.
 pub fn record_tell(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
     let offers = open_gotcha_offers(state, performer, tell);
     if offers.is_empty() {
@@ -237,10 +244,12 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// source may have left play, its controller may have opted out, or the returned
 /// card may have moved zones — each of which invalidates the window.
 ///
-/// Un-card mechanic (no CR entry): the Gotcha window is a silver-border
-/// extension rather than a CR 603 triggered ability, so no CR rule governs this
-/// live-state check. The tell-time match it re-validates is the CR 603.10
-/// look-back documented on [`record_tell`].
+/// CR 603.10: re-validates the live-state conditions (source still has Gotcha,
+/// recipient still opted in, returned card still exists) that were established
+/// at tell time. The Gotcha window is a silver-border extension rather than a CR
+/// 603 triggered ability, so no CR rule governs this live-state check during
+/// gameplay — the CR 603.10 look-back principle underlies the tell-time matching
+/// logic documented on [`record_tell`].
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
     // The source must still exist and still carry a functioning Gotcha ability in
     // its current zone (gotcha_definitions applies both checks).
