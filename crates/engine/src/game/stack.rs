@@ -3061,6 +3061,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
+                        // CR 603.2 / CR 603.7: an Aura spell resolving and attaching
+                        // is an effect resolution — emit `EffectResolved { kind: Attach }`
+                        // so "whenever an Aura becomes attached" triggers (e.g. Bramble
+                        // Elemental) fire on spell-resolution attach, not only on
+                        // effect-resolver attach via `deliver_attach`.
+                        events.push(GameEvent::EffectResolved {
+                            kind: EffectKind::Attach,
+                            source_id: entry.id,
+                            subject: state.capture_event_object_snapshot(entry.id).map(Box::new),
+                        });
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
@@ -3072,6 +3082,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
                         effects::attach::attach_to_player(state, entry.id, *player_id);
+                        events.push(GameEvent::EffectResolved {
+                            kind: EffectKind::Attach,
+                            source_id: entry.id,
+                            subject: state.capture_event_object_snapshot(entry.id).map(Box::new),
+                        });
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
