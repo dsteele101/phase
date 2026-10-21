@@ -236,6 +236,11 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// matched when the tell was made; between then and the next priority boundary the
 /// source may have left play, its controller may have opted out, or the returned
 /// card may have moved zones — each of which invalidates the window.
+///
+/// Un-card mechanic (no CR entry): the Gotcha window is a silver-border
+/// extension rather than a CR 603 triggered ability, so no CR rule governs this
+/// live-state check. The tell-time match it re-validates is the CR 603.10
+/// look-back documented on [`record_tell`].
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
     // The source must still exist and still carry a functioning Gotcha ability in
     // its current zone (gotcha_definitions applies both checks).
