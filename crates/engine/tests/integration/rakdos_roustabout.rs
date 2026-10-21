@@ -9,7 +9,7 @@
 //!
 //! CR 509.1h: A creature becomes blocked when it is declared as blocked.
 //! CR 506.3: "the player or planeswalker it's attacking" identifies the source
-//!   creature's attack target (Player, Planeswalker, or Battle).
+//!   creature's attack target (Player or Planeswalker; a battle has no referent).
 //! CR 120.1: The damage is dealt to that player or planeswalker.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

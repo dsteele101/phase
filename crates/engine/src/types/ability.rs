@@ -8615,8 +8615,8 @@ pub enum TargetFilter {
     /// attacking creature, looked up per attacker through
     /// `combat::defending_player_for_attacker`.
     DefendingPlayer,
-    /// CR 506.3 + CR 508.1a: Resolves to the attack target (Player, Planeswalker, or Battle)
-    /// of the source creature, looked up per attacker through
+    /// CR 506.3 + CR 508.1b: Resolves to the attack target (Player or Planeswalker)
+    /// of the source creature (a battle has no referent), looked up per attacker through
     /// `combat::attack_target_for_attacker`. Used for phrases like
     /// "the player or planeswalker it's attacking".
     SourceAttackTarget,

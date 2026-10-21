@@ -2348,16 +2348,18 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                 })
                 .map(TargetRef::Player)
         }
+        // CR 506.3 + CR 508.1b: "the player or planeswalker it's attacking" names a
+        // player or a planeswalker; a creature attacking a battle has no referent.
         TargetFilter::SourceAttackTarget => {
-            crate::game::combat::attack_target_for_attacker(state, source_id).map(|target| {
+            crate::game::combat::attack_target_for_attacker(state, source_id).and_then(|target| {
                 match target {
-                    crate::game::combat::AttackTarget::Player(player) => TargetRef::Player(player),
+                    crate::game::combat::AttackTarget::Player(player) => {
+                        Some(TargetRef::Player(player))
+                    }
                     crate::game::combat::AttackTarget::Planeswalker(pw_id) => {
-                        TargetRef::Object(pw_id)
+                        Some(TargetRef::Object(pw_id))
                     }
-                    crate::game::combat::AttackTarget::Battle(battle_id) => {
-                        TargetRef::Object(battle_id)
-                    }
+                    crate::game::combat::AttackTarget::Battle(_) => None,
                 }
             })
         }
