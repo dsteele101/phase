@@ -3061,11 +3061,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
-                        // CR 603.2 / CR 603.7: an Aura spell resolving and attaching
-                        // is an effect resolution — emit `EffectResolved { kind: Attach }`
-                        // so "whenever an Aura becomes attached" triggers (e.g. Bramble
-                        // Elemental) fire on spell-resolution attach, not only on
-                        // effect-resolver attach via `deliver_attach`.
+                        // CR 608.3c / CR 603.2e: an Aura spell resolves and becomes
+                        // attached — is an effect resolution — emit
+                        // `EffectResolved { kind: Attach }` so "whenever an Aura
+                        // becomes attached" triggers (e.g. Bramble Elemental) fire on
+                        // spell-resolution attach, not only on effect-resolver attach
+                        // via `deliver_attach`.
                         events.push(GameEvent::EffectResolved {
                             kind: EffectKind::Attach,
                             source_id: entry.id,
