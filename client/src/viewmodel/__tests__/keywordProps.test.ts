@@ -305,6 +305,29 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     );
   });
 
+  it("renders a Sacrifice-based Entwine cost (Solar Tide: “Entwine—Sacrifice two lands.”)", () => {
+    expect(
+      getKeywordDisplayText({
+        Entwine: {
+          type: "NonMana",
+          data: {
+            type: "Sacrifice",
+            count: 2,
+            target: { type: "Typed", type_filters: ["Land"], controller: null, properties: [] },
+          },
+        },
+      }),
+    ).toBe("Entwine Sacrifice 2 lands");
+    expect(
+      getKeywordDisplayText({
+        Entwine: {
+          type: "NonMana",
+          data: { type: "Sacrifice", count: 1, target: { type: "Any" } },
+        },
+      }),
+    ).toBe("Entwine Sacrifice a permanent");
+  });
+
   it("omits compound Ward detail when a filtered sacrifice leg cannot render", () => {
     expect(getKeywordDisplayText({
       Ward: {
@@ -372,14 +395,24 @@ describe("keyword AbilityCost detail", () => {
     }).toEqual({ upkeep: null, flashback: null, bare: null });
   });
 
-  it("does not show a sacrifice cost without its required subject", () => {
+  it("shows a sacrifice cost with its subject", () => {
+    // A sacrifice cost now names what and how many permanents to sacrifice,
+    // so a composite/one-of containing it renders fully instead of dropping
+    // to null and hiding a mandatory cost (Solar Tide: "Entwine—Sacrifice
+    // two lands.").
     expect({
       bare: getKeywordDetail({ CumulativeUpkeep: sacrificeLand }),
       composite: getKeywordDetail(upkeep([mana, sacrificeLand])),
       flashback: getKeywordDetail({
         Flashback: { type: "NonMana", data: { type: "OneOf", costs: [mana, sacrificeLand] } },
       }),
-    }).toEqual({ bare: null, composite: null, flashback: null });
-    expect(getKeywordDisplayText({ CumulativeUpkeep: sacrificeLand })).toBe("Cumulative Upkeep");
+    }).toEqual({
+      bare: "Sacrifice a land",
+      composite: "{1}{G}, Sacrifice a land",
+      flashback: "{1}{G} or Sacrifice a land",
+    });
+    expect(getKeywordDisplayText({ CumulativeUpkeep: sacrificeLand })).toBe(
+      "Cumulative Upkeep Sacrifice a land",
+    );
   });
 });

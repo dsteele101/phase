@@ -3697,12 +3697,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
         "Entwine" => {
-            // Accept both legacy ManaCost format and new EntwineCost tagged format.
-            if let Ok(entwine_cost) = serde_json::from_value::<EntwineCost>(data.clone()) {
-                Ok(Keyword::Entwine(entwine_cost))
-            } else {
-                Ok(Keyword::Entwine(EntwineCost::Mana(mana(data)?)))
-            }
+            // `EntwineCost`'s `from = "EntwineCostWire"` shim already accepts the
+            // legacy bare `ManaCost` payload (`EntwineCostWire::LegacyMana`), so
+            // this is the single authority for both the legacy and tagged shapes.
+            // A malformed payload surfaces the `EntwineCost` error instead of
+            // being silently re-read as a bare `ManaCost`.
+            serde_json::from_value::<EntwineCost>(data.clone())
+                .map(Keyword::Entwine)
+                .map_err(|e| format!("Entwine: {e}"))
         }
         // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
         "Escalate" => {
