@@ -2965,6 +2965,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::ManaExpended { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }

@@ -585,6 +585,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::CreatureExploited { .. }
             | GameEvent::Clash { .. }
             | GameEvent::VoteCast { .. }
+            | GameEvent::CardNamed { .. }
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }
             | GameEvent::CascadeMissed { .. }

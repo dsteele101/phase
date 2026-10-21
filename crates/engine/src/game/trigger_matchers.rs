@@ -1160,6 +1160,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ManaExpended { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }

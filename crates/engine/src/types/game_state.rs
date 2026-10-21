@@ -31208,6 +31208,7 @@ impl GameState {
                 | GameEvent::ManaExpended { .. }
                 | GameEvent::Clash { .. }
                 | GameEvent::VoteCast { .. }
+                | GameEvent::CardNamed { .. }
                 | GameEvent::VoteResolved { .. }
                 | GameEvent::PowerToughnessChanged { .. }
                 | GameEvent::CascadeMissed { .. }
