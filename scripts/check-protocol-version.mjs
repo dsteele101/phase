@@ -200,7 +200,7 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +88: v159 adds `GameAction::UnAction` wire action, Un-card actions state field
 //      `GameState.un_actions`, and new Un-action event tags (`UnTellPerformed`,
 //      `PhraseSaid`, `GotchaSaid`).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 88;
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 89;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -310,7 +310,7 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
 // +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
 // +87: wire 141 moves with full-game v159 for the Un-card actions state and wire action.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 87;
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 88;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse

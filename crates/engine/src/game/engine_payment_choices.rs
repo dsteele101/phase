@@ -1146,21 +1146,31 @@ pub(super) fn handle_unless_payment(
             // and maps an unpayable cost to the "unless" branch fall-through.
             // Un-card: `SayPhrase` pays through the same authority (no resources move).
             AbilityCost::Mana { .. } | AbilityCost::SayPhrase { .. } => {
-                match costs::pay_ability_cost_for_resolution(
+                // Un-card: SayPhrase requires the player to opted in; if they have
+                // not, treat the cost as unpaid so the "unless" branch fires.
+                if !crate::game::un_actions::cost_requires_unavailable_speech(
                     state,
                     player,
                     &cost,
-                    pending_effect.as_ref(),
-                    events,
-                )? {
-                    PaymentOutcome::Paid => {}
-                    PaymentOutcome::Failed { .. } => payment_failed = true,
-                    // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
-                    // ability can pause on a replacement-aware zone cost.
-                    // Its cursor owns the exact UnlessPayment continuation;
-                    // preserve that choice instead of resolving the effect.
-                    PaymentOutcome::Paused { .. } => {
-                        return Ok(action_result(events, state.waiting_for.clone()));
+                ) {
+                    payment_failed = true;
+                } else {
+                    match costs::pay_ability_cost_for_resolution(
+                        state,
+                        player,
+                        &cost,
+                        pending_effect.as_ref(),
+                        events,
+                    )? {
+                        PaymentOutcome::Paid => {}
+                        PaymentOutcome::Failed { .. } => payment_failed = true,
+                        // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
+                        // ability can pause on a replacement-aware zone cost.
+                        // Its cursor owns the exact UnlessPayment continuation;
+                        // preserve that choice instead of resolving the effect.
+                        PaymentOutcome::Paused { .. } => {
+                            return Ok(action_result(events, state.waiting_for.clone()));
+                        }
                     }
                 }
             }

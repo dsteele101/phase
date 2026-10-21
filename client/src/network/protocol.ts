@@ -730,7 +730,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 141 as const;
+export const WIRE_PROTOCOL_VERSION = 142 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
