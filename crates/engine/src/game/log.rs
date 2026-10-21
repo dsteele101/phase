@@ -679,6 +679,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
         | GameEvent::PlayerPerformedAction { .. } => LogTone::Neutral,
+        | _ => LogTone::Neutral,
     }
 }
 
