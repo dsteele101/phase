@@ -12,7 +12,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -138,4 +138,67 @@ fn elixir_shuffles_all_affected_owners_when_owner_differs_from_controller() {
         Zone::Graveyard,
         "P1's graveyard card is untouched (not in P0's graveyard)"
     );
+}
+
+/// CR 701.24d: even when the graveyard is empty, the owner's library must still
+/// be shuffled — "shuffle {possessive} graveyard into their owner's library"
+/// shuffles the library regardless of how many cards the graveyard contributes.
+#[test]
+fn elixir_shuffles_empty_graveyard_owners_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let elixir = scenario
+        .add_artifact_from_oracle(P0, "Elixir of Immortality", ELIXIR)
+        .id();
+    // P0's graveyard is deliberately empty — no cards are added to it.
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 2],
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+
+    let outcome = runner.activate(elixir, 0).resolve();
+
+    // The terminal library shuffle must resolve even with an empty graveyard.
+    let terminal_shuffles = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        terminal_shuffles, 1,
+        "the terminal library shuffle must resolve even for an empty graveyard (CR 701.24d)"
+    );
+
+    // P0's library was shuffled (ShuffledLibrary player action).
+    let shuffled_libraries = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .count();
+    assert_eq!(
+        shuffled_libraries, 1,
+        "P0's library must be shuffled even though their graveyard is empty"
+    );
+
+    let state = outcome.state();
+    assert_eq!(state.players[0].life, life_before + 5);
 }
