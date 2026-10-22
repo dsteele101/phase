@@ -739,6 +739,14 @@ pub fn resolve(
                         object_shield.valid_card = Some(TargetFilter::SelfRef);
                     }
                     if let Some(obj) = state.objects.get_mut(obj_id) {
+                        // CR 400.7 + CR 615.1: the object keeps its id across a
+                        // zone change but bumps its incarnation, so a blinked
+                        // creature is a new object with no memory of the
+                        // departed one's shield. Stamp the host's incarnation on
+                        // the shield at install time so the match-time gate in
+                        // `game::replacement::object_replacement_candidate_applies`
+                        // refuses to apply this shield to a later incarnation.
+                        object_shield.target_recipient_incarnation = Some(obj.incarnation);
                         // CR 611.2c + CR 613.1: install through the one
                         // resolution-install authority so the CR 613.1 layer reseed
                         // CARRIES this shield instead of wiping it. A prevention

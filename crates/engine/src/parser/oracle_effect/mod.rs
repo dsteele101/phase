@@ -26672,7 +26672,7 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
 
 fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
-        // CR 115.1d + CR 608.2c: a declared "any target" prevention recipient
+        // CR 115.1c + CR 608.2c: a declared "any target" prevention recipient
         // (Elvish Healer) is a chosen referent later "instead" shorthand binds to.
         || matches!(
             effect,

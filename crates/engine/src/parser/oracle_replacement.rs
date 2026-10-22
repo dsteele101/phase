@@ -38,7 +38,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_type_filter_word, parse_type_phrase, ControllerPhrase,
+    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
+    ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -10170,20 +10171,13 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
     // CR 608.2c + CR 615.2: source-scoped prevention can name its own source
-    // with a deictic object phrase (Barbed Wire: "by this artifact").
-    if all_consuming(alt((
-        value(
-            TargetFilter::SelfRef,
-            tag::<_, _, OracleError<'_>>("this artifact"),
-        ),
-        value(TargetFilter::SelfRef, tag("this creature")),
-        value(TargetFilter::SelfRef, tag("this permanent")),
-        value(TargetFilter::SelfRef, tag("this source")),
-        value(TargetFilter::SelfRef, tag("~")),
-    )))
-    .parse(subject)
-    .is_ok()
-    {
+    // with a deictic object phrase (Barbed Wire: "by this artifact"). The
+    // vocabulary is the shared `parse_self_reference` authority
+    // (oracle_nom::target), which now also covers "this source"; composing it
+    // here keeps every subject grammar in sync instead of maintaining a second
+    // phrase list. `all_consuming` keeps the contract that the whole subject
+    // must be consumed.
+    if all_consuming(parse_self_reference).parse(subject).is_ok() {
         return Some(TargetFilter::SelfRef);
     }
 

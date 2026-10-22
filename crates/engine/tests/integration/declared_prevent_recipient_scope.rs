@@ -1283,3 +1283,65 @@ fn elvish_healer_prompts_once_and_shields_only_the_chosen_creature() {
         "unchosen B is unshielded"
     );
 }
+
+/// Exile `id` and return it to the battlefield: the same ObjectId, but a new
+/// object with a bumped incarnation (CR 400.7).
+fn blink(runner: &mut GameRunner, id: ObjectId) {
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Exile, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Battlefield, &mut events);
+}
+
+/// CR 400.7 + CR 615.1: an object-hosted prevention shield belongs to its
+/// host's incarnation at install time. Aven Redeemer shields creature A, then
+/// A blinks (same id, new incarnation). The returned A is a new object with no
+/// memory of the departed shield, so damage dealt to it must NOT be prevented.
+#[test]
+fn aven_redeemer_shield_does_not_protect_a_blinked_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let aven = scenario
+        .add_creature_from_oracle(P0, "Aven Redeemer", 2, 2, AVEN_REDEEMER)
+        .id();
+    let a = scenario.add_creature(P0, "A", 3, 3).id();
+    let b = scenario.add_creature(P0, "B", 3, 3).id();
+    let pyroclasm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .id();
+    let mut runner = scenario.build();
+
+    // Shield creature A.
+    runner.activate(aven, 0).target_object(a).resolve();
+    while !runner.state().stack.is_empty() {
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+
+    let incarnation_before = runner.state().objects[&a].incarnation;
+
+    // Blink A: same ObjectId, new incarnation (CR 400.7).
+    blink(&mut runner, a);
+    assert_ne!(
+        runner.state().objects[&a].incarnation,
+        incarnation_before,
+        "the blinked creature returned as a new object"
+    );
+
+    // Pyroclasm deals 2 damage to each creature. The shield was installed on
+    // A's prior incarnation, so it must NOT protect the returned A.
+    let outcome = runner.cast(pyroclasm).resolve();
+    assert_eq!(
+        outcome.damage_marked(a),
+        2,
+        "the shield does not protect a blinked creature's new incarnation"
+    );
+    assert_eq!(
+        outcome.zone_of(a),
+        Zone::Battlefield,
+        "3-toughness A survives 2 un-prevented damage"
+    );
+    assert_eq!(
+        outcome.damage_marked(b),
+        2,
+        "unshielded B takes full damage"
+    );
+}

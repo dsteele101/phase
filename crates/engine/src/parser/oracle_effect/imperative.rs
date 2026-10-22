@@ -27295,8 +27295,8 @@ mod tests {
             "\"those creatures\" must bind via parse_target's tracked-set dispatch"
         );
 
-        // CR 201.5 + CR 109.5: printed-name and reflexive self references resolve
-        // to the source with Single scope.
+        // CR 201.5: printed-name and reflexive self references resolve to the source
+        // with Single scope.
         for self_phrase in [
             "this creature this turn.",
             "~ this turn.",
