@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIdentityBinding};
 use super::player::PlayerId;
 
 /// A physical gesture a player can perform from the Un-actions menu.
@@ -99,6 +99,12 @@ fn is_zero_u64(n: &u64) -> bool {
 
 /// A live opportunity for `player` to call "Gotcha!" for the Gotcha ability on
 /// `source_id`, returning `returns` to hand when the reflexive trigger resolves.
+///
+/// `returns` is bound to the card's occurrence (object id + incarnation) and the
+/// zone it was in when the window opened. CR 400.7: an object that changes zones
+/// becomes a new object and bumps its incarnation, so a bare ObjectId goes stale —
+/// the binding lets `offer_is_still_valid` reject a window whose returned card has
+/// moved or been replaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GotchaOffer {
     pub id: u64,
@@ -107,7 +113,7 @@ pub struct GotchaOffer {
     pub source_id: ObjectId,
     /// The card the ability returns ("this card" → `source_id`; "that card" → the
     /// graveyard card whose name contained the spoken word).
-    pub returns: ObjectId,
+    pub returns: ObjectIdentityBinding,
 }
 
 /// Per-game Un-card action state.
@@ -178,6 +184,21 @@ pub enum UnAction {
 /// Magnitude words the shared number grammar (`parse_number`) does not cover.
 const EXTRA_NUMBER_WORDS: &[&str] = &["zero", "hundred", "thousand", "million", "billion"];
 
+/// Irregular plural forms the regular suffix rules don't produce, keyed by the
+/// watched (singular) word. "life" -> "lives" (not "lifes"), "child" ->
+/// "children", etc. Gotcha conditions watch single words, so the spoken form
+/// must be the listed plural exactly.
+const IRREGULAR_PLURALS: &[(&str, &str)] = &[
+    ("life", "lives"),
+    ("child", "children"),
+    ("person", "people"),
+    ("mouse", "mice"),
+    ("goose", "geese"),
+    ("foot", "feet"),
+    ("tooth", "teeth"),
+    ("ox", "oxen"),
+];
+
 /// Split spoken text into lowercase words. Hyphenated words are preserved as single words.
 pub fn spoken_words(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-')
@@ -195,6 +216,17 @@ pub fn word_matches(watched: &str, spoken: &str) -> bool {
     }
     if w == s {
         return true;
+    }
+    // Irregular plurals ("life" -> "lives", "child" -> "children", ...).
+    // When the watched word is irregular, only its listed plural matches —
+    // "lifes" is not the plural of "life" and must not fall through to the
+    // regular "+s" rule.
+    if let Some(plural) = IRREGULAR_PLURALS
+        .iter()
+        .find(|(singular, _)| *singular == w)
+        .map(|(_, plural)| *plural)
+    {
+        return s == plural;
     }
     // 1. y -> ies (e.g. "cherry" -> "cherries", "ability" -> "abilities"; but not vowel+y like "guy")
     if w.ends_with('y') && w.len() > 1 {
@@ -296,6 +328,15 @@ mod tests {
         assert!(!word_matches("guy", "guyed"));
         assert!(!word_matches("life", "lifeline"));
         assert!(!word_matches("stop", "stopping"));
+    }
+
+    #[test]
+    fn word_matches_handles_irregular_plurals() {
+        // Irregular plurals match; non-plural lookalikes do not.
+        assert!(word_matches("life", "lives"));
+        assert!(!word_matches("life", "lifes"));
+        assert!(word_matches("child", "children"));
+        assert!(!word_matches("child", "childs"));
     }
 
     #[test]

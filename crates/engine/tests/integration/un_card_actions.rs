@@ -511,9 +511,11 @@ fn name_dropping_returns_the_graveyard_card_whose_name_the_opponent_said() {
         "only the Bolt's name contains a spoken word"
     );
     assert_eq!(
-        (offers[0].source_id, offers[0].returns),
-        (name_dropping, bolt)
+        (offers[0].source_id, offers[0].returns.reference.object_id),
+        (name_dropping, bolt),
+        "the offer returns the card whose name was spoken"
     );
+    assert_eq!(offers[0].returns.expected_zone, Zone::Graveyard);
 
     un_action(
         &mut runner,
@@ -987,9 +989,10 @@ fn a_tell_made_during_a_decision_is_announced_once_priority_settles() {
     let offers = &runner.state().un_actions.gotcha_offers;
     assert_eq!(offers.len(), 1);
     assert_eq!(
-        (offers[0].source_id, offers[0].returns),
+        (offers[0].source_id, offers[0].returns.reference.object_id),
         (name_dropping, bolt)
     );
+    assert_eq!(offers[0].returns.expected_zone, Zone::Graveyard);
     assert!(runner.state().un_actions.pending_offers.is_empty());
 }
 

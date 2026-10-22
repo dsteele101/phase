@@ -2,6 +2,7 @@ import { act } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Zone } from "../../../adapter/types";
 import { useGameStore } from "../../../stores/gameStore";
 import { gameStateFactory } from "../../../test/factories/gameStateFactory";
 import { GOTCHA_BUTTON_MS, GotchaButton } from "../GotchaButton";
@@ -38,12 +39,24 @@ vi.mock("../../../hooks/useGameDispatch", () => ({
   useGameDispatch: () => dispatch,
 }));
 
+function returnsBinding(object_id: number) {
+  return {
+    reference: { object_id, incarnation: 0 },
+    expected_zone: "Graveyard" as Zone,
+  };
+}
+
 function offerGotcha(player: number, id = 1) {
-  offerGotchas([{ id, player, source_id: 9, returns: 9 }]);
+  offerGotchas([{ id, player, source_id: 9, returns: returnsBinding(9) }]);
 }
 
 function offerGotchas(
-  offers: { id: number; player: number; source_id: number; returns: number }[],
+  offers: {
+    id: number;
+    player: number;
+    source_id: number;
+    returns: { reference: { object_id: number; incarnation: number }; expected_zone: Zone };
+  }[],
 ) {
   act(() => {
     useGameStore.setState({
@@ -137,8 +150,8 @@ describe("GotchaButton", () => {
   });
 
   it("keeps an expired offer hidden when an unrelated offer arrives, and times each offer separately", () => {
-    const a = { id: 1, player: 0, source_id: 9, returns: 9 };
-    const b = { id: 2, player: 0, source_id: 10, returns: 10 };
+    const a = { id: 1, player: 0, source_id: 9, returns: returnsBinding(9) };
+    const b = { id: 2, player: 0, source_id: 10, returns: returnsBinding(10) };
     offerGotchas([a]);
     render(<GotchaButton />);
 
@@ -155,7 +168,7 @@ describe("GotchaButton", () => {
     act(() => {
       vi.advanceTimersByTime(1500);
     });
-    const c = { id: 3, player: 0, source_id: 11, returns: 11 };
+    const c = { id: 3, player: 0, source_id: 11, returns: returnsBinding(11) };
     offerGotchas([a, b, c]);
     act(() => {
       // B's fuse (2000ms from t=2000) runs out; let its exit animation finish.

@@ -1146,9 +1146,11 @@ pub(super) fn handle_unless_payment(
             // and maps an unpayable cost to the "unless" branch fall-through.
             // Un-card: `SayPhrase` pays through the same authority (no resources move).
             AbilityCost::Mana { .. } | AbilityCost::SayPhrase { .. } => {
-                // Un-card: SayPhrase requires the player to opted in; if they have
-                // not, treat the cost as unpaid so the "unless" branch fires.
-                if !crate::game::un_actions::cost_requires_unavailable_speech(
+                // Un-card: SayPhrase requires the player to have opted in. If they
+                // have not, the cost is unpaid and the "unless" branch fires
+                // exactly as if they had declined (CR 118.12a). Otherwise pay
+                // through the single payment authority.
+                if crate::game::un_actions::cost_requires_unavailable_speech(
                     state,
                     player,
                     &cost,

@@ -25617,7 +25617,6 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
@@ -25632,6 +25631,16 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
+            if !matches!(target, TargetFilter::ParentTargetController) =>
+        {
+            *target = TargetFilter::ParentTarget;
+        }
+        // Damage is the only one of these whose subject can be a player
+        // (CR 120.1 — damage is dealt to a player, planeswalker, or
+        // creature). Valiant Farewell deals damage to creatures and players;
+        // a player-scope target must never be rebound to ParentTarget, so
+        // the object-effect guard does not apply here.
+        Effect::DealDamage { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController)
                 && !target.is_player_scope() =>
         {

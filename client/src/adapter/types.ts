@@ -1184,7 +1184,17 @@ export interface GotchaOffer {
   id: number;
   player: PlayerId;
   source_id: ObjectId;
-  returns: ObjectId;
+  /// The card the ability returns, bound to its occurrence (object id +
+  /// incarnation) and the zone it was in when the window opened (CR 400.7:
+  /// a zone change makes a new object, so a bare ObjectId goes stale).
+  returns: ObjectIdentityBinding;
+}
+
+/// Mirrors `crates/engine/src/types/identifiers.rs::ObjectIdentityBinding`:
+/// an object occurrence (id + incarnation) pinned to the zone it was in.
+export interface ObjectIdentityBinding {
+  reference: { object_id: ObjectId; incarnation: number };
+  expected_zone: Zone;
 }
 
 export interface UnActionState {

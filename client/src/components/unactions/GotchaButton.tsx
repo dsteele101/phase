@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
@@ -22,6 +23,7 @@ export function GotchaButton() {
   const spectator = useSpectatorMode();
   const offers = useGameStore((s) => s.gameState?.un_actions?.gotcha_offers);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const playerId = usePlayerId();
   // Each engine-issued offer id carries its own two-second fuse, so a new offer
   // never revives an expired one and claiming one never restarts the others.
   const [expiredIds, setExpiredIds] = useState<ReadonlySet<number>>(new Set());
@@ -60,7 +62,7 @@ export function GotchaButton() {
     };
   }, []);
 
-  const visible = (offers ?? []).filter((offer) => !expiredIds.has(offer.id));
+  const visible = (offers ?? []).filter((offer) => offer.player === playerId && !expiredIds.has(offer.id));
   if (spectator || visible.length === 0) return null;
 
   return (
@@ -82,16 +84,19 @@ export function GotchaButton() {
                 data: {
                   action: {
                     type: "SayGotcha",
-                    data: { source_id: offer.source_id, returns: offer.returns },
+                    data: {
+                      source_id: offer.source_id,
+                      returns: offer.returns.reference.object_id,
+                    },
                   },
                 },
               })
             }
           >
             {t("unActions.gotcha.button")}
-            {visible.length > 1 && objects?.[offer.returns] && (
+            {visible.length > 1 && objects?.[offer.returns.reference.object_id] && (
               <span className="block text-sm font-semibold normal-case tracking-normal">
-                {objects[offer.returns].name}
+                {objects[offer.returns.reference.object_id].name}
               </span>
             )}
             {/* The two-second fuse, burning down. */}

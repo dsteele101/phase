@@ -200,7 +200,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // +88: v159 adds `GameAction::UnAction` wire action, Un-card actions state field
 //      `GameState.un_actions`, and new Un-action event tags (`UnTellPerformed`,
 //      `PhraseSaid`, `GotchaSaid`).
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 89;
+// +90: v161 carries the final Un-action wire shape for this branch.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 90;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
