@@ -1044,7 +1044,7 @@ fn barbed_wire_raises_no_target_prompt_when_activated() {
     }
     assert!(
         prevention_resolved(&events),
-        "reach guard: the untargeted spell installed a PreventDamage effect"
+        "reach guard: Barbed Wire installed a PreventDamage effect"
     );
 
     let outcome = runner.cast(shock).target_player(P1).resolve();
