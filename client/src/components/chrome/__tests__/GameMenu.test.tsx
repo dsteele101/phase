@@ -358,4 +358,33 @@ describe("GameMenu", () => {
     expect(screen.getByRole("button", { name: "Close Game Log" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open Game Log" })).toBeNull();
   });
+
+  it.each([
+    { preview: true, origin: "https://preview.phase-rs.dev", text: `v${__APP_VERSION__} ${__BUILD_HASH__}` },
+    { preview: false, origin: "https://preview.phase-rs.dev", text: `v${__APP_VERSION__}` },
+    { preview: true, origin: "https://phase-rs.dev", text: `v${__APP_VERSION__}` },
+  ])(
+    "shows the build hash beside the version only on preview builds at the preview origin (preview=$preview, origin=$origin)",
+    ({ preview, origin, text }) => {
+      const originalLocation = window.location;
+      vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { ...originalLocation, origin },
+        writable: true,
+      });
+      try {
+        renderGameMenu();
+        fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+        expect(screen.getByRole("link", { name: text })).toBeInTheDocument();
+      } finally {
+        vi.unstubAllGlobals();
+        Object.defineProperty(window, "location", {
+          configurable: true,
+          value: originalLocation,
+          writable: true,
+        });
+      }
+    },
+  );
 });

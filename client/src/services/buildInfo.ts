@@ -5,5 +5,8 @@
  * `__BUILD_HASH__` directly.
  */
 export function displayedBuildHash(): string | null {
-  return __IS_PREVIEW_BUILD__ ? __BUILD_HASH__ : null;
+  if (!__IS_PREVIEW_BUILD__ || typeof window === "undefined") return null;
+  return window.location.origin === new URL(__PREVIEW_SITE_URL__).origin
+    ? __BUILD_HASH__
+    : null;
 }

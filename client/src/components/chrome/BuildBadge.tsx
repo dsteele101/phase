@@ -111,16 +111,20 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
             onClick={handleCheckUpdate}
             aria-label={t("buildBadge.checkForUpdates")}
             title={tooltip}
-            className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
+            className="inline-flex flex-col items-center gap-0.5 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
           >
-            <span>v{__APP_VERSION__}</span>
-            <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
-              ↻
+            <span className="inline-flex items-center gap-1">
+              <span>v{__APP_VERSION__}</span>
+              <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
+                ↻
+              </span>
             </span>
+            {buildHash && <span className="text-[9px] text-slate-500">{buildHash}</span>}
           </button>
         ) : (
-          <span title={tooltip} className="font-mono text-[10.5px] leading-none text-slate-400">
-            v{__APP_VERSION__}
+          <span title={tooltip} className="inline-flex flex-col items-center gap-0.5 font-mono text-[10.5px] leading-none text-slate-400">
+            <span>v{__APP_VERSION__}</span>
+            {buildHash && <span className="text-[9px] text-slate-500">{buildHash}</span>}
           </span>
         )}
         {canCheckForUpdates && statusLabel && (

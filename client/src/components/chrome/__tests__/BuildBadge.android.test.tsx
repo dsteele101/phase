@@ -57,7 +57,25 @@ beforeEach(() => {
   mocks.updateError = null;
 });
 
-afterEach(cleanup);
+const originalLocation = window.location;
+
+function setOrigin(origin: string): void {
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { ...originalLocation, origin },
+    writable: true,
+  });
+}
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: originalLocation,
+    writable: true,
+  });
+});
 
 it.each(mobileLayouts)("keeps mobile Tauri metadata but hides idle updater affordances ($bundled, $compact)", ({ bundled, compact }) => {
   mocks.bundled.mockReturnValue(bundled);
@@ -113,12 +131,20 @@ it("retains desktop app-version and updater reachability", async () => {
 });
 
 it.each([
-  { preview: true, shown: true },
-  { preview: false, shown: false },
-])("shows the build hash only on preview builds (preview=$preview)", ({ preview, shown }) => {
-  vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
-  render(<BuildBadge inline />);
-  if (shown) expect(screen.getByText(__BUILD_HASH__)).toBeInTheDocument();
-  else expect(screen.queryByText(__BUILD_HASH__)).not.toBeInTheDocument();
-  vi.unstubAllGlobals();
-});
+  { compact: false, preview: true, origin: "https://preview.phase-rs.dev", shown: true },
+  { compact: true, preview: true, origin: "https://preview.phase-rs.dev", shown: true },
+  { compact: false, preview: false, origin: "https://preview.phase-rs.dev", shown: false },
+  { compact: true, preview: false, origin: "https://preview.phase-rs.dev", shown: false },
+  { compact: false, preview: true, origin: "https://phase-rs.dev", shown: false },
+  { compact: true, preview: true, origin: "https://phase-rs.dev", shown: false },
+])(
+  "shows the build hash only on preview builds at the preview origin (compact=$compact, preview=$preview, origin=$origin)",
+  ({ compact, preview, origin, shown }) => {
+    vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
+    setOrigin(origin);
+    render(<BuildBadge compact={compact} inline />);
+    expect(screen.getByText(`v${__APP_VERSION__}`)).toBeInTheDocument();
+    if (shown) expect(screen.getByText(__BUILD_HASH__)).toBeInTheDocument();
+    else expect(screen.queryByText(__BUILD_HASH__)).not.toBeInTheDocument();
+  },
+);
