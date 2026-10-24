@@ -418,6 +418,10 @@ fn tidehollow_sculler_leaving_before_etb_resolves_exiles_indefinitely() {
         Zone::Exile,
         "the chosen card is exiled indefinitely; the earlier leaves trigger did nothing"
     );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "stack resolution must complete back to priority"
+    );
 }
 
 /// CR 607.2a + CR 603.3: Ashiok's Erasure exiles a SPELL (from the stack) and its
@@ -456,5 +460,136 @@ fn ashioks_erasure_returns_exiled_spell_to_owners_hand() {
         zone_of(&runner, victim),
         Zone::Hand,
         "the exiled spell returns to its owner's hand, not to the stack"
+    );
+}
+
+const UGIN_THE_INEFFABLE: &str = "Colorless spells you cast cost {2} less to cast.\n\
++1: Exile the top card of your library face down and look at it. Create a 2/2 colorless Spirit creature token. When that token leaves the battlefield, put the exiled card into your hand.\n\
+\u{2212}3: Destroy target permanent that's one or more colors.";
+
+/// CR 607.1 + CR 607.2a + CR 603.7: Ugin, the Ineffable's +1 ability binds each
+/// exiled card to its own created Spirit token via a tracked-set delayed trigger.
+/// When activated multiple times, removing one Spirit returns only that Spirit's
+/// exiled card to hand while the other remains exiled.
+#[test]
+fn ugin_the_ineffable_delayed_return_returns_only_matching_spirits_exiled_card() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ugin = scenario
+        .add_planeswalker_from_oracle(P0, "Ugin, the Ineffable", "Ugin", 4, UGIN_THE_INEFFABLE)
+        .as_legendary()
+        .id();
+
+    // Top of library: card_b is below card_a (so card_a is on top).
+    let card_b = scenario.add_card_to_library_top(P0, "Exiled Card B");
+    let card_a = scenario.add_card_to_library_top(P0, "Exiled Card A");
+
+    let murder1 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder 1", true, MURDER)
+        .id();
+    let murder2 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder 2", true, MURDER)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Grant an extra loyalty activation so we can activate Ugin's +1 twice in the same turn.
+    runner
+        .state_mut()
+        .extra_loyalty_activations_this_turn
+        .insert(P0, 1);
+
+    // First activation: exiles card_a and creates the first Spirit token.
+    runner.activate(ugin, 0).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, card_a), Zone::Exile);
+    assert_eq!(zone_of(&runner, card_b), Zone::Library);
+
+    let spirits_first: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj.card_types.subtypes.iter().any(|s| s == "Spirit")
+        })
+        .map(|obj| obj.id)
+        .collect();
+    assert_eq!(
+        spirits_first.len(),
+        1,
+        "first activation creates one Spirit"
+    );
+    let spirit_a = spirits_first[0];
+
+    // Second activation: exiles card_b and creates the second Spirit token.
+    runner.activate(ugin, 0).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, card_a), Zone::Exile);
+    assert_eq!(zone_of(&runner, card_b), Zone::Exile);
+
+    let spirits_second: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj.card_types.subtypes.iter().any(|s| s == "Spirit")
+        })
+        .map(|obj| obj.id)
+        .collect();
+    assert_eq!(
+        spirits_second.len(),
+        2,
+        "second activation creates a second Spirit"
+    );
+    let spirit_b = spirits_second
+        .into_iter()
+        .find(|&id| id != spirit_a)
+        .expect("second spirit found");
+
+    // Both cards are currently in exile.
+    assert_eq!(zone_of(&runner, card_a), Zone::Exile);
+    assert_eq!(zone_of(&runner, card_b), Zone::Exile);
+
+    // Destroy the first Spirit token (spirit_a).
+    runner.cast(murder1).target_object(spirit_a).resolve();
+    runner.advance_until_stack_empty();
+
+    // CR 607.1: Only spirit_a's exiled card (card_a) returns to hand.
+    // card_b must remain in exile.
+    assert_eq!(
+        zone_of(&runner, card_a),
+        Zone::Hand,
+        "first Spirit's death returns its linked exiled card to hand"
+    );
+    assert_eq!(
+        zone_of(&runner, card_b),
+        Zone::Exile,
+        "second Spirit's exiled card must remain in exile"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution completes back to priority"
+    );
+
+    // Destroy the second Spirit token (spirit_b).
+    runner.cast(murder2).target_object(spirit_b).resolve();
+    runner.advance_until_stack_empty();
+
+    // Now card_b also returns to hand.
+    assert_eq!(
+        zone_of(&runner, card_b),
+        Zone::Hand,
+        "second Spirit's death returns its linked exiled card to hand"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution completes back to priority"
     );
 }

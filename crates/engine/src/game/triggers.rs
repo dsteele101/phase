@@ -14569,21 +14569,20 @@ fn delayed_trigger_event_with_index(
                 matches!(
                     e,
                     GameEvent::ZoneChanged {
+                        object_id,
                         from: Some(Zone::Battlefield),
                         to: Zone::Graveyard | Zone::Exile,
+                        record,
                         ..
-                    }
-                ) && matches!(
-                    e,
-                    GameEvent::ZoneChanged { object_id, .. }
-                        if delayed_zone_change_filter_matches(
-                            state,
-                            *object_id,
-                            filter,
-                            source_id,
-                            controller,
-                            source_context,
-                        )
+                    } if delayed_zone_change_filter_matches(
+                        state,
+                        *object_id,
+                        filter,
+                        source_id,
+                        controller,
+                        source_context,
+                        record,
+                    )
                 )
             })
             .map(|(idx, event)| (idx, event.clone())),
@@ -14674,6 +14673,7 @@ fn delayed_zone_change_event_with_index(
                     object_id,
                     from: event_from,
                     to: event_to,
+                    record,
                     ..
                 } if from.is_none_or(|zone| *event_from == Some(zone))
                     && to.is_none_or(|zone| *event_to == zone)
@@ -14684,6 +14684,7 @@ fn delayed_zone_change_event_with_index(
                         source_id,
                         controller,
                         source_context,
+                        record,
                     )
             )
         })
@@ -14704,20 +14705,27 @@ fn delayed_zone_change_filter_matches(
     source_id: ObjectId,
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
+    record: &crate::types::game_state::ZoneChangeRecord,
 ) -> bool {
     if matches!(filter, crate::types::ability::TargetFilter::SelfRef) && source_context.is_some() {
         return object_id == source_id;
     }
 
-    crate::game::filter::matches_target_filter(
-        state,
-        object_id,
-        filter,
-        &source_context.map_or_else(
-            || FilterContext::from_source_with_controller(source_id, controller),
-            |source| FilterContext::from_trigger_source_with_controller(source, controller),
-        ),
-    )
+    let ctx = source_context.map_or_else(
+        || FilterContext::from_source_with_controller(source_id, controller),
+        |source| FilterContext::from_trigger_source_with_controller(source, controller),
+    );
+
+    // CR 603.10a + CR 608.2k: A departed permanent that ceased to exist (such as
+    // a token leaving the battlefield, CR 111.7) is absent from `state.objects`.
+    // Evaluate it through its exit snapshot `record`.
+    if state.objects.contains_key(&object_id) {
+        crate::game::filter::matches_target_filter(state, object_id, filter, &ctx)
+    } else {
+        crate::game::filter::matches_target_filter_on_zone_change_record(
+            state, record, filter, &ctx,
+        )
+    }
 }
 
 /// Check whether a trigger's constraint allows it to fire.
