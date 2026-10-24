@@ -1603,10 +1603,10 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, DiscardedCardResult,
-        EffectOutcomeSignal, LibraryPosition, QuantityExpr, ReplacementCondition,
-        ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
-        TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, CardSelectionMode, ChosenAttribute,
+        ControllerRef, DiscardedCardResult, EffectOutcomeSignal, LibraryPosition, QuantityExpr,
+        ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+        SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -3183,8 +3183,6 @@ mod tests {
 
     #[test]
     fn object_bound_discard_applies_card_filter_without_player_hand_fallback() {
-        use crate::types::ability::{CardSelectionMode, ChosenAttribute, QuantityExpr};
-
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
