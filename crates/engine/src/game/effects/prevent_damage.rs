@@ -600,7 +600,10 @@ pub fn resolve(
     // resolves context refs to their controller, which would mis-scope an
     // object-shield as a player-shield. Skip the player-filter inference in those cases.
     let event_context_target = if matches!(target, TargetFilter::EventTarget) {
-        crate::game::targeting::resolve_event_context_target(state, &target, ability.source_id)
+        crate::game::targeting::resolve_event_referent_permanents(state, &target, ability.source_id)
+            .into_iter()
+            .find(|&id| ability.target_pin_is_current(id, state))
+            .map(TargetRef::Object)
     } else {
         None
     };
@@ -710,10 +713,10 @@ pub fn resolve(
     // population is matched as each damage event happens, not chosen.
     // CR 608.2k + CR 120.1: concrete recipient targets to host on — declared targets,
     // inherited parent targets, or the active event's referent.
-    let targets_to_host: Vec<TargetRef> = if !ability.targets.is_empty() {
-        ability.targets.clone()
-    } else if matches!(target, TargetFilter::EventTarget) {
+    let targets_to_host: Vec<TargetRef> = if matches!(target, TargetFilter::EventTarget) {
         event_context_target.into_iter().collect()
+    } else if !ability.targets.is_empty() {
+        ability.live_object_targets(state)
     } else {
         Vec::new()
     };
@@ -730,6 +733,9 @@ pub fn resolve(
         for selected_target in &targets_to_host {
             match selected_target {
                 TargetRef::Object(obj_id) => {
+                    if !ability.target_pin_is_current(*obj_id, state) {
+                        continue;
+                    }
                     // CR 614.1a: When the shield is hosted on a specific object,
                     // scope it via `valid_card: SelfRef` so it only fires on
                     // damage to its host — not damage to any object on the

@@ -3386,6 +3386,14 @@ fn collect_matching_triggers_inner(
                     pending_ability
                         .set_effect_context_object_recursive(tapped_snapshot.as_ref().clone());
                 }
+                let later_equal_in_batch =
+                    count_later_equal_damage_events_in_batch(event_batch, event, &trigger_event);
+                seed_damage_event_recipient_pin(
+                    state,
+                    &mut pending_ability,
+                    Some(&trigger_event),
+                    later_equal_in_batch,
+                );
                 pending.push(MatchedTrigger {
                     trig_idx,
                     definition_ref: definition_ref.clone(),
@@ -8973,6 +8981,123 @@ fn effect_uses_parent_target(effect: &Effect) -> bool {
     }
 }
 
+fn ability_uses_event_target_prevent_damage(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::PreventDamage {
+            target: TargetFilter::EventTarget,
+            ..
+        }
+    ) || ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(ability_uses_event_target_prevent_damage)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_uses_event_target_prevent_damage)
+}
+
+fn count_later_equal_damage_events_in_batch(
+    event_batch: &[GameEvent],
+    current_event: &GameEvent,
+    trigger_event: &GameEvent,
+) -> usize {
+    let GameEvent::DamageDealt {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        source_incarnation,
+        ..
+    } = trigger_event
+    else {
+        return 0;
+    };
+    let Some(pos) = event_batch
+        .iter()
+        .position(|e| std::ptr::eq(e, current_event))
+    else {
+        return 0;
+    };
+    event_batch[pos + 1..]
+        .iter()
+        .filter(|later| {
+            matches!(
+                later,
+                GameEvent::DamageDealt {
+                    source_id: s,
+                    target: t,
+                    amount: a,
+                    is_combat: c,
+                    source_incarnation: si,
+                    ..
+                } if s == source_id
+                    && t == target
+                    && a == amount
+                    && c == is_combat
+                    && si == source_incarnation
+            )
+        })
+        .count()
+}
+
+fn damage_event_recipient_pin(
+    state: &GameState,
+    trigger_event: Option<&GameEvent>,
+    later_equal_in_batch: usize,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::DamageDealt {
+        source_id,
+        target: TargetRef::Object(target_id),
+        amount,
+        is_combat,
+        source_incarnation,
+        ..
+    } = trigger_event?
+    else {
+        return None;
+    };
+    let incarnation = state
+        .damage_dealt_this_turn
+        .iter()
+        .rev()
+        .filter(|record| {
+            record.source_id == *source_id
+                && record.source_incarnation == *source_incarnation
+                && record.target == TargetRef::Object(*target_id)
+                && record.amount == *amount
+                && record.is_combat == *is_combat
+        })
+        .nth(later_equal_in_batch)
+        .and_then(|record| record.target_incarnation)
+        .or_else(|| state.objects.get(target_id).map(|obj| obj.incarnation))?;
+    Some(ObjectIncarnationRef::of(*target_id, incarnation))
+}
+
+/// CR 400.7 + CR 608.2k + CR 120.1: Pin the exact damage recipient incarnation
+/// on an ability chain that resolves `TargetFilter::EventTarget` into a
+/// prevention shield (`Effect::PreventDamage`). Captured when the trigger is
+/// collected / placed on the stack so that if the recipient leaves the
+/// battlefield and returns before the trigger resolves — even if the same
+/// dealer deals an equal amount of damage to the returned incarnation before
+/// the original trigger resolves — the original trigger remains bound to its
+/// own event's recipient incarnation and does not shield the new object.
+pub(crate) fn seed_damage_event_recipient_pin(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+    later_equal_in_batch: usize,
+) {
+    if !ability.target_incarnations.is_empty() || !ability_uses_event_target_prevent_damage(ability)
+    {
+        return;
+    }
+    if let Some(pin) = damage_event_recipient_pin(state, trigger_event, later_equal_in_batch) {
+        ability.set_target_incarnations_recursive(vec![pin]);
+    }
+}
+
 pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     state: &mut GameState,
     trigger: PendingTrigger,
@@ -9050,6 +9175,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         trigger_event.as_ref(),
         EventContextSeedTiming::StackPush,
     );
+    seed_damage_event_recipient_pin(state, &mut ability, trigger_event.as_ref(), 0);
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -9333,6 +9459,7 @@ fn assign_pending_trigger_entry_ability(
     // push time (`push_pending_trigger_to_stack_with_firing_and_duration_events`)
     // for "that spell" / self-cast "this spell".
     assigned_ability.context.triggering_spell = triggering_spell_pin(state, trigger_event);
+    seed_damage_event_recipient_pin(state, &mut assigned_ability, trigger_event, 0);
 
     let Some(entry) = state
         .stack
@@ -9345,6 +9472,12 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
+    if assigned_ability.target_incarnations.is_empty()
+        && !ability.target_incarnations.is_empty()
+        && ability_uses_event_target_prevent_damage(&assigned_ability)
+    {
+        assigned_ability.set_target_incarnations_recursive(ability.target_incarnations.clone());
+    }
     *ability = assigned_ability;
     true
 }

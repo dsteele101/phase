@@ -1217,6 +1217,230 @@ fn passive_damage_trigger_prevention_on_lethal_damage_does_not_install_floating_
     );
 }
 
+fn resolve_top_stack_entry(runner: &mut GameRunner) {
+    let top_id = runner
+        .state()
+        .stack
+        .last()
+        .expect("expected a stack object to resolve")
+        .id;
+    for _ in 0..8 {
+        if !runner.state().stack.iter().any(|entry| entry.id == top_id) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve top stack entry");
+    }
+    panic!("top stack entry did not resolve");
+}
+
+fn ping_creature_leaving_triggers_pending(
+    runner: &mut GameRunner,
+    pinger: ObjectId,
+    creature: ObjectId,
+) {
+    let result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: pinger,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate pinger");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            })
+            .expect("target creature with pinger");
+    }
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay 0 activation mana");
+    }
+    resolve_top_stack_entry(runner);
+}
+
+/// CR 400.7 + CR 608.2k: when a damage-triggered prevention shield is left
+/// pending on the stack and its recipient is blinked by full-Oracle Ephemerate
+/// before the trigger resolves, the returned creature is a new object with a
+/// new incarnation and must NOT receive the original event's shield.
+#[test]
+fn passive_damage_trigger_pending_shield_does_not_install_after_ephemerate_blink() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let preventer_oracle =
+        "Whenever a creature is dealt damage, prevent the next 1 damage that would be dealt to it this turn.";
+    let ephemerate_oracle =
+        "Exile target creature you control, then return it to the battlefield under its owner's control.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
+    let pinger_oracle = "{0}: This creature deals 1 damage to any target.";
+    let shock_oracle = "Shock deals 2 damage to any target.";
+
+    scenario.add_enchantment_from_oracle(P0, "Damage Shield", preventer_oracle);
+    let pinger = scenario
+        .add_creature_from_oracle(P0, "Pinger", 1, 1, pinger_oracle)
+        .id();
+    let creature = scenario.add_creature(P0, "Shielded Creature", 3, 3).id();
+    let ephemerate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ephemerate", true, ephemerate_oracle)
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", false, shock_oracle)
+        .id();
+    let mut runner = scenario.build();
+
+    let incarnation_before = runner.state().objects[&creature].incarnation;
+
+    // Activate Pinger targeting the creature and resolve only the ping ability,
+    // leaving the triggered Damage Shield ability pending on the stack.
+    ping_creature_leaving_triggers_pending(&mut runner, pinger, creature);
+    assert_eq!(runner.state().objects[&creature].damage_marked, 1);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the passive damage-prevention trigger is pending on the stack"
+    );
+
+    // Blink the recipient with full-Oracle Ephemerate while the prevention
+    // trigger is still pending on the stack.
+    runner.cast(ephemerate).target_object(creature).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    resolve_top_stack_entry(&mut runner);
+
+    let incarnation_after_blink = runner.state().objects[&creature].incarnation;
+    assert_ne!(
+        incarnation_after_blink, incarnation_before,
+        "reach guard: Ephemerate returned the creature as a new incarnation (CR 400.7)"
+    );
+    assert_eq!(runner.state().objects[&creature].damage_marked, 0);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the original damage-prevention trigger is still pending"
+    );
+
+    // Resolve the original trigger: it must NOT install a shield on the
+    // returned creature's new incarnation.
+    resolve_top_stack_entry(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().objects[&creature]
+            .replacement_definitions
+            .is_empty(),
+        "CR 400.7 + CR 608.2k: the original trigger must not install a shield on the blinked incarnation"
+    );
+
+    // Shock deals 2 damage to the returned creature; none of it is prevented.
+    let outcome = runner.cast(shock).target_object(creature).resolve();
+    assert_eq!(
+        outcome.damage_marked(creature),
+        2,
+        "returned incarnation takes full 2 damage from Shock"
+    );
+}
+
+/// CR 400.7 + CR 608.2k + CR 120.1: if the damage-triggered prevention shield
+/// is left pending, its recipient is blinked by full-Oracle Ephemerate, and the
+/// SAME unchanged dealer deals an equal amount of damage to the returned
+/// creature before the original trigger resolves, the original trigger remains
+/// bound to its own pre-blink occurrence and must not install a second shield
+/// onto the returned incarnation.
+#[test]
+fn passive_damage_trigger_pending_shield_ignores_second_equal_damage_from_same_dealer_after_blink()
+{
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let preventer_oracle =
+        "Whenever a creature is dealt damage, prevent the next 1 damage that would be dealt to it this turn.";
+    let ephemerate_oracle =
+        "Exile target creature you control, then return it to the battlefield under its owner's control.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
+    let pinger_oracle = "{0}: This creature deals 1 damage to any target.";
+    let shock_oracle = "Shock deals 2 damage to any target.";
+
+    scenario.add_enchantment_from_oracle(P0, "Damage Shield", preventer_oracle);
+    let pinger = scenario
+        .add_creature_from_oracle(P0, "Pinger", 1, 1, pinger_oracle)
+        .id();
+    let creature = scenario.add_creature(P0, "Shielded Creature", 3, 4).id();
+    let ephemerate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ephemerate", true, ephemerate_oracle)
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", false, shock_oracle)
+        .id();
+    let mut runner = scenario.build();
+
+    let pinger_incarnation = runner.state().objects[&pinger].incarnation;
+    let incarnation_before = runner.state().objects[&creature].incarnation;
+
+    // 1. First ping: deals 1 damage to `creature` (incarnation_before) and puts
+    //    Trigger #1 on the stack.
+    ping_creature_leaving_triggers_pending(&mut runner, pinger, creature);
+    assert_eq!(runner.state().stack.len(), 1);
+
+    // 2. Blink `creature` with full-Oracle Ephemerate while Trigger #1 is
+    //    still pending on the stack.
+    runner.cast(ephemerate).target_object(creature).commit();
+    resolve_top_stack_entry(&mut runner);
+    let incarnation_after_blink = runner.state().objects[&creature].incarnation;
+    assert_ne!(incarnation_after_blink, incarnation_before);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: Trigger #1 is still pending on the stack"
+    );
+
+    // 3. Before Trigger #1 resolves, the same unchanged dealer (`pinger`) deals
+    //    an equal 1 damage to the returned `creature`, putting Trigger #2 on
+    //    top of the stack above Trigger #1.
+    assert_eq!(
+        runner.state().objects[&pinger].incarnation,
+        pinger_incarnation,
+        "reach guard: dealer incarnation is unchanged"
+    );
+    ping_creature_leaving_triggers_pending(&mut runner, pinger, creature);
+    assert_eq!(runner.state().objects[&creature].damage_marked, 1);
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "reach guard: Trigger #2 sits above Trigger #1 on the stack"
+    );
+
+    // 4. Resolve Trigger #2 (for the post-blink occurrence): installs 1 shield
+    //    on the returned creature.
+    resolve_top_stack_entry(&mut runner);
+    assert_eq!(
+        runner.state().objects[&creature]
+            .replacement_definitions
+            .len(),
+        1,
+        "reach guard: Trigger #2 installs one shield on the current incarnation"
+    );
+
+    // 5. Resolve Trigger #1 (for the pre-blink occurrence): must NOT install a
+    //    second shield on the returned creature despite the equal later ledger
+    //    row from the same dealer.
+    resolve_top_stack_entry(&mut runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&creature]
+            .replacement_definitions
+            .len(),
+        1,
+        "CR 400.7 + CR 608.2k: Trigger #1 must remain bound to the pre-blink occurrence and install nothing"
+    );
+
+    // 6. Shock deals 2 damage: only Trigger #2's single 1-damage shield applies
+    //    (1 from second ping + 1 unprevented from Shock = 2 damage marked).
+    let outcome = runner.cast(shock).target_object(creature).resolve();
+    assert_eq!(
+        outcome.damage_marked(creature),
+        2,
+        "only one 1-damage shield may apply to the returned incarnation"
+    );
+}
+
 /// CR 115.1c + CR 608.2c: Elvish Healer declares one "any target" recipient; the
 /// "prevent the next 2 damage instead" shorthand reuses it and adds no second prompt.
 #[test]
