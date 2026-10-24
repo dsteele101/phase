@@ -8,8 +8,11 @@
 //! `TriggerMode::Attached` matcher never saw the attach event and Bramble's
 //! trigger never fired. The fix emits the event at both call sites.
 
-use engine::game::game_object::GameObject;
+use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::{CopyTargetPurpose, TargetRef};
+use engine::types::actions::GameAction;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -114,13 +117,43 @@ fn bramble_elemental_triggers_once_for_aura_with_copy_choice_prompt() {
     );
 
     let mut runner = scenario.build();
+    runner.cast(aura).target_object(bramble).resolve();
+
+    match &runner.state().waiting_for {
+        WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            purpose,
+            valid_targets,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, aura);
+            assert!(matches!(purpose, CopyTargetPurpose::PersistChosenAttribute));
+            assert!(valid_targets.contains(&bramble));
+        }
+        other => panic!("expected the Aura's copy-choice prompt, got {other:?}"),
+    }
     runner
-        .cast(aura)
-        .target_object(bramble)
-        .copy_target(bramble)
-        .resolve();
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bramble)),
+        })
+        .expect("choose Bramble through the pending Aura's copy prompt");
     runner.advance_until_stack_empty();
 
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().active_spell_resolution().is_none());
+    assert!(!runner.state().has_post_replacement_drain());
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(bramble))
+    );
     assert_eq!(
         saproling_tokens(&runner).len(),
         2,
