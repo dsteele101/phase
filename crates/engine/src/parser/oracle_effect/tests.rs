@@ -1,4 +1,5 @@
 use super::gap_diagnosis::diagnose_clause_gap;
+use super::imperative::PER_GRAVEYARD_EXILE_QUALIFIER_GAP;
 use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
@@ -91200,5 +91201,50 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
             filter: TargetFilter::Any,
             caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
         })
+    ));
+}
+
+/// CR 608.2c: "exile a card with mana value 3 or less from each graveyard"
+/// has a qualifier ("mana value 3 or less") that the per-graveyard parser
+/// doesn't model — fails closed with PER_GRAVEYARD_EXILE_QUALIFIER_GAP.
+#[test]
+fn exile_per_graveyard_mana_value_qualifier_gap() {
+    let def = parse_effect_chain(
+        "exile a card with mana value 3 or less from each graveyard",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::Unimplemented { name, .. } if name == PER_GRAVEYARD_EXILE_QUALIFIER_GAP
+    ));
+}
+
+/// CR 608.2c: "exile a face down card from each graveyard" has a qualifier
+/// ("face down") that the per-graveyard parser doesn't model — fails closed
+/// with PER_GRAVEYARD_EXILE_QUALIFIER_GAP.
+#[test]
+fn exile_per_graveyard_face_down_qualifier_gap() {
+    let def = parse_effect_chain(
+        "exile a face down card from each graveyard",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::Unimplemented { name, .. } if name == PER_GRAVEYARD_EXILE_QUALIFIER_GAP
+    ));
+}
+
+/// CR 608.2c: "exile a 2/2 card from each graveyard" has a qualifier
+/// ("2/2") that the per-graveyard parser doesn't model as a type phrase —
+/// fails closed with PER_GRAVEYARD_EXILE_QUALIFIER_GAP.
+#[test]
+fn exile_per_graveyard_pt_qualifier_gap() {
+    let def = parse_effect_chain(
+        "exile a 2/2 card from each graveyard",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::Unimplemented { name, .. } if name == PER_GRAVEYARD_EXILE_QUALIFIER_GAP
     ));
 }

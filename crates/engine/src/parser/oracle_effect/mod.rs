@@ -2439,6 +2439,7 @@ fn try_parse_whenever_this_turn_from(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -2583,6 +2584,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     }
 }
 
@@ -2620,6 +2622,7 @@ fn build_when_next_delayed_trigger(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     }
 }
 
@@ -2903,6 +2906,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -3006,6 +3010,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -3094,6 +3099,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -3244,6 +3250,7 @@ fn try_parse_at_next_phase_delayed_trigger(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -4122,6 +4129,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5056,6 +5064,7 @@ fn try_parse_inline_delayed_trigger(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5391,6 +5400,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5467,6 +5477,7 @@ fn try_parse_cant_enter_battlefield_from_restriction(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5535,6 +5546,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5599,6 +5611,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5648,6 +5661,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5718,6 +5732,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5929,6 +5944,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     };
 
     // CR 611.2a + CR 514.2: this recognizer owns the leading duration
@@ -6031,6 +6047,7 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6118,6 +6135,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6238,6 +6256,7 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6318,6 +6337,7 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6370,6 +6390,7 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6436,6 +6457,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             condition: None,
             optional: false,
             unless_pay: None,
+        player_scope: None,
         });
     }
 
@@ -6518,6 +6540,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6673,6 +6696,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6771,6 +6795,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -8420,6 +8445,7 @@ fn ability_definition_from_clause(
         // CR 608.2c + CR 614.1a: dropped on purpose — see the doc comment above. Bound as `_`
         // rather than omitted via `..` so a new field cannot hide behind the rest pattern.
         unlowered_guard: _,
+        player_scope: _,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
     def.sub_ability = sub_ability;
@@ -8810,6 +8836,7 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
         // body was peeled, `peel_clause` will OR its own optional flag in too.
         optional: saw_you_may,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -8877,6 +8904,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -8963,6 +8991,7 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
         // member; `up_to` carries the per-member optionality.
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -9048,6 +9077,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -11045,6 +11075,7 @@ fn try_parse_player_draws_and_gains_control(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -14700,6 +14731,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
         sub_ability: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -14799,6 +14831,7 @@ impl ParsedRetainedTypeClause {
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         }
     }
 }
@@ -19416,6 +19449,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             condition: None,
             optional: false,
             unless_pay: None,
+        player_scope: None,
         });
     }
 
@@ -19465,6 +19499,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 condition: None,
                 optional: false,
                 unless_pay: None,
+                player_scope: None,
             });
         }
     }
@@ -19740,6 +19775,7 @@ fn parsed_for_each_quantity_effect(
                 condition: None,
                 optional: false,
                 unless_pay: None,
+                player_scope: None,
             };
         }
     }
@@ -19755,6 +19791,7 @@ fn parsed_for_each_quantity_effect(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     }
 }
 
@@ -19900,6 +19937,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -20876,6 +20914,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -22431,6 +22470,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                     condition: None,
                     optional: false,
                     unless_pay: None,
+                    player_scope: None,
                 };
             }
         }
@@ -22675,6 +22715,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -22714,6 +22755,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -23087,6 +23129,7 @@ fn try_parse_compound_player_object_damage(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -23219,6 +23262,7 @@ fn try_parse_compound_object_player_damage(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -23355,6 +23399,7 @@ fn try_parse_radiance_color_fanout_damage_inner(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -23551,6 +23596,7 @@ fn try_parse_multi_target_damage_chain_inner(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -23674,6 +23720,7 @@ fn try_parse_multi_target_counter_chain(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -24124,6 +24171,7 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -24272,6 +24320,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -24455,6 +24504,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -25054,6 +25104,7 @@ fn try_parse_compound_subject_each(
         condition: half_a.condition,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     };
 
     // CR 115.1 + CR 601.2c: a possessive-actor second subject ("target
@@ -25080,6 +25131,7 @@ fn try_parse_compound_subject_each(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -28016,6 +28068,7 @@ fn lower_subject_predicate_ast_body(
             condition: None,
             optional: subject.is_optional,
             unless_pay: None,
+            player_scope: None,
         },
         PredicateAst::Become {
             effect,
@@ -28032,6 +28085,7 @@ fn lower_subject_predicate_ast_body(
             condition: None,
             optional: subject.is_optional,
             unless_pay: None,
+            player_scope: None,
         },
         PredicateAst::Restriction {
             effect,
@@ -28048,6 +28102,7 @@ fn lower_subject_predicate_ast_body(
             condition: None,
             optional: subject.is_optional,
             unless_pay: None,
+            player_scope: None,
         },
         PredicateAst::ImperativeFallback { text } => {
             // Issue #6965: this is the ONLY predicate kind that applies the
@@ -28364,6 +28419,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        player_scope: None,
                     };
                 }
             }
@@ -28574,6 +28630,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        player_scope: None,
                     };
                 }
             }
@@ -28600,6 +28657,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        player_scope: None,
                     };
                 }
                 if subject.inherits_parent {
@@ -28620,6 +28678,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        player_scope: None,
                     };
                 }
             }
@@ -30012,6 +30071,7 @@ fn wrap_target_subject_damage(
         condition: None,
         optional: subject.is_optional,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -45776,6 +45836,7 @@ fn parse_effect_chain_ir_body(
                         condition: animate_def.condition.clone(),
                         optional: animate_def.optional,
                         unless_pay: animate_def.unless_pay.clone(),
+                        player_scope: None,
                     },
                     chunk.boundary_after,
                     ClauseDisposition::Emit {

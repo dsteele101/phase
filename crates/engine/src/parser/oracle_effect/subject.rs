@@ -768,6 +768,7 @@ fn build_conditional_protection_grant_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -835,6 +836,7 @@ fn build_additive_type_continuous_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -915,6 +917,7 @@ fn try_parse_compound_all_subjects_become_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -1657,6 +1660,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -1840,6 +1844,7 @@ fn try_parse_target_and_same_name_pump_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     };
     let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
 
@@ -1976,6 +1981,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -2025,6 +2031,7 @@ fn try_parse_subject_restriction_clause(
                 condition: None,
                 optional: application.is_optional,
                 unless_pay: None,
+                player_scope: None,
             });
         }
         // CR 508.1d + CR 701.15b + CR 611.2c: "[subject] attacks each combat if
@@ -2061,6 +2068,7 @@ fn try_parse_subject_restriction_clause(
                 condition: None,
                 optional: application.is_optional,
                 unless_pay: None,
+                player_scope: None,
             });
         }
         // CR 508.1d + CR 506.3 + CR 611.2c: the defender-bound `ForceAttack` form
@@ -2126,6 +2134,7 @@ fn try_parse_subject_restriction_clause(
                     condition: None,
                     optional: application.is_optional,
                     unless_pay: None,
+                    player_scope: None,
                 });
             }
         }
@@ -2158,6 +2167,7 @@ fn try_parse_subject_restriction_clause(
                 condition: None,
                 optional: application.is_optional,
                 unless_pay: None,
+                player_scope: None,
             });
         }
     }
@@ -2225,6 +2235,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -2272,6 +2283,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -2332,6 +2344,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -2435,6 +2448,7 @@ fn try_parse_can_attack_with_defender(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -2478,6 +2492,7 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -2542,6 +2557,7 @@ fn try_parse_can_block_additional(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -4795,6 +4811,7 @@ fn try_split_pump_compound(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -4997,6 +5014,7 @@ fn build_keyword_choice_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5199,6 +5217,7 @@ fn build_pt_choice_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5245,6 +5264,7 @@ fn build_continuous_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -5306,6 +5326,7 @@ fn build_continuous_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -5416,6 +5437,7 @@ fn build_continuous_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -5459,6 +5481,7 @@ fn build_continuous_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -5800,6 +5823,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -5831,6 +5855,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -5888,6 +5913,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -6030,6 +6056,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -6070,6 +6097,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -6107,6 +6135,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -6175,6 +6204,7 @@ fn build_become_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6316,6 +6346,7 @@ fn try_parse_become_and_attack_if_able(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6413,6 +6444,7 @@ fn try_parse_set_life_total(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -6678,6 +6710,7 @@ fn try_parse_become_choice(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     };
 
     // CR 611.2a: the clause's PRINTED window — stripped here, or peeled upstream
@@ -6748,6 +6781,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     }
 }
 
@@ -6809,6 +6843,7 @@ fn build_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            player_scope: None,
         });
     }
 
@@ -7016,6 +7051,7 @@ fn build_restriction_clause(
                 condition: None,
                 optional: false,
                 unless_pay: None,
+                player_scope: None,
             });
         }
     }
@@ -7127,6 +7163,7 @@ fn build_restriction_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -7670,6 +7707,7 @@ fn try_parse_copula_goaded_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 

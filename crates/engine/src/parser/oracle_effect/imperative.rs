@@ -10050,6 +10050,11 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 position: LibraryPosition::Bottom,
             });
 
+            // CR 701.24c + CR 400.3: the source artifact must also publish its
+            // owner to the tracked set so the terminal shuffle fans out to both
+            // the artifact's owner and the graveyard cards' owner.
+            clause.player_scope = Some(owner_library_shuffle_scope());
+
             // Build the ChangeZoneAll chain inside-out. Each ChangeZoneAll gets
             // TrackedSetPossessor player_scope so it publishes its owner even for
             // empty zones (CR 701.24d). The innermost is wrapped with
@@ -10065,24 +10070,14 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                     // CR 701.24d: ensure this ChangeZoneAll publishes its owner
                     // even when the zone is empty, by giving it the same
                     // TrackedSetPossessor scope as the terminal shuffle.
-                    def.player_scope = Some(PlayerFilter::TrackedSetPossessor {
-                        relation: PlayerRelation::All,
-                        possession: PossessionAxis::Owner,
-                        filter: TargetFilter::Any,
-                        caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-                    });
+                    def.player_scope = Some(owner_library_shuffle_scope());
                     def.sub_ability = wrapped.sub_ability;
                     tail = Some(Box::new(def));
                 } else {
                     // Outer ChangeZoneAll: no shuffle sub_ability, but still needs
                     // TrackedSetPossessor player_scope to publish for empty zones.
                     let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
-                    def.player_scope = Some(PlayerFilter::TrackedSetPossessor {
-                        relation: PlayerRelation::All,
-                        possession: PossessionAxis::Owner,
-                        filter: TargetFilter::Any,
-                        caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-                    });
+                    def.player_scope = Some(owner_library_shuffle_scope());
                     def.sub_ability = tail;
                     tail = Some(Box::new(def));
                 }
@@ -10423,12 +10418,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         },
     );
     if tracks_owner_population {
-        shuffle.player_scope = Some(PlayerFilter::TrackedSetPossessor {
-            relation: PlayerRelation::All,
-            possession: PossessionAxis::Owner,
-            filter: TargetFilter::Any,
-            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-        });
+        shuffle.player_scope = Some(owner_library_shuffle_scope());
     }
     ParsedEffectClause {
         optional_targeting: false,
@@ -10441,6 +10431,20 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
+    }
+}
+
+/// CR 701.24c-e + CR 400.3: Shared TrackedSetPossessor scope for owner-library
+/// shuffles. Used by the terminal shuffle and by each ChangeZoneAll in the
+/// chain so they all publish the same owner population (including empty zones
+/// per CR 701.24d). Centralized here to keep publisher and consumer in sync.
+fn owner_library_shuffle_scope() -> PlayerFilter {
+    PlayerFilter::TrackedSetPossessor {
+        relation: PlayerRelation::All,
+        possession: PossessionAxis::Owner,
+        filter: TargetFilter::Any,
+        caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
     }
 }
 

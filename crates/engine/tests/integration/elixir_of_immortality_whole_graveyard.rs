@@ -59,7 +59,43 @@ fn elixir_shuffles_entire_graveyard_without_targeting() {
         "the terminal library shuffle must resolve"
     );
 
+    // Verify ownership: each affected owner's library is shuffled (ShuffledLibrary player action).
+    // Elixir is owned by P0, graveyard cards are owned by P0 → only P0's library shuffled.
+    let shuffled_libraries = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .count();
+    assert_eq!(shuffled_libraries, 1, "P0's library must be shuffled");
+    // P1's library must NOT be shuffled (no cards owned by P1 moved)
+    let p1_shuffled = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P1
+            )
+        })
+        .count();
+    assert_eq!(p1_shuffled, 0, "P1's library must not be shuffled");
+
     let state = outcome.state();
+    // The Elixir must be in P0's library (its owner's library).
+    assert!(state.players[P0.0 as usize].library.contains(&elixir));
     assert_eq!(state.players[0].life, life_before + 5);
     for id in [elixir, mine_a, mine_b] {
         assert_eq!(
@@ -128,6 +164,8 @@ fn elixir_shuffles_all_affected_owners_when_owner_differs_from_controller() {
         Zone::Library,
         "Elixir must go to its owner's (P1's) library"
     );
+    // Verify the Elixir is in P1's library.
+    assert!(state.players[P1.0 as usize].library.contains(&elixir));
     assert_eq!(
         state.objects[&mine_a].zone,
         Zone::Library,
@@ -143,12 +181,17 @@ fn elixir_shuffles_all_affected_owners_when_owner_differs_from_controller() {
 /// CR 701.24d: even when the graveyard is empty, the owner's library must still
 /// be shuffled — "shuffle {possessive} graveyard into their owner's library"
 /// shuffles the library regardless of how many cards the graveyard contributes.
+/// When the artifact's owner differs from its controller, BOTH owners' libraries
+/// must be shuffled (artifact owner + graveyard owner).
 #[test]
 fn elixir_shuffles_empty_graveyard_owners_library() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // Elixir is owned by P1 but controlled by P0: "your graveyard" is P0's,
+    // the artifact goes to P1's library. Both libraries must be shuffled.
     let elixir = scenario
-        .add_artifact_from_oracle(P0, "Elixir of Immortality", ELIXIR)
+        .add_artifact_from_oracle(P1, "Elixir of Immortality", ELIXIR)
+        .controlled_by(P0)
         .id();
     // P0's graveyard is deliberately empty — no cards are added to it.
     scenario.with_mana_pool(
@@ -160,7 +203,7 @@ fn elixir_shuffles_empty_graveyard_owners_library() {
 
     let outcome = runner.activate(elixir, 0).resolve();
 
-    // The terminal library shuffle must resolve even with an empty graveyard.
+    // The terminal library shuffle must resolve for BOTH owners (P0 graveyard + P1 artifact).
     let terminal_shuffles = outcome
         .events()
         .iter()
@@ -175,30 +218,37 @@ fn elixir_shuffles_empty_graveyard_owners_library() {
         })
         .count();
     assert_eq!(
-        terminal_shuffles, 1,
-        "the terminal library shuffle must resolve even for an empty graveyard (CR 701.24d)"
+        terminal_shuffles, 2,
+        "one terminal library shuffle must resolve for each affected owner (CR 701.24d)"
     );
 
-    // P0's library was shuffled (ShuffledLibrary player action).
-    let shuffled_libraries = outcome
-        .events()
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                GameEvent::PlayerPerformedAction {
-                    player_id,
-                    action: PlayerActionKind::ShuffledLibrary,
-                    ..
-                } if *player_id == P0
-            )
-        })
-        .count();
-    assert_eq!(
-        shuffled_libraries, 1,
-        "P0's library must be shuffled even though their graveyard is empty"
-    );
+    // Both P0's and P1's libraries must be shuffled (ShuffledLibrary player action).
+    for player in [P0, P1] {
+        let shuffled_libraries = outcome
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } if *player_id == player
+                )
+            })
+            .count();
+        assert_eq!(shuffled_libraries, 1, "{player:?}'s library must be shuffled");
+    }
 
     let state = outcome.state();
     assert_eq!(state.players[0].life, life_before + 5);
+    // The artifact goes to ITS owner (P1), not the controller's library.
+    assert_eq!(
+        state.objects[&elixir].zone,
+        Zone::Library,
+        "Elixir must go to its owner's (P1's) library"
+    );
+    // Verify the Elixir is in P1's library.
+    assert!(state.players[P1.0 as usize].library.contains(&elixir));
 }

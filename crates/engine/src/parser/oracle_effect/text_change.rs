@@ -98,6 +98,7 @@ pub(super) fn try_parse_text_change_clause(tp: TextPair<'_>) -> Option<ParsedEff
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 

@@ -9,7 +9,8 @@ use crate::types::ability::{
     TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, PendingContinuation, WaitingFor};
+use crate::types::resolution::ChildStackDepth;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -554,23 +555,39 @@ pub fn resolve(
     } else {
         Vec::new()
     };
-    zone_pipeline::move_objects_simultaneously_then(
-        state,
-        requests,
-        Some(BatchCompletion::PutOnTopComplete {
-            source_id: ability.source_id,
-            removed_exile_links,
-        }),
-        events,
-    );
 
     // CR 400.3 + CR 701.24c: Publish each moved object's owner as a library
     // shuffle subject so a chained `Shuffle { target: ScopedPlayer }` with
     // `TrackedSetPossessor` fans over every affected owner — e.g. Elixir of
     // Immortality, where the artifact's owner differs from the graveyard
-    // cards' owner. The publication is a no-op unless a downstream owner
-    // library shuffle consumer exists (tracked_set_publication_mode).
+    // cards' owner. This MUST be called BEFORE the zone move so prospective
+    // publication binds the owners before replacement effects can redirect them.
+    // The publication is a no-op unless a downstream owner library shuffle
+    // consumer exists (tracked_set_publication_mode).
     publish_finalized_owner_library_subjects(state, ability, &collected_targets);
+
+    // CR 608.2c: Set up the continuation for the sub_ability before the batch
+    // starts, so the chain continues after the batch completes. The batch
+    // completion handler (PutOnTopComplete) will call finish_with_continuation
+    // to resume it.
+    let child_stack_start = state.resolution_stack.capture_child_boundary();
+    if let Some(sub_ability) = ability.sub_ability.as_ref() {
+        let pending = PendingContinuation::new(sub_ability.clone(), state);
+        state
+            .insert_ability_continuation_parent_at_child_boundary(pending, child_stack_start)
+            .expect("PutAtLibraryPosition sub_ability continuation must insert");
+    }
+
+    zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(BatchCompletion::PutOnTopComplete {
+            player: ability.controller,
+            source_id: ability.source_id,
+            removed_exile_links,
+        }),
+        events,
+    );
 
     Ok(())
 }

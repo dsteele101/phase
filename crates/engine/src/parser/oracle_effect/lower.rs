@@ -9788,6 +9788,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -9874,6 +9875,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -9949,6 +9951,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
@@ -10060,6 +10063,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         condition: None,
         optional: false,
         unless_pay: None,
+        player_scope: None,
     })
 }
 
