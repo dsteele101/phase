@@ -3563,36 +3563,34 @@ pub(crate) fn apply_pending_spell_resolution(
         .unwrap_or(false);
     if is_aura {
         if let Some(target) = ctx.spell_targets.first() {
-            match target {
+            // CR 608.3c / CR 603.2e: an Aura spell becoming attached on this
+            // resume path is an effect resolution, so emit `EffectResolved
+            // { Attach }` (Bramble Elemental) -- but only when the attachment
+            // actually moved: a same-host re-attach is a CR 701.3b no-op and
+            // must not re-trigger "becomes attached".
+            let attached = match target {
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to(state, ctx.object_id, *target_id);
-                    // CR 608.3c / CR 603.2e: an Aura spell resolving and becoming
-                    // attached after a paused replacement choice is an effect
-                    // resolution — emit `EffectResolved { kind: Attach }` so
-                    // "whenever an Aura becomes attached" triggers (e.g. Bramble
-                    // Elemental) fire on this resume path too, not only on the
-                    // unpaused spell-resolution attach in `stack.rs`.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Attach,
-                        source_id: ctx.object_id,
-                        subject: state
-                            .capture_event_object_snapshot(ctx.object_id)
-                            .map(Box::new),
-                    });
+                    effects::attach::attach_to_reporting_change(state, ctx.object_id, *target_id)
                 }
-                crate::types::ability::TargetRef::Object(_) => {}
+                crate::types::ability::TargetRef::Object(_) => false,
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player(state, ctx.object_id, *player_id);
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Attach,
-                        source_id: ctx.object_id,
-                        subject: state
-                            .capture_event_object_snapshot(ctx.object_id)
-                            .map(Box::new),
-                    });
+                    effects::attach::attach_to_player_reporting_change(
+                        state,
+                        ctx.object_id,
+                        *player_id,
+                    )
                 }
+            };
+            if attached {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::Attach,
+                    source_id: ctx.object_id,
+                    subject: state
+                        .capture_event_object_snapshot(ctx.object_id)
+                        .map(Box::new),
+                });
             }
         }
     }

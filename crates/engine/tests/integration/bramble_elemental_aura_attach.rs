@@ -11,7 +11,7 @@
 use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -78,4 +78,52 @@ fn bramble_elemental_creates_saprolings_when_aura_attaches() {
         assert_eq!(token.power, Some(1));
         assert_eq!(token.toughness, Some(1));
     }
+}
+
+const METAMORPHIC_ALTERATION_ORACLE: &str = "Enchant creature\nAs this Aura enters, choose a creature.\nEnchanted creature is a copy of the chosen creature.";
+
+/// CR 603.2e + CR 701.3b: Metamorphic Alteration attaches on spell resolution,
+/// then parks on its copy-choice prompt and re-runs the attach on resume. The
+/// resume re-attach to the same host is a no-op, so "becomes attached" fires
+/// once: exactly two Saprolings, not four.
+#[test]
+fn bramble_elemental_triggers_once_for_aura_with_copy_choice_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bramble = scenario
+        .add_creature_from_oracle(P0, "Bramble Elemental", 3, 2, BRAMBLE_ELEMENTAL_ORACLE)
+        .id();
+    let aura = scenario
+        .add_spell_to_hand(P0, "Metamorphic Alteration", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .from_oracle_text_with_keywords(&["enchant"], METAMORPHIC_ALTERATION_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(9_990), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_991), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_992), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner
+        .cast(aura)
+        .target_object(bramble)
+        .copy_target(bramble)
+        .resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        saproling_tokens(&runner).len(),
+        2,
+        "one attachment must trigger Bramble Elemental once, even across the copy-choice resume"
+    );
 }
