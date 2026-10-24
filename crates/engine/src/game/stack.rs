@@ -3422,7 +3422,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
-                match spell_targets.first() {
+                let attached = match spell_targets.first() {
                     // CR 608.3c + CR 608.2b: Object Aura — verify the target is
                     // still a legal host per the Aura's own zone-scoped enchant
                     // ability (`is_valid_attachment_target`, the single legality
@@ -3441,28 +3441,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             state, entry.id, *target_id,
                         ) =>
                     {
-                        if effects::attach::attach_to_reporting_change(
-                            state,
-                            entry.id,
-                            *target_id,
-                        ) {
-                            // CR 608.3c / CR 603.2e: an Aura spell resolves and becomes
-                            // attached — is an effect resolution — emit
-                            // `EffectResolved { kind: Attach }` so "whenever an Aura
-                            // becomes attached" triggers (e.g. Bramble Elemental) fire on
-                            // spell-resolution attach, not only on effect-resolver attach
-                            // via `deliver_attach`.
-                            events.push(GameEvent::EffectResolved {
-                                kind: EffectKind::Attach,
-                                source_id: entry.id,
-                                subject: state
-                                    .capture_event_object_snapshot(entry.id)
-                                    .map(Box::new),
-                            });
-                        }
+                        effects::attach::attach_to_reporting_change(state, entry.id, *target_id)
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
+                        false
                     }
                     // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
@@ -3470,25 +3453,29 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
-                        if effects::attach::attach_to_player_reporting_change(
-                            state,
-                            entry.id,
-                            *player_id,
-                        ) {
-                            events.push(GameEvent::EffectResolved {
-                                kind: EffectKind::Attach,
-                                source_id: entry.id,
-                                subject: state
-                                    .capture_event_object_snapshot(entry.id)
-                                    .map(Box::new),
-                            });
-                        }
+                        effects::attach::attach_to_player_reporting_change(
+                            state, entry.id, *player_id,
+                        )
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
+                        false
                     }
+                };
+                if attached {
+                    // CR 608.3c / CR 603.2e: an Aura spell resolves and becomes
+                    // attached — is an effect resolution — emit
+                    // `EffectResolved { kind: Attach }` so "whenever an Aura
+                    // becomes attached" triggers (e.g. Bramble Elemental) fire on
+                    // spell-resolution attach, not only on effect-resolver attach
+                    // via `deliver_attach`.
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        source_id: entry.id,
+                        subject: state.capture_event_object_snapshot(entry.id).map(Box::new),
+                    });
                 }
             }
 
