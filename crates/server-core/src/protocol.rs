@@ -3473,6 +3473,8 @@ mod tests {
         }
     }
 
+    /// v160: `GameEvent::CardNamed` (CR 201.4) joins the serialized event stream. A v159
+    /// or older peer cannot read the tag, so it must be refused before it receives v160 events.
     /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
     /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
     /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
@@ -3762,8 +3764,8 @@ mod tests {
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_159_for_coin_flip_runs() {
-        assert_eq!(PROTOCOL_VERSION, 159);
+    fn protocol_version_is_160_for_card_named_event() {
+        assert_eq!(PROTOCOL_VERSION, 160);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3774,7 +3776,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_159_for_coin_flip_runs` stays
+    /// `protocol_version_is_160_for_card_named_event` stays
     /// `protocol_version_is_157_for_total_mana_value_zone_choices` stays
     /// green, which is why the two are separate assertions.
     #[test]

@@ -60,6 +60,8 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 160 — `GameEvent::CardNamed` (CR 201.4) is a new serialized event tag in `game_setup` and
+///       `state_update` payloads; a v159 or older peer cannot read it.
 /// 159 — Coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`.
 ///      The `FlipCoin` and `FlipCoinUntilLose` tags are no longer written,
 ///      `count` moves into `flips`, and the coin-flip resolution frame's kind
@@ -1209,7 +1211,7 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 159;
+pub const PROTOCOL_VERSION: u32 = 160;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2466,12 +2468,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 159);
+        assert_eq!(PROTOCOL_VERSION, 160);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 158);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 159);
     }
 
     #[test]

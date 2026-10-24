@@ -466,10 +466,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v159 merged coin-flip run, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
+  it("accepts the literal Full v160 card-named event, merged coin-flip run, pre-event change-zone entry, deferred counter-cost removal, kind-selected grant, shortcut-suggestion and populated Bestow protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 159 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 160 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

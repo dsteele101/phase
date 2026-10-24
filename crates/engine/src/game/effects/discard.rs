@@ -398,6 +398,19 @@ pub fn resolve(
     // before #4950's broken fix.
     let parent_reveal_choice_found_nothing =
         ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
+    // Apply card_filter to specific_targets before either branch proposes a discard.
+    // When an Effect::Discard has both a card filter and a live object-bound hand
+    // target, the object-bound branch can propose a card without applying card_filter.
+    // Apply the filter before either branch proposes a discard.
+    let specific_targets: Vec<_> = if let Some(filter) = &card_filter {
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        specific_targets
+            .into_iter()
+            .filter(|id| crate::game::filter::matches_target_filter(state, *id, filter, &ctx))
+            .collect()
+    } else {
+        specific_targets
+    };
     if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
         || (object_bound_discard && parent_reveal_choice_found_nothing)
     {

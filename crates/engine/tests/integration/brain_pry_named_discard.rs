@@ -48,7 +48,7 @@ fn setup(opponent_hand: &[&str]) -> (Setup, ObjectId) {
         ],
     );
     let mut runner = scenario.build();
-    runner.state_mut().all_card_names = ["Opt", "Shock", "Forest"].map(String::from).into();
+    runner.state_mut().all_card_names = ["Opt", "Shock", "Lightning Bolt"].map(String::from).into();
     (Setup { runner, hand }, spell)
 }
 
@@ -153,7 +153,7 @@ fn naming_a_card_is_logged_and_only_that_card_is_discarded() {
 #[test]
 fn no_matching_card_discards_nothing_and_controller_draws() {
     let (mut setup, spell) = setup(&["Opt", "Shock"]);
-    cast_naming(&mut setup, spell, "Forest");
+    cast_naming(&mut setup, spell, "Lightning Bolt");
     let state = setup.runner.state();
 
     for id in &setup.hand {

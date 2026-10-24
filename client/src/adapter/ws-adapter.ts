@@ -215,6 +215,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 160 — GameEvent::CardNamed is a new serialized event tag; a v159 or older peer cannot
+ *       read it. See PROTOCOL_VERSION's own `/// 160` entry in
+ *       crates/lobby-broker/src/protocol.rs. Wire 142 moves with it.
  * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
  *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
  *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
@@ -968,7 +971,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 159;
+export const PROTOCOL_VERSION = 160;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

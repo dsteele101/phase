@@ -530,7 +530,6 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. } => LogImportance::Detail,
-        | _ => LogImportance::Essential,
     }
 }
 
