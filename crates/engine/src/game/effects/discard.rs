@@ -398,22 +398,30 @@ pub fn resolve(
     // before #4950's broken fix.
     let parent_reveal_choice_found_nothing =
         ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
-    // Apply card_filter to specific_targets before either branch proposes a discard.
-    // When an Effect::Discard has both a card filter and a live object-bound hand
-    // target, the object-bound branch can propose a card without applying card_filter.
-    // Apply the filter before either branch proposes a discard.
-    let specific_targets: Vec<_> = if let Some(filter) = &card_filter {
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        specific_targets
-            .into_iter()
-            .filter(|id| crate::game::filter::matches_target_filter(state, *id, filter, &ctx))
-            .collect()
-    } else {
-        specific_targets
-    };
     if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
         || (object_bound_discard && parent_reveal_choice_found_nothing)
     {
+        // CR 608.2c: Apply `card_filter` to object-bound / declared-target hand
+        // discards before proposing any discard. Done inside this branch so a
+        // live hand-object target that fails `card_filter` resolves as a no-op
+        // instead of emptying `specific_targets` before the branch gate and
+        // falling through to the generic player-hand path.
+        let specific_targets: Vec<_> = match &card_filter {
+            Some(filter) => {
+                let ctx = crate::game::filter::FilterContext::from_ability(ability);
+                let filtered: Vec<_> = specific_targets
+                    .into_iter()
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                    })
+                    .collect();
+                if filtered.is_empty() && !up_to {
+                    state.cost_payment_failed_flag = true;
+                }
+                filtered
+            }
+            None => specific_targets,
+        };
         // Discard specific targeted cards
         for (index, obj_id) in specific_targets.iter().copied().enumerate() {
             let obj = state
@@ -3171,5 +3179,84 @@ mod tests {
             "the land must be left alone"
         );
         assert_eq!(state.players[0].life, 18);
+    }
+
+    #[test]
+    fn object_bound_discard_applies_card_filter_without_player_hand_fallback() {
+        use crate::types::ability::{CardSelectionMode, ChosenAttribute, QuantityExpr};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Shock".into()));
+
+        let p0_shock = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shock".into(),
+            Zone::Hand,
+        );
+        let p1_opt = create_object(&mut state, CardId(2), PlayerId(1), "Opt".into(), Zone::Hand);
+        let p1_shock = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Shock".into(),
+            Zone::Hand,
+        );
+
+        // Object-bound discard pointing at `p1_opt` (which does NOT match "Shock"):
+        // must discard nothing and set `cost_payment_failed_flag` rather than
+        // discarding `p1_opt` or falling through to a player-hand discard.
+        let miss = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                filter: Some(TargetFilter::HasChosenName),
+                unless_filter: None,
+            },
+            vec![TargetRef::Object(p1_opt)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &miss, &mut events).unwrap();
+        assert!(state.players[0].hand.contains(&p0_shock));
+        assert!(state.players[1].hand.contains(&p1_opt));
+        assert!(state.players[1].hand.contains(&p1_shock));
+        assert!(state.cost_payment_failed_flag);
+
+        // Object-bound discard pointing at `p1_shock` (which DOES match "Shock"):
+        // must discard `p1_shock`.
+        state.cost_payment_failed_flag = false;
+        let hit = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                filter: Some(TargetFilter::HasChosenName),
+                unless_filter: None,
+            },
+            vec![TargetRef::Object(p1_shock)],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &hit, &mut events).unwrap();
+        assert!(!state.players[1].hand.contains(&p1_shock));
+        assert!(state.players[1].graveyard.contains(&p1_shock));
+        assert!(state.players[1].hand.contains(&p1_opt));
+        assert!(state.players[0].hand.contains(&p0_shock));
     }
 }

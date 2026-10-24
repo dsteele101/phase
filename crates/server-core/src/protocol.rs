@@ -3110,6 +3110,8 @@ mod tests {
         let pool = vec![first_pull.clone(), second_pull.clone()];
         let pool_groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         let view = DraftPlayerView {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,
             source: DraftSourceView::Set {
@@ -3164,6 +3166,9 @@ mod tests {
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
@@ -3427,6 +3432,8 @@ mod tests {
         use draft_core::view::{DraftSourceView, SetLayoutView, SpectatorDraftView};
 
         let view = SpectatorDraftView {
+            flow: DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Drafting,
             kind: DraftKind::Premier,
             source: DraftSourceView::Set {
@@ -3462,6 +3469,9 @@ mod tests {
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftSpectatorView { view: v } => {
@@ -3473,8 +3483,6 @@ mod tests {
         }
     }
 
-    /// v160: `GameEvent::CardNamed` (CR 201.4) joins the serialized event stream. A v159
-    /// or older peer cannot read the tag, so it must be refused before it receives v160 events.
     /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
     /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
     /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
@@ -3759,13 +3767,9 @@ mod tests {
     /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
     /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
-    /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
-    /// <n>)` under a function named for `<n-1>` is green, so
-    /// `check-protocol-version.mjs` requires the current numeral in this name
-    /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_160_for_card_named_event() {
-        assert_eq!(PROTOCOL_VERSION, 160);
+    fn protocol_version_is_owned_by_broker() {
+        assert_eq!(PROTOCOL_VERSION, lobby_broker::PROTOCOL_VERSION);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3776,8 +3780,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_160_for_card_named_event` stays
-    /// `protocol_version_is_157_for_total_mana_value_zone_choices` stays
+    /// `protocol_version_is_owned_by_broker` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
