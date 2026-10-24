@@ -309,10 +309,19 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
                 },
             },
         },
-        WardCost::DiscardCard => AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            selection: crate::types::ability::CardSelectionMode::Chosen,
+        // CR 702.21a + CR 701.9a + CR 701.9b: the discard axes (count, card-type
+        // filter, chosen vs random) pass through to the unified discard cost; a
+        // ward cost is always paid from the payer's hand.
+        WardCost::Discard {
+            count,
+            filter,
+            selection,
+        } => AbilityCost::Discard {
+            count: QuantityExpr::Fixed {
+                value: i32::try_from(*count).unwrap_or(i32::MAX),
+            },
+            filter: filter.clone(),
+            selection: *selection,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
         WardCost::Sacrifice { count, filter } => {
@@ -940,6 +949,20 @@ impl PendingActivationTriggerCollection {
         );
         self.operation_journal = session.into_operation_journal();
         self.pending_contexts.extend(contexts);
+    }
+
+    /// The triggers collected during the announcement, each with its own trigger
+    /// event, that `commit_into` hands to ordinary placement once the activation
+    /// completes. Read-only, for the restore validator.
+    pub(crate) fn pending_contexts(&self) -> &[PendingTriggerContext] {
+        &self.pending_contexts
+    }
+
+    /// Test fixture: a collection already holding `context`.
+    #[cfg(test)]
+    pub(crate) fn with_pending_context_for_test(mut self, context: PendingTriggerContext) -> Self {
+        self.pending_contexts.push(context);
+        self
     }
 
     /// Commit collector consequences exactly once and append the retained
@@ -6862,16 +6885,9 @@ fn pending_trigger_has_no_legal_resolution_targets(
     );
     let empty = match super::ability_utils::build_target_slots(state, &pending.ability) {
         Ok(slots) => {
-            // CR 115.1: only effects that DECLARE a target surface a chooseable
-            // slot. `extract_target_filter_from_effect` is the single authority
-            // the slot builder itself uses — it returns `None` not only for
-            // context-refs ("you may draw a card") but for every resolution-time
-            // selection (Sacrifice, at-resolution Bounce, put-from-hand
-            // ChangeZone/CastFromZone, etc.), all of which are ALWAYS resolvable.
-            // Testing raw `target_filter()` here would fork from that authority
-            // and silently drop an auto-accepted "you may put a creature from
-            // your hand …" trigger (Kaalia et al.).
-            (extract_target_filter_from_effect(&pending.ability.effect).is_some()
+            // CR 115.10a + CR 603.3d: only an announcement declaration
+            // requires a legal stack-time choice, not an untargeted recipient.
+            (super::ability_utils::node_has_stack_target_declaration(&pending.ability)
                 && slots.is_empty())
                 || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
         }
@@ -9625,7 +9641,10 @@ pub(crate) enum PendingTriggeredManaClass {
 }
 
 /// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
-fn any_reachable_link(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
+pub(crate) fn any_reachable_link(
+    ability: &ResolvedAbility,
+    pred: &dyn Fn(&ResolvedAbility) -> bool,
+) -> bool {
     if pred(ability) {
         return true;
     }
@@ -12851,6 +12870,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer => false,
+        // CR 506.4c + CR 603.4: unlike `DefendingPlayer`, whose answer rests on the
+        // event binding alone, this referent also reads live combat and battlefield
+        // state (the attacker's current attack target, whether the planeswalker is
+        // still there), which can differ between fire time and resolution. When in
+        // doubt the answer is `true`.
+        TargetFilter::AttackedPlayerOrPlaneswalker => true,
     }
 }
 
@@ -14809,7 +14834,26 @@ fn check_trigger_constraint_with_ref(
     controller: PlayerId,
     event: Option<&GameEvent>,
 ) -> bool {
-    use crate::types::ability::TriggerConstraint;
+    // CR 701.43d + CR 603.1: A standalone static permission has no triggered
+    // effect to publish, including when collection uses a latched definition.
+    if trig_def.is_standalone_attack_exert_permission() {
+        return false;
+    }
+
+    // CR 607.2h: A linked payoff observes only its own optional-cost payment.
+    // Generic actor-filtered observers still see every exert, and completed
+    // historical events without a receipt retain their saved interpretation.
+    if trig_def.is_attack_exert_permission() {
+        if let Some(GameEvent::CreatureExerted {
+            attack_permission: Some(permission),
+            ..
+        }) = event
+        {
+            if definition_ref != Some(permission) {
+                return false;
+            }
+        }
+    }
 
     let constraint = match &trig_def.constraint {
         Some(c) => c,
@@ -16337,6 +16381,8 @@ fn evaluate_trigger_condition_with_source(
         }),
         // CR 207.2c + CR 601.2: cast during the configured phase set.
         TriggerCondition::CastDuringPhase { phases } => phases.contains(&state.phase),
+        // CR 500.1 + CR 506.1: the game is currently in one of `phases`.
+        TriggerCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3b + CR 702.8a: source permanent came from a spell cast using
         // the specified timing permission this turn.
         TriggerCondition::CastTimingPermission { permission } => {
@@ -17669,12 +17715,12 @@ pub mod tests {
         ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
         DelayedTriggerKind, DelayedTriggerLifetime, DiscardSelfScope, Duration,
         EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant, ModalChoice,
-        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        SpentColor, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PreventionAmount,
+        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -17703,6 +17749,50 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
+    /// an untargeted scope, so `extract_target_filter_from_effect` surfaces no
+    /// slot for it — the only declared target is the damage source. The source
+    /// role remains present, and a single declared recipient remains a target.
+    #[test]
+    fn source_scoped_prevent_recipient_scope_is_not_a_target() {
+        let prevent =
+            |recipient_scope, damage_source_filter: Option<TargetFilter>| Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Player,
+                recipient_scope,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter,
+                prevention_duration: Some(Duration::UntilEndOfCombat),
+            };
+        let source_scoped = prevent(
+            EffectScope::All,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTargetSlot { index: 0 },
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ],
+            }),
+        );
+        assert_eq!(extract_target_filter_from_effect(&source_scoped), None);
+        assert_eq!(source_scoped.target_filter(), None);
+        // The declared damage source still supplies its independent target role.
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_scoped)
+                .is_some()
+        );
+        // A single declared recipient keeps its target filter.
+        let source_less = prevent(EffectScope::Single, None);
+        assert_eq!(
+            extract_target_filter_from_effect(&source_less),
+            Some(&TargetFilter::Player)
+        );
+        assert!(
+            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_less)
+                .is_none()
+        );
     }
 
     /// CR 103.4e + CR 904.5 + CR 608.2c: Cecil's parsed resolution-time
@@ -19276,6 +19366,7 @@ pub mod tests {
             departed_source_lki: None,
             trigger_state: ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         let seed = |effect: Effect| {
             let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
@@ -21120,6 +21211,7 @@ pub mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(check_trigger_condition(
             &state,
@@ -21135,6 +21227,7 @@ pub mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -24514,6 +24607,7 @@ pub mod tests {
             QuantityRef::references_cost_paid_object(&QuantityRef::DistinctSubtypes {
                 source: nested,
                 exclude: Default::default(),
+                restrict: None,
             }),
             "a reference nested inside a union of unions must be detected"
         );
@@ -25777,6 +25871,7 @@ pub mod tests {
                 controller,
                 land,
                 ActivatedAbilityKind::Mana,
+                crate::types::events::BoundActivationCost::basic_land_intrinsic(),
                 None,
                 Zone::Battlefield,
                 &mut events,
@@ -30442,6 +30537,39 @@ pub mod tests {
     }
 
     #[test]
+    fn attack_exert_admission_rejects_only_static_components() {
+        let state = setup();
+        let permission =
+            TriggerDefinition::new(TriggerMode::Exerted).valid_card(TargetFilter::SelfRef);
+        // CR 701.43d + CR 603.1: Shared collection admission refuses only the
+        // static component, before its no-constraint fast return.
+        assert!(!check_trigger_constraint_with_ref(
+            &state,
+            &permission,
+            None,
+            None,
+            PlayerId(0),
+            None,
+        ));
+        let linked = permission.clone().execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("ExertLinkedBody", "unsupported linked effect"),
+        ));
+        let observer = permission.valid_target(TargetFilter::Controller);
+        let unrelated = TriggerDefinition::new(TriggerMode::ChangesZone);
+        for definition in [linked, observer, unrelated] {
+            assert!(check_trigger_constraint_with_ref(
+                &state,
+                &definition,
+                None,
+                None,
+                PlayerId(0),
+                None,
+            ));
+        }
+    }
+
+    #[test]
     fn trigger_no_execute_goes_on_stack_without_targeting() {
         // Trigger with no execute (Effect::Unimplemented) goes on stack without targeting attempt
         let mut state = setup();
@@ -31858,7 +31986,11 @@ pub mod tests {
         ));
 
         // Discard
-        let discard = WardCost::DiscardCard;
+        let discard = WardCost::Discard {
+            count: 1,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+        };
         let result = ward_cost_to_ability_cost(&discard);
         assert!(matches!(
             result,
@@ -31868,6 +32000,25 @@ pub mod tests {
                 selection: CardSelectionMode::Chosen,
                 self_scope: DiscardSelfScope::FromHand,
             }
+        ));
+
+        // CR 701.9b + CR 205.2a: the count, filter and random-selection axes
+        // pass through to the unified discard cost.
+        let typed_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+        let counted_random_filtered = WardCost::Discard {
+            count: 2,
+            filter: Some(typed_filter.clone()),
+            selection: CardSelectionMode::Random,
+        };
+        let result = ward_cost_to_ability_cost(&counted_random_filtered);
+        assert!(matches!(
+            result,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                filter: Some(ref f),
+                selection: CardSelectionMode::Random,
+                self_scope: DiscardSelfScope::FromHand,
+            } if *f == typed_filter
         ));
 
         // Sacrifice
@@ -42527,6 +42678,7 @@ pub mod tests {
             player: PlayerId(0),
             total: 3,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert!(!resolution_completion_can_settle(&state));
 
@@ -42709,6 +42861,7 @@ pub mod tests {
                 ability_cost: None,
                 activation_cost_snapshot: None,
                 unavailable_modes: Vec::new(),
+                activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
@@ -45136,6 +45289,7 @@ pub mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: konrad,
                     ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap_or_else(|e| panic!("activation {activation} failed: {e:?}"));
             resolve_stack_to_empty(&mut runner);
@@ -52570,6 +52724,24 @@ mod pending_trigger_pin_reassignment_tests {
             assigned_pin,
             Some(expected),
             "assigning an unpinned ability must rebind the pin from the entry's own trigger event"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_binding_tests {
+    use super::*;
+
+    /// CR 506.4c + CR 603.4: the bound referent also reads live combat and battlefield state,
+    /// which can differ between fire time and resolution; "when in doubt, true".
+    #[test]
+    fn attacked_referent_filter_binding_diverges() {
+        assert!(filter_binding_diverges(
+            &TargetFilter::AttackedPlayerOrPlaneswalker
+        ));
+        assert!(
+            !filter_binding_diverges(&TargetFilter::DefendingPlayer),
+            "contrast: the event binding alone is non-divergent"
         );
     }
 }

@@ -37,7 +37,7 @@ use crate::types::ability::{
     ZoneRef,
 };
 use crate::types::card::CardFace;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
 use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -777,6 +777,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "controller of the object targeted by the triggering event".into()
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
+        TargetFilter::AttackedPlayerOrPlaneswalker => {
+            "the player or planeswalker it's attacking".into()
+        }
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
@@ -1871,15 +1874,38 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_characteristic_population_bounded(source)
             )
         }
-        QuantityRef::DistinctSubtypes { source, exclude } => {
-            let suffix = match exclude {
-                crate::types::ability::SubtypeExclusion::CreatureTypes => {
-                    " other than creature types"
-                }
-                crate::types::ability::SubtypeExclusion::None => "",
-            };
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict,
+        } => {
             let scope_desc = fmt_characteristic_population_bounded(source);
-            format!("subtypes{suffix} among {scope_desc}")
+            // CR 205.3: the category axis renders its own noun — derived from
+            // the `SubtypeSet`, not a second table. Only Creature/Planeswalker
+            // are producible today; the rest still render sanely.
+            match restrict {
+                Some(set) => {
+                    let noun = match set {
+                        SubtypeSet::Creature => "creature",
+                        SubtypeSet::Land => "land",
+                        SubtypeSet::Artifact => "artifact",
+                        SubtypeSet::Enchantment => "enchantment",
+                        SubtypeSet::Planeswalker => "planeswalker",
+                        SubtypeSet::Spell => "spell",
+                        SubtypeSet::Battle => "battle",
+                    };
+                    format!("{noun} types among {scope_desc}")
+                }
+                None => {
+                    let suffix = match exclude {
+                        crate::types::ability::SubtypeExclusion::CreatureTypes => {
+                            " other than creature types"
+                        }
+                        crate::types::ability::SubtypeExclusion::None => "",
+                    };
+                    format!("subtypes{suffix} among {scope_desc}")
+                }
+            }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
@@ -4278,6 +4304,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 ));
             }
         }
+        Effect::ModifyAnnouncedX { modification } => {
+            d.push(("modifies X".into(), format!("{modification:?}")));
+        }
         Effect::Double {
             target_kind,
             target,
@@ -4614,6 +4643,12 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     if let Some(cond) = &trig.condition {
         d.push(("condition".into(), fmt_trigger_condition(cond, &trig.mode)));
     }
+    if let Some(condition) = &trig.attack_cost_condition {
+        d.push((
+            "attack cost condition".into(),
+            fmt_static_condition(condition),
+        ));
+    }
     d
 }
 
@@ -4941,6 +4976,10 @@ fn fmt_trigger_condition(
             let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
             format!("cast during {}", parts.join(" or "))
         }
+        TC::CurrentPhaseIs { phases } => {
+            let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
+            format!("during {}", parts.join(" or "))
+        }
         TC::CastTimingPermission { .. } => "cast with timing permission".into(),
         TC::ManaColorSpent { color, minimum } => {
             format!("{}+ {} spent", minimum, fmt_mana_color_full(&color.color()))
@@ -5189,6 +5228,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
         SC::SourceHasDealtDamage => "source has dealt damage".into(),
+        SC::SourceExertedThisTurn => "source has been exerted this turn".into(),
         SC::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
             None => "was cast".into(),
@@ -5554,6 +5594,11 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     }
     if let Some(cref) = &repl.enters_under {
         d.push(("enters under".into(), format!("{cref:?}")));
+    }
+    // CR 614.12a: project the entry-payment cap (Nameless Race) so a fix that
+    // only changes it cannot produce a byte-identical signature.
+    if let Some(max) = &repl.entry_payment_max {
+        d.push(("entry payment max".into(), format!("{max:?}")));
     }
     if let Some(expiry) = &repl.expiry {
         d.push(("expiry".into(), format!("{expiry:?}")));
@@ -10085,6 +10130,9 @@ fn extract_trigger_features(
         emit_structural(features, StructuralFeature::TriggerCondition);
         extract_trigger_condition_features(condition, features);
     }
+    if let Some(condition) = &trigger.attack_cost_condition {
+        extract_static_condition_features(condition, features);
+    }
 }
 
 fn extract_effect_static_carrier_features(
@@ -10323,6 +10371,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::DefendingPlayerControlsNone { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ManaColorSpent { .. }
         | TriggerCondition::ManaSpentCondition { .. }
@@ -10452,6 +10501,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             }
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
             EffectOutcomeSignal::RevealUntilMatched => ("EffectOutcomeRevealUntilMatched", Handled),
+            EffectOutcomeSignal::RepeatDirectiveReached => {
+                ("EffectOutcomeRepeatDirectiveReached", Handled)
+            }
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
@@ -11027,6 +11079,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
+        StaticCondition::SourceExertedThisTurn => ("SourceExertedThisTurn", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
@@ -15489,6 +15542,72 @@ mod tests {
             8,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
+    }
+
+    #[test]
+    fn attack_cost_condition_reaches_parse_details() {
+        let oracle = "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)";
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            "Combat Celebrant",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut face = CardFace {
+            name: "Combat Celebrant".into(),
+            oracle_text: Some(oracle.into()),
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            keywords: parsed.extracted_keywords,
+            parse_warnings: parsed.parse_warnings,
+            ..Default::default()
+        };
+        assert_eq!(face.triggers.len(), 1);
+        assert!(face.triggers[0].is_attack_exert_permission());
+        assert!(face.triggers[0].execute.is_some());
+        assert!(face.triggers[0].condition.is_none());
+
+        let items = build_parse_details_for_face(&face);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, ParseCategory::Trigger);
+        assert!(items[0].is_fully_supported());
+        assert!(items[0].details.iter().any(|(key, value)| {
+            key == "attack cost condition" && value == "not (source has been exerted this turn)"
+        }));
+
+        face.triggers[0].condition = Some(crate::types::ability::TriggerCondition::LostLife);
+        for (condition, expected) in [
+            (
+                face.triggers[0].attack_cost_condition.clone(),
+                Some("not (source has been exerted this turn)"),
+            ),
+            (
+                Some(StaticCondition::SourceExertedThisTurn),
+                Some("source has been exerted this turn"),
+            ),
+            (None, None),
+        ] {
+            face.triggers[0].attack_cost_condition = condition;
+            let items = build_parse_details_for_face(&face);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].category, ParseCategory::Trigger);
+            assert!(items[0].is_fully_supported());
+            let details = &items[0].details;
+            assert_eq!(
+                details
+                    .iter()
+                    .find(|(key, _)| key == "attack cost condition")
+                    .map(|(_, value)| value.as_str()),
+                expected,
+                "attack-cost polarity and absence must remain distinct: {details:?}"
+            );
+            assert!(details
+                .iter()
+                .any(|(key, value)| key == "condition" && value == "lost life this turn"));
+        }
     }
 
     /// Exact cardinality and counter-removal eligibility are semantic parser
@@ -24635,6 +24754,19 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(
             items.is_empty(),
             "modeled tree must emit no unsupported item"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn attacked_referent_is_named_in_coverage_text() {
+        assert_eq!(
+            fmt_target(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            "the player or planeswalker it's attacking"
         );
     }
 }

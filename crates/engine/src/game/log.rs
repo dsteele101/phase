@@ -1237,7 +1237,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
         ],
 
-        GameEvent::CreatureExerted { object_id } => {
+        GameEvent::CreatureExerted { object_id, .. } => {
             vec![card_seg(state, *object_id), text(" is exerted")]
         }
 
@@ -3544,6 +3544,7 @@ mod tests {
                 owner: record.owner,
                 rebound_from: None,
                 entry_timestamp: None,
+                retained_sticker_timestamps: None,
                 turn_zone_change_index: record.turn_zone_change_index,
                 zone_change_record: (**record).clone(),
                 cause,
@@ -3949,6 +3950,7 @@ mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -3972,6 +3974,7 @@ mod tests {
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         };
         assert_eq!(lines(&[mana]), 0);
     }

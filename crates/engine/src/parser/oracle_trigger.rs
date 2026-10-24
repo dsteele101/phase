@@ -3,13 +3,16 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
 use nom::combinator::{
-    all_consuming, consumed, eof, fail, map, not, opt, peek, recognize, rest, value,
+    all_consuming, consumed, eof, fail, map, map_opt, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
-use super::oracle_effect::conditions::{source_saddled_filter, split_leading_conditional};
+use super::oracle_effect::conditions::{
+    parse_phase_name_set, source_saddled_filter, split_leading_conditional,
+};
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
@@ -88,7 +91,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
-use crate::types::phase::Phase;
+use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::triggers::{
     AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
 };
@@ -891,6 +894,57 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
             base_trigger_index,
             ctx,
         )];
+    }
+
+    // CR 603.2: "<actor> cast(s) <spell> or activate(s) an ability" names two
+    // trigger events (a spell cast and an activation), so it lowers to one
+    // definition per event, each with its own printed index and its own share
+    // of a distributed `{X}`-in-cost intervening-if (CR 603.4, folded into the
+    // half's event filter; see `parse_distributed_x_cost_condition`).
+    if let Some(split) = split_cast_or_activate_compound(&condition, &cond_lower, &effect) {
+        let mut results: Vec<TriggerIr> = split
+            .halves
+            .iter()
+            .enumerate()
+            .map(|(i, half)| {
+                let trigger_text = if split.effect.is_empty() {
+                    half.condition.clone()
+                } else {
+                    format!("{}, {}", half.condition, split.effect)
+                };
+                let mut ir = parse_trigger_line_with_index_ir(
+                    &trigger_text,
+                    card_name,
+                    base_trigger_index.map(|b| b.offset(i)),
+                    ctx,
+                );
+                if let Some(slot) = half.x_cost_fold {
+                    conjoin_valid_card(&mut ir.partial_def, slot.x_in_cost_filter());
+                }
+                ir
+            })
+            .collect();
+        // Shared-constraint marker. A constraint that counts firings per
+        // definition (`constraint_counts_per_definition`) must span both halves
+        // of the one printed ability: CR 603.2h for "Do this only once each
+        // turn" (Glava, Five-Advents Mage); for "This ability triggers only
+        // once each turn" (Bill Potts) the engine fact is that the counter is
+        // keyed per `TriggerDefinitionRef`, so two lowered halves would each
+        // fire once. Until a single-definition disjunctive trigger lets one
+        // counter span both events, the activation half is a strict failure
+        // and the spell half keeps the constraint, so exactly one counted
+        // definition is live.
+        if results.iter().any(|ir| {
+            lowered_trigger_constraint(&ir.modifiers, ir.partial_def.constraint.clone())
+                .as_ref()
+                .is_some_and(constraint_counts_per_definition)
+        }) {
+            let (mode, def) = unknown_trigger_definition(&split.halves[1].condition);
+            let activation_half = &mut results[1];
+            activation_half.condition = mode;
+            activation_half.partial_def = def;
+        }
+        return results;
     }
 
     // Pattern 2: disjunctive shared-subject event list — "whenever ~ A, B, or C"
@@ -2578,16 +2632,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
-    // Text-based constraints take precedence; fall back to condition-parser constraint.
-    def.constraint = modifiers.constraint.clone().or(def.constraint.take());
-
-    // CR 603.2: Apply trigger-event frequency limits as a fallback.
-    if let (Some(limit), None) = (modifiers.first_time_limit, def.constraint.as_ref()) {
-        def.constraint = Some(match limit {
-            FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
-            FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
-        });
-    }
+    def.constraint = lowered_trigger_constraint(modifiers, def.constraint.take());
     constrain_triggering_spell_with_nth_filter(&mut def);
 
     // Preserve original oracle text for coverage/UI annotation.
@@ -4134,6 +4179,14 @@ fn constrain_triggering_spell_with_nth_filter(def: &mut TriggerDefinition) {
         _ => return,
     };
 
+    conjoin_valid_card(def, filter);
+}
+
+/// Narrow a trigger's event filter by conjoining `filter` onto its
+/// `valid_card`: an absent or `Any` filter is replaced, an equal filter is
+/// kept, and any other filter is composed with `And`. Shared by the
+/// nth-spell constraint fold and the cast-or-activate split's `{X}`-in-cost fold.
+fn conjoin_valid_card(def: &mut TriggerDefinition, filter: TargetFilter) {
     def.valid_card = Some(match def.valid_card.take() {
         None | Some(TargetFilter::Any) => filter,
         Some(existing) if existing == filter => existing,
@@ -4141,6 +4194,52 @@ fn constrain_triggering_spell_with_nth_filter(def: &mut TriggerDefinition) {
             filters: vec![existing, filter],
         },
     });
+}
+
+/// The constraint a trigger lowers to: the constraint parsed from the full
+/// trigger text takes precedence, then the condition parser's constraint, then
+/// the "for the first time ..." event limit. The single authority for "which
+/// constraint does this trigger end up with", shared by `lower_trigger_ir` and
+/// the cast-or-activate split, which must inspect a half before it is lowered.
+fn lowered_trigger_constraint(
+    modifiers: &TriggerModifiers,
+    condition_constraint: Option<TriggerConstraint>,
+) -> Option<TriggerConstraint> {
+    modifiers
+        .constraint
+        .clone()
+        .or(condition_constraint)
+        .or_else(|| {
+            // CR 603.2: Apply trigger-event frequency limits as a fallback.
+            modifiers.first_time_limit.map(|limit| match limit {
+                FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
+                FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
+            })
+        })
+}
+
+/// Whether `constraint` counts firings per trigger definition. The four
+/// counting arms are keyed by `TriggerDefinitionRef` in
+/// `triggers.rs::check_trigger_constraint_with_ref`, so a printed line that a
+/// compound split lowers to two definitions would count each half separately
+/// (CR 603.2h: "Do this only once each turn" limits the one printed ability, not
+/// each of its events). The remaining arms are predicates on the event or the
+/// game state, which every half evaluates identically. Exhaustive, so a new
+/// `TriggerConstraint` variant is forced into this decision.
+fn constraint_counts_per_definition(constraint: &TriggerConstraint) -> bool {
+    match constraint {
+        TriggerConstraint::OncePerTurn
+        | TriggerConstraint::OncePerGame
+        | TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn => true,
+        TriggerConstraint::OnlyDuringYourTurn
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OnlyDuringOpponentsTurn
+        | TriggerConstraint::OnlyDuringYourMainPhase
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::EventSourceControlledBy { .. } => false,
+    }
 }
 
 /// CR 601.2a + CR 603.4: Recognize the disjunctive "first-of-type this turn"
@@ -6661,6 +6760,7 @@ pub(crate) fn static_condition_to_trigger_condition(
         // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
         // Layer-6 gate with no intervening-if (`TriggerCondition`) equivalent.
         StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::DevotionGE { .. }
@@ -10020,6 +10120,16 @@ fn trigger_condition_excludes_mana_activations(condition: Option<&TriggerConditi
     }
 }
 
+/// The grammatical person of a trigger's acting subject and the verb that
+/// agrees with it ("you activate" vs. "an opponent activates"). Only a
+/// third-person subject ("a player", "an opponent") is the antecedent of a
+/// later "they".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubjectPerson {
+    Second,
+    Third,
+}
+
 /// CR 602.1 + CR 603.2 + CR 605.1a: Parse "Whenever <player_scope> activates
 /// an ability [that isn't a mana ability]" triggers — the generic activated-
 /// ability trigger class covering Burning-Tree Shaman ("a player"),
@@ -10040,14 +10150,6 @@ fn trigger_condition_excludes_mana_activations(condition: Option<&TriggerConditi
 /// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
 /// permutation as separate `tag` arms.
 fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
-    /// The grammatical person of the activating subject. Only a third-person
-    /// subject ("a player", "an opponent") is the antecedent of a later "they".
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum SubjectPerson {
-        Second,
-        Third,
-    }
-
     // Pair subject with its verb conjugation: third-person-singular subjects
     // ("a player", "an opponent") take "activates"; second-person ("you")
     // takes "activate". Each arm carries the typed `valid_target` filter so
@@ -10976,6 +11078,203 @@ fn is_enters_or_haunted_creature_dies_compound(cond_lower: &str) -> bool {
             cond_lower,
             "enters the battlefield or the creature it haunts dies",
         )
+}
+
+/// A "<spell phrase> or activate(s) an ability[<qualifier>]" disjunction, split
+/// at its word boundary. Every field borrows the scanned lowercase input.
+pub(crate) struct SpellOrActivationDisjunction<'a> {
+    /// The spell leg, without trailing whitespace ("a spell with {x} in its mana cost").
+    pub(crate) spell: &'a str,
+    /// The person the "activate" verb agrees with.
+    pub(crate) person: SubjectPerson,
+    /// The activation leg from its verb to the end ("activate an ability …").
+    pub(crate) activation: &'a str,
+    /// The text after "an ability" (" with {x} in its activation cost"; may be empty).
+    pub(crate) activation_qualifier: &'a str,
+}
+
+/// "activate(s) an ability", ending at a word boundary. The verb's inflection
+/// gives the person of its subject.
+fn parse_activate_an_ability(input: &str) -> OracleResult<'_, SubjectPerson> {
+    terminated(
+        alt((
+            value(SubjectPerson::Third, tag("activates")),
+            value(SubjectPerson::Second, tag("activate")),
+        )),
+        (tag(" an ability"), peek(alt((eof, tag(" "))))),
+    )
+    .parse(input)
+}
+
+/// CR 603.2: Casting a spell and activating an ability are distinct trigger
+/// events. Locate the "or activate(s) an ability" that joins the two legs of a
+/// cast-or-activate disjunction, at a word boundary. Shared by the printed
+/// trigger splitter ([`split_cast_or_activate_compound`]) and the "when you
+/// next cast … or activate an ability …" delayed trigger.
+pub(crate) fn split_spell_or_activation_disjunction(
+    lower: &str,
+) -> Option<SpellOrActivationDisjunction<'_>> {
+    let (before, (activation, person), activation_qualifier) = scan_preceded(lower, |i| {
+        let (after_or, _) = tag::<_, _, OracleError<'_>>("or ").parse(i)?;
+        let (qualifier, person) = parse_activate_an_ability(after_or)?;
+        Ok((qualifier, (after_or, person)))
+    })?;
+    Some(SpellOrActivationDisjunction {
+        spell: before.trim_end(),
+        person,
+        activation,
+        activation_qualifier,
+    })
+}
+
+/// "that spell's " / "that ability's " — the anaphor naming one half's event object.
+fn parse_cost_anaphor(input: &str) -> OracleResult<'_, CostSlot> {
+    alt((
+        value(CostSlot::Mana, tag("that spell's ")),
+        value(CostSlot::Activation, tag("that ability's ")),
+    ))
+    .parse(input)
+}
+
+/// "that spell's mana cost" / "that ability's activation cost": an anaphor
+/// followed by the cost slot that belongs to it. A crossed pairing ("that
+/// ability's mana cost") is rejected.
+fn parse_anaphoric_cost(input: &str) -> OracleResult<'_, CostSlot> {
+    verify(
+        (parse_cost_anaphor, parse_cost_slot, tag(" cost")),
+        |(anaphor, slot, _): &(CostSlot, CostSlot, &str)| anaphor == slot,
+    )
+    .map(|(anaphor, _, _)| anaphor)
+    .parse(input)
+}
+
+/// CR 603.4 + CR 202.1 + CR 602.1a + CR 113.7a + CR 608.2h: The intervening-if
+/// "if that spell's mana cost or that ability's activation cost contains {x}, "
+/// of a cast-or-activate trigger. Each disjunct restates its own half's event
+/// filter, and its answer cannot change between the trigger event and
+/// resolution: a spell's mana cost is printed on it, an activation's cost is
+/// fixed when it is activated and carried on its event, and a spell or ability
+/// that has left the stack answers from last-known information. So the
+/// condition is answered once, in each half's event filter. The anaphor, not
+/// the order, assigns each slot to its half; both anaphors must appear, once
+/// each. Consumes the trailing ", ". The swallow audit recognizes the folded
+/// restatement with this same combinator
+/// (`swallow_check::distributed_x_cost_if_is_only_if_marker`).
+pub(crate) fn parse_distributed_x_cost_condition(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(
+            (
+                tag("if "),
+                parse_anaphoric_cost,
+                tag(" or "),
+                parse_anaphoric_cost,
+                tag(" contains {x}, "),
+            ),
+            |(_, first, _, second, _): &(&str, CostSlot, &str, CostSlot, &str)| first != second,
+        ),
+    )
+    .parse(input)
+}
+
+/// "<actor> " at the head of a trigger condition, tagged with its person.
+fn parse_cast_or_activate_actor(input: &str) -> OracleResult<'_, SubjectPerson> {
+    preceded(
+        parse_trigger_keyword_prefix,
+        alt((
+            value(SubjectPerson::Second, tag("you ")),
+            value(SubjectPerson::Third, parse_trigger_actor),
+        )),
+    )
+    .parse(input)
+}
+
+/// "cast " / "casts ", tagged with the person it agrees with.
+fn parse_cast_verb(input: &str) -> OracleResult<'_, SubjectPerson> {
+    alt((
+        value(SubjectPerson::Third, tag("casts ")),
+        value(SubjectPerson::Second, tag("cast ")),
+    ))
+    .parse(input)
+}
+
+/// One half of a split cast-or-activate trigger: its reconstructed condition
+/// (original case) and the `{X}`-in-cost predicate its distributed
+/// intervening-if folds into its event filter.
+struct CastOrActivateHalf {
+    condition: String,
+    x_cost_fold: Option<CostSlot>,
+}
+
+/// A split cast-or-activate trigger line. `halves[0]` is the spell half and
+/// `halves[1]` the activation half; `effect` is the shared effect with any
+/// distributed intervening-if removed.
+struct CastOrActivateSplit {
+    halves: [CastOrActivateHalf; 2],
+    effect: String,
+}
+
+/// CR 603.2 + CR 602.2a: Split "<actor> cast(s) <spell phrase> or activate(s)
+/// an ability[<qualifier>]" into a spell-cast condition and an activation
+/// condition that share the actor (the activating player is the ability's
+/// controller, so the actor binds the activation half's player filter exactly
+/// as it binds the spell half's). The actor, the cast verb and the activate verb
+/// must agree in person.
+///
+/// A leading intervening-if is distributed only when it is the anaphoric
+/// `{X}`-in-cost restatement ([`parse_distributed_x_cost_condition`]); any other
+/// intervening-if declines the split, because it would otherwise be shared
+/// verbatim into a half it does not describe (Vazi, Keen Negotiator's "if mana
+/// from a Treasure was spent to cast it or activate it").
+fn split_cast_or_activate_compound(
+    condition: &str,
+    cond_lower: &str,
+    effect: &str,
+) -> Option<CastOrActivateSplit> {
+    let (after_actor, actor) = parse_cast_or_activate_actor(cond_lower).ok()?;
+    let (after_cast, cast_person) = parse_cast_verb(after_actor).ok()?;
+    if cast_person != actor {
+        return None;
+    }
+    let disjunction = split_spell_or_activation_disjunction(after_cast)?;
+    if disjunction.person != actor {
+        return None;
+    }
+
+    // Reconstruct both halves in original case from lowercase suffixes.
+    let tp = TextPair::new(condition, cond_lower);
+    let after_spell = tp.original_remainder(&after_cast[disjunction.spell.len()..])?;
+    let spell_condition = &condition[..condition.len() - after_spell.len()];
+    let after_head = tp.original_remainder(after_actor)?;
+    let head = &condition[..condition.len() - after_head.len()];
+    let activation = tp.original_remainder(disjunction.activation)?;
+
+    let effect_lower = effect.to_lowercase();
+    let (effect, folds) = if tag::<_, _, OracleError<'_>>("if ")
+        .parse(effect_lower.as_str())
+        .is_ok()
+    {
+        let ((), residual) =
+            nom_on_lower(effect, &effect_lower, parse_distributed_x_cost_condition)?;
+        (residual, [Some(CostSlot::Mana), Some(CostSlot::Activation)])
+    } else {
+        (effect, [None, None])
+    };
+    let [spell_fold, activation_fold] = folds;
+
+    Some(CastOrActivateSplit {
+        halves: [
+            CastOrActivateHalf {
+                condition: spell_condition.to_string(),
+                x_cost_fold: spell_fold,
+            },
+            CastOrActivateHalf {
+                condition: format!("{head}{activation}"),
+                x_cost_fold: activation_fold,
+            },
+        ],
+        effect: effect.to_string(),
+    })
 }
 
 /// Split a disjunctive shared-subject event trigger into one reconstructed
@@ -14818,6 +15117,15 @@ fn try_parse_event(
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
     if let Ok((after_enter, ())) = value((), tag::<_, _, OracleError<'_>>("enter")).parse(rest) {
+        // CR 603.2: a trailing "during <window>" qualifier ("enters during
+        // combat", "enters during your turn", "enters during the declare
+        // attackers step") is part of the trigger event. Peel it first so the
+        // origin / control / tapped / this-way riders below scan only the
+        // remaining tail; an unrecognized window stays coverage-red.
+        let (after_enter, window) = peel_trailing_event_window(after_enter);
+        if has_untyped_event_window(after_enter) {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -14936,6 +15244,7 @@ fn try_parse_event(
             ));
         }
 
+        attach_event_window(&mut def, window);
         return Some((TriggerMode::ChangesZone, def));
     }
 
@@ -14948,12 +15257,20 @@ fn try_parse_event(
         ))
         .parse(input)
     }
-    if parse_dies_verb.parse(rest).is_ok() {
+    if let Ok((dies_tail, ())) = parse_dies_verb.parse(rest) {
+        // CR 603.2: "dies during combat" / "dies during your turn" — the
+        // window is part of the trigger event. An unrecognized window stays
+        // coverage-red rather than firing ungated.
+        let (dies_tail, window) = peel_trailing_event_window(dies_tail);
+        if has_untyped_event_window(dies_tail) {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.origin = Some(Zone::Battlefield);
         def.destination = Some(Zone::Graveyard);
         def.valid_card = Some(subject.clone());
+        attach_event_window(&mut def, window);
         return Some((TriggerMode::ChangesZone, def));
     }
 
@@ -15428,19 +15745,7 @@ fn try_parse_event(
         // Courageous Rescuer ("another permanent you control leaves the
         // battlefield during your turn").
         let (tail, turn_constraint) = peel_trailing_turn_constraint(tail);
-        let turn_condition = match turn_constraint {
-            Some(TriggerConstraint::OnlyDuringYourTurn) => {
-                Some(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Controller,
-                })
-            }
-            Some(TriggerConstraint::OnlyDuringOpponentsTurn) => {
-                Some(TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::Opponent,
-                })
-            }
-            _ => None,
-        };
+        let turn_condition = turn_constraint.and_then(turn_window_condition);
         let without_dying = all_consuming(tag::<_, _, OracleError<'_>>("without dying"))
             .parse(tail)
             .is_ok();
@@ -21161,18 +21466,6 @@ fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
     });
 }
 
-/// Parse a post-spell modifier phrase (text between "spell" and the timing tail).
-///
-/// Currently supports:
-/// - "with {x} in its mana cost" — CR 107.3 + CR 202.1. Produces a `TargetFilter`
-///   containing `FilterProp::HasXInManaCost`.
-///
-/// Extend by adding more combinator branches as additional post-spell modifiers
-/// (e.g. "with converted mana cost N", "that targets you") become supported.
-///
-/// Shared with `oracle_effect::try_parse_when_next_event` (delayed-trigger variant
-/// of the same filter shape) — exposed as `pub(crate)` to keep the combinator
-/// definition in a single place.
 /// CR 107.4 + CR 202.1: Pure-nom recognizer for the spell-qualifier phrase
 /// "with one or more `<color>` mana symbol(s) in its mana cost"
 /// (Namor the Sub-Mariner — "Whenever you cast a noncreature spell with one or
@@ -21205,6 +21498,85 @@ pub(crate) fn extract_colored_mana_symbol_spell_qualifier(text: &str) -> Option<
         .map(|(_, color, _)| color)
 }
 
+/// The cost slot an `{X}`-in-cost qualifier names: a spell's mana cost
+/// (CR 202.1) or an ability's activation cost (CR 602.1a: everything before
+/// the colon). A spell qualifier accepts only `Mana` and an activation
+/// qualifier only `Activation`, so the two slots never cross.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CostSlot {
+    Mana,
+    Activation,
+}
+
+impl CostSlot {
+    /// CR 107.3a: the filter property asserting that this slot contains the
+    /// mana symbol `{X}`.
+    const fn x_in_cost_prop(self) -> FilterProp {
+        match self {
+            CostSlot::Mana => FilterProp::HasXInManaCost,
+            CostSlot::Activation => FilterProp::HasXInActivationCost,
+        }
+    }
+
+    /// The event filter "whose <slot> cost contains `{X}`".
+    fn x_in_cost_filter(self) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![self.x_in_cost_prop()]))
+    }
+}
+
+fn parse_cost_slot(input: &str) -> OracleResult<'_, CostSlot> {
+    alt((
+        value(CostSlot::Mana, tag("mana")),
+        value(CostSlot::Activation, tag("activation")),
+    ))
+    .parse(input)
+}
+
+/// CR 107.3a + CR 202.1 / CR 602.1a: The single grammar for an `{X}` in a
+/// spell's mana cost or in an ability's activation cost, in both printed forms:
+/// "with (an) {x} in its <slot> cost" (Brass Infiniscope, Magus Lucea Kane) and
+/// "with a(n) <slot> cost that contains {x}" (Unbound Flourishing). Returns the
+/// named slot; callers decide which slot they accept.
+fn parse_x_in_cost_qualifier(input: &str) -> OracleResult<'_, CostSlot> {
+    preceded(
+        tag("with "),
+        alt((
+            delimited(
+                (opt(tag("an ")), tag("{x} in its ")),
+                parse_cost_slot,
+                tag(" cost"),
+            ),
+            delimited(
+                alt((tag("an "), tag("a "))),
+                parse_cost_slot,
+                tag(" cost that contains {x}"),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+/// The full-consumption, slot-checked answer of [`parse_x_in_cost_qualifier`]:
+/// the `{X}`-in-cost filter when `modifier` is exactly a qualifier naming
+/// `slot`, otherwise `None`.
+fn x_in_cost_modifier(modifier: &str, slot: CostSlot) -> Option<TargetFilter> {
+    let (rest, parsed) = parse_x_in_cost_qualifier(modifier).ok()?;
+    (parsed == slot && rest.trim().is_empty()).then(|| slot.x_in_cost_filter())
+}
+
+/// Parse a post-spell modifier phrase (text between "spell" and the timing tail).
+///
+/// Supports, among others:
+/// - "with {x} in its mana cost" / "with a mana cost that contains {x}" —
+///   CR 107.3a + CR 202.1, through the shared [`parse_x_in_cost_qualifier`].
+///   Produces a `TargetFilter` containing `FilterProp::HasXInManaCost`.
+///
+/// Extend by adding more combinator branches as additional post-spell modifiers
+/// (e.g. "with converted mana cost N", "that targets you") become supported.
+///
+/// Shared with `oracle_effect::try_parse_when_next_event` (delayed-trigger variant
+/// of the same filter shape) — exposed as `pub(crate)` to keep the combinator
+/// definition in a single place.
 pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> {
     use crate::types::ability::{FilterProp, TypedFilter};
 
@@ -21238,21 +21610,11 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
         }
     }
 
-    // "with {X} in its mana cost" (Brass Infiniscope): X literally appears in the mana cost.
-    if let Ok((rest, ())) = alt((
-        value(
-            (),
-            tag::<_, _, OracleError<'_>>("with {x} in its mana cost"),
-        ),
-        value((), tag("with an {x} in its mana cost")),
-    ))
-    .parse(modifier)
-    {
-        if rest.trim().is_empty() {
-            return Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
-            ));
-        }
+    // CR 107.3a + CR 202.1: "with {X} in its mana cost" (Brass Infiniscope) /
+    // "with a mana cost that contains {X}" (Unbound Flourishing): the mana symbol
+    // {X} literally appears in the spell's mana cost.
+    if let Some(filter) = x_in_cost_modifier(modifier, CostSlot::Mana) {
+        return Some(filter);
     }
 
     // CR 202.3: "with mana value N or less" / "with mana value N or greater" /
@@ -21369,31 +21731,15 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
 /// an ability <qualifier>" delayed triggers.
 ///
 /// Currently supports:
-/// - "with {x} in its activation cost" — CR 107.3 + CR 601.2f. Produces a
-///   `TargetFilter` containing `FilterProp::HasXInActivationCost`.
+/// - "with {x} in its activation cost" / "with an activation cost that contains
+///   {x}" — CR 107.3a + CR 602.1a, through the shared
+///   [`parse_x_in_cost_qualifier`]. Produces a `TargetFilter` containing
+///   `FilterProp::HasXInActivationCost`.
 ///
 /// Shared with `oracle_effect::try_parse_when_next_event` — exposed as
 /// `pub(crate)` to keep the combinator definition in a single place.
 pub(crate) fn parse_post_activation_modifier(modifier: &str) -> Option<TargetFilter> {
-    use crate::types::ability::{FilterProp, TypedFilter};
-
-    if let Ok((rest, ())) = alt((
-        value(
-            (),
-            tag::<_, _, OracleError<'_>>("with {x} in its activation cost"),
-        ),
-        value((), tag("with an {x} in its activation cost")),
-    ))
-    .parse(modifier)
-    {
-        if rest.trim().is_empty() {
-            return Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
-            ));
-        }
-    }
-
-    None
+    x_in_cost_modifier(modifier, CostSlot::Activation)
 }
 
 /// Parse "whenever [subject] draw(s) [possessive] Nth card each turn" into a Drawn trigger
@@ -23263,6 +23609,88 @@ fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint
             return (input, None);
         };
         remaining = remaining[idx + 1..].trim_start();
+    }
+}
+
+/// CR 102.1 + CR 603.2: the turn owner a [`parse_during_turn_spec`] token
+/// names, as a trigger-condition leaf ("your turn" → the trigger's
+/// controller is the active player; "an opponent's turn" → an opponent of the
+/// controller is). Only the two turn tokens `parse_during_turn_spec` emits map
+/// to a player; every other constraint is not a turn window.
+fn turn_window_condition(constraint: TriggerConstraint) -> Option<TriggerCondition> {
+    let player = match constraint {
+        TriggerConstraint::OnlyDuringYourTurn => PlayerFilter::Controller,
+        TriggerConstraint::OnlyDuringOpponentsTurn => PlayerFilter::Opponent,
+        TriggerConstraint::OncePerTurn
+        | TriggerConstraint::OncePerGame
+        | TriggerConstraint::NthSpellThisTurn { .. }
+        | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::OnlyDuringYourMainPhase
+        | TriggerConstraint::AtClassLevel { .. }
+        | TriggerConstraint::MaxTimesPerTurn { .. }
+        | TriggerConstraint::OncePerOpponentPerTurn
+        | TriggerConstraint::EventSourceControlledBy { .. } => return None,
+    };
+    Some(TriggerCondition::DuringPlayersTurn { player })
+}
+
+/// CR 603.2 + CR 500.1 + CR 506.1: the "during <window>" qualifier of an
+/// event-trigger head — "during your turn" / "during an opponent's turn"
+/// (turn windows, via [`parse_during_turn_spec`]), "during combat" (the whole
+/// combat phase, CR 506.1), or "during the <step/phase>" (via
+/// `parse_phase_name_set`). The arms are leaf alternatives after the shared
+/// "during " prefix. NON-`all_consuming`: callers own any trailing text.
+pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerCondition> {
+    preceded(
+        tag("during "),
+        alt((
+            map_opt(parse_during_turn_spec, turn_window_condition),
+            map(parse_event_word("combat"), |()| {
+                TriggerCondition::CurrentPhaseIs {
+                    phases: PhaseGroup::Combat.steps().to_vec(),
+                }
+            }),
+            map(preceded(tag("the "), parse_phase_name_set), |phases| {
+                TriggerCondition::CurrentPhaseIs { phases }
+            }),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 603.2: peel a "during <window>" qualifier that ends an event-trigger
+/// head's tail ("s during combat" → ("s", Some(window))). Found at a word
+/// boundary; the window must consume the rest of the tail.
+fn peel_trailing_event_window(input: &str) -> (&str, Option<TriggerCondition>) {
+    match scan_preceded(input, |i| all_consuming(parse_event_window).parse(i)) {
+        Some((before, window, _)) => (before.trim_end(), Some(window)),
+        None => (input, None),
+    }
+}
+
+/// CR 603.2: true when an event-trigger tail still carries a word-bounded
+/// "during " after [`peel_trailing_event_window`] — a window the combinator
+/// cannot type ("dies during your upkeep"). Callers decline the head so the
+/// line stays coverage-red instead of firing ungated.
+fn has_untyped_event_window(residual: &str) -> bool {
+    scan_preceded(residual, |i| {
+        tag::<_, _, OracleError<'_>>("during ").parse(i)
+    })
+    .is_some()
+}
+
+/// CR 603.2 + CR 603.4: AND the event window onto the trigger's condition as
+/// `EventTime` — read when the trigger event occurs and never rechecked on
+/// resolution, since the window is part of the trigger event rather than an
+/// intervening "if" (`stack_condition_for_trigger` drops `EventTime`).
+fn attach_event_window(def: &mut TriggerDefinition, window: Option<TriggerCondition>) {
+    if let Some(window) = window {
+        def.condition = Some(append_trigger_condition(
+            def.condition.take(),
+            TriggerCondition::EventTime {
+                condition: Box::new(window),
+            },
+        ));
     }
 }
 
