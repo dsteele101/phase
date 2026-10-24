@@ -34,6 +34,7 @@ use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
+use super::announcement_triggers::stage_announcement_trigger_events;
 use super::casting::emit_targeting_events;
 use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
@@ -1979,14 +1980,32 @@ pub(crate) fn begin_deferred_target_selection(
         );
         // CR 601.2c + CR 603.2: each automatically declared target becomes the
         // target of the spell or ability once, as a prompted declaration emits it.
-        super::casting::emit_targeting_events(
-            state,
-            &declared_targets_in_chain(&pending.ability),
-            pending.object_id,
-            pending.ability.controller,
-            super::casting::pending_cast_targeter(state, &pending),
-            events,
-        );
+        // CR 601.2c + CR 603.2: Stage announcement triggers (e.g., Horobi) after
+        // target declaration but before cost payment, so automatic mana payments
+        // (e.g., sacrificing Blood Pet) don't move the target before the trigger
+        // is matched. The activation route uses begin_activation_trigger_collection();
+        // spells use the in-flight spell trigger carrier.
+        if pending.activation_ability_index.is_none() {
+            let event_start = events.len();
+            super::casting::emit_targeting_events(
+                state,
+                &declared_targets_in_chain(&pending.ability),
+                pending.object_id,
+                pending.ability.controller,
+                super::casting::pending_cast_targeter(state, &pending),
+                events,
+            );
+            stage_announcement_trigger_events(state, events, event_start);
+        } else {
+            super::casting::emit_targeting_events(
+                state,
+                &declared_targets_in_chain(&pending.ability),
+                pending.object_id,
+                pending.ability.controller,
+                super::casting::pending_cast_targeter(state, &pending),
+                events,
+            );
+        }
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -2014,14 +2033,32 @@ pub(crate) fn begin_deferred_target_selection(
         );
         // CR 601.2c + CR 603.2: each automatically declared target becomes the
         // target of the spell or ability once, as a prompted declaration emits it.
-        super::casting::emit_targeting_events(
-            state,
-            &declared_targets_in_chain(&pending.ability),
-            pending.object_id,
-            pending.ability.controller,
-            super::casting::pending_cast_targeter(state, &pending),
-            events,
-        );
+        // CR 601.2c + CR 603.2: Stage announcement triggers (e.g., Horobi) after
+        // target declaration but before cost payment, so automatic mana payments
+        // (e.g., sacrificing Blood Pet) don't move the target before the trigger
+        // is matched. The activation route uses begin_activation_trigger_collection();
+        // spells use the in-flight spell trigger carrier.
+        if pending.activation_ability_index.is_none() {
+            let event_start = events.len();
+            super::casting::emit_targeting_events(
+                state,
+                &declared_targets_in_chain(&pending.ability),
+                pending.object_id,
+                pending.ability.controller,
+                super::casting::pending_cast_targeter(state, &pending),
+                events,
+            );
+            stage_announcement_trigger_events(state, events, event_start);
+        } else {
+            super::casting::emit_targeting_events(
+                state,
+                &declared_targets_in_chain(&pending.ability),
+                pending.object_id,
+                pending.ability.controller,
+                super::casting::pending_cast_targeter(state, &pending),
+                events,
+            );
+        }
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
