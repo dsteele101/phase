@@ -14539,32 +14539,6 @@ fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
                 filter: TargetFilter::Any,
                 caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
             })
-        ) | (
-            Effect::ChangeZoneAll {
-                destination: Zone::Library,
-                ..
-            },
-            Some(PlayerFilter::TrackedSetPossessor {
-                relation: PlayerRelation::All,
-                possession: PossessionAxis::Owner,
-                filter: TargetFilter::Any,
-                caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-            })
-        ) | (
-            // CR 701.24c + CR 400.3: PutAtLibraryPosition for the source artifact
-            // in "shuffle this and your graveyard into their owner's library" must
-            // also publish its owner to the tracked set so the terminal shuffle
-            // fans out to both the artifact's owner and the graveyard cards' owner.
-            Effect::PutAtLibraryPosition {
-                target: TargetFilter::SelfRef,
-                ..
-            },
-            Some(PlayerFilter::TrackedSetPossessor {
-                relation: PlayerRelation::All,
-                possession: PossessionAxis::Owner,
-                filter: TargetFilter::Any,
-                caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-            })
         )
     )
 }

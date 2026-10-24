@@ -2974,11 +2974,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
         def.unlowered_guard = clause_ir.parsed.unlowered_guard.clone();
-        // CR 701.24c + CR 400.3: propagate player_scope for tracked-set publication
-        // in owner-library shuffles (e.g., Elixir of Immortality's source artifact).
-        if let Some(scope) = clause_ir.parsed.player_scope.clone() {
-            def.player_scope = Some(scope);
-        }
         // CR 608.2c: A mass zone move immediately followed by "deals that much
         // damage to each ..." reads ONE scalar result from the completed move,
         // not a different per-recipient event-context amount. Bind only this

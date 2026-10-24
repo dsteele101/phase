@@ -73,35 +73,6 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
-    /// CR 701.24c + CR 400.3: Player scope for tracked-set publication in
-    /// owner-library shuffles (e.g., Elixir of Immortality's source artifact).
-    /// When set on a `PutAtLibraryPosition` or `ChangeZoneAll` with the
-    /// `TrackedSetPossessor` scope, this causes the prospective publisher to
-    /// include the object's owner in the tracked set so the terminal shuffle
-    /// fans out to all affected owners.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) player_scope: Option<PlayerFilter>,
-}
-
-impl Default for ParsedEffectClause {
-    fn default() -> Self {
-        Self {
-            effect: Effect::Unimplemented {
-                name: "default".to_string(),
-                description: None,
-            },
-            duration: None,
-            sub_ability: None,
-            distribute: None,
-            multi_target: None,
-            optional_targeting: false,
-            condition: None,
-            optional: false,
-            unless_pay: None,
-            unlowered_guard: None,
-            player_scope: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2268,7 +2239,6 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
         unlowered_guard: None,
-        player_scope: None,
     }
 }
 

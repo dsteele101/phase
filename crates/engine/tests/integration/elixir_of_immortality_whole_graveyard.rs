@@ -238,7 +238,10 @@ fn elixir_shuffles_empty_graveyard_owners_library() {
                 )
             })
             .count();
-        assert_eq!(shuffled_libraries, 1, "{player:?}'s library must be shuffled");
+        assert_eq!(
+            shuffled_libraries, 1,
+            "{player:?}'s library must be shuffled"
+        );
     }
 
     let state = outcome.state();

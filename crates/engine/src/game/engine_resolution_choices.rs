@@ -9882,7 +9882,6 @@ pub(crate) fn run_batch_completion(
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::PutOnTopComplete {
-            player,
             source_id,
             removed_exile_links,
         } => {
@@ -9894,7 +9893,6 @@ pub(crate) fn run_batch_completion(
                 source_id,
                 subject: None,
             });
-            finish_with_continuation(state, player, events);
             crate::game::zone_pipeline::BatchMoveResult::Done
         }
         BatchCompletion::TopOrBottomComplete { player } => {

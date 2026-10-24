@@ -6989,8 +6989,6 @@ pub enum BatchCompletion {
     /// PutAtLibraryPosition instruction have settled. Source-linked exile
     /// bookkeeping and the resolution event occur only after the full batch.
     PutOnTopComplete {
-        /// Controller of the ability whose continuation should be drained.
-        player: PlayerId,
         source_id: ObjectId,
         removed_exile_links: Vec<ObjectId>,
     },

@@ -10106,37 +10106,25 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 position: LibraryPosition::Bottom,
             });
 
-            // CR 701.24c + CR 400.3: the source artifact must also publish its
-            // owner to the tracked set so the terminal shuffle fans out to both
-            // the artifact's owner and the graveyard cards' owner.
-            clause.player_scope = Some(owner_library_shuffle_scope());
-
-            // Build the ChangeZoneAll chain inside-out. Each ChangeZoneAll gets
-            // TrackedSetPossessor player_scope so it publishes its owner even for
-            // empty zones (CR 701.24d). The innermost is wrapped with
-            // with_shuffle_sub_ability to create the terminal shuffle with the
-            // matching TrackedSetPossessor scope.
+            // The zone moves publish their owners themselves (CR 701.24d, empty
+            // zones included); only the terminal shuffle carries the
+            // owner-population scope, so each ChangeZoneAll keeps resolving
+            // against the ability controller's own zone.
             let mut tail: Option<Box<AbilityDefinition>> = None;
             for origin in origins.iter().rev() {
                 let effect = change_zone_all_to_library_effect(*origin);
-                if tail.is_none() {
-                    // Innermost: wrap with shuffle sub_ability for terminal shuffle.
+                let mut def = if tail.is_none() {
                     let wrapped = with_shuffle_sub_ability(effect);
                     let mut def = AbilityDefinition::new(AbilityKind::Spell, wrapped.effect);
-                    // CR 701.24d: ensure this ChangeZoneAll publishes its owner
-                    // even when the zone is empty, by giving it the same
-                    // TrackedSetPossessor scope as the terminal shuffle.
-                    def.player_scope = Some(owner_library_shuffle_scope());
                     def.sub_ability = wrapped.sub_ability;
-                    tail = Some(Box::new(def));
+                    def
                 } else {
-                    // Outer ChangeZoneAll: no shuffle sub_ability, but still needs
-                    // TrackedSetPossessor player_scope to publish for empty zones.
-                    let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
-                    def.player_scope = Some(owner_library_shuffle_scope());
+                    AbilityDefinition::new(AbilityKind::Spell, effect)
+                };
+                if def.sub_ability.is_none() {
                     def.sub_ability = tail;
-                    tail = Some(Box::new(def));
                 }
+                tail = Some(Box::new(def));
             }
 
             clause.sub_ability = tail;
@@ -10487,7 +10475,6 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         condition: None,
         optional: false,
         unless_pay: None,
-        player_scope: None,
     }
 }
 
