@@ -124,24 +124,24 @@ use crate::types::ability::{
     CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
     CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
     ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
-    CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
-    IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition,
-    ManaProduction, ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec,
-    NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource,
-    TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier,
-    UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource,
-    ZoneChoiceChooser, ZoneOwner,
+    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
+    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
+    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
+    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
+    GuardReading, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
+    KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
+    MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty,
+    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
+    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
+    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
+    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
+    ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter,
+    TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -2490,6 +2490,7 @@ fn try_parse_whenever_this_turn_from(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -2632,6 +2633,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 
@@ -2669,6 +2671,7 @@ fn build_when_next_delayed_trigger(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 
@@ -2952,6 +2955,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -3055,6 +3059,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -3143,6 +3148,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -3293,6 +3299,7 @@ fn try_parse_at_next_phase_delayed_trigger(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -4171,6 +4178,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5105,6 +5113,7 @@ fn try_parse_inline_delayed_trigger(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5440,6 +5449,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5516,6 +5526,7 @@ fn try_parse_cant_enter_battlefield_from_restriction(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5584,6 +5595,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5648,6 +5660,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5697,6 +5710,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5767,6 +5781,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5978,6 +5993,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
 
     // CR 611.2a + CR 514.2: this recognizer owns the leading duration
@@ -6080,6 +6096,7 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6167,6 +6184,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6287,6 +6305,7 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6367,6 +6386,7 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6419,6 +6439,7 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6485,6 +6506,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -6567,6 +6589,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6722,6 +6745,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6820,6 +6844,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -8437,6 +8462,8 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
 ///
 ///   * `effect`, `sub_ability`, `duration`, `condition`, `optional`, `multi_target`,
 ///     `distribute` — CARRIED onto the identically-named `AbilityDefinition` fields.
+///   * `entry_onset` (CR 611.2e) — CARRIED onto `AbilityDefinition::entry_onset`: the
+///     clause's verb form decides when its effect starts relative to an entry.
 ///   * `unless_pay` (CR 118.12 + CR 118.12a) — CARRIED. `build_resolved_from_def` copies it
 ///     onto `ResolvedAbility`, where `effects::resolve_chain_body`'s CR 118.12 intercept owns
 ///     the payment prompt, so a branch definition that carries one is honoured at runtime.
@@ -8469,6 +8496,7 @@ fn ability_definition_from_clause(
         // CR 608.2c + CR 614.1a: dropped on purpose — see the doc comment above. Bound as `_`
         // rather than omitted via `..` so a new field cannot hide behind the rest pattern.
         unlowered_guard: _,
+        entry_onset,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
     def.sub_ability = sub_ability;
@@ -8481,6 +8509,7 @@ fn ability_definition_from_clause(
     def.optional_targeting = optional_targeting;
     def.distribute = distribute;
     def.unless_pay = unless_pay;
+    def.entry_onset = entry_onset;
     def
 }
 
@@ -8859,6 +8888,7 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
         // body was peeled, `peel_clause` will OR its own optional flag in too.
         optional: saw_you_may,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -8926,6 +8956,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9012,6 +9043,7 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
         // member; `up_to` carries the per-member optionality.
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9097,6 +9129,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -11095,6 +11128,7 @@ fn try_parse_player_draws_and_gains_control(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -12379,8 +12413,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // Digital-only Alchemy: "[~/it/this creature] perpetually become(s)/has base
     // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
-    if let Some(effect) = try_parse_perpetual_base_pt(tp) {
-        return parsed_clause(effect);
+    if let Some((effect, onset)) = try_parse_perpetual_base_pt(tp) {
+        return ParsedEffectClause {
+            entry_onset: onset,
+            ..parsed_clause(effect)
+        };
     }
 
     // Digital-only Alchemy: "[~/that X] perpetually gets +N/+M" — persistent
@@ -12692,7 +12729,7 @@ fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
 ///
 /// The clause tail must be fully consumed so riders (e.g. "… and gains flying")
 /// fall through instead of being silently dropped.
-fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
+fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<(Effect, ContinuousEffectOnset)> {
     fn tail_done(tail: &str) -> bool {
         tail.is_empty() || tail == "."
     }
@@ -12708,70 +12745,58 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
 
     // Referenced object: "The duplicate perpetually has base power and toughness 1/1."
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the duplicate perpetually ").parse(lower) {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("becomes "),
-            tag::<_, _, OracleError<'_>>("become "),
-            tag::<_, _, OracleError<'_>>("has "),
-            tag::<_, _, OracleError<'_>>("have "),
-        ))
-        .parse(rest)
-        .ok()?;
+        let (rest, onset) = perpetual_base_pt_verb(rest).ok()?;
         let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
             .parse(rest)
             .ok()?;
         let (power, toughness, _) = parse_base_pt_values(rest)?;
-        return Some(Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
-            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
-                power,
-                toughness,
+        return Some((
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                    power,
+                    toughness,
+                },
             },
-        });
+            onset,
+        ));
     }
 
     // Referenced object: "It perpetually has base power and toughness 1/1."
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("becomes "),
-            tag::<_, _, OracleError<'_>>("become "),
-            tag::<_, _, OracleError<'_>>("has "),
-            tag::<_, _, OracleError<'_>>("have "),
-        ))
-        .parse(rest)
-        .ok()?;
+        let (rest, onset) = perpetual_base_pt_verb(rest).ok()?;
         let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
             .parse(rest)
             .ok()?;
         let (power, toughness, _) = parse_base_pt_values(rest)?;
-        return Some(Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
-            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
-                power,
-                toughness,
+        return Some((
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                    power,
+                    toughness,
+                },
             },
-        });
+            onset,
+        ));
     }
 
     // Prior-clause anaphor: "Its base power and toughness perpetually become 2/2."
     if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("its base power and toughness perpetually ").parse(lower)
     {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("becomes "),
-            tag::<_, _, OracleError<'_>>("become "),
-            tag::<_, _, OracleError<'_>>("has "),
-            tag::<_, _, OracleError<'_>>("have "),
-        ))
-        .parse(rest)
-        .ok()?;
+        let (rest, onset) = perpetual_base_pt_verb(rest).ok()?;
         let (power, toughness, _) = parse_base_pt_values(rest)?;
-        return Some(Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
-            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
-                power,
-                toughness,
+        return Some((
+            Effect::ApplyPerpetual {
+                target: TargetFilter::ParentTarget,
+                modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                    power,
+                    toughness,
+                },
             },
-        });
+            onset,
+        ));
     }
 
     // Self-subject: "~ perpetually has base power and toughness 4/1."
@@ -12794,25 +12819,38 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
         .parse(after_subject)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("becomes "),
-        tag::<_, _, OracleError<'_>>("become "),
-        tag::<_, _, OracleError<'_>>("has "),
-        tag::<_, _, OracleError<'_>>("have "),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (rest, onset) = perpetual_base_pt_verb(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
         .parse(rest)
         .ok()?;
     let (power, toughness, _) = parse_base_pt_values(rest)?;
-    Some(Effect::ApplyPerpetual {
-        target: TargetFilter::Any,
-        modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
-            power,
-            toughness,
+    Some((
+        Effect::ApplyPerpetual {
+            target: TargetFilter::Any,
+            modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+                power,
+                toughness,
+            },
         },
-    })
+        onset,
+    ))
+}
+
+/// Digital-only Alchemy (no CR; by analogy to CR 611.2e): the verb of a perpetual base-P/T
+/// clause and the onset it states — "perpetually has/have base power and toughness N/N" applies
+/// with the entry, "perpetually become(s) …" after it.
+fn perpetual_base_pt_verb(input: &str) -> OracleResult<'_, ContinuousEffectOnset> {
+    alt((
+        value(
+            ContinuousEffectOnset::WhenFollowed,
+            alt((tag("becomes "), tag("become "))),
+        ),
+        value(
+            ContinuousEffectOnset::WithEntry,
+            alt((tag("has "), tag("have "))),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Digital-only Alchemy: parse the "perpetually gets +N/+M" modifier form —
@@ -14754,6 +14792,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
         sub_ability: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -14853,6 +14892,10 @@ impl ParsedRetainedTypeClause {
             condition: None,
             optional: false,
             unless_pay: None,
+            // CR 205.1b: "still a [type]" retains a prior type as part of the governing
+            // type-changing effect ("becomes …"); it is not a CR 611.2e "is" statement of
+            // its own, so it does not apply with the entry.
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         }
     }
 }
@@ -19470,6 +19513,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -19519,6 +19563,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 condition: None,
                 optional: false,
                 unless_pay: None,
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
         }
     }
@@ -19794,6 +19839,7 @@ fn parsed_for_each_quantity_effect(
                 condition: None,
                 optional: false,
                 unless_pay: None,
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
             };
         }
     }
@@ -19809,6 +19855,7 @@ fn parsed_for_each_quantity_effect(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 
@@ -19954,6 +20001,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -20930,6 +20978,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -22497,6 +22546,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                     condition: None,
                     optional: false,
                     unless_pay: None,
+                    entry_onset: ContinuousEffectOnset::WhenFollowed,
                 };
             }
         }
@@ -22684,6 +22734,9 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // rebuilt link starts clean, so an Attach host frame captured on the
     // sub-clause would otherwise be dropped here.
     sub_ability.optional_targeting = sub_clause.optional_targeting;
+    // CR 611.2e: the continuation's verb form decides when its effect starts
+    // relative to an entry of the same resolution.
+    sub_ability.entry_onset = sub_clause.entry_onset;
     // CR 119.3 + CR 109.5: Install the iterating player scope lifted from an
     // "each of your opponents" subject conjunct so the resolver iterates each
     // opponent and the inner effect drains the scoped player (not the source's
@@ -22741,6 +22794,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -22780,6 +22834,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -23153,6 +23208,7 @@ fn try_parse_compound_player_object_damage(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -23285,6 +23341,7 @@ fn try_parse_compound_object_player_damage(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -23421,6 +23478,7 @@ fn try_parse_radiance_color_fanout_damage_inner(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -23617,6 +23675,7 @@ fn try_parse_multi_target_damage_chain_inner(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -23741,6 +23800,7 @@ fn try_parse_multi_target_counter_chain(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -24191,6 +24251,7 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -24325,6 +24386,9 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // link starts clean, so a future Attach host frame on the sub-clause would
     // otherwise be dropped here.
     sub_ability.optional_targeting = sub_clause.optional_targeting;
+    // CR 611.2e: the continuation's verb form decides when its effect starts
+    // relative to an entry of the same resolution.
+    sub_ability.entry_onset = sub_clause.entry_onset;
 
     Some(ParsedEffectClause {
         optional_targeting: false,
@@ -24339,6 +24403,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -24521,6 +24586,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -25121,6 +25187,7 @@ fn try_parse_compound_subject_each(
         condition: half_a.condition,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
 
     // CR 115.1 + CR 601.2c: a possessive-actor second subject ("target
@@ -25147,6 +25214,7 @@ fn try_parse_compound_subject_each(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -28155,6 +28223,7 @@ fn lower_subject_predicate_ast_body(
             effect,
             duration,
             sub_ability,
+            onset,
         } => ParsedEffectClause {
             optional_targeting: false,
             unlowered_guard: None,
@@ -28166,11 +28235,14 @@ fn lower_subject_predicate_ast_body(
             condition: None,
             optional: subject.is_optional,
             unless_pay: None,
+            // CR 611.2e: the onset the predicate's verb form stated.
+            entry_onset: onset,
         },
         PredicateAst::Become {
             effect,
             duration,
             sub_ability,
+            onset,
         } => ParsedEffectClause {
             optional_targeting: false,
             unlowered_guard: None,
@@ -28182,6 +28254,8 @@ fn lower_subject_predicate_ast_body(
             condition: None,
             optional: subject.is_optional,
             unless_pay: None,
+            // CR 611.2e: the onset the predicate's verb form stated.
+            entry_onset: onset,
         },
         PredicateAst::Restriction {
             effect,
@@ -28198,6 +28272,7 @@ fn lower_subject_predicate_ast_body(
             condition: None,
             optional: subject.is_optional,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         },
         PredicateAst::ImperativeFallback { text } => {
             // Issue #6965: this is the ONLY predicate kind that applies the
@@ -28514,6 +28589,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
                 }
             }
@@ -28744,6 +28820,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
                 }
             }
@@ -28770,6 +28847,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
                 }
                 if subject.inherits_parent {
@@ -28790,6 +28868,7 @@ fn lower_subject_predicate_ast_body(
                         condition: None,
                         optional: subject.is_optional,
                         unless_pay: None,
+                        entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
                 }
             }
@@ -30183,6 +30262,7 @@ fn wrap_target_subject_damage(
         condition: None,
         optional: subject.is_optional,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -43069,10 +43149,15 @@ fn parse_effect_chain_ir_body(
                 builder
                     .clause(
                         normalized_text,
-                        parsed_clause(Effect::ReturnAsAura {
-                            enchant_filter,
-                            grants,
-                        }),
+                        ParsedEffectClause {
+                            // CR 611.2e: "It's an Aura enchantment …" is an "is"
+                            // statement, so it applies simultaneously with the entry.
+                            entry_onset: ContinuousEffectOnset::WithEntry,
+                            ..parsed_clause(Effect::ReturnAsAura {
+                                enchant_filter,
+                                grants,
+                            })
+                        },
                         chunk.boundary_after,
                         ClauseDisposition::Emit {
                             followup: None,
@@ -46017,6 +46102,9 @@ fn parse_effect_chain_ir_body(
                         condition: animate_def.condition.clone(),
                         optional: animate_def.optional,
                         unless_pay: animate_def.unless_pay.clone(),
+                        // CR 611.2e: "it's a/an [type]" is an "is" statement, so it
+                        // applies simultaneously with the entry.
+                        entry_onset: ContinuousEffectOnset::WithEntry,
                     },
                     chunk.boundary_after,
                     ClauseDisposition::Emit {
