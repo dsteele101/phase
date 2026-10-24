@@ -9502,16 +9502,13 @@ fn parse_remove_from_combat_ast(lower: &str, ctx: &mut ParseContext) -> Option<T
 ///
 /// Accepts: "your", "their", "its owner's", "that player's". These are the possessives
 /// that can precede a zone reference in a "shuffle X into Y" phrase.
-fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    value(
-        (),
-        alt((
-            tag("your"),
-            tag("their"),
-            tag("its owner's"),
-            tag("that player's"),
-        )),
-    )
+fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    alt((
+        value(TargetFilter::Controller, tag("your")),
+        value(TargetFilter::ScopedPlayer, tag("their")),
+        value(TargetFilter::Owner, tag("its owner's")),
+        value(TargetFilter::Player, tag("that player's")),
+    ))
     .parse(input)
 }
 
@@ -9598,30 +9595,36 @@ fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
 }
 
 /// Parse "shuffle ~ and {possessive} {zone-list} into {their owner's|possessive}
-/// library" and return the origin zones.
+/// library" and return the origin zones and the parsed zone possessor.
 ///
 /// CR 701.24c + CR 400.6: Elixir of Immortality — "Shuffle this artifact and
 /// your graveyard into their owner's library." The second operand names the
 /// whole zone (no targeting, no choice), so it lowers to a `ChangeZoneAll`
 /// mass move preceded by the source's own zone change, not to a single-card
 /// `ChangeZone` with a graveyard-card target.
-fn parse_self_and_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
+fn parse_self_and_zones_to_library(lower: &str) -> Option<(Vec<Zone>, TargetFilter)> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ~ and ")
         .parse(lower)
         .ok()?;
-    let (rest, _) = parse_possessive_determiner(rest).ok()?;
+    let (rest, owner) = parse_possessive_determiner(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
     let (rest, origins) = parse_shuffle_origin_zones(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" into ").parse(rest).ok()?;
     let (rest, _) = alt((
         value((), tag::<_, _, OracleError<'_>>("their owner's")),
-        parse_possessive_determiner,
+        value((), tag::<_, _, OracleError<'_>>("their owners'")),
+        value((), parse_possessive_determiner),
     ))
     .parse(rest)
     .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" library").parse(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" library"),
+        tag::<_, _, OracleError<'_>>(" libraries"),
+    ))
+    .parse(rest)
+    .ok()?;
     let (_, _) = eof::<_, OracleError<'_>>(rest.trim_end_matches('.')).ok()?;
-    Some(origins)
+    Some((origins, owner))
 }
 
 /// Parse "the cards {in|from} {possessive} hand on the bottom/top [of
@@ -9804,8 +9807,8 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     }
     // Must precede the descriptive-target path below, which would read
     // "~ and your graveyard" as one object phrase.
-    if let Some(origins) = parse_self_and_zones_to_library(lower) {
-        return Some(ShuffleImperativeAst::SelfAndZonesToLibrary { origins });
+    if let Some((origins, owner)) = parse_self_and_zones_to_library(lower) {
+        return Some(ShuffleImperativeAst::SelfAndZonesToLibrary { origins, owner });
     }
     if let Some(target) = parse_compound_all_subjects_to_library(lower) {
         return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
@@ -10099,7 +10102,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
         // CR 701.24c + CR 400.3: the source moves to its owner's library, then
         // every card in the named zone(s) follows, and the terminal shuffle
         // closes the chain.
-        ShuffleImperativeAst::SelfAndZonesToLibrary { origins } => {
+        ShuffleImperativeAst::SelfAndZonesToLibrary { origins, owner } => {
             let mut clause = parsed_clause(Effect::PutAtLibraryPosition {
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
@@ -10109,10 +10112,10 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // The zone moves publish their owners themselves (CR 701.24d, empty
             // zones included); only the terminal shuffle carries the
             // owner-population scope, so each ChangeZoneAll keeps resolving
-            // against the ability controller's own zone.
+            // against the designated owner's zone.
             let mut tail: Option<Box<AbilityDefinition>> = None;
             for origin in origins.iter().rev() {
-                let effect = change_zone_all_to_library_effect(*origin);
+                let effect = change_zone_all_to_library_effect(*origin, owner.clone());
                 let mut def = if tail.is_none() {
                     let wrapped = with_shuffle_sub_ability(effect);
                     let mut def = AbilityDefinition::new(AbilityKind::Spell, wrapped.effect);
@@ -10491,11 +10494,11 @@ fn owner_library_shuffle_scope() -> PlayerFilter {
     }
 }
 
-fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
+fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effect {
     Effect::ChangeZoneAll {
         origin: Some(origin),
         destination: Zone::Library,
-        target: TargetFilter::Controller,
+        target,
         enters_under: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
@@ -10521,13 +10524,16 @@ fn lower_change_zone_all_to_library(origins: Vec<Zone>) -> ParsedEffectClause {
     for origin in rest.iter().rev().copied() {
         let mut def = AbilityDefinition::new(
             AbilityKind::Spell,
-            change_zone_all_to_library_effect(origin),
+            change_zone_all_to_library_effect(origin, TargetFilter::Controller),
         );
         def.sub_ability = tail;
         tail = Some(Box::new(def));
     }
 
-    let mut clause = parsed_clause(change_zone_all_to_library_effect(*first));
+    let mut clause = parsed_clause(change_zone_all_to_library_effect(
+        *first,
+        TargetFilter::Controller,
+    ));
     clause.sub_ability = tail;
     clause
 }

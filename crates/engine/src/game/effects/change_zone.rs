@@ -238,6 +238,13 @@ pub(crate) fn change_zone_all_player_scope(
 ) -> Option<PlayerId> {
     match target_filter {
         TargetFilter::Controller => Some(ability.controller),
+        // CR 400.3: "its owner's" resolves to the owner of source_id.
+        TargetFilter::Owner => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.owner)
+            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner))
+            .or(Some(ability.controller)),
         TargetFilter::Player => ability
             .targets
             .iter()
@@ -603,10 +610,13 @@ pub(super) fn publish_finalized_owner_library_subjects(
     if objects.is_empty() {
         if let Effect::ChangeZoneAll {
             destination: Zone::Library,
+            target,
             ..
         } = &ability.effect
         {
-            participants.push(ability.controller);
+            if let Some(player) = change_zone_all_player_scope(state, ability, target) {
+                participants.push(player);
+            }
         }
     }
     participants.sort_unstable();

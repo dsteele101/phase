@@ -1981,6 +1981,7 @@ pub(crate) enum ShuffleImperativeAst {
     /// object plus every card in the named zone(s) (Elixir of Immortality).
     SelfAndZonesToLibrary {
         origins: Vec<Zone>,
+        owner: TargetFilter,
     },
     /// "shuffle target card from {origin} into {owner}'s library" —
     /// targeted zone change + shuffle composition.

@@ -156,6 +156,28 @@ fn elixir_shuffles_all_affected_owners_when_owner_differs_from_controller() {
         "one terminal shuffle per affected owner (P0 graveyard cards + P1 artifact)"
     );
 
+    // Both P0's and P1's libraries must be shuffled (ShuffledLibrary player action).
+    for player in [P0, P1] {
+        let shuffled_libraries = outcome
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } if *player_id == player
+                )
+            })
+            .count();
+        assert_eq!(
+            shuffled_libraries, 1,
+            "{player:?}'s library must be shuffled"
+        );
+    }
+
     let state = outcome.state();
     assert_eq!(state.players[0].life, life_before + 5);
     // The artifact goes to ITS owner (P1), not the controller's library.
@@ -254,4 +276,73 @@ fn elixir_shuffles_empty_graveyard_owners_library() {
     );
     // Verify the Elixir is in P1's library.
     assert!(state.players[P1.0 as usize].library.contains(&elixir));
+}
+
+/// CR 701.24c + CR 400.3: "shuffle ~ and its owner's graveyard into their owner's library"
+/// preserves the parsed zone possessor as a typed `TargetFilter::Owner` reference,
+/// moving the owner's (P1's) graveyard cards rather than deriving the zone from
+/// the controller's (P0's) zone.
+#[test]
+fn shuffle_source_and_its_owners_graveyard_moves_owners_graveyard() {
+    const OWNER_ELIXIR: &str =
+        "{2}, {T}: Shuffle ~ and its owner's graveyard into their owner's library.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let artifact = scenario
+        .add_artifact_from_oracle(P1, "Owner Elixir", OWNER_ELIXIR)
+        .controlled_by(P0)
+        .id();
+    let p0_card = scenario.add_creature_to_graveyard(P0, "P0 Card", 1, 1).id();
+    let p1_card = scenario.add_creature_to_graveyard(P1, "P1 Card", 2, 2).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 2],
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner.activate(artifact, 0).resolve();
+
+    let state = outcome.state();
+    // Artifact and P1's graveyard card go to P1's library.
+    assert_eq!(state.objects[&artifact].zone, Zone::Library);
+    assert_eq!(state.objects[&p1_card].zone, Zone::Library);
+    assert!(state.players[P1.0 as usize].library.contains(&artifact));
+    assert!(state.players[P1.0 as usize].library.contains(&p1_card));
+
+    // P0's graveyard card remains in P0's graveyard.
+    assert_eq!(state.objects[&p0_card].zone, Zone::Graveyard);
+
+    // Only P1's library was shuffled.
+    let p1_shuffled = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P1
+            )
+        })
+        .count();
+    assert_eq!(p1_shuffled, 1, "P1's library must be shuffled");
+
+    let p0_shuffled = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .count();
+    assert_eq!(p0_shuffled, 0, "P0's library must not be shuffled");
 }

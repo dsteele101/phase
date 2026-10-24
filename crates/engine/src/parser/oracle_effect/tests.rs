@@ -93206,3 +93206,47 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
         })
     ));
 }
+
+/// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's
+/// library" preserves the parsed possessor as `TargetFilter::Owner` in `ChangeZoneAll`.
+#[test]
+fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and its owner's graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Owner,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
+}
