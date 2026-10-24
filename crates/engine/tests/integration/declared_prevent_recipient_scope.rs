@@ -776,6 +776,7 @@ fn aven_redeemer_prompts_for_target_when_activated_and_shields_chosen_creature()
         .act(GameAction::ActivateAbility {
             source_id: aven,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Aven Redeemer");
     assert!(
@@ -932,6 +933,7 @@ fn revered_elder_raises_no_target_prompt_when_activated_and_shields_only_source(
         .act(GameAction::ActivateAbility {
             source_id: elder,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Revered Elder");
     assert!(
@@ -1015,6 +1017,7 @@ fn barbed_wire_raises_no_target_prompt_when_activated() {
         .act(GameAction::ActivateAbility {
             source_id: wire,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Barbed Wire");
     assert!(
@@ -1055,6 +1058,7 @@ fn barbed_wire_raises_no_target_prompt_when_activated() {
         .act(GameAction::ActivateAbility {
             source_id: wire,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Barbed Wire's test damage ability");
     assert!(
@@ -1249,6 +1253,7 @@ fn elvish_healer_prompts_once_and_shields_only_the_chosen_creature() {
         .act(GameAction::ActivateAbility {
             source_id: healer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Elvish Healer");
     assert!(

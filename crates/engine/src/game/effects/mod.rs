@@ -9281,6 +9281,7 @@ fn replacement_matchers_read_filter_population(
         damage_modification,
         damage_source_filter,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
