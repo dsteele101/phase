@@ -1978,6 +1978,20 @@ fn finish_unprompted_spell_declaration(
     finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
 }
 
+/// CR 601.2c + CR 603.2: stage a deferred spell's announcement triggers while
+/// it owns `state.pending_cast` (the deferred-target path took it earlier), so
+/// the staging authority sees the spell before payment can move its targets.
+fn stage_with_pending_owner(
+    state: &mut GameState,
+    pending: &PendingCast,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let prior_pending = state.pending_cast.replace(Box::new(pending.clone()));
+    stage_announcement_trigger_events(state, events, event_start);
+    state.pending_cast = prior_pending;
+}
+
 pub(crate) fn begin_deferred_target_selection(
     state: &mut GameState,
     player: PlayerId,
@@ -2143,7 +2157,7 @@ pub(crate) fn begin_deferred_target_selection(
                 super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
-            stage_announcement_trigger_events(state, events, event_start);
+            stage_with_pending_owner(state, &pending, events, event_start);
         } else {
             super::casting::emit_targeting_events(
                 state,
@@ -2196,7 +2210,7 @@ pub(crate) fn begin_deferred_target_selection(
                 super::casting::pending_cast_targeter(state, &pending),
                 events,
             );
-            stage_announcement_trigger_events(state, events, event_start);
+            stage_with_pending_owner(state, &pending, events, event_start);
         } else {
             super::casting::emit_targeting_events(
                 state,
@@ -6235,27 +6249,28 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         )
     })?;
 
-    pending.begin_activation_trigger_collection();
-    if let Some(collection) = pending.activation_trigger_collection.as_deref_mut() {
-        // CR 601.2c + CR 602.2b + CR 603.2: Targets have been declared and targeting
-        // events emitted before costs are paid. Collect any pre-payment announcement
-        // triggers now against the pre-payment game state so costs (such as activating
-        // mana abilities that sacrifice a creature target, or paying non-mana costs)
-        // do not alter the target's qualification or zone before becomes-target triggers
-        // are matched.
-        let start = match state.announcement_event_scope {
-            crate::types::game_state::AnnouncementEventScope::From { start } => start,
-            crate::types::game_state::AnnouncementEventScope::Unowned => events.len(),
-        };
+    // CR 601.2c + CR 602.2b + CR 603.2: Targets have been declared and targeting
+    // events emitted before costs are paid. Collect any pre-payment announcement
+    // triggers now against the pre-payment game state so costs (such as activating
+    // mana abilities that sacrifice a creature target, or paying non-mana costs)
+    // do not alter the target's qualification or zone before becomes-target triggers
+    // are matched. Only an owned announcement scope has a carrier to commit them;
+    // an unowned one leaves collection to the priority pipeline.
+    if let crate::types::game_state::AnnouncementEventScope::From { start } =
+        state.announcement_event_scope
+    {
         let unclaimed = super::announcement_triggers::unclaimed_events(state, events, start);
         if !unclaimed.is_empty() {
-            collection.collect(state, &unclaimed);
-            super::announcement_triggers::claim_ordinary_collected_span(
-                state,
-                events,
-                start,
-                events.len(),
-            );
+            pending.begin_activation_trigger_collection();
+            if let Some(collection) = pending.activation_trigger_collection.as_deref_mut() {
+                collection.collect(state, &unclaimed);
+                super::announcement_triggers::claim_ordinary_collected_span(
+                    state,
+                    events,
+                    start,
+                    events.len(),
+                );
+            }
         }
     }
 
