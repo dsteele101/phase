@@ -169,3 +169,93 @@ fn no_matching_card_discards_nothing_and_controller_draws() {
         "\"if they can't\" draws a card"
     );
 }
+
+#[test]
+fn two_matching_cards_prompt_the_discarding_player_to_choose_one() {
+    let (mut setup, spell) = setup(&["Opt", "Shock", "Shock"]);
+    let (opt, shock_a, shock_b) = (setup.hand[0], setup.hand[1], setup.hand[2]);
+    let card_id = setup.runner.state().objects[&spell].card_id;
+
+    let result = setup
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast");
+    let mut result = result;
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        result = setup
+            .runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("target");
+    }
+    // CR 601.2i: the spell is on the stack; it resolves once priority passes.
+    while matches!(result.waiting_for, WaitingFor::Priority { .. }) {
+        result = setup.runner.act(GameAction::PassPriority).expect("resolve");
+    }
+    assert!(
+        matches!(result.waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected NamedChoice, got {:?}",
+        result.waiting_for
+    );
+    let mut result = setup
+        .runner
+        .act(GameAction::ChooseOption {
+            choice: "Shock".to_string(),
+        })
+        .expect("name");
+    // Resolve the spell if the stack still holds it.
+    while matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !setup.runner.state().stack.is_empty()
+    {
+        result = setup.runner.act(GameAction::PassPriority).expect("pass");
+        if let WaitingFor::NamedChoice { .. } = result.waiting_for {
+            panic!("unexpected second NamedChoice");
+        }
+    }
+
+    // CR 701.9b: the discarding player chooses among both same-name cards.
+    let WaitingFor::DiscardChoice {
+        player,
+        count,
+        cards,
+        ..
+    } = &result.waiting_for
+    else {
+        panic!("expected DiscardChoice, got {:?}", result.waiting_for);
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(*count, 1);
+    let mut eligible = cards.clone();
+    eligible.sort();
+    let mut expected = vec![shock_a, shock_b];
+    expected.sort();
+    assert_eq!(eligible, expected, "only the Shocks are eligible, not Opt");
+
+    let result = setup
+        .runner
+        .act(GameAction::SelectCards {
+            cards: vec![shock_b],
+        })
+        .expect("select discard");
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "got {:?}",
+        result.waiting_for
+    );
+    let state = setup.runner.state();
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&shock_b].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&shock_a].zone, Zone::Hand);
+    assert_eq!(state.objects[&opt].zone, Zone::Hand);
+    assert_eq!(
+        state.players[0].hand.len(),
+        0,
+        "a discard happened: no draw"
+    );
+}

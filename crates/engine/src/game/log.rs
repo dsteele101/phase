@@ -583,9 +583,13 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::CardNamed { .. }
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. } => LogTone::Informational,
+        // CR 701.17a + CR 701.17c: never narrated, because the paired `ZoneChanged`
+        // already names the milled card and this event exists for mill triggers.
+        GameEvent::Milled { .. }
         | GameEvent::LifeChanged { .. }
         | GameEvent::GameStarted
-        | GameEvent::Milled { .. }
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::CreatureExploited { .. }
         | GameEvent::TurnStarted { .. }
@@ -678,9 +682,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::EnergyChanged { .. }
         | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. }
-        | GameEvent::PlayerPerformedAction { .. }
-        | GameEvent::VoteCast { .. }
-        | GameEvent::VoteResolved { .. } => LogTone::Neutral,
+        | GameEvent::PlayerPerformedAction { .. } => LogTone::Neutral,
     }
 }
 
@@ -1075,7 +1077,6 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CardNamed { .. }
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
-
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::XValueChosen { .. } => LogCategory::Special,
