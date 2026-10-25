@@ -14808,6 +14808,7 @@ fn delayed_zone_change_event_with_index(
 /// current source lookup. The event is being consumed at the same boundary at
 /// which it was emitted, so comparing its subject id is attribution-only; all
 /// source facts in every other filter arm still flow through the exact context.
+#[allow(clippy::too_many_arguments)] // Each input is an independent fact of the zone-change event or trigger source.
 fn delayed_zone_change_filter_matches(
     state: &GameState,
     object_id: ObjectId,
