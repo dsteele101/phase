@@ -13,9 +13,11 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
 use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::zones::Zone;
 
 const ELIXIR: &str = "{2}, {T}: You gain 5 life. Shuffle this artifact and your graveyard into their owner's library.";
@@ -39,6 +41,12 @@ fn elixir_shuffles_entire_graveyard_without_targeting() {
 
     // No target selection is supplied: a graveyard-card target slot would stall here.
     let outcome = runner.activate(elixir, 0).resolve();
+
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
 
     // The terminal library shuffle must resolve through the production event path.
     let terminal_shuffles = outcome
@@ -137,6 +145,12 @@ fn elixir_shuffles_all_affected_owners_when_owner_differs_from_controller() {
     // P0 controls the Elixir, so P0 activates it. No target selection is supplied.
     let outcome = runner.activate(elixir, 0).resolve();
 
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+
     // Both owners' libraries must be shuffled by the terminal fan-out.
     let terminal_shuffles = outcome
         .events()
@@ -225,6 +239,12 @@ fn elixir_shuffles_empty_graveyard_owners_library() {
 
     let outcome = runner.activate(elixir, 0).resolve();
 
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+
     // The terminal library shuffle must resolve for BOTH owners (P0 graveyard + P1 artifact).
     let terminal_shuffles = outcome
         .events()
@@ -303,6 +323,12 @@ fn shuffle_source_and_its_owners_graveyard_moves_owners_graveyard() {
 
     let outcome = runner.activate(artifact, 0).resolve();
 
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+
     let state = outcome.state();
     // Artifact and P1's graveyard card go to P1's library.
     assert_eq!(state.objects[&artifact].zone, Zone::Library);
@@ -345,4 +371,57 @@ fn shuffle_source_and_its_owners_graveyard_moves_owners_graveyard() {
         })
         .count();
     assert_eq!(p0_shuffled, 0, "P0's library must not be shuffled");
+}
+/// CR 701.24d: an empty filtered set still shuffles the named library, without
+/// adding the caster's different library to the affected participants.
+#[test]
+fn repopulate_empty_target_creature_set_shuffles_only_the_target_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let repopulate = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Repopulate",
+            true,
+            "Shuffle all creature cards from target player's graveyard into that player's library.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    for player in [P0, P1] {
+        for name in ["First", "Second", "Third"] {
+            scenario.add_card_to_library_top(player, &format!("{player:?} {name}"));
+        }
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Green, ObjectId(9_999), false, vec![]); 2],
+    );
+    let mut runner = scenario.build();
+    let caster_library = runner.state().players[P0.0 as usize].library.clone();
+
+    let outcome = runner.cast(repopulate).target_player(P1).resolve();
+
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    let shuffled_libraries: Vec<_> = outcome
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.command {
+            Some(ResolvedRulesCommand::LibraryShuffle(command)) => Some(command.player),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shuffled_libraries, vec![P1]);
+    assert_eq!(
+        outcome.state().players[P0.0 as usize].library,
+        caster_library
+    );
 }
