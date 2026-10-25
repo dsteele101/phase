@@ -8,7 +8,7 @@ use engine::game::combat::{
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
-use engine::types::ability::{AbilityCost, StaticDefinition};
+use engine::types::ability::{is_loyalty_ability_cost, AbilityCost, StaticDefinition};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatTopology;
 use engine::types::game_state::GameState;
@@ -717,22 +717,47 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     if opponents.len() == 1 {
         let opp = opponents[0];
         let opponent_life = state.players[opp.0 as usize].life;
-        // An attacker the defender has any legal blocker for can be chump-blocked
-        // to save a planeswalker, so its power can't be counted toward the kill.
-        let blocked_attackers: HashSet<ObjectId> = attacking_ids
-            .iter()
-            .copied()
-            .filter(|&id| {
-                defender_best_block(
-                    state,
-                    id,
-                    evaluate_creature(state, id),
-                    &opponent_blockers,
-                    &slices,
-                )
-                .is_some()
-            })
-            .collect();
+        // Gate the blocker sweep on an actual planeswalker attack target being
+        // available. When no planeswalker can be attacked, the redirect path
+        // is unreachable and scanning blockers for connecting damage is wasted.
+        let has_planeswalker_target = targeting.valid_attack_targets.is_some_and(|targets| {
+            targets
+                .iter()
+                .any(|t| matches!(t, AttackTarget::Planeswalker(_)))
+        });
+        let connecting_damage: HashMap<ObjectId, i32> = if has_planeswalker_target {
+            attacking_ids
+                .iter()
+                .copied()
+                .map(|id| {
+                    let eligible: Vec<ObjectId> = opponent_blockers
+                        .iter()
+                        .copied()
+                        .filter(|&bid| slices.can_block_pair(state, bid, id))
+                        .collect();
+                    // CR 509.1b + CR 702.111b: minimum-block floor. An attacker with
+                    // menace or a MinBlockers restriction cannot be blocked unless
+                    // enough eligible blockers exist.
+                    let required = engine::game::combat::min_blockers_required_from_precomputed(
+                        state,
+                        id,
+                        &slices.block_restriction,
+                    ) as usize;
+                    // CR 702.19b: combat_damage_to_defender is the engine's authority
+                    // for connecting combat damage through blockers, correctly accounting
+                    // for unblocked attackers, menace restrictions, trample excess,
+                    // double strike, and lethal damage assignment.
+                    let damage = if eligible.len() >= required {
+                        engine::game::combat_damage::combat_damage_to_defender(state, id, &eligible)
+                    } else {
+                        engine::game::combat_damage::combat_damage_to_defender(state, id, &[])
+                    };
+                    (id, damage)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let assignments = redirect_attackers_to_planeswalker(
             state,
             &attacking_ids,
@@ -740,7 +765,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             objective,
             opp,
             opponent_life,
-            &blocked_attackers,
+            &connecting_damage,
         );
         emit_attack_trace(player, &candidates, &assignments);
         return assignments;
@@ -769,8 +794,47 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     assignments
 }
 
+/// Weight of a loyalty ability for threat evaluation.
+///
+/// CR 606.1 + CR 606.2: Loyalty abilities are activated abilities with a loyalty
+/// symbol in their cost, including fixed costs (`[+N]`, `[0]`, `[−N]`) and variable
+/// `[−X]` costs (`RemoveCounter` of loyalty counters). Both shapes are recognized
+/// by `is_loyalty_ability_cost`.
+///
+/// CR 606.6: A loyalty ability cannot be activated unless the permanent has at
+/// least that many loyalty counters on it. A non-minus ability counts twice because
+/// it builds or preserves loyalty and repeats every turn (CR 606.3); an affordable
+/// minus ability (including −X) counts once.
+fn loyalty_ability_weight(cost: &AbilityCost, loyalty: i32) -> Option<f64> {
+    if !is_loyalty_ability_cost(cost) {
+        return None;
+    }
+    match cost {
+        AbilityCost::Loyalty { amount } => {
+            if loyalty + amount >= 0 {
+                Some(if *amount >= 0 { 2.0 } else { 1.0 })
+            } else {
+                None
+            }
+        }
+        AbilityCost::RemoveCounter { .. } => {
+            // Variable −X loyalty ability (CR 606.2, CR 606.6).
+            // Affordable as long as loyalty >= 0; counts as a minus ability.
+            if loyalty >= 0 {
+                Some(1.0)
+            } else {
+                None
+            }
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .find_map(|c| loyalty_ability_weight(c, loyalty)),
+        _ => None,
+    }
+}
+
 /// Threat score for an attackable planeswalker: how much it will do for its
-/// controller if left alive. Each loyalty ability (CR 606.1) the planeswalker can
+/// controller if left alive. Each loyalty ability (CR 606.1, CR 606.2) the planeswalker can
 /// still pay for at its current loyalty (CR 606.6) counts once, and a non-minus
 /// ability counts again because it builds loyalty and repeats every turn
 /// (CR 606.3). A planeswalker with nothing it can activate scores `0.0`.
@@ -781,11 +845,9 @@ fn planeswalker_threat(state: &GameState, pw_id: ObjectId) -> f64 {
     let loyalty = obj.loyalty.unwrap_or(0) as i32;
     obj.abilities
         .iter()
-        .filter_map(|ability| match ability.cost {
-            Some(AbilityCost::Loyalty { amount }) if loyalty + amount >= 0 => {
-                Some(if amount >= 0 { 2.0 } else { 1.0 })
-            }
-            _ => None,
+        .filter_map(|ability| {
+            let cost = ability.cost.as_ref()?;
+            loyalty_ability_weight(cost, loyalty)
         })
         .sum()
 }
@@ -796,14 +858,15 @@ fn planeswalker_threat(state: &GameState, pw_id: ObjectId) -> f64 {
 ///
 /// Policy: when not pushing lethal and the full swing isn't near-lethal at the
 /// face, kill an opponent planeswalker with the *fewest large* attackers
-/// (largest-power-first). Of the planeswalkers the swing can kill, the most
-/// threatening ([`planeswalker_threat`]) is chosen, ties going to the lowest
-/// loyalty. Attackers in `blocked` (the defender has a legal blocker for them)
-/// contribute no power, since blocking one saves the planeswalker. The kill may
-/// take every attacker unless the objective is `Race`: only then is the face
-/// being raced, and a swing that empties it is kept there. "Kill it or ignore
-/// it" — never dribble partial loyalty damage at a planeswalker that cannot die,
-/// and never dilute a lethal race.
+/// (largest connecting damage first). Of the planeswalkers the swing can kill,
+/// the most threatening ([`planeswalker_threat`]) is chosen, ties going to the
+/// lowest loyalty. Connecting damage is computed through the engine's
+/// minimum-blocker ([`engine::game::combat::min_blockers_required_from_precomputed`])
+/// and combat-damage ([`engine::game::combat_damage::combat_damage_to_defender`])
+/// authorities. The kill may take every attacker unless the objective is `Race`:
+/// only then is the face being raced, and a swing that empties it is kept there.
+/// "Kill it or ignore it" — never dribble partial loyalty damage at a planeswalker
+/// that cannot die, and never dilute a lethal race.
 fn redirect_attackers_to_planeswalker(
     state: &GameState,
     attacking_ids: &[ObjectId],
@@ -811,7 +874,7 @@ fn redirect_attackers_to_planeswalker(
     objective: CombatObjective,
     opponent: PlayerId,
     opponent_life: i32,
-    blocked: &HashSet<ObjectId>,
+    connecting_damage: &HashMap<ObjectId, i32>,
 ) -> Vec<(ObjectId, AttackTarget)> {
     let player_target = AttackTarget::Player(opponent);
     let all_at_player = || -> Vec<(ObjectId, AttackTarget)> {
@@ -837,24 +900,29 @@ fn redirect_attackers_to_planeswalker(
         return all_at_player();
     };
 
-    // Largest-power-first, counting only attackers the defender cannot stop.
-    let mut by_power: Vec<(ObjectId, i32)> = attacking_ids
+    // Largest connecting damage first, counting only attackers that deal > 0 damage.
+    let mut by_damage: Vec<(ObjectId, i32)> = attacking_ids
         .iter()
-        .filter(|id| !blocked.contains(id))
-        .filter_map(|&id| Some((id, state.objects.get(&id)?.power.unwrap_or(0))))
+        .map(|&id| {
+            let dmg = connecting_damage.get(&id).copied().unwrap_or_else(|| {
+                engine::game::combat_damage::combat_damage_to_defender(state, id, &[])
+            });
+            (id, dmg)
+        })
+        .filter(|&(_, dmg)| dmg > 0)
         .collect();
-    by_power.sort_by_key(|b| std::cmp::Reverse(b.1));
+    by_damage.sort_by_key(|b| std::cmp::Reverse(b.1));
 
-    // The fewest big attackers whose power sums to >= `loyalty`, if any.
+    // The fewest big attackers whose connecting damage sums to >= `loyalty`, if any.
     let killing_subset = |loyalty: i32| -> Option<Vec<ObjectId>> {
         let mut redirected = Vec::new();
         let mut acc = 0;
-        for (id, power) in &by_power {
+        for (id, dmg) in &by_damage {
             if acc >= loyalty {
                 break;
             }
             redirected.push(*id);
-            acc += power;
+            acc += dmg;
         }
         (acc >= loyalty).then_some(redirected)
     };
@@ -7536,7 +7604,7 @@ mod tests {
             CombatObjective::PreserveAdvantage,
             PlayerId(1),
             runner.state().players[PlayerId(1).0 as usize].life,
-            &HashSet::new(),
+            &HashMap::new(),
         );
         assert!(
             redirected
@@ -7763,7 +7831,7 @@ mod tests {
             CombatObjective::Race,
             PlayerId(1),
             20,
-            &HashSet::new(),
+            &HashMap::from([(ogre, 5)]),
         );
         assert_eq!(
             redirected,
@@ -7786,7 +7854,7 @@ mod tests {
             CombatObjective::PushLethal,
             PlayerId(1),
             20,
-            &HashSet::new(),
+            &HashMap::from([(ogre, 5)]),
         );
         assert_eq!(redirected, vec![(ogre, AttackTarget::Player(PlayerId(1)))]);
     }
@@ -7797,8 +7865,10 @@ mod tests {
     fn picks_more_threatening_planeswalker_over_higher_loyalty() {
         let mut state = setup();
         let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 5, 5, vec![]);
-        let _bare = add_planeswalker(&mut state, PlayerId(1), 4);
-        let engine_pw = add_planeswalker(&mut state, PlayerId(1), 2);
+        // Equal loyalty, so only the threat score can separate them; the bare
+        // one is created first so a positional/tie-break choice would pick it.
+        let _bare = add_planeswalker(&mut state, PlayerId(1), 3);
+        let engine_pw = add_planeswalker(&mut state, PlayerId(1), 3);
         add_loyalty_ability(&mut state, engine_pw, 1);
         add_loyalty_ability(&mut state, engine_pw, -2);
         let attacks = declare_attacks(&state);
@@ -7823,19 +7893,91 @@ mod tests {
         );
     }
 
-    /// An untapped blocker that can stop the lone attacker means its power does
-    /// not count toward the kill, so nothing is redirected.
+    /// A blocker that stops the lone, profitable attacker removes its damage
+    /// from the kill budget, so the planeswalker is not targeted.
     #[test]
     fn blocked_attacker_does_not_count_toward_planeswalker_kill() {
         let mut state = setup();
-        let cub = add_creature(&mut state, PlayerId(0), "Cub", 2, 2, vec![]);
-        add_creature(&mut state, PlayerId(1), "Wall", 0, 4, vec![]);
-        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+        let brute = add_creature(&mut state, PlayerId(0), "Brute", 4, 4, vec![]);
+        add_creature(&mut state, PlayerId(1), "Chump", 1, 1, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 4);
         let attacks = declare_attacks(&state);
         assert_ne!(
-            attack_target_of(&attacks, cub),
+            attack_target_of(&attacks, brute),
             Some(AttackTarget::Planeswalker(pw))
         );
+    }
+
+    /// CR 702.111b: a single blocker cannot block a menace attacker, so its
+    /// damage still connects and kills the planeswalker.
+    #[test]
+    fn menace_attacker_unblockable_by_lone_blocker_kills_planeswalker() {
+        let mut state = setup();
+        let menace = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Raider",
+            3,
+            3,
+            vec![Keyword::Menace],
+        );
+        add_creature(&mut state, PlayerId(1), "Chump", 1, 1, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 3);
+        let attacks = declare_attacks(&state);
+        assert_eq!(
+            attack_target_of(&attacks, menace),
+            Some(AttackTarget::Planeswalker(pw))
+        );
+    }
+
+    /// CR 702.19b: trample excess over a chump blocker still reaches the
+    /// planeswalker, so the trampler's connecting damage counts toward the kill.
+    #[test]
+    fn trample_excess_counts_toward_planeswalker_kill() {
+        let mut state = setup();
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Rhino",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+        add_creature(&mut state, PlayerId(1), "Chump", 0, 1, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 4);
+        let attacks = declare_attacks(&state);
+        assert_eq!(
+            attack_target_of(&attacks, trampler),
+            Some(AttackTarget::Planeswalker(pw))
+        );
+    }
+
+    /// CR 606.2: a `[−X]` loyalty ability (a `RemoveCounter` cost) is a loyalty
+    /// ability and must contribute to the threat score like a fixed minus.
+    #[test]
+    fn minus_x_loyalty_ability_contributes_to_threat() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, QuantityExpr,
+            REMOVE_COUNTER_COST_X,
+        };
+        use engine::types::counter::{CounterMatch, CounterType};
+        let mut state = setup();
+        let pw = add_planeswalker(&mut state, PlayerId(1), 4);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        ability.cost = Some(AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::default(),
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&pw).unwrap().abilities).push(ability);
+        assert_eq!(planeswalker_threat(&state, pw), 1.0);
     }
 
     /// #5 guard: don't dilute a near-lethal swing (raw power >= opp life) into a

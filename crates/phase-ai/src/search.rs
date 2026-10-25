@@ -8638,6 +8638,43 @@ mod tests {
         );
     }
 
+    /// Production declaration path: a lone 2/2 facing a 2-loyalty planeswalker
+    /// attacks the planeswalker, not the player (no race, no blockers).
+    #[test]
+    fn root_attack_declaration_kills_lone_planeswalker() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 2, 2);
+        let pw_card = CardId(state.next_object_id);
+        let pw = create_object(
+            &mut state,
+            pw_card,
+            PlayerId(1),
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pw).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(2);
+        obj.entered_battlefield_turn = Some(1);
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+        let session = AiSession::arc_from_game(&state);
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert!(
+            matches!(
+                root.as_slice(),
+                [(GameAction::DeclareAttackers { attacks, .. }, 1.0)]
+                    if attacks.iter().any(|(id, t)| *id == attacker
+                        && *t == engine::game::combat::AttackTarget::Planeswalker(pw))
+            ),
+            "got {root:?}"
+        );
+    }
+
     #[test]
     fn root_combat_comparison_requires_context_but_root_scoring_reaches_it() {
         let (state, attacker) = free_for_all_attacker_root(false);
