@@ -136,7 +136,7 @@ fn solar_tide_entwine_refused_with_too_few_lands() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // P0 controls only 1 land, but Solar Tide entwine requires 2 lands
-    let _land1 = scenario.add_basic_land(P0, ManaColor::White);
+    let land1 = scenario.add_basic_land(P0, ManaColor::White);
     let spell_id = scenario
         .add_spell_to_hand_from_oracle(P0, "Solar Tide", false, SOLAR_TIDE)
         .id();
@@ -145,11 +145,48 @@ fn solar_tide_entwine_refused_with_too_few_lands() {
     add_mana(&mut runner, ManaType::White, 2);
     add_mana(&mut runner, ManaType::Colorless, 4);
 
-    let result = runner.cast(spell_id).modes(&[0, 1]).try_resolve();
-    assert!(
-        result.is_err(),
-        "casting entwined Solar Tide with too few lands must be refused"
+    let card_id = runner.state().objects[&spell_id].card_id;
+    runner
+        .act(engine::types::actions::GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("cast initiation succeeds");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        engine::types::game_state::WaitingFor::ModeChoice { .. }
+    ));
+
+    // Choosing both modes requires sacrificing 2 lands (CR 702.42a).
+    // Since P0 controls only 1 land, this cost cannot be paid (CR 601.2h).
+    // The cast is illegal and reversed under CR 733.1.
+    runner
+        .act(engine::types::actions::GameAction::SelectModes {
+            indices: vec![0, 1],
+        })
+        .expect("action handled by reversal settlement");
+
+    let state = runner.state();
+    // Spell is returned to hand (not on stack, not resolved)
+    assert_eq!(
+        state.objects[&spell_id].zone,
+        Zone::Hand,
+        "spell must be returned to hand after reversal"
     );
+    assert!(state.stack.is_empty(), "stack must be empty after reversal");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert_eq!(
+        state.objects[&land1].zone,
+        Zone::Battlefield,
+        "land must remain on battlefield"
+    );
+    assert!(matches!(
+        state.waiting_for,
+        engine::types::game_state::WaitingFor::Priority { .. }
+    ));
 }
 
 /// Scenario 4: Betrayal of Flesh's target-selection continuation across both modes and land payment.
