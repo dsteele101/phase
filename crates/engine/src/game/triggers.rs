@@ -7206,7 +7206,7 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
 /// objects in other zones (a fizzled spell that has left the stack, an object
 /// that bounced) since their cast provenance is no longer meaningful, and is
 /// cleared on battlefield exit by `reset_for_battlefield_exit`.
-fn clear_post_collection_transients(state: &mut GameState) {
+pub(super) fn clear_post_collection_transients(state: &mut GameState) {
     state.objects.update_where(
         |_, obj| {
             obj.mana_spent_to_cast

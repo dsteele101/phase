@@ -489,6 +489,12 @@ fn commit_announcement_span(
     let mut deferred = std::mem::take(&mut state.deferred_triggers);
     collection.commit_into(state, &mut deferred);
     state.deferred_triggers = deferred;
+    // CR 400.7 + CR 601.2h: the priority pipeline clears the transient cast
+    // payment stamps after a non-empty trigger collection; a committed
+    // announcement is that collection for its span, so it clears them too.
+    if !new_events.is_empty() {
+        triggers::clear_post_collection_transients(state);
+    }
     // The span is claimed below by its identities in the full buffer.
     triggers::collect_delayed_trigger_contexts_into_deferred(state, &delayed_events);
     // CR 603.2c: each occurrence is collected once, by this commit, for both
