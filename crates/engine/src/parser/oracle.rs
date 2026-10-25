@@ -17,12 +17,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
     CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
-    DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CountScope,
+    CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect,
+    EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
+    VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -1730,7 +1731,7 @@ fn apply_self_replacement_override(
 
 // --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------
 
-/// Pair the "as this enters, choose a creature type/color" replacement (producer)
+/// Pair the "as this enters, choose a creature type/color/player" replacement (producer)
 /// with the self-ETB counter replacement (consumer) whose count reads the chosen
 /// value. First-match of each mirrors the former `position()` over the folded
 /// replacement vector (replacements fold in item order).
@@ -1747,20 +1748,36 @@ fn detect_linked_choice_etb_counter(
                     .is_some_and(|def| is_persisted_as_enters_choice(def))
         })
     });
+    let Some(chooser_item) = chooser else {
+        return;
+    };
+    let Some(chooser_repl) = item_replacement(chooser_item) else {
+        return;
+    };
+    let Some(chooser_exec) = chooser_repl.execute.as_ref() else {
+        return;
+    };
+    let Effect::Choose {
+        ref choice_type, ..
+    } = *chooser_exec.effect
+    else {
+        return;
+    };
+
     let counter = items.iter().find(|item| {
         item_replacement(item).is_some_and(|replacement| {
             replacement.event == ReplacementEvent::Moved
                 && replacement
                     .execute
                     .as_ref()
-                    .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
+                    .is_some_and(|def| is_chosen_dependent_self_etb_counter(def, choice_type))
         })
     });
-    if let (Some(chooser), Some(counter)) = (chooser, counter) {
-        if chooser.id != counter.id {
+    if let Some(counter) = counter {
+        if chooser_item.id != counter.id {
             relations.push(DocumentRelationIr::LinkedChoice(
                 LinkedChoiceKind::EtbCounterCount {
-                    chooser: chooser.id,
+                    chooser: chooser_item.id,
                     counter: counter.id,
                 },
             ));
@@ -1789,13 +1806,24 @@ fn apply_linked_choice_etb_counter(
         };
         let counter_repl = result.replacements.remove(counter_pos);
         replacement_ids.remove(counter_pos);
-        let Some(counter_exec) = counter_repl.execute else {
+        let Some(mut counter_exec) = counter_repl.execute else {
             continue;
         };
         let Some(chooser_pos) = position_of(replacement_ids, *chooser) else {
             continue;
         };
         if let Some(ref mut choose_exec) = result.replacements[chooser_pos].execute {
+            if let Effect::Choose {
+                ref choice_type, ..
+            } = *choose_exec.effect
+            {
+                if matches!(
+                    choice_type,
+                    ChoiceType::Opponent { .. } | ChoiceType::Player { .. }
+                ) {
+                    rebind_scoped_player_to_chosen_player_in_ability(&mut counter_exec, 0);
+                }
+            }
             append_sub_ability(choose_exec, *counter_exec);
         }
     }
@@ -1805,14 +1833,331 @@ fn is_persisted_as_enters_choice(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::Choose { persist: true, .. })
 }
 
-fn is_chosen_dependent_self_etb_counter(def: &AbilityDefinition) -> bool {
+fn is_chosen_dependent_self_etb_counter(def: &AbilityDefinition, choice_type: &ChoiceType) -> bool {
     match &*def.effect {
         Effect::PutCounter {
             target: TargetFilter::SelfRef,
             count,
             ..
-        } => quantity_expr_uses_chosen_filter(count),
+        } => match choice_type {
+            ChoiceType::CreatureType { .. } | ChoiceType::Color { .. } => {
+                quantity_expr_uses_chosen_filter(count)
+            }
+            ChoiceType::Opponent { .. } | ChoiceType::Player { .. } => {
+                quantity_expr_uses_chosen_player_scope(count)
+            }
+            _ => false,
+        },
         _ => false,
+    }
+}
+
+fn quantity_expr_uses_chosen_player_scope(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_uses_chosen_player_scope(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_chosen_player_scope(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_uses_chosen_player_scope)
+        }
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::UpTo { max } => quantity_expr_uses_chosen_player_scope(max),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_uses_chosen_player_scope(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_chosen_player_scope(left)
+                || quantity_expr_uses_chosen_player_scope(right)
+        }
+    }
+}
+
+fn quantity_ref_uses_chosen_player_scope(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::StartingLifeTotal { player } => player_scope_uses_chosen_player(player),
+        QuantityRef::ZoneCardCount { scope, filter, .. } => {
+            count_scope_uses_chosen_player(scope)
+                || filter
+                    .as_ref()
+                    .is_some_and(target_filter_uses_chosen_player_scope)
+        }
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
+            target_filter_uses_chosen_player_scope(filter)
+        }
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_uses_chosen_player_scope(filter)
+        }
+        QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(target_filter_uses_chosen_player_scope),
+        _ => false,
+    }
+}
+
+fn player_scope_uses_chosen_player(scope: &PlayerScope) -> bool {
+    matches!(
+        scope,
+        PlayerScope::ScopedPlayer | PlayerScope::SourceChosenPlayer
+    )
+}
+
+fn count_scope_uses_chosen_player(scope: &CountScope) -> bool {
+    matches!(
+        scope,
+        CountScope::ScopedPlayer | CountScope::SourceChosenPlayer
+    )
+}
+
+fn controller_ref_uses_chosen_player(controller: &ControllerRef) -> bool {
+    matches!(
+        controller,
+        ControllerRef::ScopedPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::SourceChosenPlayer
+    )
+}
+
+fn target_filter_uses_chosen_player_scope(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ScopedPlayer | TargetFilter::SourceChosenPlayer => true,
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            controller
+                .as_ref()
+                .is_some_and(controller_ref_uses_chosen_player)
+                || properties.iter().any(filter_prop_uses_chosen_player)
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_uses_chosen_player_scope)
+        }
+        TargetFilter::Not { filter } => target_filter_uses_chosen_player_scope(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_uses_chosen_player(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Attacking { defender: Some(c) }
+        | FilterProp::AttackedThisTurn { defender: Some(c) }
+        | FilterProp::Owned { controller: c }
+        | FilterProp::ProtectorMatches { controller: c }
+        | FilterProp::MostPrevalentCreatureTypeIn { scope: c, .. }
+        | FilterProp::HasAttachment {
+            controller: Some(c),
+            ..
+        }
+        | FilterProp::HasAnyAttachmentOf {
+            controller: Some(c),
+            ..
+        } => controller_ref_uses_chosen_player(c),
+        _ => false,
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_ability(def: &mut AbilityDefinition, index: u8) {
+    rebind_scoped_player_to_chosen_player_in_effect(&mut def.effect, index);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rebind_scoped_player_to_chosen_player_in_ability(sub, index);
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_effect(effect: &mut Effect, index: u8) {
+    match effect {
+        Effect::PutCounter { count, target, .. } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(count, index);
+            rebind_scoped_player_to_chosen_player_in_target_filter(target, index);
+        }
+        Effect::Draw { count, target, .. } | Effect::Mill { count, target, .. } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(count, index);
+            rebind_scoped_player_to_chosen_player_in_target_filter(target, index);
+        }
+        Effect::DealDamage { amount, target, .. } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(amount, index);
+            rebind_scoped_player_to_chosen_player_in_target_filter(target, index);
+        }
+        Effect::GainLife { amount, player, .. } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(amount, index);
+            rebind_scoped_player_to_chosen_player_in_target_filter(player, index);
+        }
+        Effect::LoseLife {
+            amount,
+            target: Some(target),
+            ..
+        } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(amount, index);
+            rebind_scoped_player_to_chosen_player_in_target_filter(target, index);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_quantity_expr(expr: &mut QuantityExpr, index: u8) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_ref(qty, index);
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(inner, index);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for inner in exprs {
+                rebind_scoped_player_to_chosen_player_in_quantity_expr(inner, index);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(left, index);
+            rebind_scoped_player_to_chosen_player_in_quantity_expr(right, index);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_quantity_ref(qty: &mut QuantityRef, index: u8) {
+    match qty {
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::StartingLifeTotal { player }
+            if *player == PlayerScope::ScopedPlayer =>
+        {
+            *player = PlayerScope::SourceChosenPlayer;
+        }
+        QuantityRef::ZoneCardCount { scope, filter, .. } => {
+            if *scope == CountScope::ScopedPlayer {
+                *scope = CountScope::SourceChosenPlayer;
+            }
+            if let Some(f) = filter {
+                rebind_scoped_player_to_chosen_player_in_target_filter(f, index);
+            }
+        }
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
+            rebind_scoped_player_to_chosen_player_in_target_filter(filter, index);
+        }
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            rebind_scoped_player_to_chosen_player_in_target_filter(filter, index);
+        }
+        QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => {
+            if let Some(f) = filter {
+                rebind_scoped_player_to_chosen_player_in_target_filter(f, index);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_controller_ref(
+    controller: &mut ControllerRef,
+    index: u8,
+) {
+    if *controller == ControllerRef::ScopedPlayer {
+        *controller = ControllerRef::ChosenPlayer { index };
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_filter_prop(prop: &mut FilterProp, index: u8) {
+    match prop {
+        FilterProp::Attacking {
+            defender: Some(ref mut c),
+        }
+        | FilterProp::AttackedThisTurn {
+            defender: Some(ref mut c),
+        } => {
+            rebind_scoped_player_to_chosen_player_in_controller_ref(c, index);
+        }
+        FilterProp::Owned {
+            controller: ref mut c,
+        }
+        | FilterProp::ProtectorMatches {
+            controller: ref mut c,
+        }
+        | FilterProp::MostPrevalentCreatureTypeIn {
+            scope: ref mut c, ..
+        } => {
+            rebind_scoped_player_to_chosen_player_in_controller_ref(c, index);
+        }
+        FilterProp::HasAttachment {
+            controller: Some(ref mut c),
+            ..
+        }
+        | FilterProp::HasAnyAttachmentOf {
+            controller: Some(ref mut c),
+            ..
+        } => {
+            rebind_scoped_player_to_chosen_player_in_controller_ref(c, index);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_scoped_player_to_chosen_player_in_target_filter(filter: &mut TargetFilter, index: u8) {
+    match filter {
+        TargetFilter::ScopedPlayer => *filter = TargetFilter::SourceChosenPlayer,
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            if let Some(c) = controller {
+                rebind_scoped_player_to_chosen_player_in_controller_ref(c, index);
+            }
+            for prop in properties {
+                rebind_scoped_player_to_chosen_player_in_filter_prop(prop, index);
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters {
+                rebind_scoped_player_to_chosen_player_in_target_filter(f, index);
+            }
+        }
+        TargetFilter::Not { filter } => {
+            rebind_scoped_player_to_chosen_player_in_target_filter(filter, index);
+        }
+        _ => {}
     }
 }
 
