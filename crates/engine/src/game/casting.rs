@@ -21169,12 +21169,20 @@ const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 64;
 /// only once targets are chosen, so the pre-target price of `prepared` is the
 /// unreduced one. The spell is still castable when SOME legal target
 /// assignment brings its total cost within reach, because the caster chooses
-/// the targets before paying. Prices each legal assignment with the same
-/// authority the cast uses ([`apply_target_dependent_cost_modifiers`]).
+/// the targets before paying.
+///
+/// Each assignment is priced from the announcement-time base through
+/// [`recompute_pending_mana_total_with`] — the authority payment uses — so
+/// target-dependent reductions, an accepted Defiler reduction, and both cost
+/// floors (Trinisphere) apply in CR 601.2f order. An {X} spell is probed at
+/// X = 0, the cheapest announcement (CR 107.3a).
 ///
 /// When the assignments exceed [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`]
-/// the answer is not decided here; the cast is offered, and payment still
-/// enforces the real total once targets are chosen.
+/// only the first ones are priced. The answer is then `true` only if some
+/// priced assignment actually changed the spell's price (a target-dependent
+/// modifier is in play, so an unpriced assignment might reach further);
+/// payment still enforces the real total once targets are chosen. A spell no
+/// target-dependent modifier touches stays at its unreduced, unpayable price.
 fn target_dependent_reduction_makes_payable(
     state: &GameState,
     player: PlayerId,
@@ -21199,52 +21207,59 @@ fn target_dependent_reduction_makes_payable(
             &ability_def.target_constraints,
             Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
         );
-        if assignments.len() > TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT {
-            return true;
-        }
-        assignments.into_iter().any(|assignment| {
+        let overflowed = assignments.len() > TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
+        let defiler = casting_costs::defiler_reduction_entry_if_affordable(
+            flushed,
+            player,
+            prepared.object_id,
+        );
+        let price = |ability: &ResolvedAbility, accept_defiler: bool| {
+            let mut pending = PendingCast::new(
+                prepared.object_id,
+                prepared.card_id,
+                ability.clone(),
+                prepared.mana_cost.clone(),
+            );
+            pending.base_cost = Some(prepared.base_mana_cost.clone());
+            pending.casting_variant = prepared.casting_variant;
+            if accept_defiler {
+                pending.accepted_cost_reductions.extend(defiler.clone());
+            }
+            let ctx = CostFinalizeContext::from_pending(&pending);
+            recompute_pending_mana_total_with(flushed, player, &pending, Some(0), &ctx)
+        };
+        let payable = |cost: &ManaCost| {
+            can_feasibly_pay_harmonize_mana_cost_with_probe(
+                flushed,
+                player,
+                prepared.object_id,
+                prepared.casting_variant,
+                cost,
+                None,
+            )
+        };
+        let untargeted = price(&resolved, false);
+        let mut price_changed = false;
+        for assignment in assignments
+            .into_iter()
+            .take(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT)
+        {
             let mut chosen = resolved.clone();
             if assign_selected_slots_in_chain(flushed, &mut chosen, &assignment).is_err() {
-                return false;
+                continue;
             }
-            let mut cost = prepared.mana_cost.clone();
-            apply_target_dependent_cost_modifiers(
-                flushed,
-                player,
-                prepared.object_id,
-                &chosen,
-                &mut cost,
-            );
-            if cost == prepared.mana_cost {
-                return false;
+            let priced = price(&chosen, false);
+            price_changed |= priced != untargeted;
+            if payable(&priced) {
+                return true;
             }
-            // CR 107.3a + CR 601.2f: an {X} spell is probed at X = 0, the
-            // cheapest announcement, so the floor sees a concrete total.
-            cost.concretize_x(0);
-            // CR 601.2f: cost floors (Trinisphere) apply last, as payment does.
-            apply_cost_floor_with_selected_targets(
-                flushed,
-                player,
-                prepared.object_id,
-                &chosen,
-                &mut cost,
-            );
             // CR 601.2f: an accepted Defiler reduction stacks with the
-            // target-dependent one, so price the combined reduction too.
-            let payable = |cost: &ManaCost| {
-                can_feasibly_pay_harmonize_mana_cost_with_probe(
-                    flushed,
-                    player,
-                    prepared.object_id,
-                    prepared.casting_variant,
-                    cost,
-                    None,
-                )
-            };
-            payable(&cost)
-                || casting_costs::defiler_reduced_cost(flushed, player, prepared.object_id, &cost)
-                    .is_some_and(|reduced| payable(&reduced))
-        })
+            // target-dependent one, ahead of the floors.
+            if defiler.is_some() && payable(&price(&chosen, true)) {
+                return true;
+            }
+        }
+        overflowed && price_changed
     })
 }
 

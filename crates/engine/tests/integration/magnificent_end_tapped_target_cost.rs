@@ -169,3 +169,75 @@ fn castable_at_reduced_cost_when_a_tapped_creature_is_among_targets() {
         .unwrap();
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
 }
+
+const TRINISPHERE: &str = "As long as Trinisphere is untapped, each spell that would cost less than three mana to cast costs three mana to cast. (Additional mana in the cost may be paid with any color of mana or colorless mana. For example, a spell that would cost {1}{B} to cast costs {2}{B} to cast instead.)";
+
+/// CR 601.2f: Trinisphere's floor applies after the target-dependent
+/// reduction, so the {1}{W} price is floored to three mana and two lands
+/// cannot cast the spell; three can.
+#[test]
+fn trinisphere_floors_the_reduced_cost_in_castability() {
+    for (lands, castable) in [(2, false), (3, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let tapped = scenario.add_creature(P1, "Weary", 2, 2).id();
+        scenario.add_artifact_from_oracle(P1, "Trinisphere", TRINISPHERE);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Final Verdict", false, MAGNIFICENT_END)
+            .as_instant()
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 4,
+            })
+            .id();
+        for _ in 0..lands {
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&tapped).unwrap().tapped = true;
+        assert_eq!(
+            engine::game::casting::can_cast_object_now(runner.state(), P0, spell),
+            castable,
+            "{lands} lands under Trinisphere"
+        );
+        assert_eq!(
+            engine::ai_support::legal_actions(runner.state())
+                .iter()
+                .any(
+                    |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+                ),
+            castable
+        );
+    }
+}
+
+/// CR 601.2h: with more legal targets than the pricing window, none tapped,
+/// no assignment reduces the cost, so two lands still cannot pay {4}{W}.
+#[test]
+fn many_untapped_targets_do_not_make_the_spell_castable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for i in 0..65 {
+        scenario.add_creature(P1, &format!("Fresh {i}"), 2, 2);
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Verdict", false, MAGNIFICENT_END)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        })
+        .id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let runner = scenario.build();
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        spell
+    ));
+    assert!(!engine::ai_support::legal_actions(runner.state())
+        .iter()
+        .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)));
+}
