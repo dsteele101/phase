@@ -9194,17 +9194,31 @@ fn zone_change_filter_inner(
         TargetFilter::TrackedSetFiltered {
             id,
             filter: inner,
-            caused_by: _,
+            caused_by,
         } => {
             let set_id = if id.0 == 0 {
                 crate::game::targeting::resolve_tracked_set_id(state)
             } else {
                 Some(*id)
             };
-            set_id
-                .and_then(|sid| state.tracked_object_sets.get(&sid))
-                .is_some_and(|set| set.contains(&record.object_id))
-                && zone_change_filter_inner(state, record, licensed, inner, ctx)
+            // CR 608.2c + CR 614.6: mirror the live-object arm — an action-bound
+            // consumer matches only members whose recorded producer action
+            // equals the bound cause; `None` keeps the "any member" behavior.
+            let in_set = set_id.is_some_and(|sid| {
+                state
+                    .tracked_object_sets
+                    .get(&sid)
+                    .is_some_and(|set| set.contains(&record.object_id))
+                    && match caused_by {
+                        None => true,
+                        Some(cause) => state
+                            .tracked_set_member_causes
+                            .get(&sid)
+                            .and_then(|causes| causes.get(&record.object_id))
+                            .is_some_and(|member_cause| member_cause == cause),
+                    }
+            });
+            in_set && zone_change_filter_inner(state, record, licensed, inner, ctx)
         }
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed

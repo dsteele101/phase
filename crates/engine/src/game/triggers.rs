@@ -14821,16 +14821,11 @@ fn delayed_zone_change_filter_matches(
         |source| FilterContext::from_trigger_source_with_controller(source, controller),
     );
 
-    // CR 603.10a + CR 608.2k: A departed permanent that ceased to exist (such as
-    // a token leaving the battlefield, CR 111.7) is absent from `state.objects`.
-    // Evaluate it through its exit snapshot `record`.
-    if state.objects.contains_key(&object_id) {
-        crate::game::filter::matches_target_filter(state, object_id, filter, &ctx)
-    } else {
-        crate::game::filter::matches_target_filter_on_zone_change_record(
-            state, record, filter, &ctx,
-        )
-    }
+    // CR 603.10a: Leaves-the-battlefield abilities look back in time, so the
+    // departed object is evaluated through its exit snapshot `record` rather
+    // than its post-departure live characteristics. This also covers a token
+    // that ceased to exist (CR 111.7) and is absent from `state.objects`.
+    crate::game::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
 }
 
 /// Check whether a trigger's constraint allows it to fire.
