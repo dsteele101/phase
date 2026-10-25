@@ -4039,6 +4039,13 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
             event,
             GameEvent::LandPlayed { object_id, .. }
                 if *object_id == source_id
+        ) || matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id: attach_source_id,
+                ..
+            } if *attach_source_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
