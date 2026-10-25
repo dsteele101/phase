@@ -15988,7 +15988,7 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
         "payable alternative cost should make the spell castable without mana"
     );
 
-    let waiting = crate::game::engine::apply_as_current(
+    crate::game::engine::apply_as_current(
         &mut state,
         GameAction::CastSpell {
             object_id: spell_id,
@@ -15998,8 +15998,6 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
         },
     )
     .expect("cast should reach alternative-cost choice");
-    let waiting = state.waiting_for.clone();
-    state.waiting_for = waiting;
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16187,7 +16185,7 @@ fn cast_without_mana_cost_option_checks_commander_control() {
         "controlling a commander should make the free-cast option payable"
     );
 
-    let waiting = crate::game::engine::apply_as_current(
+    crate::game::engine::apply_as_current(
         &mut state,
         GameAction::CastSpell {
             object_id: spell_id,
@@ -16197,8 +16195,6 @@ fn cast_without_mana_cost_option_checks_commander_control() {
         },
     )
     .expect("cast should reach the free-cast choice");
-    let waiting = state.waiting_for.clone();
-    state.waiting_for = waiting;
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16303,7 +16299,7 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
         .core_types
         .push(CoreType::Creature);
 
-    let waiting = crate::game::engine::apply_as_current(
+    crate::game::engine::apply_as_current(
         &mut state,
         GameAction::CastSpell {
             object_id: spell_id,
@@ -16313,8 +16309,6 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
         },
     )
     .expect("Snuff Out should reach the alternative-cost choice");
-    let waiting = state.waiting_for.clone();
-    state.waiting_for = waiting;
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
