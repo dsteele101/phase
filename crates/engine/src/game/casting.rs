@@ -21215,19 +21215,20 @@ fn target_dependent_reduction_makes_payable(
                 &chosen,
                 &mut cost,
             );
-            // CR 601.2f: cost floors (Trinisphere) apply last, as payment does.
-            if !casting_costs::cost_has_x(&cost) {
-                apply_cost_floor_with_selected_targets(
-                    flushed,
-                    player,
-                    prepared.object_id,
-                    &chosen,
-                    &mut cost,
-                );
-            }
             if cost == prepared.mana_cost {
                 return false;
             }
+            // CR 107.3a + CR 601.2f: an {X} spell is probed at X = 0, the
+            // cheapest announcement, so the floor sees a concrete total.
+            cost.concretize_x(0);
+            // CR 601.2f: cost floors (Trinisphere) apply last, as payment does.
+            apply_cost_floor_with_selected_targets(
+                flushed,
+                player,
+                prepared.object_id,
+                &chosen,
+                &mut cost,
+            );
             // CR 601.2f: an accepted Defiler reduction stacks with the
             // target-dependent one, so price the combined reduction too.
             let payable = |cost: &ManaCost| {
