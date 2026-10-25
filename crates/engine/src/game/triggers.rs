@@ -14676,10 +14676,11 @@ fn delayed_trigger_event_with_index(
                     GameEvent::ZoneChanged {
                         object_id,
                         from: Some(Zone::Battlefield),
-                        to: Zone::Graveyard | Zone::Exile,
+                        to,
                         record,
                         ..
-                    } if delayed_zone_change_filter_matches(
+                    } if matches!(to, Zone::Graveyard | Zone::Exile)
+                        && delayed_zone_change_filter_matches(
                         state,
                         *object_id,
                         filter,
@@ -14687,6 +14688,8 @@ fn delayed_trigger_event_with_index(
                         controller,
                         source_context,
                         record,
+                        Some(Zone::Battlefield),
+                        Some(*to),
                     )
                 )
             })
@@ -14790,6 +14793,8 @@ fn delayed_zone_change_event_with_index(
                         controller,
                         source_context,
                         record,
+                        from,
+                        to,
                     )
             )
         })
@@ -14811,6 +14816,8 @@ fn delayed_zone_change_filter_matches(
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
     record: &crate::types::game_state::ZoneChangeRecord,
+    from: Option<Zone>,
+    to: Option<Zone>,
 ) -> bool {
     if matches!(filter, crate::types::ability::TargetFilter::SelfRef) && source_context.is_some() {
         return object_id == source_id;
@@ -14820,6 +14827,14 @@ fn delayed_zone_change_filter_matches(
         || FilterContext::from_source_with_controller(source_id, controller),
         |source| FilterContext::from_trigger_source_with_controller(source, controller),
     );
+
+    // CR 603.10 + CR 603.6a: a battlefield-entry observer reads the entrant as it
+    // existed immediately after the entry event, not the departure look-back.
+    if to == Some(Zone::Battlefield) {
+        return crate::game::filter::matches_target_filter_on_entry_observation(
+            state, record, from, filter, &ctx,
+        );
+    }
 
     // CR 603.10a: Leaves-the-battlefield abilities look back in time, so the
     // departed object is evaluated through its exit snapshot `record` rather

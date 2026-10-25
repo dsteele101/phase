@@ -401,6 +401,17 @@ fn tidehollow_sculler_leaving_before_etb_resolves_exiles_indefinitely() {
                 })
         },
     );
+    // Reach guard: the leaves trigger really fired and sits above the ETB trigger.
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == sculler)
+            .count(),
+        2,
+        "both Sculler triggers are on the stack"
+    );
     pass_until(&mut runner, "the exile choice", |r| {
         matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
     });
@@ -557,39 +568,220 @@ fn ugin_the_ineffable_delayed_return_returns_only_matching_spirits_exiled_card()
     assert_eq!(zone_of(&runner, card_a), Zone::Exile);
     assert_eq!(zone_of(&runner, card_b), Zone::Exile);
 
-    // Destroy the first Spirit token (spirit_a).
-    runner.cast(murder1).target_object(spirit_a).resolve();
+    // Destroy the SECOND Spirit first: a FIFO association would wrongly return card_a.
+    runner.cast(murder1).target_object(spirit_b).resolve();
     runner.advance_until_stack_empty();
 
-    // CR 607.1: Only spirit_a's exiled card (card_a) returns to hand.
-    // card_b must remain in exile.
-    assert_eq!(
-        zone_of(&runner, card_a),
-        Zone::Hand,
-        "first Spirit's death returns its linked exiled card to hand"
-    );
-    assert_eq!(
-        zone_of(&runner, card_b),
-        Zone::Exile,
-        "second Spirit's exiled card must remain in exile"
-    );
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "resolution completes back to priority"
-    );
-
-    // Destroy the second Spirit token (spirit_b).
-    runner.cast(murder2).target_object(spirit_b).resolve();
-    runner.advance_until_stack_empty();
-
-    // Now card_b also returns to hand.
+    // CR 607.1: Only spirit_b's exiled card (card_b) returns to hand.
     assert_eq!(
         zone_of(&runner, card_b),
         Zone::Hand,
         "second Spirit's death returns its linked exiled card to hand"
     );
+    assert_eq!(
+        zone_of(&runner, card_a),
+        Zone::Exile,
+        "first Spirit's exiled card must remain in exile"
+    );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "resolution completes back to priority"
+    );
+
+    runner.cast(murder2).target_object(spirit_a).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, card_a),
+        Zone::Hand,
+        "first Spirit's death returns its linked exiled card to hand"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution completes back to priority"
+    );
+}
+
+/// CR 603.7c + CR 400.7: "if that object left that zone and then returned, it's a
+/// new object and thus won't be affected." Once Ugin's exiled card has gone to
+/// the graveyard and been exiled again, the Spirit's death must not retrieve it.
+#[test]
+fn ugin_the_ineffable_return_ignores_card_exiled_again_as_new_object() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ugin = scenario
+        .add_planeswalker_from_oracle(P0, "Ugin, the Ineffable", "Ugin", 4, UGIN_THE_INEFFABLE)
+        .as_legendary()
+        .id();
+    let card = scenario.add_card_to_library_top(P0, "Exiled Card");
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.activate(ugin, 0).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(zone_of(&runner, card), Zone::Exile);
+    let spirit = runner
+        .state()
+        .objects
+        .values()
+        .find(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj.card_types.subtypes.iter().any(|s| s == "Spirit")
+        })
+        .map(|obj| obj.id)
+        .expect("Ugin creates a Spirit");
+
+    // The exiled card is processed into the graveyard and exiled again: a new object.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), card, Zone::Graveyard, &mut events);
+    engine::game::zones::move_to_zone(runner.state_mut(), card, Zone::Exile, &mut events);
+    assert_eq!(zone_of(&runner, card), Zone::Exile);
+
+    let outcome = runner.cast(murder).target_object(spirit).resolve();
+    runner.advance_until_stack_empty();
+
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. }
+                if *object_id == spirit
+        )),
+        "the Spirit left the battlefield, so its delayed trigger was offered the event"
+    );
+    assert_eq!(
+        zone_of(&runner, card),
+        Zone::Exile,
+        "a card that left exile and returned is a new object and is not retrieved"
+    );
+}
+
+const UGINS_LABYRINTH: &str = "Imprint — When this land enters, you may exile a colorless card with mana value 7 or greater from your hand.\n\
+{T}: Add {C}. If a card is exiled with this land, add {C}{C} instead.\n\
+{T}: Return the exiled card to its owner's hand.";
+
+/// CR 607.2a + CR 406.6: an ACTIVATED linked ability ("{T}: Return the exiled card to
+/// its owner's hand") returns the card exiled with its source.
+#[test]
+fn ugins_labyrinth_activated_return_puts_imprinted_card_in_owners_hand() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let labyrinth = scenario
+        .add_land_from_oracle(P0, "Ugin's Labyrinth", UGINS_LABYRINTH)
+        .id();
+    let imprinted = scenario.add_card_to_hand(P0, "Colorless Seven-Drop");
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), imprinted, Zone::Exile, &mut events);
+    runner
+        .state_mut()
+        .exile_links
+        .push(engine::types::game_state::ExileLink {
+            exiled_id: imprinted,
+            source_id: labyrinth,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+    assert_eq!(zone_of(&runner, imprinted), Zone::Exile);
+
+    runner.activate(labyrinth, 1).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, imprinted),
+        Zone::Hand,
+        "the exiled card returns to its owner's hand"
+    );
+}
+
+const CHAMPIONS_OF_THE_SHOAL: &str = "As an additional cost to cast this spell, behold a Merfolk and exile it. (Exile a Merfolk you control or a Merfolk card from your hand.)\n\
+Whenever this creature enters or becomes tapped, tap up to one target creature and put a stun counter on it.\n\
+When this creature leaves the battlefield, return the exiled card to its owner's hand.";
+
+/// CR 118.8 + CR 607.2a + CR 603.3: the card exiled as part of Champions of the Shoal's
+/// additional casting cost is linked to it and returns when it leaves the battlefield.
+#[test]
+fn champions_of_the_shoal_returns_cost_exiled_merfolk_when_it_leaves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let champions = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Champions of the Shoal",
+            4,
+            4,
+            CHAMPIONS_OF_THE_SHOAL,
+        )
+        .id();
+    let merfolk = {
+        let mut builder = scenario.add_creature_to_hand(P0, "Merfolk Fixture", 1, 1);
+        builder.with_subtypes(vec!["Merfolk"]);
+        builder.id()
+    };
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..8)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&champions].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: champions,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("casting Champions of the Shoal is accepted");
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::PayCost { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![merfolk],
+                    })
+                    .expect("behold the Merfolk card");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets { targets: vec![] })
+                    .expect("decline the optional tap target");
+            }
+            WaitingFor::Priority { .. }
+                if zone_of(&runner, champions) == Zone::Battlefield
+                    && runner.state().stack.is_empty() =>
+            {
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt while casting Champions: {other:?}"),
+        }
+    }
+    assert_eq!(zone_of(&runner, champions), Zone::Battlefield);
+    assert_eq!(zone_of(&runner, merfolk), Zone::Exile, "cost exile");
+    assert!(runner.state().exile_links.iter().any(|link| {
+        link.exiled_id == merfolk
+            && link.source_id == champions
+            && link.kind == ExileLinkKind::CastCost
+    }));
+
+    runner.cast(destroy).target_object(champions).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(zone_of(&runner, champions), Zone::Graveyard);
+    assert_eq!(
+        zone_of(&runner, merfolk),
+        Zone::Hand,
+        "the cost-exiled Merfolk returns to its owner's hand"
     );
 }
