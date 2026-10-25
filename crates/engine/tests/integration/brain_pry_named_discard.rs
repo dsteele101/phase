@@ -21,6 +21,8 @@ use engine::types::zones::Zone;
 const BRAIN_PRY: &str = "Choose a nonland card name. Target player reveals their hand. That \
 player discards a card with that name. If they can't, you draw a card.";
 
+const REGROWTH: &str = "Return target card from your graveyard to your hand.";
+
 struct Setup {
     runner: GameRunner,
     hand: Vec<ObjectId>,
@@ -257,5 +259,205 @@ fn two_matching_cards_prompt_the_discarding_player_to_choose_one() {
         state.players[0].hand.len(),
         0,
         "a discard happened: no draw"
+    );
+}
+
+/// CR 608.2c + CR 608.2d: When a source that makes a card-name choice resolves
+/// multiple times on the same stored object (via Regrowth recursion), each
+/// resolution's named-discard restriction must consume that specific
+/// resolution's chosen answer rather than the first historical choice stored
+/// across past casts.
+#[test]
+fn recast_on_same_object_via_regrowth_binds_new_chosen_name() {
+    let mut scenario = GameScenario::new_n_player(2, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Top Deck 1", "Top Deck 2"]);
+
+    // Opponent has two distinct Opts and one Lightning Bolt (no Shock).
+    let opt_a = scenario.add_card_to_hand(P1, "Opt");
+    let opt_b = scenario.add_card_to_hand(P1, "Opt");
+    let bolt = scenario.add_card_to_hand(P1, "Lightning Bolt");
+
+    let brain_pry = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brain Pry", false, BRAIN_PRY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let regrowth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Regrowth", false, REGROWTH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = ["Opt", "Shock", "Lightning Bolt"].map(String::from).into();
+
+    let brain_pry_card_id = runner.state().objects[&brain_pry].card_id;
+
+    // --- FIRST CAST: name absent Shock ---
+    let mut result = runner
+        .act(GameAction::CastSpell {
+            object_id: brain_pry,
+            card_id: brain_pry_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast 1");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        result = runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("target P1");
+    }
+    while matches!(result.waiting_for, WaitingFor::Priority { .. }) {
+        result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass to resolution");
+    }
+    assert!(
+        matches!(result.waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected NamedChoice on first cast, got {:?}",
+        result.waiting_for
+    );
+    let mut result = runner
+        .act(GameAction::ChooseOption {
+            choice: "Shock".to_string(),
+        })
+        .expect("name Shock");
+    while matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass to finish resolution");
+    }
+
+    // Reach guards: first cast completed, opponent discarded nothing (no Shock in hand),
+    // P0 drew a card via "if they can't", Brain Pry is in graveyard.
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&brain_pry].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&opt_a].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&opt_b].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        2, // Regrowth + Top Deck 1
+        "first cast draws via 'if they can't'"
+    );
+
+    // --- RECURSION: parsed Regrowth returns the same Brain Pry object ---
+    let regrowth_card_id = runner.state().objects[&regrowth].card_id;
+    let mut result = runner
+        .act(GameAction::CastSpell {
+            object_id: regrowth,
+            card_id: regrowth_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Regrowth");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        result = runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(brain_pry)],
+            })
+            .expect("target Brain Pry in graveyard");
+    }
+    while matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        result = runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Regrowth");
+    }
+
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&brain_pry].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&regrowth].zone, Zone::Graveyard);
+
+    // --- SECOND CAST: name Opt ---
+    let mut result = runner
+        .act(GameAction::CastSpell {
+            object_id: brain_pry,
+            card_id: brain_pry_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast 2");
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        result = runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("target P1 again");
+    }
+    while matches!(result.waiting_for, WaitingFor::Priority { .. }) {
+        result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass to resolution 2");
+    }
+    assert!(
+        matches!(result.waiting_for, WaitingFor::NamedChoice { .. }),
+        "expected NamedChoice on second cast, got {:?}",
+        result.waiting_for
+    );
+    let mut result = runner
+        .act(GameAction::ChooseOption {
+            choice: "Opt".to_string(),
+        })
+        .expect("name Opt");
+    while matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass to prompt");
+    }
+
+    // Require the actual mandatory discard prompt containing exactly both Opt IDs.
+    let WaitingFor::DiscardChoice {
+        player,
+        count,
+        cards,
+        ..
+    } = &result.waiting_for
+    else {
+        panic!("expected DiscardChoice, got {:?}", result.waiting_for);
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(*count, 1);
+    let mut eligible = cards.clone();
+    eligible.sort();
+    let mut expected = vec![opt_a, opt_b];
+    expected.sort();
+    assert_eq!(
+        eligible, expected,
+        "discard prompt must contain exactly both Opt IDs, excluding Lightning Bolt"
+    );
+
+    // Select one (opt_a)
+    let mut result = runner
+        .act(GameAction::SelectCards { cards: vec![opt_a] })
+        .expect("select opt_a for discard");
+    while matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        result = runner
+            .act(GameAction::PassPriority)
+            .expect("settle priority");
+    }
+
+    // Assert only that card discarded, no second draw and settled Priority/empty resolution state.
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&opt_a].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&opt_b].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&brain_pry].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        1, // only Top Deck 1 from the first cast; no second draw!
+        "mandatory discard succeeded: no second draw"
     );
 }
