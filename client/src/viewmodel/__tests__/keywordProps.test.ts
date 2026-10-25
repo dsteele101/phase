@@ -328,6 +328,36 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     ).toBe("Entwine Sacrifice a permanent");
   });
 
+  it("omits keyword detail when a sacrifice target has unrenderable subtype restrictions (Lava Dart, Walk the Aeons)", () => {
+    // Lava Dart: Flashback—Sacrifice a Mountain.
+    expect(
+      getKeywordDisplayText({
+        Flashback: {
+          type: "NonMana",
+          data: {
+            type: "Sacrifice",
+            count: 1,
+            target: { type: "Typed", type_filters: [{ Subtype: "Mountain" }] },
+          },
+        },
+      }),
+    ).toBe("Flashback");
+
+    // Walk the Aeons: Buyback—Sacrifice three Islands.
+    expect(
+      getKeywordDisplayText({
+        Buyback: {
+          type: "NonMana",
+          data: {
+            type: "Sacrifice",
+            count: 3,
+            target: { type: "Typed", type_filters: [{ Subtype: "Island" }] },
+          },
+        },
+      }),
+    ).toBe("Buyback");
+  });
+
   it("omits compound Ward detail when a filtered sacrifice leg cannot render", () => {
     expect(getKeywordDisplayText({
       Ward: {

@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, ResolvedAbility,
-    TargetRef, TargetSelectionMode,
+    AbilityCost, AbilityTag, Effect, ModalChoice, QuantityExpr, ResolvedAbility, TargetRef,
+    TargetSelectionMode,
 };
 use crate::types::casting_costs::SettledTail;
 use crate::types::events::GameEvent;
@@ -23,7 +23,7 @@ use super::ability_utils::{
 };
 use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
-    finish_pending_cast_cost_or_pay,
+    finish_pending_cast_cost_or_pay, split_declared_mana_addition_and_residual,
     target_first_activation_defers_interactive_costs_to_payment_boundary,
     TargetFirstPaymentHandoff,
 };
@@ -135,29 +135,6 @@ pub(crate) fn handle_select_modes(
                 pending.ability.chosen_x,
             );
         }
-    }
-    // CR 702.42a: Add non-mana entwine cost as additional cost when all modes are chosen.
-    // Collect both entwine and escalate costs
-    let mut additional_costs = Vec::new();
-    if let Some(entwine_cost) = extract_entwine_additional_cost(&modal, &indices) {
-        additional_costs.push(entwine_cost);
-    }
-    if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
-    {
-        additional_costs.push(cost);
-    }
-
-    // If we have additional costs, combine them
-    if !additional_costs.is_empty() {
-        let combined = if additional_costs.len() == 1 {
-            additional_costs.into_iter().next().unwrap()
-        } else {
-            // Combine multiple additional costs into a Composite
-            AbilityCost::Composite {
-                costs: additional_costs,
-            }
-        };
-        pending.additional_cost_flow = Some(AdditionalCost::Required(combined));
     }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
@@ -610,13 +587,14 @@ pub(crate) fn compute_modal_total_cost(
 
     // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
     if indices.len() == modal.mode_count {
-        // Only mana costs can be added to the total mana cost.
-        // Non-mana costs (e.g., "Sacrifice two lands") are handled as additional costs.
-        if let Some(AbilityCost::Mana {
-            cost: ref mana_cost,
-        }) = modal.entwine_cost.as_deref()
-        {
-            total = restrictions::add_mana_cost(&total, mana_cost);
+        if let Some(entwine_cost) = modal.entwine_cost.as_deref() {
+            if let Ok(split) =
+                split_declared_mana_addition_and_residual(None, None, entwine_cost.clone())
+            {
+                for declared_mana in split.declared {
+                    total = restrictions::add_mana_cost(&total, &declared_mana);
+                }
+            }
         }
     }
 
@@ -629,25 +607,19 @@ pub(crate) fn extract_entwine_additional_cost(
     indices: &[usize],
 ) -> Option<AbilityCost> {
     if indices.len() == modal.mode_count {
-        if let Some(entwine_cost) = modal.entwine_cost.as_deref() {
-            // Return non-mana costs only; mana costs are already folded into
-            // the computed mana total by `compute_modal_total_cost`.
-            match entwine_cost {
-                AbilityCost::Mana { .. } => None,
-                other => Some(other.clone()),
-            }
-        } else {
-            None
-        }
+        let entwine_cost = modal.entwine_cost.as_deref()?;
+        split_declared_mana_addition_and_residual(None, None, entwine_cost.clone())
+            .ok()
+            .and_then(|split| split.residual)
     } else {
         None
     }
 }
 
-fn escalate_cost_for_selected_modes(
+pub(crate) fn escalate_cost_for_selected_modes_count(
     state: &GameState,
     player: PlayerId,
-    pending: &PendingCast,
+    object_id: ObjectId,
     selected_mode_count: usize,
 ) -> Option<AbilityCost> {
     let additional_modes = selected_mode_count.checked_sub(1)?;
@@ -661,7 +633,7 @@ fn escalate_cost_for_selected_modes(
     // `CastWithKeyword` `affected` filter keyed on the combined mana value / colors
     // — a class that does not arise for Escalate. If a fused split spell were ever
     // granted Escalate by a value-keyed static, this would need the `_for` variant.
-    let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
+    let cost = super::casting::effective_spell_keywords(state, player, object_id)
         .into_iter()
         .find_map(|keyword| match keyword {
             Keyword::Escalate(cost) => Some(cost),

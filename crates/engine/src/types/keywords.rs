@@ -100,7 +100,7 @@ pub enum EchoCost {
 }
 
 /// CR 702.42a: Entwine cost — pay additional cost to choose all modes of a modal spell.
-/// Most Entwine cards use a pure mana cost (e.g., Voidslime "Entwine {2}{B}"),
+/// Most Entwine cards use a pure mana cost (e.g., Journey of Discovery "Entwine {2}{G}"),
 /// but some use non-mana costs (e.g., Solar Tide "Entwine—Sacrifice two lands.").
 /// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
 /// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.

@@ -385,25 +385,34 @@ function formatKeywordAbilityCost(cost: KeywordAbilityCost): string | null {
 }
 
 /** Render a Sacrifice cost's count and target as keyword detail ("Sacrifice two lands"). */
-function formatSacrificeCost(cost: { count?: unknown; target?: unknown }): string {
-  const count = typeof cost.count === "number" ? Math.max(cost.count, 1) : 1;
+function formatSacrificeCost(cost: { count?: unknown; target?: unknown }): string | null {
   const noun = formatSacrificeTarget(cost.target);
+  if (!noun) return null;
+  const count = typeof cost.count === "number" ? Math.max(cost.count, 1) : 1;
   return count === 1 ? `Sacrifice a ${noun}` : `Sacrifice ${count} ${pluralize(noun)}`;
 }
 
 /** Noun for what a Sacrifice cost targets ("land", "creature", "permanent"). */
-function formatSacrificeTarget(target: unknown): string {
+function formatSacrificeTarget(target: unknown): string | null {
   if (typeof target === "object" && target !== null) {
     const t = target as { type?: string; type_filters?: unknown[] };
     if (t.type === "Typed") {
-      const filters = (t.type_filters ?? [])
+      const typeFilters = t.type_filters ?? [];
+      const filters = typeFilters
         .filter((f): f is string => typeof f === "string" && f !== "Card" && f !== "Any");
+      const relevantFilters = typeFilters.filter((f) => f !== "Card" && f !== "Any");
+      // If there are type_filters but no renderable strings (e.g. Subtype objects),
+      // the full restriction cannot be rendered — return null so the caller
+      // falls back to null rather than silently dropping the detail.
+      if (filters.length !== relevantFilters.length) return null;
       if (filters.length === 1) return filters[0].toLowerCase();
       if (filters.length > 0) return filters.join(" ");
+      return null;
     }
     if (t.type === "Any") return "permanent";
+    return null;
   }
-  return "permanent";
+  return null;
 }
 
 function pluralize(noun: string): string {
