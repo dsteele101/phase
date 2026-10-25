@@ -2247,7 +2247,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&sprocket.to_string()),
         ],
         GameEvent::Clash { .. } => vec![text("Clash")],
-        // CR 201.4: a card name chosen as the spell or ability resolves is public
+        // CR 608.2d: a card name chosen as the spell or ability resolves is public
         // information, so the log states the name itself.
         GameEvent::CardNamed {
             player_id,

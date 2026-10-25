@@ -1,8 +1,8 @@
 //! Brain Pry — "Choose a nonland card name. Target player reveals their hand.
 //! That player discards a card with that name. If they can't, you draw a card."
 //!
-//! CR 201.4: the chosen name is public information, so the game log must state
-//! it. CR 608.2c: the discard is limited to cards with that name (CR 201.2), and
+//! CR 608.2d: the chosen name is public information, so the game log must state
+//! it. CR 608.2c: the discard is limited to cards with that name (CR 201.2a), and
 //! the "if they can't" rider draws only when no such card was discarded.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

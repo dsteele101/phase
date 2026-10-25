@@ -230,70 +230,6 @@ pub(crate) fn pin_paused_occurrence(
 
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
-/// CR 608.2c + CR 608.2d: Look up the card name announced during this
-/// resolution from the owned continuation context (`ability.trigger_source`),
-/// falling back to the source object's newest chosen name.
-fn resolution_chosen_name<'a>(
-    state: &'a GameState,
-    ability: &'a ResolvedAbility,
-) -> Option<&'a str> {
-    ability
-        .trigger_source
-        .as_ref()
-        .and_then(|source| {
-            source
-                .lki
-                .chosen_attributes
-                .iter()
-                .rev()
-                .find_map(|a| match a {
-                    crate::types::ability::ChosenAttribute::CardName(name) => Some(name.as_str()),
-                    _ => None,
-                })
-        })
-        .or_else(|| {
-            state
-                .objects
-                .get(&ability.source_id)
-                .and_then(|obj| obj.chosen_card_name())
-        })
-}
-
-/// Evaluates a discard filter against a candidate hand card.
-/// CR 608.2c + CR 201.2: "discards a card with that name" must consume the name
-/// chosen by this resolution instruction (`resolution_chosen_name`) rather than
-/// the first historical choice stored on the source object across past casts.
-fn matches_discard_card_filter(
-    state: &GameState,
-    card_id: ObjectId,
-    filter: &TargetFilter,
-    ctx: &crate::game::filter::FilterContext<'_>,
-    chosen_name: Option<&str>,
-) -> bool {
-    match filter {
-        TargetFilter::HasChosenName => {
-            if let Some(name) = chosen_name {
-                state
-                    .objects
-                    .get(&card_id)
-                    .is_some_and(|obj| obj.name.eq_ignore_ascii_case(name))
-            } else {
-                crate::game::filter::matches_target_filter(state, card_id, filter, ctx)
-            }
-        }
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|sub| matches_discard_card_filter(state, card_id, sub, ctx, chosen_name)),
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|sub| matches_discard_card_filter(state, card_id, sub, ctx, chosen_name)),
-        TargetFilter::Not { filter: inner } => {
-            !matches_discard_card_filter(state, card_id, inner, ctx, chosen_name)
-        }
-        _ => crate::game::filter::matches_target_filter(state, card_id, filter, ctx),
-    }
-}
-
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -473,10 +409,11 @@ pub fn resolve(
         let specific_targets: Vec<_> = match &card_filter {
             Some(filter) => {
                 let ctx = crate::game::filter::FilterContext::from_ability(ability);
-                let chosen_name = resolution_chosen_name(state, ability);
                 let filtered: Vec<_> = specific_targets
                     .into_iter()
-                    .filter(|id| matches_discard_card_filter(state, *id, filter, &ctx, chosen_name))
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                    })
                     .collect();
                 if filtered.is_empty() && !up_to {
                     state.cost_payment_failed_flag = true;
@@ -678,17 +615,18 @@ pub fn resolve(
             .iter()
             .copied()
             .collect();
-        // CR 608.2c + CR 201.2: "discards a card with that name" restricts which
+        // CR 608.2c + CR 201.2a: "discards a card with that name" restricts which
         // cards in the hand can satisfy the instruction. A player with no such
         // card can't discard, so the instruction does nothing (the empty pool
         // takes the same no-op path as an empty hand).
         let hand_cards: Vec<ObjectId> = match &card_filter {
             Some(filter) => {
                 let ctx = crate::game::filter::FilterContext::from_ability(ability);
-                let chosen_name = resolution_chosen_name(state, ability);
                 hand_cards
                     .into_iter()
-                    .filter(|id| matches_discard_card_filter(state, *id, filter, &ctx, chosen_name))
+                    .filter(|id| {
+                        crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                    })
                     .collect()
             }
             None => hand_cards,

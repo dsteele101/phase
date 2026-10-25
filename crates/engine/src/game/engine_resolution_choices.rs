@@ -7758,7 +7758,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            // CR 201.4: a chosen card name is public information; surface it for
+            // CR 608.2d: a chosen card name is public information; surface it for
             // every naming (resolving instruction or as-enters choice) so the log
             // shows what was named.
             if matches!(choice_type, ChoiceType::CardName) {
@@ -7808,10 +7808,17 @@ pub(super) fn handle_resolution_choice(
             effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .update_trigger_source_context_in_resolution_segment(context);
+                    if matches!(choice_type, ChoiceType::CardName) {
+                        frame
+                            .pending
+                            .chain
+                            .update_trigger_source_context_through_chain(context);
+                    } else {
+                        frame
+                            .pending
+                            .chain
+                            .update_trigger_source_context_in_resolution_segment(context);
+                    }
                 }
             }
             if choice_type.is_card_predicate_guess() {

@@ -2152,7 +2152,7 @@ pub(super) fn parse_targeted_action_ast(
         ))
         .parse(noun_lower.as_str())
         .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
-        // CR 201.2 + CR 608.2c: a trailing "with that name" binds the discard to the
+        // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
         // card name chosen earlier in this resolution (Brain Pry). It composes onto
         // whatever type qualifier precedes it.
         let (noun, has_chosen_name) = match terminated(
