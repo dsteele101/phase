@@ -665,6 +665,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         target_selection_mode: _,
         sub_link: _,
         target_reads: _, // TargetReadOrigin: which announcement `Target` reads name
+        entry_onset: _,  // ContinuousEffectOnset: when the effect starts, not what it does
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
@@ -1436,6 +1437,7 @@ pub(crate) fn any_action_may_interfere(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => indexed_ability_window_reach(state, *source_id, *ability_index).may_interfere(),
         // Every other priority action (play a land, declare attackers, special
         // actions, ...) is unclassified and therefore interference.
@@ -2607,6 +2609,7 @@ mod tests {
                 &[GameAction::ActivateAbility {
                     source_id: missing,
                     ability_index: 7,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 }]
             ),
             "an out-of-range ability index is interference, not a confined no-op"
