@@ -2102,6 +2102,7 @@ mod celes_kotis_graveyard_origin_batch;
 mod commanders_plate_protection;
 mod display_identity_serde;
 mod event_window_trigger_gate;
+mod magnificent_end_tapped_target_cost;
 mod put_target_count_entry_counters;
 mod risky_move_gain_control_trigger;
 mod squall_attack_batch_chosen_number;

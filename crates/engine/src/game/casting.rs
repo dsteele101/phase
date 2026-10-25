@@ -54,11 +54,11 @@ use super::ability_utils::{
     ability_target_legality_needs_chosen_x, additional_cost_instead_spell_has_legal_targets,
     assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets,
     auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
-    build_resolved_from_def, build_target_slots, build_target_slots_for_announcement,
-    compute_unavailable_modes, declared_targets_in_chain, filter_references_target_player,
-    has_legal_target_assignment_for_ability, modal_choice_for_player,
-    simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
-    unresolved_x_target_construction_error, TargetSlotBuildOutcome,
+    build_resolved_from_def, build_target_assignments_for_ability_with_limit, build_target_slots,
+    build_target_slots_for_announcement, compute_unavailable_modes, declared_targets_in_chain,
+    filter_references_target_player, has_legal_target_assignment_for_ability,
+    modal_choice_for_player, simple_legal_target_assignment_exists_for_ability,
+    target_constraints_from_modal, unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
@@ -21072,6 +21072,8 @@ fn can_cast_prepared_now_with_probe(
         prepared.casting_variant,
         &prepared.mana_cost,
         probe,
+    ) || target_dependent_reduction_makes_payable(
+        state, player, prepared, probe,
     ) || casting_costs::defiler_reduced_cost(
         state,
         player,
@@ -21156,6 +21158,75 @@ fn can_cast_prepared_now_with_probe(
     }
 
     false
+}
+
+/// Upper bound on the target assignments priced by
+/// [`target_dependent_reduction_makes_payable`].
+const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 64;
+
+/// CR 601.2c + CR 601.2f: a cost reduction that reads the chosen targets ("This
+/// spell costs {3} less to cast if it targets a tapped creature") is applied
+/// only once targets are chosen, so the pre-target price of `prepared` is the
+/// unreduced one. The spell is still castable when SOME legal target
+/// assignment brings its total cost within reach, because the caster chooses
+/// the targets before paying. Prices each legal assignment with the same
+/// authority the cast uses ([`apply_target_dependent_cost_modifiers`]).
+///
+/// When the assignments exceed [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`]
+/// the answer is not decided here; the cast is offered, and payment still
+/// enforces the real total once targets are chosen.
+fn target_dependent_reduction_makes_payable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    let Some(ability_def) = prepared.ability_def.as_ref() else {
+        return false;
+    };
+    with_flushed_cast_state(state, player, probe, |flushed| {
+        let resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
+        let Ok(slots) = build_target_slots(flushed, &resolved) else {
+            return false;
+        };
+        if slots.is_empty() {
+            return false;
+        }
+        let assignments = build_target_assignments_for_ability_with_limit(
+            flushed,
+            &resolved,
+            &slots,
+            &ability_def.target_constraints,
+            Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
+        );
+        if assignments.len() > TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT {
+            return true;
+        }
+        assignments.into_iter().any(|assignment| {
+            let targets: Vec<TargetRef> = assignment.into_iter().flatten().collect();
+            let mut chosen = resolved.clone();
+            if assign_targets_in_chain(flushed, &mut chosen, &targets).is_err() {
+                return false;
+            }
+            let mut cost = prepared.mana_cost.clone();
+            apply_target_dependent_cost_modifiers(
+                flushed,
+                player,
+                prepared.object_id,
+                &chosen,
+                &mut cost,
+            );
+            cost != prepared.mana_cost
+                && can_feasibly_pay_harmonize_mana_cost_with_probe(
+                    flushed,
+                    player,
+                    prepared.object_id,
+                    prepared.casting_variant,
+                    &cost,
+                    None,
+                )
+        })
+    })
 }
 
 /// Returns true if the player can pay this mana cost after auto-tapping
