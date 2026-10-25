@@ -17783,7 +17783,12 @@ mod issue_4548_full_create_tests {
             .await;
             assert_eq!(created_code(reply), "BOTRS2");
 
-            assert!(!app_state.connections.lock().await["BOTRS2"].contains_key(&PlayerId(1)));
+            assert!(!app_state
+                .connections
+                .lock()
+                .await
+                .get("BOTRS2")
+                .is_some_and(|routes| routes.contains_key(&PlayerId(1))));
         })
         .await;
         server.abort();
