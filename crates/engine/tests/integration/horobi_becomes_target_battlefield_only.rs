@@ -15,6 +15,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -375,4 +376,130 @@ fn cut_down_targeting_sacrificed_blood_pet_mana_source_triggers_horobi() {
         outcome.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
+}
+
+const BLOODCHIEFS_THIRST: &str = "Kicker {2}{B} (You may pay an additional {2}{B} as you cast this spell.)\nDestroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker.";
+const CONTROLLED_CREATURE_AURA: &str = "Enchant creature you control
+Enchanted creature gets +1/+1.";
+const MUTATOR: &str = "Mutate {B} (If you cast this spell for its mutate cost, merge it with target non-Human creature you own. The merged permanent has all abilities of each card.)\nFlying";
+
+fn blood_pet_and_horobi(scenario: &mut GameScenario) -> ObjectId {
+    // Horobi's mana value (5) keeps it out of Bloodchief's Thirst's MV ≤ 2 filter.
+    scenario
+        .add_creature_from_oracle(P1, "Horobi, Death's Wail", 4, 4, HOROBI)
+        .with_mana_cost(ManaCost::generic(5));
+    scenario
+        .add_creature_from_oracle(P0, "Blood Pet", 1, 1, "Sacrifice this creature: Add {B}.")
+        .id()
+}
+
+fn assert_pet_sacrificed_and_both_stacked(
+    commit: &engine::game::scenario::CastCommit<'_>,
+    pet: ObjectId,
+) {
+    assert!(
+        commit.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == pet
+        )),
+        "Blood Pet must be sacrificed as a mana source during payment"
+    );
+    assert_eq!(
+        stack_pushes(commit.events()),
+        2,
+        "both the spell and Horobi's trigger must reach the stack"
+    );
+}
+
+/// CR 601.2c + CR 601.2g + CR 603.2: the ownerless deferred-target route.
+/// Bloodchief's Thirst's kicker is unaffordable (only Blood Pet's {B} is
+/// available), so its target is chosen after the kicker decision with no
+/// preceding prompt. Blood Pet is the only legal target (Horobi's mana value is
+/// 5) and is sacrificed for the {B}; Horobi must still trigger.
+#[test]
+fn deferred_kicker_spell_targeting_sacrificed_blood_pet_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pet = blood_pet_and_horobi(&mut scenario);
+    let thirst = scenario
+        .add_spell_to_hand(P0, "Bloodchief's Thirst", false)
+        .from_oracle_text_with_keywords(&["Kicker"], BLOODCHIEFS_THIRST)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    let commit = runner.cast(thirst).commit();
+
+    assert_pet_sacrificed_and_both_stacked(&commit, pet);
+    let outcome = commit.resolve();
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 601.2c + CR 601.2g + CR 603.2: the automatic Aura-targeting route.
+/// An Aura that can only enchant a creature its caster controls (the engine does
+/// not yet type Kaya's Ghostform's "creature or planeswalker you control" clause)
+/// has Blood Pet as its sole legal target; payment sacrifices it.
+#[test]
+fn aura_targeting_sacrificed_blood_pet_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pet = blood_pet_and_horobi(&mut scenario);
+    let enchant: Keyword = "Enchant:creature you control"
+        .parse()
+        .expect("enchant keyword parses");
+    assert!(matches!(enchant, Keyword::Enchant(_)));
+    let aura = scenario
+        .add_spell_to_hand(P0, "Test Aura", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&[], CONTROLLED_CREATURE_AURA)
+        .with_keyword(enchant)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    let commit = runner.cast(aura).commit();
+
+    assert_pet_sacrificed_and_both_stacked(&commit, pet);
+    let outcome = commit.resolve();
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 702.140a + CR 601.2c + CR 601.2g + CR 603.2: the automatic mutate route.
+/// Casting for the mutate cost targets a non-Human creature its caster owns;
+/// Blood Pet is the sole host and supplies the {B} by being sacrificed.
+#[test]
+fn mutate_targeting_sacrificed_blood_pet_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pet = blood_pet_and_horobi(&mut scenario);
+    let mutator = scenario
+        .add_creature_to_hand_from_oracle(P0, "Insatiable Hemophage", 2, 2, MUTATOR)
+        .from_oracle_text_with_keywords(&["Mutate"], MUTATOR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 4,
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    let commit = runner.cast(mutator).commit();
+
+    assert_pet_sacrificed_and_both_stacked(&commit, pet);
+    let outcome = commit.resolve();
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
 }
