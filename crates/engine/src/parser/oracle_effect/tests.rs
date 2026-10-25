@@ -94347,6 +94347,41 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
     ));
 }
 
+/// CR 701.24c + CR 400.6: "Shuffle this artifact and your graveyard into their owner's library"
+/// recognizes "this artifact" via `nom_target::parse_self_reference` without requiring `~` normalization.
+#[test]
+fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle this artifact and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+}
+
 /// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's
 /// library" preserves the parsed possessor as `TargetFilter::Owner` in `ChangeZoneAll`.
 #[test]

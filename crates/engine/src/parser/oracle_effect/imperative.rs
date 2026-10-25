@@ -9603,9 +9603,9 @@ fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
 /// mass move preceded by the source's own zone change, not to a single-card
 /// `ChangeZone` with a graveyard-card target.
 fn parse_self_and_zones_to_library(lower: &str) -> Option<(Vec<Zone>, TargetFilter)> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ~ and ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(lower).ok()?;
+    let (rest, _) = nom_target::parse_self_reference(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" and ").parse(rest).ok()?;
     let (rest, owner) = parse_possessive_determiner(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
     let (rest, origins) = parse_shuffle_origin_zones(rest).ok()?;
