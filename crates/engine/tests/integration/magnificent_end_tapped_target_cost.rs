@@ -13,6 +13,27 @@ use engine::types::zones::Zone;
 
 const MAGNIFICENT_END: &str = "This spell costs {3} less to cast if it targets a tapped creature.\nMagnificent End deals 5 damage to target creature.";
 
+/// Build the one-creature scenario without attempting the cast.
+fn cast_at_no_attempt(target_tapped: bool, mana: usize) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Mark", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Verdict", false, MAGNIFICENT_END)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        })
+        .id();
+    for _ in 0..mana {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&victim).unwrap().tapped = target_tapped;
+    (runner, spell, victim)
+}
+
 /// Cast the spell at one creature (tapped or not) holding `mana` colorless
 /// mana; returns the runner, the spell, and the mana left in the pool.
 fn cast_at(target_tapped: bool, mana: usize) -> (GameRunner, ObjectId, Option<usize>) {
@@ -82,6 +103,15 @@ fn untapped_target_pays_full_cost() {
 
 #[test]
 fn untapped_target_is_not_castable_with_reduced_mana() {
+    let (probe, spell, _) = cast_at_no_attempt(false, 2);
+    assert!(!engine::game::casting::can_cast_object_now(
+        probe.state(),
+        P0,
+        spell
+    ));
+    assert!(!engine::ai_support::legal_actions(probe.state())
+        .iter()
+        .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)));
     let (runner, spell, _) = cast_at(false, 2);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
 }

@@ -21203,9 +21203,8 @@ fn target_dependent_reduction_makes_payable(
             return true;
         }
         assignments.into_iter().any(|assignment| {
-            let targets: Vec<TargetRef> = assignment.into_iter().flatten().collect();
             let mut chosen = resolved.clone();
-            if assign_targets_in_chain(flushed, &mut chosen, &targets).is_err() {
+            if assign_selected_slots_in_chain(flushed, &mut chosen, &assignment).is_err() {
                 return false;
             }
             let mut cost = prepared.mana_cost.clone();
@@ -21216,15 +21215,34 @@ fn target_dependent_reduction_makes_payable(
                 &chosen,
                 &mut cost,
             );
-            cost != prepared.mana_cost
-                && can_feasibly_pay_harmonize_mana_cost_with_probe(
+            // CR 601.2f: cost floors (Trinisphere) apply last, as payment does.
+            if !casting_costs::cost_has_x(&cost) {
+                apply_cost_floor_with_selected_targets(
+                    flushed,
+                    player,
+                    prepared.object_id,
+                    &chosen,
+                    &mut cost,
+                );
+            }
+            if cost == prepared.mana_cost {
+                return false;
+            }
+            // CR 601.2f: an accepted Defiler reduction stacks with the
+            // target-dependent one, so price the combined reduction too.
+            let payable = |cost: &ManaCost| {
+                can_feasibly_pay_harmonize_mana_cost_with_probe(
                     flushed,
                     player,
                     prepared.object_id,
                     prepared.casting_variant,
-                    &cost,
+                    cost,
                     None,
                 )
+            };
+            payable(&cost)
+                || casting_costs::defiler_reduced_cost(flushed, player, prepared.object_id, &cost)
+                    .is_some_and(|reduced| payable(&reduced))
         })
     })
 }
