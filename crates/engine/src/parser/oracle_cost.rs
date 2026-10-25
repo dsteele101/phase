@@ -994,8 +994,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                         };
                     }
                 }
-                // Flat "Pay N life" — no " for each " tail and no unparsed trailing text.
-                if after_n.trim().trim_end_matches('.').trim() == "life" {
+                // Flat "Pay N life" — no " for each " tail and no unparsed trailing text within sentence.
+                let trimmed = after_n.trim();
+                if trimmed == "life" || trimmed.starts_with("life.") {
                     return AbilityCost::PayLife {
                         amount: QuantityExpr::Fixed { value: n as i32 },
                     };
