@@ -6134,10 +6134,6 @@ fn rw_effect(
         // event-context ref there retains the batch prompt (CR 603.10a).
         Effect::Goad { target }
         | Effect::GoadAll { target }
-        // Scope-invariant by design (CR 722.3a): the mass form is a write to each
-        // population member, and the `Other` kind conflicts with every read, so
-        // both scopes are fail-closed alike.
-        | Effect::BecomePrepared { target, scope: _ }
         | Effect::ApplyPerpetual {
             target,
             modification: _,
@@ -6146,16 +6142,19 @@ fn rw_effect(
             flag_legacy_write_target(&mut p, target);
             (p, None)
         }
-        // §L12 (CR 701.60 suspect / CR 701.60a unsuspect): suspected is an
-        // IDEMPOTENT designation — suspecting an already-suspected creature is a
-        // no-op, and identical siblings suspect/unsuspect the SAME (or self)
+        // §L12 (CR 701.60 suspect / CR 701.60a unsuspect / CR 722.3 prepare / unprepare):
+        // suspected and prepared are IDEMPOTENT designations — applying an already-present
+        // designation is a no-op, and identical siblings designation-write the SAME (or self)
         // targets, so the write is order-invariant. Like `PairWith`/`Attach`, no
         // LIVE read observes it (the status is read only via source-referential
-        // `SourceMatchesFilter{Suspected}`), so NO observable RW kind — never the
+        // `SourceMatchesFilter`), so NO observable RW kind — never the
         // `Other` catch-all, which falsely conflicted with Frantic Scapegoat's
-        // "if ~ is suspected" source read. The write target still flags D5 batch
-        // parity (CR 603.10a).
-        Effect::Suspect { target, scope: _ } | Effect::Unsuspect { target, scope: _ } => {
+        // "if ~ is suspected" and Woodwork Prodigy's "if ~ isn't prepared" source reads.
+        // The write target still flags D5 batch parity (CR 603.10a).
+        Effect::Suspect { target, scope: _ }
+        | Effect::Unsuspect { target, scope: _ }
+        | Effect::BecomePrepared { target, scope: _ }
+        | Effect::BecomeUnprepared { target, scope: _ } => {
             let mut p = RwProfile::empty();
             flag_legacy_write_target(&mut p, target);
             (p, None)
@@ -6378,7 +6377,6 @@ fn rw_effect(
         | Effect::RevealFromHand { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::PhaseIn { .. }
-        | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
         | Effect::FreeCastFromZones { .. }
@@ -9423,20 +9421,29 @@ mod tests {
         );
     }
 
-    /// §L12 (CR 701.60 + CR 701.60a): suspect/unsuspect is an idempotent
-    /// designation with NO observable RW kind — never the `Other` catch-all that
-    /// falsely conflicted with Frantic Scapegoat's "if ~ is suspected" source read.
+    /// §L12 (CR 701.60 + CR 701.60a + CR 722.3a + CR 722.3b): suspect/unsuspect and
+    /// prepare/unprepare are idempotent designations with NO observable RW kind — never
+    /// the `Other` catch-all that falsely conflicted with Frantic Scapegoat's "if ~ is suspected"
+    /// or Woodwork Prodigy's "if ~ isn't prepared" source reads.
     #[test]
     fn l12_suspect_unsuspect_no_observable_write() {
         // "if ~ is suspected" — a source read (SourceMatchesFilter ⇒ reads_src).
         let is_suspected = || AbilityCondition::SourceMatchesFilter { filter: creature() };
-        // POS: Suspect (empty profile) × the source read ⇒ no write to feed ⇒ clean.
+        // POS: Suspect/Prepare (empty profile) × the source read ⇒ no write to feed ⇒ clean.
         for status in [
             Effect::Suspect {
                 target: creature(),
                 scope: crate::types::ability::EffectScope::Single,
             },
             Effect::Unsuspect {
+                target: creature(),
+                scope: crate::types::ability::EffectScope::Single,
+            },
+            Effect::BecomePrepared {
+                target: creature(),
+                scope: crate::types::ability::EffectScope::Single,
+            },
+            Effect::BecomeUnprepared {
                 target: creature(),
                 scope: crate::types::ability::EffectScope::Single,
             },
