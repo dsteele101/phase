@@ -386,14 +386,14 @@ function formatKeywordAbilityCost(cost: KeywordAbilityCost): string | null {
 
 /** Render a Sacrifice cost's count and target as keyword detail ("Sacrifice two lands"). */
 function formatSacrificeCost(cost: { count?: unknown; target?: unknown }): string | null {
-  const noun = formatSacrificeTarget(cost.target);
-  if (!noun) return null;
+  const targetKey = formatSacrificeTargetKey(cost.target);
+  if (!targetKey) return null;
   const count = typeof cost.count === "number" ? Math.max(cost.count, 1) : 1;
-  return count === 1 ? `Sacrifice a ${noun}` : `Sacrifice ${count} ${pluralize(noun)}`;
+  return i18n.t(`game:keywordDetail.sacrifice${targetKey}`, { count });
 }
 
-/** Noun for what a Sacrifice cost targets ("land", "creature", "permanent"). */
-function formatSacrificeTarget(target: unknown): string | null {
+/** Keyword target key for a Sacrifice cost ("Permanent", "Land", "Creature", "Artifact"). */
+function formatSacrificeTargetKey(target: unknown): "Permanent" | "Land" | "Creature" | "Artifact" | null {
   if (typeof target === "object" && target !== null) {
     const t = target as { type?: string; type_filters?: unknown[] };
     if (t.type === "Typed") {
@@ -404,19 +404,17 @@ function formatSacrificeTarget(target: unknown): string | null {
       // If there are type_filters but no renderable strings (e.g. Subtype objects),
       // the full restriction cannot be rendered — return null so the caller
       // falls back to null rather than silently dropping the detail.
-      if (filters.length !== relevantFilters.length) return null;
-      if (filters.length === 1) return filters[0].toLowerCase();
-      if (filters.length > 0) return filters.join(" ");
+      if (filters.length !== relevantFilters.length || filters.length !== 1) return null;
+      const f = filters[0];
+      if (f === "Land" || f === "Creature" || f === "Artifact" || f === "Permanent") {
+        return f;
+      }
       return null;
     }
-    if (t.type === "Any") return "permanent";
+    if (t.type === "Any") return "Permanent";
     return null;
   }
   return null;
-}
-
-function pluralize(noun: string): string {
-  return `${noun}s`;
 }
 
 /** CR 702.168a: DisguiseCost is untagged — a bare ManaCost, or `{ cost, reduction }`. */

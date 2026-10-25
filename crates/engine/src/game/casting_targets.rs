@@ -608,9 +608,12 @@ pub(crate) fn extract_entwine_additional_cost(
 ) -> Option<AbilityCost> {
     if indices.len() == modal.mode_count {
         let entwine_cost = modal.entwine_cost.as_deref()?;
-        split_declared_mana_addition_and_residual(None, None, entwine_cost.clone())
-            .ok()
-            .and_then(|split| split.residual)
+        match split_declared_mana_addition_and_residual(None, None, entwine_cost.clone()) {
+            Ok(split) => split.residual,
+            // CR 601.2h: If the entwine cost cannot be split (e.g. an unresolved choice cost),
+            // preserve the full cost as the additional cost rather than letting it become free.
+            Err(_) => Some(entwine_cost.clone()),
+        }
     } else {
         None
     }

@@ -9,8 +9,12 @@
 //! - Entwine spell discovering other casting costs (e.g., granted Casualty 2).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -19,7 +23,13 @@ const SOLAR_TIDE: &str = "Choose one —\n• Destroy all creatures with power 2
 const BETRAYAL_OF_FLESH: &str = "Choose one —\n• Destroy target creature.\n• Return target creature card from your graveyard to the battlefield.\nEntwine—Sacrifice three lands.";
 
 const ANHELO_STYLE_CASUALTY_STATIC: &str =
-    "Each instant and sorcery spell you cast has casualty 2.";
+    "The first instant or sorcery spell you cast each turn has casualty 2.";
+
+const BOLAS_ORACLE: &str = "You may look at the top card of your library any time.\n\
+You may play lands and cast spells from the top of your library. If you cast a spell this way, pay life equal to its mana value rather than pay its mana cost.\n\
+{T}, Sacrifice ten nonland permanents: Each opponent loses 10 life.";
+
+const WORT_ORACLE: &str = "Each red or green instant or sorcery spell you cast has conspire.";
 
 fn add_mana(runner: &mut GameRunner, mana: ManaType, count: usize) {
     let dummy = ObjectId(0);
@@ -80,6 +90,12 @@ fn solar_tide_entwine_pay_lands_both_modes() {
         Zone::Graveyard,
         "power >= 3 creature must be destroyed"
     );
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for must be priority"
+    );
 }
 
 /// Scenario 2: Casting a single mode requires no land payment and leaves lands on the battlefield.
@@ -127,6 +143,12 @@ fn solar_tide_single_mode_no_land_cost() {
         state.objects[&big_creature].zone,
         Zone::Battlefield,
         "power >= 3 creature must survive"
+    );
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for must be priority"
     );
 }
 
@@ -260,14 +282,23 @@ fn betrayal_of_flesh_entwine_target_selection() {
         state.objects[&reanimate_target].controller, P0,
         "reanimated creature must be controlled by P0"
     );
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for must be priority"
+    );
 }
 
 /// Scenario 5: Entwine cast discovers granted additional costs (Casualty 2), ensuring other costs are not skipped.
+/// CR 702.153a + CR 702.42a: Casualty is offered before Entwine; paying Casualty sacrifices fodder and
+/// paying Entwine sacrifices lands. The fodder's graveyard assertion is checked BEFORE resolution
+/// to discriminate sacrifice payment from Solar Tide's board wipe.
 #[test]
 fn solar_tide_entwine_discovers_granted_casualty() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // Static granting casualty 2 to instant and sorcery spells
+    // Anhelo's verbatim text granting casualty 2 to the first instant or sorcery cast each turn
     scenario.add_creature_from_oracle(P0, "Anhelo Proxy", 1, 3, ANHELO_STYLE_CASUALTY_STATIC);
     // Casualty fodder: creature with power >= 2
     let casualty_fodder = scenario.add_creature(P0, "Casualty Fodder", 2, 2).id();
@@ -282,32 +313,402 @@ fn solar_tide_entwine_discovers_granted_casualty() {
     add_mana(&mut runner, ManaType::White, 2);
     add_mana(&mut runner, ManaType::Colorless, 4);
 
-    // Cast entwined Solar Tide while Casualty 2 is granted:
-    // Casualty is an optional additional cost (accepted by default / accept_optional),
-    // and pay_cost_with supplies the fodder for Casualty and the lands for Entwine.
+    let card_id = runner.state().objects[&spell_id].card_id;
     runner
-        .cast(spell_id)
-        .modes(&[0, 1])
-        .accept_optional()
-        .pay_cost_with(&[casualty_fodder, land1, land2])
-        .resolve();
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("initiate cast of Solar Tide");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ModeChoice { .. }
+    ));
+    runner
+        .act(GameAction::SelectModes {
+            indices: vec![0, 1],
+        })
+        .expect("select both modes for entwine");
+
+    // CR 702.153a + CR 601.2b: Casualty is an optional additional cost in the queue; assert it is offered
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "casualty cost must be offered, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("elect to pay casualty");
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "waiting for casualty sacrifice fodder, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![casualty_fodder],
+        })
+        .expect("sacrifice casualty fodder");
+
+    // Deferred Entwine required additional cost is paid next
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "waiting for entwine lands, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![land1, land2],
+        })
+        .expect("sacrifice lands for entwine");
+
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).expect("pay mana");
+    }
+
+    // DISCRIMINATE PAYMENT FROM RESOLUTION:
+    // Assert BEFORE resolution that fodder was sacrificed for casualty (not destroyed by Solar Tide),
+    // lands were sacrificed for entwine, and Solar Tide is on the stack.
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&casualty_fodder].zone,
+        Zone::Graveyard,
+        "casualty fodder must be in graveyard before resolution (paid as cost, not destroyed)"
+    );
+    assert_eq!(
+        state.objects[&land1].zone,
+        Zone::Graveyard,
+        "land1 must be in graveyard before resolution"
+    );
+    assert_eq!(
+        state.objects[&land2].zone,
+        Zone::Graveyard,
+        "land2 must be in graveyard before resolution"
+    );
+    assert_eq!(
+        state.objects[&spell_id].zone,
+        Zone::Stack,
+        "Solar Tide must be on the stack"
+    );
+
+    // Verify copy trigger and resolution
+    let mut spell_copied = false;
+    for _ in 0..20 {
+        drain_order_triggers_with_identity(runner.state_mut());
+        if matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }) {
+            runner
+                .act(GameAction::KeepAllCopyTargets)
+                .expect("keep targets");
+            continue;
+        }
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        let events = runner.act(GameAction::PassPriority).expect("pass");
+        if events.events.iter().any(
+            |e| matches!(e, GameEvent::SpellCopied { original_id, .. } if original_id == &spell_id),
+        ) {
+            spell_copied = true;
+        }
+    }
+    assert!(
+        spell_copied,
+        "casualty trigger must copy Solar Tide (SpellCopied event)"
+    );
+
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for must be priority"
+    );
+}
+
+/// Scenario 6: Casting entwined Solar Tide from the top of the library with Bolas's Citadel
+/// pays 6 life (its mana value, CR 118.9 + CR 118.9d) and sacrifices 2 lands for Entwine.
+#[test]
+fn solar_tide_entwine_with_bolas_citadel_pays_life_and_lands() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _citadel = scenario
+        .add_creature(P0, "Bolas's Citadel", 0, 0)
+        .as_artifact()
+        .from_oracle_text(BOLAS_ORACLE)
+        .id();
+    let land1 = scenario.add_basic_land(P0, ManaColor::White);
+    let land2 = scenario.add_basic_land(P0, ManaColor::White);
+    let small_creature = scenario.add_creature(P0, "Small Creature", 1, 1).id();
+    let big_creature = scenario.add_creature(P1, "Big Creature", 4, 4).id();
+
+    let spell_id = scenario
+        .add_spell_to_library_top(P0, "Solar Tide", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 4,
+        })
+        .from_oracle_text(SOLAR_TIDE)
+        .id();
+    scenario.with_life(P0, 20);
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&spell_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("initiate cast from top of library via Citadel");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ModeChoice { .. }
+    ));
+    runner
+        .act(GameAction::SelectModes {
+            indices: vec![0, 1],
+        })
+        .expect("select both modes for entwine");
+
+    // Citadel alternative cost (pay 6 life) is paid first, followed by Entwine sacrifice
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "waiting for entwine lands sacrifice, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![land1, land2],
+        })
+        .expect("sacrifice two lands for entwine");
+
+    // CR 118.9d + CR 601.2h: Assert BEFORE resolution that 6 life was paid AND both lands were sacrificed
+    let state = runner.state();
+    assert_eq!(
+        state.players[0].life, 14,
+        "Casting Solar Tide (MV 6) via Citadel must pay 6 life (20 - 6 = 14)"
+    );
+    assert_eq!(
+        state.objects[&land1].zone,
+        Zone::Graveyard,
+        "land1 must be in graveyard before resolution"
+    );
+    assert_eq!(
+        state.objects[&land2].zone,
+        Zone::Graveyard,
+        "land2 must be in graveyard before resolution"
+    );
+    assert_eq!(
+        state.objects[&spell_id].zone,
+        Zone::Stack,
+        "Solar Tide must be on the stack"
+    );
 
     runner.advance_until_stack_empty();
 
     let state = runner.state();
     assert_eq!(
-        state.objects[&casualty_fodder].zone,
+        state.objects[&small_creature].zone,
         Zone::Graveyard,
-        "casualty fodder must be sacrificed"
+        "mode 0 must destroy small creature"
+    );
+    assert_eq!(
+        state.objects[&big_creature].zone,
+        Zone::Graveyard,
+        "mode 1 must destroy big creature"
+    );
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for must be priority"
+    );
+}
+
+/// Scenario 7: Granted Conspire (Wort / Rassilon) with entwined Solar Tide:
+/// Conspire optional cost is offered, player pays Conspire by tapping 2 creatures,
+/// player sacrifices 2 lands for Entwine, and Solar Tide is copied upon cast.
+#[test]
+fn solar_tide_entwine_with_granted_conspire_taps_and_sacrifices() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Wort grants Conspire to red or green instant/sorcery spells
+    scenario.add_creature_from_oracle(P0, "Wort, the Raidmother", 3, 3, WORT_ORACLE);
+    let tap1 = scenario
+        .add_creature(P0, "Red Goblin 1", 1, 1)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let tap2 = scenario
+        .add_creature(P0, "Red Goblin 2", 1, 1)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let land1 = scenario.add_basic_land(P0, ManaColor::White);
+    let land2 = scenario.add_basic_land(P0, ManaColor::White);
+
+    let spell_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Solar Tide", false, SOLAR_TIDE)
+        .with_color(vec![ManaColor::Red]) // Red so it shares color with goblins and matches Wort's static
+        .id();
+    let mut runner = scenario.build();
+
+    add_mana(&mut runner, ManaType::White, 2);
+    add_mana(&mut runner, ManaType::Colorless, 4);
+
+    let card_id = runner.state().objects[&spell_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("initiate cast");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ModeChoice { .. }
+    ));
+    runner
+        .act(GameAction::SelectModes {
+            indices: vec![0, 1],
+        })
+        .expect("select both modes");
+
+    // Conspire is an optional additional cost in the queue; assert it is offered
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "conspire cost must be offered, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("elect to pay conspire");
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            }
+        ),
+        "waiting for creatures to tap for conspire, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![tap1, tap2],
+        })
+        .expect("tap creatures for conspire");
+
+    // Next, the deferred Entwine required cost is paid
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "waiting for entwine lands, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![land1, land2],
+        })
+        .expect("sacrifice lands for entwine");
+
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).expect("pay mana");
+    }
+
+    // Assert BEFORE resolution: creatures tapped, lands sacrificed, spell on stack
+    let state = runner.state();
+    assert!(
+        state.objects[&tap1].tapped,
+        "conspire creature 1 must be tapped"
+    );
+    assert!(
+        state.objects[&tap2].tapped,
+        "conspire creature 2 must be tapped"
     );
     assert_eq!(
         state.objects[&land1].zone,
         Zone::Graveyard,
-        "land1 must be sacrificed for entwine"
+        "land1 must be sacrificed"
     );
     assert_eq!(
         state.objects[&land2].zone,
         Zone::Graveyard,
-        "land2 must be sacrificed for entwine"
+        "land2 must be sacrificed"
+    );
+    assert_eq!(
+        state.objects[&spell_id].zone,
+        Zone::Stack,
+        "Solar Tide must be on stack"
+    );
+
+    // Verify copy trigger and resolution
+    let mut spell_copied = false;
+    for _ in 0..20 {
+        drain_order_triggers_with_identity(runner.state_mut());
+        if matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }) {
+            runner
+                .act(GameAction::KeepAllCopyTargets)
+                .expect("keep targets");
+            continue;
+        }
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        let events = runner.act(GameAction::PassPriority).expect("pass");
+        if events.events.iter().any(
+            |e| matches!(e, GameEvent::SpellCopied { original_id, .. } if original_id == &spell_id),
+        ) {
+            spell_copied = true;
+        }
+    }
+    assert!(
+        spell_copied,
+        "conspire must copy Solar Tide (SpellCopied event)"
+    );
+
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "stack must be empty");
+    assert!(state.pending_cast.is_none(), "pending cast must be cleared");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for must be priority"
     );
 }

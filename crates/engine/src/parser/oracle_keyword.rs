@@ -1070,10 +1070,18 @@ fn parse_echo_cost(cost_text: &str) -> Option<crate::types::keywords::EchoCost> 
     }
 }
 
+fn ability_cost_contains_one_of(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => true,
+        AbilityCost::Composite { costs, .. } => costs.iter().any(ability_cost_contains_one_of),
+        _ => false,
+    }
+}
+
 /// CR 702.42a: Parse an Entwine em-dash cost ("entwine—sacrifice two lands" or
 /// "entwine {2}{G}"). Mirrors `parse_echo_cost`: reminder-strip, delegate to
 /// `parse_oracle_cost`, wrap a single `Mana` cost in `Mana`, anything
-/// composite/non-mana in `NonMana`, and reject `Unimplemented`.
+/// composite/non-mana in `NonMana`, and reject `Unimplemented` and unsupported `OneOf` choices.
 fn parse_entwine_cost(cost_text: &str) -> Option<EntwineCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
@@ -1088,7 +1096,9 @@ fn parse_entwine_cost(cost_text: &str) -> Option<EntwineCost> {
     match cost {
         AbilityCost::Mana { cost: mana_cost } => Some(EntwineCost::Mana(mana_cost)),
         AbilityCost::Unimplemented { .. } => None,
-        other if ability_cost_is_fully_typed(&other) => Some(EntwineCost::NonMana(other)),
+        other if ability_cost_is_fully_typed(&other) && !ability_cost_contains_one_of(&other) => {
+            Some(EntwineCost::NonMana(other))
+        }
         _ => None,
     }
 }
@@ -3337,6 +3347,14 @@ mod tests {
         assert!(
             parse_entwine_cost("Pay 2 life, frobnicate a permanent").is_none(),
             "composite entwine cost with unimplemented leg must return None"
+        );
+    }
+
+    #[test]
+    fn parse_entwine_cost_rejects_choice_cost() {
+        assert!(
+            parse_entwine_cost("Pay 2 life or sacrifice a creature").is_none(),
+            "entwine cost with OneOf choice must return None"
         );
     }
 
