@@ -95,6 +95,7 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
 
     // The as-enters replacement must pause on the fronted opponent choice.
     let WaitingFor::NamedChoice {
+        player: choice_player,
         choice_type,
         options,
         ..
@@ -105,6 +106,7 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
             runner.waiting_for_kind()
         );
     };
+    assert_eq!(choice_player, P0, "prompt actor must be controller P0");
     assert!(
         matches!(
             choice_type,
@@ -117,6 +119,11 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
         options,
         vec![P1.0.to_string()],
         "only P1 is a legal opponent"
+    );
+    assert_eq!(
+        runner.state().objects[&canker].zone,
+        Zone::Stack,
+        "CR 614.12a: permanent must still be on the stack while choice is pending"
     );
 
     // Answer the choice and let entry complete.
