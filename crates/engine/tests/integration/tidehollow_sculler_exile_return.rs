@@ -641,16 +641,52 @@ fn ugin_the_ineffable_return_ignores_card_exiled_again_as_new_object() {
     engine::game::zones::move_to_zone(runner.state_mut(), card, Zone::Exile, &mut events);
     assert_eq!(zone_of(&runner, card), Zone::Exile);
 
-    let outcome = runner.cast(murder).target_object(spirit).resolve();
-    runner.advance_until_stack_empty();
+    // Drive the stack by hand so every event is observed, including those from the
+    // delayed return that fires after Murder resolves.
+    drop(runner.cast(murder).target_object(spirit).commit());
+    let mut events = Vec::new();
+    for _ in 0..12 {
+        // A token ceases to exist after leaving the battlefield (CR 111.7).
+        let spirit_on_battlefield = runner
+            .state()
+            .objects
+            .get(&spirit)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        if !spirit_on_battlefield && runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority while Murder and the delayed return resolve")
+                .events,
+        );
+    }
 
+    // Reach guards: the Spirit left, and its delayed return resolved its
+    // ChangeZoneAll (so the empty-handed outcome is not a never-fired trigger).
     assert!(
-        outcome.events().iter().any(|e| matches!(
+        events.iter().any(|e| matches!(
             e,
             GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. }
                 if *object_id == spirit
         )),
         "the Spirit left the battlefield, so its delayed trigger was offered the event"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::ChangeZoneAll,
+                ..
+            }
+        )),
+        "the Spirit's delayed return must resolve its ChangeZoneAll"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution completes back to priority"
     );
     assert_eq!(
         zone_of(&runner, card),
@@ -701,7 +737,7 @@ const CHAMPIONS_OF_THE_SHOAL: &str = "As an additional cost to cast this spell, 
 Whenever this creature enters or becomes tapped, tap up to one target creature and put a stun counter on it.\n\
 When this creature leaves the battlefield, return the exiled card to its owner's hand.";
 
-/// CR 118.8 + CR 607.2a + CR 603.3: the card exiled as part of Champions of the Shoal's
+/// CR 118.8 + CR 607.2q + CR 603.3: the card exiled as part of Champions of the Shoal's
 /// additional casting cost is linked to it and returns when it leaves the battlefield.
 #[test]
 fn champions_of_the_shoal_returns_cost_exiled_merfolk_when_it_leaves() {
