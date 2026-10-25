@@ -263,12 +263,10 @@ pub(crate) fn change_zone_all_player_scope(
         | TargetFilter::DeclaredPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         }
-        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            target_filter,
-        )
-        .or(Some(ability.controller)),
+        TargetFilter::ScopedPlayer => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+                .or(Some(ability.controller))
+        }
         _ => None,
     }
 }
