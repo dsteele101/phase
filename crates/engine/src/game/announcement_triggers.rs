@@ -16,7 +16,7 @@
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AnnouncementEventScope, GameState, InFlightSpellTriggerCarrier, PendingCastOwner,
+    AnnouncementEventScope, GameState, InFlightSpellTriggerCarrier, PendingCast, PendingCastOwner,
     PendingCostMoveResume, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -214,6 +214,21 @@ pub(crate) fn take_inline_trigger_span(
     triggers::resolve_tap_mana_triggers_inline(state, events, start);
     stage_announcement_trigger_events(state, events, start);
     start..owned_from.min(events.len())
+}
+
+/// CR 601.2c + CR 603.2: stage a spell's announcement triggers while
+/// it owns `state.pending_cast` (the spell is still in flight and has not yet
+/// parked in an external payment root or waiting prompt), so the staging
+/// authority sees the spell before payment can move its targets.
+pub(crate) fn stage_with_pending_owner(
+    state: &mut GameState,
+    pending: &PendingCast,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let prior_pending = state.pending_cast.replace(Box::new(pending.clone()));
+    stage_announcement_trigger_events(state, events, event_start);
+    state.pending_cast = prior_pending;
 }
 
 /// Stages the not-yet-collected events of `events[event_start..]` into the

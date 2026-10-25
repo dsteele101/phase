@@ -34,7 +34,7 @@ use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
-use super::announcement_triggers::stage_announcement_trigger_events;
+use super::announcement_triggers::stage_with_pending_owner;
 use super::casting::emit_targeting_events;
 use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
@@ -1976,20 +1976,6 @@ fn finish_unprompted_spell_declaration(
     let ability = (*pending.ability).clone();
     let cost = pending.cost.clone();
     finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
-}
-
-/// CR 601.2c + CR 603.2: stage a deferred spell's announcement triggers while
-/// it owns `state.pending_cast` (the deferred-target path took it earlier), so
-/// the staging authority sees the spell before payment can move its targets.
-fn stage_with_pending_owner(
-    state: &mut GameState,
-    pending: &PendingCast,
-    events: &[GameEvent],
-    event_start: usize,
-) {
-    let prior_pending = state.pending_cast.replace(Box::new(pending.clone()));
-    stage_announcement_trigger_events(state, events, event_start);
-    state.pending_cast = prior_pending;
 }
 
 pub(crate) fn begin_deferred_target_selection(

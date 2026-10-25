@@ -13,8 +13,9 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::events::GameEvent;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -243,17 +244,35 @@ fn disfigure_targeting_sacrificed_blood_pet_mana_source_triggers_horobi() {
             true,
             "Target creature gets -2/-2 until end of turn.",
         )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
         .id();
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(disfigure).target_object(pet).resolve();
+    let commit = runner.cast(disfigure).target_object(pet).commit();
 
-    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(
+        commit.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == pet
+        )),
+        "Blood Pet must be sacrificed as a mana source during payment"
+    );
     assert_eq!(
-        stack_pushes(outcome.events()),
+        stack_pushes(commit.events()),
         2,
         "both Disfigure and Horobi's trigger must reach the stack"
     );
+
+    let outcome = commit.resolve();
+
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 700.2 + CR 601.2c + CR 603.2: the modal spell route. Targets for the
@@ -274,15 +293,86 @@ fn modal_spell_targeting_sacrificed_blood_pet_mana_source_triggers_horobi() {
             true,
             "Choose one —\n• Target creature gets -2/-2 until end of turn.\n• Target player loses 2 life.",
         )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
         .id();
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(charm).modes(&[0]).target_object(pet).resolve();
+    let commit = runner.cast(charm).modes(&[0]).target_object(pet).commit();
 
-    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(
+        commit.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == pet
+        )),
+        "Blood Pet must be sacrificed as a mana source during payment"
+    );
     assert_eq!(
-        stack_pushes(outcome.events()),
+        stack_pushes(commit.events()),
         2,
         "both the modal spell and Horobi's trigger must reach the stack"
     );
+
+    let outcome = commit.resolve();
+
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 601.2c + CR 601.2g + CR 603.2: the initial automatic spell route. Cut Down
+/// targets a creature with total power and toughness 5 or less. Blood Pet (1/1)
+/// is the sole eligible target (Horobi is 4/4, total 8 > 5), so target selection
+/// is unprompted and automatic. Automatic payment sacrifices Blood Pet for {B}.
+/// Pre-payment trigger collection must ensure Horobi triggers despite Blood Pet
+/// being in the graveyard by the time payment completes.
+#[test]
+fn cut_down_targeting_sacrificed_blood_pet_mana_source_triggers_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Horobi, Death's Wail", 4, 4, HOROBI);
+    let pet = scenario
+        .add_creature_from_oracle(P0, "Blood Pet", 1, 1, "Sacrifice this creature: Add {B}.")
+        .id();
+    let cut_down = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Cut Down",
+            true,
+            "Destroy target creature with total power and toughness 5 or less.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+
+    // No target_object specified: auto-selects Blood Pet as the sole legal target.
+    let commit = runner.cast(cut_down).commit();
+
+    assert!(
+        commit.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == pet
+        )),
+        "Blood Pet must be sacrificed as a mana source during payment"
+    );
+    assert_eq!(
+        stack_pushes(commit.events()),
+        2,
+        "both Cut Down and Horobi's trigger must reach the stack"
+    );
+
+    let outcome = commit.resolve();
+
+    assert_eq!(outcome.zone_of(pet), Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
