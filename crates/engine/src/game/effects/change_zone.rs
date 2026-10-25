@@ -257,17 +257,18 @@ pub(crate) fn change_zone_all_player_scope(
             TargetRef::Player(player) => Some(*player),
             _ => None,
         }),
-        TargetFilter::ParentTargetController => crate::game::targeting::resolve_effect_player_ref(
+        // CR 608.2c: "that player" names the player an earlier instruction of this ability declared.
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::DeclaredPlayer { .. } => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        }
+        TargetFilter::ScopedPlayer => crate::game::targeting::resolve_effect_player_ref(
             state,
             ability,
-            &TargetFilter::ParentTargetController,
-        ),
-        TargetFilter::ParentTargetOwner => crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            &TargetFilter::ParentTargetOwner,
-        ),
-        TargetFilter::ScopedPlayer => ability.scoped_player.or(Some(ability.controller)),
+            target_filter,
+        )
+        .or(Some(ability.controller)),
         _ => None,
     }
 }
