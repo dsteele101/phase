@@ -1892,6 +1892,7 @@ mod pr65_growing_cascade_win;
 mod priest_of_the_crossing_died_under_control;
 mod prospective_fetchland_mana;
 mod quick_draw_target_opponent;
+mod rakdos_roustabout_blocked_ping;
 mod rankle_and_torbran;
 mod razorkin_needlehead_opponent_draw_damage_2869;
 mod reflexive_body_token_referent;
