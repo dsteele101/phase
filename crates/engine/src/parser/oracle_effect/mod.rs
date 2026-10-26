@@ -46881,7 +46881,6 @@ fn parse_effect_chain_ir_body(
                 &mut clause.effect,
             )
             && !bind_self_ref_damage_subject(&mut clause.effect)
-            && !bind_anaphoric_damage_subject_keep_recipient(&mut clause.effect)
         {
             replace_target_with_parent(&mut clause.effect);
         }
