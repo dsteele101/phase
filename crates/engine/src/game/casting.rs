@@ -21218,7 +21218,12 @@ const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 4096;
 /// [`recompute_pending_mana_total_using`] — the authority payment uses — so
 /// target-dependent reductions, an accepted Defiler reduction, and both cost
 /// floors (Trinisphere) apply in CR 601.2f order. An {X} spell is probed at
-/// X = 0, the cheapest announcement (CR 107.3a).
+/// X = 0, the cheapest announcement (CR 107.3a). Both reductions are priced
+/// together per assignment, so a spell payable only with both is castable.
+///
+/// Only targets of the spell ability are enumerated. An Aura (CR 303.4a) or
+/// a mutating spell (CR 702.140a) targets through its keyword, not its spell
+/// ability, so its target-dependent reductions are not priced here.
 ///
 /// The scan runs only when a target-dependent reduction can apply to the
 /// spell at all. The target-independent modifiers and floors are collected
