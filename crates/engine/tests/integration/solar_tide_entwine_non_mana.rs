@@ -29,6 +29,8 @@ const BOLAS_ORACLE: &str = "You may look at the top card of your library any tim
 You may play lands and cast spells from the top of your library. If you cast a spell this way, pay life equal to its mana value rather than pay its mana cost.\n\
 {T}, Sacrifice ten nonland permanents: Each opponent loses 10 life.";
 
+const ANHELO_ORACLE: &str = "Deathtouch\nThe first instant or sorcery spell you cast each turn has casualty 2. (As you cast that spell, you may sacrifice a creature with power 2 or greater. When you do, copy the spell and you may choose new targets for the copy.)";
+
 const WORT_ORACLE: &str = "Each red or green instant or sorcery spell you cast has conspire.";
 
 fn add_mana(runner: &mut GameRunner, mana: ManaType, count: usize) {
@@ -711,4 +713,163 @@ fn solar_tide_entwine_with_granted_conspire_taps_and_sacrifices() {
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "waiting_for must be priority"
     );
+}
+
+const TERROR_OF_THE_PEAKS: &str = "Flying\nSpells your opponents cast that target this creature cost an additional 3 life to cast.";
+
+/// CR 118.9d: Bolas's Citadel's life payment is the alternative cost, and Terror of
+/// the Peaks' imposed 3 life applies to it even though the bolt has no other
+/// additional cost. Life is asserted BEFORE resolution (bolt's damage is not to the caster).
+#[test]
+fn citadel_alternative_cost_keeps_imposed_terror_tax() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Bolas's Citadel", 0, 0)
+        .as_artifact()
+        .from_oracle_text(BOLAS_ORACLE);
+    let terror = scenario
+        .add_creature_from_oracle(P1, "Terror of the Peaks", 5, 4, TERROR_OF_THE_PEAKS)
+        .id();
+    let bolt = scenario
+        .add_spell_to_library_top(P0, "Lightning Bolt", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text("Lightning Bolt deals 3 damage to any target.")
+        .id();
+    scenario.with_life(P0, 20);
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("initiate cast from library top");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![engine::types::ability::TargetRef::Object(terror)],
+            })
+            .expect("target Terror of the Peaks");
+    }
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&bolt].zone,
+        Zone::Stack,
+        "bolt must be on the stack, found {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.players[0].life, 16,
+        "Citadel pays MV 1 plus Terror's 3 imposed life (20 - 4 = 16)"
+    );
+}
+
+/// CR 702.78a + CR 702.153a: when casualty (Anhelo) was announced before targets,
+/// granted Conspire (Wort) is still offered afterwards and its payment taps the creatures.
+#[test]
+fn targeted_spell_offers_conspire_after_casualty_queue() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Wort, the Raidmother", 3, 3, WORT_ORACLE)
+        .id();
+    scenario
+        .add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO_ORACLE)
+        .id();
+    scenario.add_creature(P0, "Casualty Fodder", 2, 2);
+    let tap1 = scenario
+        .add_creature(P0, "Red Goblin 1", 1, 1)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let tap2 = scenario
+        .add_creature(P0, "Red Goblin 2", 1, 1)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let victim = scenario.add_creature(P1, "Victim", 2, 2).id();
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Red, 1);
+
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("initiate cast");
+
+    let mut declined_casualty = false;
+    let mut accepted_conspire = false;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } if !declined_casualty => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .expect("decline casualty");
+                declined_casualty = true;
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("accept conspire");
+                accepted_conspire = true;
+            }
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![tap1, tap2],
+                    })
+                    .expect("tap creatures for conspire");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![engine::types::ability::TargetRef::Object(victim)],
+                    })
+                    .expect("target victim");
+            }
+            _ => break,
+        }
+    }
+
+    assert!(declined_casualty, "casualty must be offered first");
+    assert!(
+        accepted_conspire,
+        "conspire must still be offered, found {:?}",
+        runner.state().waiting_for
+    );
+    let state = runner.state();
+    assert!(
+        state.objects[&tap1].tapped && state.objects[&tap2].tapped,
+        "conspire creatures must be tapped before resolution"
+    );
+    assert_eq!(state.objects[&bolt].zone, Zone::Stack);
 }

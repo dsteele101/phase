@@ -8759,19 +8759,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // independently functioning instances are announced through a queue. This
     // preserves one payment record per Casualty/Offspring/Squad/Replicate/
     // Bargain/Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
-    let mut additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
-    let conspire_additional = effective_conspire_additional_cost(state, player, object_id);
-    if let Some(conspire) = conspire_additional {
-        if !additional_cost_queue
-            .iter()
-            .any(|instance| instance.cost == conspire)
-        {
-            additional_cost_queue.push(AdditionalCostInstance::new(
-                AdditionalCostOrigin::Other,
-                conspire,
-            ));
-        }
-    }
+    let additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
     let obj_additional_matches_instance = obj_additional.as_ref().is_some_and(|cost| {
         additional_cost_queue
             .iter()
@@ -8904,7 +8892,12 @@ fn check_additional_cost_or_pay_with_kept_cost(
             // the alternative cost. Hand the additional-cost authority the
             // queued keyword costs and the required cost.
             pending.additional_cost_queue = additional_cost_queue;
-            pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
+            // CR 118.9d: imposed costs (Terror of the Peaks) apply to the alternative
+            // cost even when no other additional cost exists.
+            pending.additional_cost_flow = additional
+                .clone()
+                .or(deferred_required.clone())
+                .or(imposed_required_cost.clone().map(AdditionalCost::Required));
             pending.additional_cost_source = additional_cost_source;
             if additional.is_some() {
                 pending.deferred_required_additional_cost =
@@ -9003,7 +8996,12 @@ fn check_additional_cost_or_pay_with_kept_cost(
             crate::types::game_state::SpellAlternativeCostElection::Accepted;
         pending.ability.context.alternative_mana_cost_paid = true;
         pending.additional_cost_queue = additional_cost_queue;
-        pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
+        // CR 118.9d: imposed costs (Terror of the Peaks) apply to the alternative
+        // cost even when no other additional cost exists.
+        pending.additional_cost_flow = additional
+            .clone()
+            .or(deferred_required.clone())
+            .or(imposed_required_cost.clone().map(AdditionalCost::Required));
         pending.additional_cost_source = additional_cost_source;
         if additional.is_some() {
             pending.deferred_required_additional_cost =
@@ -11498,6 +11496,11 @@ pub(super) fn build_effective_additional_cost_queue(
     additional_cost_queue.extend(effective_gift_additional_cost_instances(
         state, player, object_id,
     ));
+    // CR 702.78a: Conspire (printed or granted) is an optional additional cost.
+    additional_cost_queue.extend(
+        effective_conspire_additional_cost(state, player, object_id)
+            .map(|cost| AdditionalCostInstance::new(AdditionalCostOrigin::Other, cost)),
+    );
     additional_cost_queue
 }
 
