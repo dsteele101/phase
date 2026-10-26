@@ -703,7 +703,7 @@ fn park_turn_face_up_cost_move(
     paused_at_index: usize,
     remaining_cost: Option<Box<AbilityCost>>,
     choice_player: PlayerId,
-    events: &[GameEvent],
+    events: &mut Vec<GameEvent>,
     events_before: usize,
 ) {
     state.pending_cost_move_resume = Some(
