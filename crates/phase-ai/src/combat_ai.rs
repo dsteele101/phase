@@ -766,7 +766,14 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                         by_toughness.sort_by_key(|bid| {
                             std::cmp::Reverse(state.objects.get(bid).and_then(|o| o.toughness))
                         });
-                        (required.max(1)..=by_toughness.len().min(max))
+                        let sizes = required.max(1)..=by_toughness.len().min(max);
+                        // A token-heavy defender makes the sweep quadratic; past the
+                        // cap, credit no connecting damage so the attacker is never
+                        // counted toward a planeswalker kill (conservative no-redirect).
+                        if sizes.clone().count() > PLANESWALKER_BLOCK_GROUP_SWEEP_CAP {
+                            return (id, 0);
+                        }
+                        sizes
                             .map(|n| {
                                 engine::game::combat_damage::combat_damage_to_defender(
                                     state,
@@ -826,6 +833,12 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     emit_attack_trace(player, &candidates, &assignments);
     assignments
 }
+
+/// Maximum blocker-group sizes evaluated per attacker when estimating connecting
+/// damage for planeswalker redirection. Bounds the per-attacker sweep so a wide
+/// defender board cannot stall the attack decision; beyond it the attacker is
+/// treated as dealing no damage (no redirect).
+const PLANESWALKER_BLOCK_GROUP_SWEEP_CAP: usize = 8;
 
 /// Weight of a loyalty ability for threat evaluation.
 ///
