@@ -335,6 +335,54 @@ describe("LLM-driven AI seats", () => {
     controller.dispose();
   });
 
+  it("keeps unbound seats on heuristic AI when default opponent is not selected, even if another seat uses LLM", async () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi",
+      model: "gpt-5",
+      apiKey: "my-key",
+      enabled: true,
+    });
+    // Explicitly bind seat 0, but seat 1 is unbound and default opponent is null
+    useLlmStore.getState().bindSeat(0, id);
+    expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+    expect(useLlmStore.getState().seatBindings[1]).toBeUndefined();
+
+    // Priority is on player 2 (seat 1)
+    storeState.gameState = buildGameState({
+      waiting_for: { type: "Priority", data: { player: 2 } } as WaitingFor,
+      priority_player: 2,
+      stack: [],
+    });
+    storeState.waitingFor = storeState.gameState.waiting_for;
+
+    const heuristic: AiActionProposal = {
+      token: "heuristic",
+      semanticOwner: 2,
+      actor: 2,
+      action: PASS,
+    };
+    const buildLlmDecisionRequest = vi.fn();
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [
+        { playerId: 1, difficulty: "Medium", llmSeatIndex: 0 },
+        { playerId: 2, difficulty: "Medium", llmSeatIndex: 1 },
+      ],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
+    controller.dispose();
+  });
+
   it("routes a persisted default through request, transport, binding and dispatch for an unbound seat", async () => {
     const id = useLlmStore.getState().addProfile({
       provider: "OpenAi", model: "gpt-5", apiKey: "default-key", enabled: true,
