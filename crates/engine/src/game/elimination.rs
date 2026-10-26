@@ -56,8 +56,16 @@ fn abandon_pending_casts(
         if !abandoned {
             continue;
         }
+        let object_id = pending.object_id;
         super::announcement_triggers::publish_abandoned_announcement(state, owner);
         state.retire_pending_cast_owner(owner, departing_player);
+        if state
+            .spell_cast_reversal
+            .as_ref()
+            .is_some_and(|root| root.object_id == object_id)
+        {
+            state.spell_cast_reversal = None;
+        }
     }
 }
 
@@ -427,6 +435,8 @@ pub fn eliminate_players_simultaneously(
                 crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
             );
         }
+        // CR 104.1: the game is over; no owner arrangement is owed to a finished game.
+        state.pending_mass_library_order_choice = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
@@ -445,6 +455,32 @@ pub fn eliminate_players_simultaneously(
         {
             tracing::error!(%refusal, "per-player zone choice was not reconciled after a departure");
         }
+
+        // CR 800.4a + CR 101.4 + CR 401.4: an open owner library arrangement is
+        // reconciled with the players and objects still in the game — a departed
+        // owner's cards left with them, and a member exiled with its departed
+        // controller is gone — so the next owner chooses, or the arrangement
+        // completes, moving what is collected or nothing, and its resolution
+        // continues (CR 608.2c). When the arranger an instruction named has left
+        // with cards still to arrange, the object's controller, or the next
+        // player in turn order after them, elects another player to arrange them
+        // (CR 800.4g + CR 800.4h). Runs after every departure sweep and before the
+        // generic dead-actor repoint, which would otherwise strand the
+        // resolution behind unrelated priority (CR 117.2e).
+        let owner_arrangement =
+            match super::engine_resolution_choices::settle_owner_library_arrangement_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "owner library arrangement was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "owner library arrangement was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::OwnerArrangementDepartureSettlement::NotSettled
+                }
+            };
 
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
@@ -553,19 +589,29 @@ pub fn eliminate_players_simultaneously(
             }
         }
 
-        // CR 800.4a + CR 608.2m + CR 608.2n: a paused spell the departure
-        // sweeps took off the stack while its controller left. When nothing of
-        // its resolution is still live — the departed player's question was its
-        // last instruction — its carrier is retired here as `Eliminated`, and
-        // the spell is never reported resolved. When a surviving player still
-        // has one of its instructions to answer, the carrier stays; once those
-        // instructions are done, the departed-spell path reports it resolved
-        // exactly once. (A spell that reverted to a surviving owner stays on the
-        // stack, and its final part puts it into that owner's graveyard.) A
-        // spell whose final part already ran and parked was reported resolved
-        // at that moment; its carrier is retired with its departed controller.
+        // CR 800.4a + CR 608.2m + CR 608.2n: a paused spell the departure sweeps
+        // took off the stack while its controller left. When nothing of its
+        // resolution is still live because the departed player's unanswered
+        // question was its last instruction, its carrier is retired here as
+        // `Eliminated`, and the spell is never reported resolved. An owner
+        // arrangement the departure itself settled is not that case: the departure
+        // answered the question and the settlement ran the remaining instructions,
+        // so the carrier, which still owes its final part, is left to the action
+        // boundary's final-part convergence, which reports the spell resolved once
+        // and then checks state-based actions before any player acts (CR 608.2m +
+        // CR 608.2n + CR 704.3). When a surviving player still has one of its
+        // instructions to answer, the carrier stays; once those instructions are
+        // done, the departed-spell path reports it resolved exactly once. (A spell
+        // that reverted to a surviving owner stays on the stack, and its final part
+        // puts it into that owner's graveyard.) A spell whose final part already
+        // ran and parked was reported resolved at that moment; its carrier is
+        // retired with its departed controller.
         if let Some((spell, controller)) = paused_spell {
             if leaving_set.contains(&controller)
+                && matches!(
+                    owner_arrangement,
+                    super::engine_resolution_choices::OwnerArrangementDepartureSettlement::NotSettled
+                )
                 && state
                     .resolving_stack_entry
                     .as_ref()
@@ -889,6 +935,14 @@ fn end_control_effects_for_leaving_players(
                 .any(|m| matches!(m, ContinuousModification::ChangeController)))
     });
 
+    // CR 611.2c + CR 614.1a: a resolved token-controller redirect ("each token
+    // that would be created under an opponent's control this turn is created
+    // under your control instead" — Crafty Cutpurse) gives nobody control of an
+    // existing object; it modifies future creation events, so it is not ended
+    // here and lasts its turn. A token it would create under a player who has
+    // left the game is not created (CR 800.4b), which the token materialization
+    // authority enforces (`effects::token::token_creator_has_left_game`).
+
     // CR 613.1b: recompute layers so control reverts to base_controller/owner for
     // every object whose control TCE was pruned. evaluate_layers is pure (no events).
     super::layers::mark_layers_full(state);
@@ -968,7 +1022,9 @@ fn abandon_pending_zone_change_member_for_player_left(
             .logical_zone_change_group
             .record_abandoned_by_player_left(identity)
             .expect("pending change-zone iteration owns a coherent logical group");
-        pending.remaining.retain(|id| *id != identity.object_id);
+        pending
+            .remaining
+            .retain(|member| member.object_id != identity.object_id);
         if pending
             .paused_current
             .as_ref()
@@ -2152,24 +2208,29 @@ mod tests {
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
-            remaining,
+            remaining: remaining
+                .into_iter()
+                .map(
+                    |object_id| crate::types::game_state::ChangeZoneMemberEntry {
+                        object_id,
+                        enter_with_counters: Vec::new(),
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                    },
+                )
+                .collect(),
             source_id,
             controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             enter_transformed: false,
-            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_under_player: None,
-            enters_attacking: false,
-            enter_with_counters: Vec::new(),
-            conditional_enter_with_counters: Vec::new(),
             duration: None,
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
-            enters_modified_if: None,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         }
@@ -2449,7 +2510,14 @@ mod tests {
             .and_then(|frame| frame.pending.as_ref())
             .expect("living controller keeps the change-zone family");
         assert!(iteration.paused_current.is_none());
-        assert_eq!(iteration.remaining, vec![surviving]);
+        assert_eq!(
+            iteration
+                .remaining
+                .iter()
+                .map(|member| member.object_id)
+                .collect::<Vec<_>>(),
+            vec![surviving]
+        );
         assert!(state.pending_replacement.is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
@@ -2639,10 +2707,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context,
                 committed_choice: None,
-            }),
+            })),
             proposition_truth: Some(true),
         };
         state.park_ability_continuation(pending_source_bound_continuation(
@@ -4835,6 +4903,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
         entry
     }

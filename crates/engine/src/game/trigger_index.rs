@@ -180,7 +180,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::Evolved => return (keys, true),
         // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
         TriggerMode::GotchaSaid => return (keys, true),
-        TriggerMode::ChangesController => push(TriggerEventKey::ChangesController),
+        TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
         // --- Damage family ---
@@ -926,9 +926,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::LoseTheGame
         | EffectKind::WinTheGame
         | EffectKind::RollDie
-        | EffectKind::FlipCoin
         | EffectKind::FlipCoins
-        | EffectKind::FlipCoinUntilLose
         | EffectKind::RingTemptsYou
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
@@ -992,6 +990,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SkipNextStep
         | EffectKind::AdditionalPhase
         | EffectKind::Double
+        | EffectKind::ModifyAnnouncedX
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
