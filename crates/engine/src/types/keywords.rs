@@ -5910,6 +5910,30 @@ mod tests {
         }
     }
 
+    // CR 107.3a + CR 702.37e: turning face up announces no X, so symbolic or
+    // sentinel counts must not be accepted as payable morph costs.
+    #[test]
+    fn morph_cost_support_requires_fixed_counts() {
+        assert!(is_ability_cost_supported_for_morph(&pay_life_cost()));
+        assert!(!is_ability_cost_supported_for_morph(
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }
+        ));
+        let sacrifice = |count| {
+            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::new(
+                TargetFilter::Any,
+                crate::types::ability::SacrificeRequirement::Count { count },
+            ))
+        };
+        assert!(is_ability_cost_supported_for_morph(&sacrifice(1)));
+        assert!(!is_ability_cost_supported_for_morph(&sacrifice(u32::MAX)));
+    }
+
     /// One distinctive sample per payload-bearing `Keyword` variant.
     ///
     /// Kept in lockstep with `payload_variant_name` below, which fails to
