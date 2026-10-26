@@ -94866,6 +94866,7 @@ fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
             target: TargetFilter::SelfRef,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         }
     ));
     let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
@@ -94910,6 +94911,7 @@ fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
             target: TargetFilter::SelfRef,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         }
     ));
     let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
@@ -94945,6 +94947,7 @@ fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
             target: TargetFilter::SelfRef,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         }
     ));
     let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
