@@ -241,3 +241,36 @@ fn many_untapped_targets_do_not_make_the_spell_castable() {
         .iter()
         .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)));
 }
+
+/// Paired positive control: with more legal targets than the pricing window, a
+/// tapped target inside the window changes the price, so the overflow fallback
+/// keeps the spell castable even though the discounted {1}{W} is still
+/// unaffordable with one land (payment enforces the real total later).
+#[test]
+fn many_targets_with_a_tapped_one_in_window_stay_castable_via_overflow_fallback() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "Weary", 2, 2).id();
+    for i in 0..64 {
+        scenario.add_creature(P1, &format!("Fresh {i}"), 2, 2);
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Final Verdict", false, MAGNIFICENT_END)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        })
+        .id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&first).unwrap().tapped = true;
+    assert!(engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        spell
+    ));
+    assert!(engine::ai_support::legal_actions(runner.state())
+        .iter()
+        .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)));
+}

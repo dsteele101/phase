@@ -21240,6 +21240,7 @@ fn target_dependent_reduction_makes_payable(
         };
         let untargeted = price(&resolved, false);
         let mut price_changed = false;
+        let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
         for assignment in assignments
             .into_iter()
             .take(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT)
@@ -21250,14 +21251,21 @@ fn target_dependent_reduction_makes_payable(
             }
             let priced = price(&chosen, false);
             price_changed |= priced != untargeted;
-            if payable(&priced) {
-                return true;
-            }
             // CR 601.2f: an accepted Defiler reduction stacks with the
             // target-dependent one, ahead of the floors.
-            if defiler.is_some() && payable(&price(&chosen, true)) {
+            let with_defiler = defiler.is_some().then(|| price(&chosen, true));
+            // Payability depends only on the priced pair, so assignments that
+            // price identically are checked once.
+            if checked
+                .iter()
+                .any(|(plain, stacked)| *plain == priced && *stacked == with_defiler)
+            {
+                continue;
+            }
+            if payable(&priced) || with_defiler.as_ref().is_some_and(&payable) {
                 return true;
             }
+            checked.push((priced, with_defiler));
         }
         overflowed && price_changed
     })
