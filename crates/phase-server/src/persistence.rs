@@ -38,7 +38,29 @@ pub enum SessionRetention {
 pub struct GameDb {
     conn: Mutex<Connection>,
     retention: SessionRetention,
+    pub(crate) full_saves: crate::full_persistence::Scheduler,
+    #[cfg(test)]
+    full_save_hook: Mutex<Option<FullSaveHook>>,
+    #[cfg(test)]
+    full_save_io_hook: Mutex<Option<FullSaveIoHook>>,
+    #[cfg(test)]
+    full_currency_entry: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
 }
+
+/// CPU-prepared SQL inputs. The full game snapshot is released before I/O.
+pub(crate) struct PreparedFullSave {
+    pub(crate) key: FullSessionKey,
+    mutation_revision: u64,
+    activation_epoch: Option<u64>,
+    deck_pools_json: std::sync::Arc<str>,
+    json: String,
+}
+
+#[cfg(test)]
+type FullSaveHook = std::sync::Arc<dyn Fn(&FullPersistSnapshot) + Send + Sync>;
+
+#[cfg(test)]
+type FullSaveIoHook = std::sync::Arc<dyn Fn(&FullSessionKey, u64) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RatingDelta {
@@ -127,7 +149,78 @@ impl GameDb {
         Ok(Self {
             conn: Mutex::new(conn),
             retention,
+            full_saves: crate::full_persistence::Scheduler::default(),
+            #[cfg(test)]
+            full_save_hook: Mutex::new(None),
+            #[cfg(test)]
+            full_save_io_hook: Mutex::new(None),
+            #[cfg(test)]
+            full_currency_entry: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_save_hook(&self, hook: FullSaveHook) {
+        *self.full_save_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_save_io_hook(&self, hook: FullSaveIoHook) {
+        *self.full_save_io_hook.lock().unwrap() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_full_currency_entry(&self, entered: std::sync::Arc<tokio::sync::Notify>) {
+        *self.full_currency_entry.lock().unwrap() = Some(entered);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_connection_for_test(
+        &self,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        let _connection = self.conn.lock().unwrap();
+        entered.notify_one();
+        // Sender teardown unblocks the worker even if the test assertion fails.
+        let _ = release.recv();
+    }
+
+    /// Test fault: a terminal result already recorded for this Full key with different
+    /// content, so every honest `prepare_full_terminal` fails while the key stays
+    /// active (the transient shape of a commit failure).
+    #[cfg(test)]
+    pub(crate) fn plant_terminal_conflict(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO terminal_match_results
+                (game_code, generation, terminal_revision, artifact_digest, display_json, created_at)
+             VALUES (?1, ?2, 0, 'conflicting-digest', '{}', ?3)",
+            params![key.game_code, key.generation, now_epoch()],
+        )?;
+        Ok(())
+    }
+
+    /// Undo [`Self::plant_terminal_conflict`]: the fault clears.
+    #[cfg(test)]
+    pub(crate) fn clear_terminal_conflict(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM terminal_match_results WHERE game_code = ?1 AND generation = ?2",
+            params![key.game_code, key.generation],
+        )?;
+        Ok(())
+    }
+
+    /// Test fault: the Full key is retired out from under the running game.
+    #[cfg(test)]
+    pub(crate) fn retire_full_key_for_test(&self, key: &FullSessionKey) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE game_sessions SET retired = 1 WHERE game_code = ?1 AND generation = ?2",
+            params![key.game_code, key.generation],
+        )?;
+        Ok(())
     }
 
     /// Legacy persistence path retained while Full runtime callers migrate to
@@ -286,41 +379,156 @@ impl GameDb {
         .optional()
     }
 
+    /// Cheap preflight before capture/serialization. The transactional upsert
+    /// remains authoritative if a retirement or newer save races this read.
+    pub(crate) fn full_save_currency(
+        &self,
+        key: &FullSessionKey,
+        revision: u64,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        #[cfg(test)]
+        if let Some(entered) = self.full_currency_entry.lock().unwrap().clone() {
+            entered.notify_one();
+        }
+        let conn = self.conn.lock().unwrap();
+        if !Self::current_activation(&conn, key, activation_epoch)? {
+            return Ok(FullPersistDisposition::NotCurrentActivation);
+        }
+        let retained = conn
+            .query_row(
+                "SELECT generation, mutation_revision, retired, session_state_json IS NULL
+             FROM game_sessions WHERE game_code = ?1",
+                params![key.game_code],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if retained.is_some_and(|(generation, saved, retired, empty)| {
+            generation > key.generation
+                || (generation == key.generation && (retired || (saved >= revision && !empty)))
+        }) {
+            Ok(FullPersistDisposition::SupersededOrRetired)
+        } else {
+            Ok(FullPersistDisposition::Applied)
+        }
+    }
+
+    fn current_activation(
+        conn: &Connection,
+        key: &FullSessionKey,
+        activation_epoch: Option<u64>,
+    ) -> rusqlite::Result<bool> {
+        let Some(epoch) = activation_epoch else {
+            return Ok(true);
+        };
+        let active = conn.query_row(
+            "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
+            [],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+            )),
+        ).optional()?;
+        Ok(active.is_some_and(|(code, generation, active_epoch)| {
+            code == key.game_code && generation == key.generation && active_epoch == epoch
+        }))
+    }
+
     /// Saves a Full authoritative snapshot only when it is newer than the
     /// retained lifetime. Equal revisions are intentionally no-ops.
     pub fn save_full_session(
         &self,
         snapshot: &FullPersistSnapshot,
     ) -> rusqlite::Result<FullPersistDisposition> {
-        let json = serde_json::to_string(&snapshot.persisted)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let json = self.serialize_full_session(snapshot)?;
+        self.save_full_session_parts(
+            &snapshot.key,
+            snapshot.mutation_revision,
+            snapshot.activation_epoch,
+            snapshot.deck_pools_json.as_ref(),
+            &json,
+        )
+    }
+
+    pub(crate) fn prepare_full_session_save(
+        &self,
+        snapshot: FullPersistSnapshot,
+    ) -> Result<PreparedFullSave, (FullSessionKey, rusqlite::Error)> {
+        let json = match self.serialize_full_session(&snapshot) {
+            Ok(json) => json,
+            Err(error) => return Err((snapshot.key, error)),
+        };
+        let FullPersistSnapshot {
+            key,
+            mutation_revision,
+            activation_epoch,
+            deck_pools_json,
+            ..
+        } = snapshot;
+        Ok(PreparedFullSave {
+            key,
+            mutation_revision,
+            activation_epoch,
+            deck_pools_json,
+            json,
+        })
+    }
+
+    fn serialize_full_session(&self, snapshot: &FullPersistSnapshot) -> rusqlite::Result<String> {
+        #[cfg(test)]
+        {
+            let hook = self.full_save_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(snapshot);
+            }
+        }
+        serde_json::to_string(&snapshot.persisted)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+    }
+
+    /// Performs only the fenced SQL write; callers need no game CPU admission.
+    pub(crate) fn save_prepared_full_session(
+        &self,
+        prepared: &PreparedFullSave,
+    ) -> rusqlite::Result<FullPersistDisposition> {
+        self.save_full_session_parts(
+            &prepared.key,
+            prepared.mutation_revision,
+            prepared.activation_epoch,
+            prepared.deck_pools_json.as_ref(),
+            &prepared.json,
+        )
+    }
+
+    fn save_full_session_parts(
+        &self,
+        key: &FullSessionKey,
+        mutation_revision: u64,
+        activation_epoch: Option<u64>,
+        deck_pools_json: &str,
+        json: &str,
+    ) -> rusqlite::Result<FullPersistDisposition> {
         let now = now_epoch();
         let mut conn = self.conn.lock().unwrap();
+        #[cfg(test)]
+        {
+            let hook = self.full_save_io_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(key, mutation_revision);
+            }
+        }
         let tx = conn.transaction()?;
 
-        if let Some(epoch) = snapshot.activation_epoch {
-            let active = tx
-                .query_row(
-                    "SELECT game_code, generation, activation_epoch FROM full_active_session WHERE slot = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, u64>(1)?,
-                            row.get::<_, u64>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if active
-                != Some((
-                    snapshot.key.game_code.clone(),
-                    snapshot.key.generation,
-                    epoch,
-                ))
-            {
-                return Ok(FullPersistDisposition::NotCurrentActivation);
-            }
+        if !Self::current_activation(&tx, key, activation_epoch)? {
+            return Ok(FullPersistDisposition::NotCurrentActivation);
         }
 
         // The dynamic payload and the pools are two columns of one upsert in
@@ -351,12 +559,12 @@ impl GameDb {
                     AND (excluded.mutation_revision > game_sessions.mutation_revision
                         OR game_sessions.session_state_json IS NULL))",
             params![
-                snapshot.key.game_code,
-                snapshot.key.generation,
-                snapshot.mutation_revision,
-                snapshot.activation_epoch,
+                key.game_code,
+                key.generation,
+                mutation_revision,
+                activation_epoch,
                 json,
-                snapshot.deck_pools_json.as_ref(),
+                deck_pools_json,
                 now,
             ],
         )?;
@@ -365,7 +573,7 @@ impl GameDb {
                 "INSERT INTO full_generation_high_water (game_code, generation)
                  VALUES (?1, ?2)
                  ON CONFLICT(game_code) DO UPDATE SET generation = MAX(generation, excluded.generation)",
-                params![snapshot.key.game_code, snapshot.key.generation],
+                params![key.game_code, key.generation],
             )?;
             tx.commit()?;
             Ok(FullPersistDisposition::Applied)
@@ -466,6 +674,7 @@ impl GameDb {
             params![snapshot.key.game_code, snapshot.key.generation],
         )?;
         tx.commit()?;
+        self.full_saves.cancel_all();
         Ok((next_epoch, FullPersistDisposition::Applied))
     }
 
@@ -538,6 +747,7 @@ impl GameDb {
             tx.execute("DELETE FROM full_active_session WHERE slot = 1", [])?;
         }
         tx.commit()?;
+        self.full_saves.cancel(key);
         Ok(FullPersistDisposition::Applied)
     }
 
@@ -574,10 +784,9 @@ impl GameDb {
                 error!("Skipped Full session row {game_code}: deck_pools_json is NULL");
                 continue;
             };
-            match serde_json::from_str(&json).and_then(|mut persisted: PersistedSession| {
-                persisted.deck_pools = serde_json::from_str(&pools)?;
-                Ok(persisted)
-            }) {
+            // The pools column passes the engine's onset admission inside
+            // `decode_row`; a refused row is skipped like any decode failure.
+            match PersistedSession::decode_row(&json, &pools) {
                 Ok(persisted) => snapshots.push(FullPersistSnapshot {
                     key: FullSessionKey {
                         game_code,
@@ -639,6 +848,7 @@ impl GameDb {
         {
             if existing_digest == digest {
                 tx.commit()?;
+                self.full_saves.cancel(&artifact.key);
                 return Ok(PrepareFullTerminalDisposition::AlreadyPrepared);
             }
             return Err(rusqlite::Error::InvalidQuery);
@@ -718,6 +928,7 @@ impl GameDb {
             params![artifact.key.game_code, artifact.key.generation],
         )?;
         tx.commit()?;
+        self.full_saves.cancel(&artifact.key);
         Ok(PrepareFullTerminalDisposition::Prepared)
     }
 
@@ -1295,7 +1506,7 @@ fn now_epoch() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::game_state::{GameState, PersistedGameState};
+    use engine::types::game_state::{AbilityOnsetRecord, GameState, PersistedGameState};
     use tempfile::NamedTempFile;
 
     fn test_db() -> GameDb {
@@ -1510,6 +1721,150 @@ mod tests {
             payload["state"]["state"]["deck_pools"],
             serde_json::json!([]),
             "the mutation-time payload must not carry the pools"
+        );
+    }
+
+    /// One deck pool whose sideboard holds a face carrying an ability node of an
+    /// onset-admitting kind (CR 611.2e) — the face an outside-game fetch
+    /// materializes an object from (`put_outside_game_face_into`).
+    fn pool_with_onset_admitting_sideboard_face() -> engine::types::game_state::PlayerDeckPool {
+        use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+
+        let card = engine::types::card::CardFace {
+            name: "Onset Sideboard Card".to_string(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: Vec::new(),
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            )],
+            ..Default::default()
+        };
+        let sideboard = std::sync::Arc::new(vec![engine::game::deck_loading::DeckEntry {
+            card,
+            count: 1,
+        }]);
+        let mut pool = pool_named("Forest");
+        pool.registered_sideboard = std::sync::Arc::clone(&sideboard);
+        pool.current_sideboard = sideboard;
+        pool
+    }
+
+    /// Saves a Full session holding `pools` under the given writer record. For
+    /// `Unrecorded` it rewrites the stored payload to what an engine that
+    /// predates the onset record wrote: the trusted envelope's state with no
+    /// `ability_onset_record`.
+    fn save_row_with_pools(
+        db: &GameDb,
+        pools: Vec<engine::types::game_state::PlayerDeckPool>,
+        record: AbilityOnsetRecord,
+    ) -> String {
+        let (mut mgr, code) = seeded_full_session(db);
+        mgr.session_exclusive(&code)
+            .expect("session")
+            .state
+            .deck_pools = pools;
+        assert_eq!(save(db, &mgr, &code), FullPersistDisposition::Applied);
+        match record {
+            AbilityOnsetRecord::Recorded => {}
+            AbilityOnsetRecord::Unrecorded => {
+                let mut payload: serde_json::Value =
+                    serde_json::from_str(&column::<String>(db, "session_state_json", &code))
+                        .expect("the stored payload decodes");
+                assert_eq!(
+                    payload["state"]["state"]
+                        .as_object_mut()
+                        .expect("the trusted envelope's state is an object")
+                        .remove("ability_onset_record"),
+                    Some(serde_json::Value::from("Recorded")),
+                    "reach guard: this build writes the onset record"
+                );
+                db.conn
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE game_sessions SET session_state_json = ?1 WHERE game_code = ?2",
+                        params![serde_json::to_string(&payload).unwrap(), code],
+                    )
+                    .expect("rewrite the payload");
+            }
+        }
+        code
+    }
+
+    /// CR 611.2e: the detached `deck_pools_json` column passes the same onset
+    /// admission as the payload it was lifted from. An unrecorded row whose
+    /// only onset-admitting node sits in a sideboard face is refused; a
+    /// recorded row with the same pools restores and keeps the face's node;
+    /// an unrecorded row with onset-free pools restores, so the refusal is the
+    /// pools' and not the payload's own.
+    #[test]
+    fn an_unrecorded_row_is_refused_for_an_onset_admitting_node_in_its_pools_column() {
+        let db = test_db();
+        let refused = save_row_with_pools(
+            &db,
+            vec![pool_with_onset_admitting_sideboard_face()],
+            AbilityOnsetRecord::Unrecorded,
+        );
+        let recorded = save_row_with_pools(
+            &db,
+            vec![pool_with_onset_admitting_sideboard_face()],
+            AbilityOnsetRecord::Recorded,
+        );
+        let onset_free = save_row_with_pools(
+            &db,
+            vec![pool_named("Forest")],
+            AbilityOnsetRecord::Unrecorded,
+        );
+
+        let loaded = db.load_active_full_sessions().expect("read back");
+        let find = |code: &str| {
+            loaded
+                .iter()
+                .find(|snapshot| snapshot.key.game_code == code)
+                .cloned()
+        };
+
+        assert!(
+            find(&refused).is_none(),
+            "an unrecorded row whose pools hold an onset-admitting node is not restored"
+        );
+        let refusal = PersistedSession::decode_row(
+            &column::<String>(&db, "session_state_json", &refused),
+            &column::<String>(&db, "deck_pools_json", &refused),
+        )
+        .expect_err("the row decoder refuses the unrecorded row");
+        assert!(
+            refusal.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+            "{refusal}"
+        );
+
+        let db_cards = std::sync::Arc::new(engine::database::CardDatabase::default());
+        let recorded = find(&recorded).expect("a recorded row with the same pools restores");
+        let restored =
+            server_core::session::GameSession::from_persisted(recorded.persisted, &db_cards)
+                .expect("the recorded row restores");
+        let face = &restored.state.deck_pools[0].current_sideboard[0].card;
+        assert!(
+            matches!(
+                *face.abilities[0].effect,
+                engine::types::ability::Effect::GenericEffect { .. }
+            ),
+            "reach guard: the restored sideboard face keeps its onset-admitting node"
+        );
+
+        let onset_free =
+            find(&onset_free).expect("an unrecorded row with onset-free pools restores");
+        let restored =
+            server_core::session::GameSession::from_persisted(onset_free.persisted, &db_cards)
+                .expect("the onset-free unrecorded row restores");
+        assert_eq!(
+            restored.state.ability_onset_record,
+            AbilityOnsetRecord::Recorded,
+            "the admitted unrecorded payload is recorded"
         );
     }
 
