@@ -672,6 +672,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         },
         Some(cost_removed_counters),
         None,
+        false,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
     // payment failure to an illegal action — the authority's `Failed` is the
@@ -754,6 +755,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
         // CR 118.12: a resolution-time PayCost has no activation to own a count.
         None,
         Some(cost),
+        false,
     )
 }
 
@@ -831,6 +833,10 @@ pub(crate) fn pay_counter_cost_removals(
 /// `cost_removed_counters` is the paying activation's ledger (CR 602.2b). `None`
 /// is resolution scope (CR 118.12) and the `can_pay` dry run: no activation
 /// reads the count.
+///
+/// `dry_run`: when true, the function validates payability without emitting
+/// events or mutating observable state (e.g., Gotcha offers). Used by the
+/// `can_pay` activation dry-run (CR 601.2h).
 #[allow(clippy::too_many_arguments)]
 fn pay_ability_cost_inner(
     state: &mut GameState,
@@ -841,6 +847,7 @@ fn pay_ability_cost_inner(
     scope: &PaymentScope,
     mut cost_removed_counters: Option<&mut Option<u32>>,
     resume_cost: Option<&AbilityCost>,
+    dry_run: bool,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
     // activation-window mana detour, so any shape outside the resolution-payable
@@ -862,17 +869,19 @@ fn pay_ability_cost_inner(
                     "Player has not opted in to Un-card spoken actions".to_string(),
                 ));
             }
-            events.push(GameEvent::PhraseSaid {
-                player,
-                phrase: phrase.clone(),
-            });
-            super::un_actions::record_tell(
-                state,
-                player,
-                &crate::types::un_actions::UnTell::Said {
-                    text: phrase.clone(),
-                },
-            );
+            if !dry_run {
+                events.push(GameEvent::PhraseSaid {
+                    player,
+                    phrase: phrase.clone(),
+                });
+                super::un_actions::record_tell(
+                    state,
+                    player,
+                    &crate::types::un_actions::UnTell::Said {
+                        text: phrase.clone(),
+                    },
+                );
+            }
         }
         AbilityCost::Tap => {
             let obj = state
@@ -1090,6 +1099,7 @@ fn pay_ability_cost_inner(
                     scope,
                     cost_removed_counters.as_deref_mut(),
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
+                    false,
                 )?;
                 match outcome {
                     PaymentOutcome::Paid => {
@@ -2220,6 +2230,7 @@ pub(crate) fn can_pay(
                     scope,
                     None,
                     None,
+                    true,
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
             );
@@ -3324,6 +3335,7 @@ mod tests {
                 &scope,
                 None,
                 None,
+                true,
             )
             .unwrap();
             assert!(
@@ -3355,6 +3367,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(matches!(outcome, PaymentOutcome::Paid));
@@ -3374,6 +3387,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         );
         assert!(
             result.is_err(),
@@ -4073,6 +4087,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -4091,6 +4106,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -4388,6 +4404,7 @@ mod tests {
             },
             None,
             None,
+            false,
         )
         .expect("resolution-time tap-creatures payment must not error")
     }
