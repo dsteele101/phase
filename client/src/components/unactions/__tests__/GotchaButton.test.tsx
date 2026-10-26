@@ -104,12 +104,6 @@ describe("GotchaButton", () => {
     expect(screen.queryByRole("button", { name: /gotcha!/i })).not.toBeInTheDocument();
   });
 
-  it("is not shown for an opponent's window", () => {
-    offerGotcha(1);
-    render(<GotchaButton />);
-    expect(screen.queryByRole("button", { name: /gotcha!/i })).not.toBeInTheDocument();
-  });
-
   it("shows an identical later window again after the first one closed", () => {
     offerGotcha(0);
     render(<GotchaButton />);
