@@ -78,6 +78,47 @@ fn graveyard_creature_card_target_does_not_trigger_horobi() {
     assert_eq!(outcome.zone_of(nighteyes), Zone::Battlefield);
 }
 
+/// A spell targeting a creature card in a graveyard (e.g. Zombify) does not
+/// trigger Horobi: only the spell is placed on the stack, the creature returns
+/// to the battlefield, and Horobi does not destroy it (CR 109.2).
+#[test]
+fn graveyard_creature_card_spell_target_does_not_trigger_horobi() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Horobi, Death's Wail", 4, 4, HOROBI);
+    let corpse = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let zombify = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Zombify",
+            false,
+            "Return target creature card from your graveyard to the battlefield.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        })
+        .id();
+    scenario.with_mana_pool(P0, pool(1, 3));
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(zombify).target_object(corpse).resolve();
+
+    assert_eq!(
+        stack_pushes(outcome.events()),
+        1,
+        "only the reanimation spell goes on the stack; Horobi must not trigger"
+    );
+    assert_eq!(
+        outcome.zone_of(corpse),
+        Zone::Battlefield,
+        "a creature card targeted in a graveyard is not a creature permanent (CR 109.2); \
+         Horobi must not trigger or destroy it"
+    );
+}
+
 /// A "card" ability targeting a creature card in a graveyard (Nezumi
 /// Graverobber's front face) does not trigger Horobi either.
 #[test]
