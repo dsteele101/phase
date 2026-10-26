@@ -742,7 +742,7 @@ pub(crate) fn pay_ability_cost_for_replacement_may_cost(
 }
 
 /// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Pay an ability cost to turn a face-down
-/// permanent face up as a special action. Supported costs: Mana, ReturnToHand, Discard,
+/// permanent face up as a special action. Supported costs: ReturnToHand, Discard,
 /// PayLife, Reveal, and non-self Sacrifice.
 pub(crate) fn pay_ability_cost_for_turn_face_up(
     state: &mut GameState,
@@ -1051,10 +1051,11 @@ fn pay_ability_cost_inner(
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
+            // Turn-face-up mana costs are paid through `TurnFaceUpCost::Mana`.
             PaymentScope::TurnFaceUp { .. } => {
-                unreachable!(
-                    "TurnFaceUp mana costs are normalized to TurnFaceUpCost::Mana in turn_face_up_prepare"
-                )
+                return Ok(payment_failed(
+                    "turn-face-up mana costs must be paid through TurnFaceUpCost::Mana",
+                ));
             }
         },
         // CR 118.4 + CR 107.3c: Dynamic-generic mana. At activation it should

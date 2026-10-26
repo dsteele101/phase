@@ -7148,4 +7148,19 @@ mod router_registry_tests {
             "partially parsed morph reveal cost must be rejected: {hostile2:?}"
         );
     }
+
+    /// CR 107.3a: variable-count morph costs are rejected (no X is announced when turning face up).
+    #[test]
+    fn parse_morph_cost_rejects_variable_counts() {
+        for line in [
+            "Morph—Pay X life",
+            "Morph—Discard X cards",
+            "Morph—Sacrifice X creatures",
+        ] {
+            assert!(
+                parse_router_keyword_line(line).is_none(),
+                "variable-count morph cost must be rejected: {line:?}"
+            );
+        }
+    }
 }

@@ -25870,7 +25870,7 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     filter: &TargetFilter,
     scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
-    let skip_cant_sacrifice = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
+    let is_turn_face_up = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
@@ -25882,12 +25882,16 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
             if obj.controller != player {
                 return false;
             }
+            // CR 702.37e: the permanent being turned face up cannot pay its own turn-up cost.
+            if is_turn_face_up && id == source_id {
+                return false;
+            }
             // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
             // for any cost regardless of payment scope (e.g. Assault Suit).
             if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
                 return false;
             }
-            if !skip_cant_sacrifice
+            if !is_turn_face_up
                 && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
             {
                 return false;

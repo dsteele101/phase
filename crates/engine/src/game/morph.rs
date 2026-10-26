@@ -726,6 +726,97 @@ fn park_turn_face_up_cost_move(
     crate::game::triggers::park_delayed_observer_triggers_if_paused(state, events, events_before);
 }
 
+/// CR 702.37e + CR 118.1: Pay one object of a turn-face-up cost move (return to
+/// hand, discard, or sacrifice). Single authority for both the initial selection
+/// and the post-replacement-choice resume loop. Returns the player who must make
+/// a replacement choice when the move pauses, `None` when it completed.
+fn pay_turn_face_up_cost_object(
+    state: &mut GameState,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+    move_kind: crate::types::game_state::TurnFaceUpMoveKind,
+    id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<PlayerId>, EngineError> {
+    match move_kind {
+        crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand => {
+            match crate::game::zone_pipeline::move_object(
+                state,
+                crate::game::zone_pipeline::ZoneMoveRequest::cost(id, Zone::Hand, source.object_id),
+                events,
+            ) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => Ok(None),
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                    Ok(Some(choice_player))
+                }
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a cost move to Hand cannot require Aura attachment")
+                }
+            }
+        }
+        crate::types::game_state::TurnFaceUpMoveKind::Discard => {
+            match super::effects::discard::discard_as_cost_with_source(
+                state,
+                id,
+                player,
+                Some(source.object_id),
+                events,
+            ) {
+                super::effects::discard::DiscardOutcome::Complete => Ok(None),
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                    Ok(Some(choice_player))
+                }
+            }
+        }
+        crate::types::game_state::TurnFaceUpMoveKind::Sacrifice => {
+            match super::sacrifice::sacrifice_permanent(state, id, player, events)? {
+                super::sacrifice::SacrificeOutcome::Complete => Ok(None),
+                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                    Ok(Some(choice_player))
+                }
+            }
+        }
+    }
+}
+
+/// CR 702.37e: Pay each chosen object from `start` onward; parks on a replacement
+/// choice, otherwise continues with the remaining cost.
+#[allow(clippy::too_many_arguments)]
+fn pay_turn_face_up_cost_objects(
+    state: &mut GameState,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+    cost_source: TurnUpCostSource,
+    move_kind: crate::types::game_state::TurnFaceUpMoveKind,
+    chosen: Vec<ObjectId>,
+    start: usize,
+    remaining_cost: Option<Box<AbilityCost>>,
+    events_before: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    for index in start..chosen.len() {
+        if let Some(choice_player) =
+            pay_turn_face_up_cost_object(state, player, source, move_kind, chosen[index], events)?
+        {
+            park_turn_face_up_cost_move(
+                state,
+                player,
+                source,
+                cost_source,
+                move_kind,
+                chosen,
+                index,
+                remaining_cost,
+                choice_player,
+                events,
+                events_before,
+            );
+            return Ok(state.waiting_for.clone());
+        }
+    }
+    finish_or_continue_turn_face_up(state, player, source, cost_source, remaining_cost, events)
+}
+
 /// CR 702.37e + CR 118.1 + CR 118.3: Handle player selection of cards/permanents
 /// to pay a turn-face-up non-mana cost (return to hand, discard, sacrifice, reveal).
 #[allow(clippy::too_many_arguments)]
@@ -762,118 +853,42 @@ pub(crate) fn handle_turn_face_up_cost_selection(
         }
     }
     match kind {
-        crate::types::game_state::PayCostKind::ReturnToHand => {
-            for (index, &id) in chosen.iter().enumerate() {
-                match crate::game::zone_pipeline::move_object(
-                    state,
-                    crate::game::zone_pipeline::ZoneMoveRequest::cost(
-                        id,
-                        Zone::Hand,
-                        source.object_id,
-                    ),
-                    events,
-                ) {
-                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
-                        park_turn_face_up_cost_move(
-                            state,
-                            player,
-                            source,
-                            cost_source,
-                            crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand,
-                            chosen.to_vec(),
-                            index,
-                            remaining_cost,
-                            choice_player,
-                            events,
-                            0,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        unreachable!("a cost move to Hand cannot require Aura attachment");
-                    }
-                }
-            }
-            finish_or_continue_turn_face_up(
-                state,
-                player,
-                source,
-                cost_source,
-                remaining_cost,
-                events,
-            )
-        }
-        crate::types::game_state::PayCostKind::Discard => {
-            for (index, &id) in chosen.iter().enumerate() {
-                match super::effects::discard::discard_as_cost_with_source(
-                    state,
-                    id,
-                    player,
-                    Some(source.object_id),
-                    events,
-                ) {
-                    super::effects::discard::DiscardOutcome::Complete => {}
-                    super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
-                        choice_player,
-                    ) => {
-                        park_turn_face_up_cost_move(
-                            state,
-                            player,
-                            source,
-                            cost_source,
-                            crate::types::game_state::TurnFaceUpMoveKind::Discard,
-                            chosen.to_vec(),
-                            index,
-                            remaining_cost,
-                            choice_player,
-                            events,
-                            0,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
-            finish_or_continue_turn_face_up(
-                state,
-                player,
-                source,
-                cost_source,
-                remaining_cost,
-                events,
-            )
-        }
-        crate::types::game_state::PayCostKind::Sacrifice => {
-            for (index, &id) in chosen.iter().enumerate() {
-                match super::sacrifice::sacrifice_permanent(state, id, player, events)? {
-                    super::sacrifice::SacrificeOutcome::Complete => {}
-                    super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                        park_turn_face_up_cost_move(
-                            state,
-                            player,
-                            source,
-                            cost_source,
-                            crate::types::game_state::TurnFaceUpMoveKind::Sacrifice,
-                            chosen.to_vec(),
-                            index,
-                            remaining_cost,
-                            choice_player,
-                            events,
-                            0,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
-            finish_or_continue_turn_face_up(
-                state,
-                player,
-                source,
-                cost_source,
-                remaining_cost,
-                events,
-            )
-        }
+        crate::types::game_state::PayCostKind::ReturnToHand => pay_turn_face_up_cost_objects(
+            state,
+            player,
+            source,
+            cost_source,
+            crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand,
+            chosen.to_vec(),
+            0,
+            remaining_cost,
+            0,
+            events,
+        ),
+        crate::types::game_state::PayCostKind::Discard => pay_turn_face_up_cost_objects(
+            state,
+            player,
+            source,
+            cost_source,
+            crate::types::game_state::TurnFaceUpMoveKind::Discard,
+            chosen.to_vec(),
+            0,
+            remaining_cost,
+            0,
+            events,
+        ),
+        crate::types::game_state::PayCostKind::Sacrifice => pay_turn_face_up_cost_objects(
+            state,
+            player,
+            source,
+            cost_source,
+            crate::types::game_state::TurnFaceUpMoveKind::Sacrifice,
+            chosen.to_vec(),
+            0,
+            remaining_cost,
+            0,
+            events,
+        ),
         crate::types::game_state::PayCostKind::Reveal => {
             let revealed_names = chosen
                 .iter()
@@ -927,94 +942,18 @@ pub(crate) fn resume_turn_face_up_cost_move(
     };
 
     let events_before = events.len();
-    for (index, &card_id) in chosen.iter().enumerate().skip(paused_at_index + 1) {
-        match move_kind {
-            crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand => {
-                match crate::game::zone_pipeline::move_object(
-                    state,
-                    crate::game::zone_pipeline::ZoneMoveRequest::cost(
-                        card_id,
-                        Zone::Hand,
-                        source.object_id,
-                    ),
-                    events,
-                ) {
-                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
-                        park_turn_face_up_cost_move(
-                            state,
-                            player,
-                            source,
-                            cost_source,
-                            move_kind,
-                            chosen,
-                            index,
-                            remaining_cost,
-                            choice_player,
-                            events,
-                            events_before,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        unreachable!()
-                    }
-                }
-            }
-            crate::types::game_state::TurnFaceUpMoveKind::Discard => {
-                match super::effects::discard::discard_as_cost_with_source(
-                    state,
-                    card_id,
-                    player,
-                    Some(source.object_id),
-                    events,
-                ) {
-                    super::effects::discard::DiscardOutcome::Complete => {}
-                    super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
-                        choice_player,
-                    ) => {
-                        park_turn_face_up_cost_move(
-                            state,
-                            player,
-                            source,
-                            cost_source,
-                            move_kind,
-                            chosen,
-                            index,
-                            remaining_cost,
-                            choice_player,
-                            events,
-                            events_before,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
-            crate::types::game_state::TurnFaceUpMoveKind::Sacrifice => {
-                match super::sacrifice::sacrifice_permanent(state, card_id, player, events)? {
-                    super::sacrifice::SacrificeOutcome::Complete => {}
-                    super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                        park_turn_face_up_cost_move(
-                            state,
-                            player,
-                            source,
-                            cost_source,
-                            move_kind,
-                            chosen,
-                            index,
-                            remaining_cost,
-                            choice_player,
-                            events,
-                            events_before,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    finish_or_continue_turn_face_up(state, player, source, cost_source, remaining_cost, events)
+    pay_turn_face_up_cost_objects(
+        state,
+        player,
+        source,
+        cost_source,
+        move_kind,
+        chosen,
+        paused_at_index + 1,
+        remaining_cost,
+        events_before,
+        events,
+    )
 }
 
 /// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through

@@ -143,17 +143,27 @@ impl MorphCost {
 pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::ReturnToHand { .. } => true,
+        // CR 107.3a: turning face up announces no X, so only fixed counts are payable.
         AbilityCost::Discard {
+            count,
             selection,
             self_scope,
             ..
-        } => !self_scope.is_source_card() && *selection != CardSelectionMode::Random,
-        AbilityCost::PayLife { .. } => true,
+        } => {
+            matches!(count, QuantityExpr::Fixed { .. })
+                && !self_scope.is_source_card()
+                && *selection != CardSelectionMode::Random
+        }
+        AbilityCost::PayLife { amount } => matches!(amount, QuantityExpr::Fixed { .. }),
         // CR 107.3a: turning face up announces no X, so a symbolic reveal count
         // would read as 0 and make the cost free; only a fixed count is payable.
         AbilityCost::Reveal { count, .. } => matches!(count, QuantityExpr::Fixed { .. }),
         AbilityCost::Sacrifice(cost) => {
-            matches!(cost.requirement, SacrificeRequirement::Count { .. })
+            // `u32::MAX` is the parser sentinel for "X" / "any number of".
+            matches!(
+                cost.requirement,
+                SacrificeRequirement::Count { count } if count != u32::MAX
+            )
         }
         AbilityCost::Mana { .. } => true,
         AbilityCost::ManaDynamic { .. }
