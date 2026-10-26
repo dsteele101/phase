@@ -408,11 +408,19 @@ pub fn resolve(
         // falling through to the generic player-hand path.
         let specific_targets: Vec<_> = match &card_filter {
             Some(filter) => {
-                let ctx = crate::game::filter::FilterContext::from_ability(ability);
+                // CR 608.2c: "their hand" in the filter is the hand the card is
+                // in — its owner's (CR 400.3) — so bind each card's owner.
                 let filtered: Vec<_> = specific_targets
                     .into_iter()
                     .filter(|id| {
-                        crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                        state.objects.get(id).is_some_and(|obj| {
+                            discard_card_filter_matches(
+                                state,
+                                &discard_filter_scope(ability, obj.owner),
+                                *id,
+                                filter,
+                            )
+                        })
                     })
                     .collect();
                 if filtered.is_empty() && !up_to {
@@ -621,12 +629,10 @@ pub fn resolve(
         // takes the same no-op path as an empty hand).
         let hand_cards: Vec<ObjectId> = match &card_filter {
             Some(filter) => {
-                let ctx = crate::game::filter::FilterContext::from_ability(ability);
+                let scoped = discard_filter_scope(ability, discard_player);
                 hand_cards
                     .into_iter()
-                    .filter(|id| {
-                        crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                    })
+                    .filter(|id| discard_card_filter_matches(state, &scoped, *id, filter))
                     .collect()
             }
             None => hand_cards,
@@ -753,6 +759,30 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2c + CR 109.5: bind the discarding player as the scoped "they" for a
+/// discard's card filter. "Target player discards a card with the greatest mana
+/// value among cards in their hand" (Draconic Fealty, Intruder's Inquisition)
+/// compares against the DISCARDING player's hand, not the caster's; the
+/// controller stays the ability's controller, so "you" is unchanged.
+fn discard_filter_scope(ability: &ResolvedAbility, discard_player: PlayerId) -> ResolvedAbility {
+    let mut scoped = ability.clone();
+    scoped.scoped_player = Some(discard_player);
+    scoped
+}
+
+/// CR 608.2c + CR 201.2a: whether `card` satisfies the discard's card filter
+/// ("a card with that name", "a nonland card with the greatest mana value ...")
+/// evaluated against the recipient-scoped ability from [`discard_filter_scope`].
+fn discard_card_filter_matches(
+    state: &GameState,
+    scoped: &ResolvedAbility,
+    card: ObjectId,
+    filter: &TargetFilter,
+) -> bool {
+    let ctx = crate::game::filter::FilterContext::from_ability(scoped);
+    crate::game::filter::matches_target_filter(state, card, filter, &ctx)
 }
 
 /// CR 207.2c + CR 118.12a: Discard a card as part of an ability cost (Channel).

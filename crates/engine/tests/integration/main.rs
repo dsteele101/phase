@@ -1378,6 +1378,7 @@ mod random_discard_cost_replacement_resume;
 mod raubahn_bull_of_ala_mhigo;
 mod raw_resolution_stack_restore;
 mod reapers_scythe;
+mod recipient_scoped_discard_filter;
 mod recurring_insight_6856;
 mod recursive_recruitment;
 mod refurbished_familiar;
