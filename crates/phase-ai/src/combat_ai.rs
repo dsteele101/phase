@@ -7886,6 +7886,35 @@ mod tests {
         );
     }
 
+    /// A fully blocked attacker deals no connecting damage, so it is not part of
+    /// the race: when every *damaging* attacker would be needed for the kill, the
+    /// Race guard still keeps the swing on the face.
+    #[test]
+    fn race_guard_ignores_fully_blocked_attackers() {
+        let mut state = setup();
+        let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 5, 5, vec![]);
+        let walled = add_creature(&mut state, PlayerId(0), "Walled", 2, 2, vec![]);
+        add_planeswalker(&mut state, PlayerId(1), 3);
+        let targets = valid_targets(&state);
+        let redirected = redirect_attackers_to_planeswalker(
+            &state,
+            &[ogre, walled],
+            Some(&targets),
+            CombatObjective::Race,
+            PlayerId(1),
+            20,
+            &HashMap::from([(ogre, 5), (walled, 0)]),
+        );
+        assert_eq!(
+            redirected,
+            vec![
+                (ogre, AttackTarget::Player(PlayerId(1))),
+                (walled, AttackTarget::Player(PlayerId(1)))
+            ],
+            "the only damaging attacker stays on the face while racing"
+        );
+    }
+
     /// PushLethal never redirects, even when the attacker could kill the planeswalker.
     #[test]
     fn push_lethal_never_redirects_to_planeswalker() {
