@@ -93,7 +93,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::triggers::{
-    AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
+    AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 use std::str::FromStr;
@@ -1550,6 +1550,36 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
     )
 }
 
+/// CR 400.3 + CR 608.2c: the head names a third-person player as the destination
+/// graveyard's possessor ("put into an opponent's / a player's / their graveyard").
+/// An object only ever goes to its owner's graveyard, so that player is the moving
+/// card's OWNER, and by the rules of English a later "that player" names them, never
+/// the controller the card had when it moved. Same possessive combinator as the header
+/// builders (the "is/are put into" verb tags are repeated); the origin tail is the disjunctive-clause tail
+/// ([`parse_put_into_graveyard_origin`]), so a union origin ("from your library or
+/// hand") is not proven here and keeps no scope. An empty tail is required, like
+/// [`trigger_head_dies_zone_change`]. "Your graveyard" names the controller, never the
+/// antecedent of "that player", and "a graveyard" names no player, so neither proves.
+fn condition_names_destination_graveyard_owner(cond_lower: &str) -> bool {
+    scan_preceded(cond_lower, |input| {
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("is put into "),
+                tag("are put into "),
+            )),
+            terminated(parse_graveyard_possessive, parse_put_into_graveyard_origin),
+        )
+        .parse(input)
+    })
+    .is_some_and(|(_, possessive, rest)| {
+        rest.trim().is_empty()
+            && matches!(
+                possessive,
+                Some(PlayerRelation::Opponent | PlayerRelation::All)
+            )
+    })
+}
+
 /// CR 109.4 + CR 115.1 + CR 506.2: Derive the relative-player scope
 /// that a trigger condition introduces for `"that player"`/`"they"`-style
 /// anaphors in the trigger's effect body.
@@ -1566,6 +1596,11 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
 /// DamageDone (`TriggeringPlayer`) is checked BEFORE `condition_introduces_target_player`
 /// because both match "deals [combat] damage to a player", but DamageDone needs
 /// `TriggeringPlayer` while generic target-player triggers need `TargetPlayer`.
+///
+/// A head naming a third-person graveyard possessive ("put into an opponent's / a
+/// player's graveyard") scopes "that player" to the card's owner
+/// (`ParentTargetOwner`, CR 400.3 + CR 608.2c); it is the last branch, so no
+/// condition that already earns a scope changes.
 pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<ControllerRef> {
     if is_damage_done_trigger_pattern(cond_lower) {
         Some(ControllerRef::TriggeringPlayer)
@@ -1606,6 +1641,12 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
         // CR 603.2 + CR 605.1a: "that player" in tap-all-lands effects (War's
         // Toll) refers to the player who tapped for mana.
         Some(ControllerRef::TriggeringPlayer)
+    } else if condition_names_destination_graveyard_owner(cond_lower) {
+        // CR 400.3 + CR 608.2c: "that player" after "put into an opponent's / a
+        // player's graveyard" is the graveyard's owner, i.e. the moving card's
+        // owner, read from the zone-change record (`ParentTargetOwner`). Checked
+        // last so no head that already earns a scope can change it.
+        Some(ControllerRef::ParentTargetOwner)
     } else {
         None
     }
@@ -13594,7 +13635,30 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::SelfRef);
     }
 
+    // CR 509.3a + CR 608.2k + CR 603.7e: a self-subject block condition that names
+    // no other object ("~ blocks" / "~ attacks or blocks") introduces only the
+    // source, so a bare "it" in the body names it. Without the pin, `ParentTarget`
+    // resolves the BlockersDeclared event to the blocked ATTACKER — through
+    // `delayed_trigger::parent_target_snapshot` for "at end of combat" bodies and
+    // the parentless-ParentTarget event fallback for immediate bodies — so Cinder
+    // Wall destroyed, and Zephyr Spirit bounced, the creature it blocked.
+    if matches!(trigger_subject, TargetFilter::SelfRef)
+        && nom_primitives::scan_at_word_boundaries(after_keyword, parse_intransitive_blocks)
+            .is_some()
+    {
+        return Some(TargetFilter::SelfRef);
+    }
+
     None
+}
+
+/// CR 509.3a: a terminal intransitive "blocks" ("~ blocks", "~ attacks or
+/// blocks") — the condition names no object other than its subject. Rejects
+/// "blocks a creature", "blocks or becomes blocked" and every other form with a
+/// trailing object or qualifier, because only end of input (optionally after the
+/// condition's closing comma) may follow.
+fn parse_intransitive_blocks(input: &str) -> OracleResult<'_, ()> {
+    value((), terminated(tag("blocks"), (opt(tag(",")), eof))).parse(input)
 }
 
 /// CR 509.3c + CR 608.2k: the object a bare-pronoun pin names, where the pinned
@@ -20131,25 +20195,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
-    // CR 603.2 + CR 613.3: "When you lose control of ~" — fires after a
-    // controller change on the source object. Maps to ChangesController so
-    // the trigger fires on the GainControl/GiveControl effect-resolved event.
-    // valid_card = SelfRef gates the trigger to changes on this specific object.
-    // The trigger controller is the previous controller (still Khârn's holder
-    // at trigger-scan time, because layer re-evaluation runs after trigger
-    // collection in the post-action pipeline).
-    fn parse_you_lose_control_of_self(i: &str) -> OracleResult<'_, ()> {
+    // CR 603.2 + CR 603.10 + CR 603.10d: "When[ever] you lose control of ~" /
+    // "When[ever] you gain control of ~[ from another player]". Maps to
+    // ChangesController, which fires on the `ControllerChanged` event published by
+    // the control-changing instructions (not by control the layer pass assigns or
+    // retires, #9903).
+    // valid_card = SelfRef gates the trigger to
+    // changes on this specific object; the `side` names which endpoint of the
+    // change is "you" (CR 603.3a: the trigger's controller). "From another player"
+    // adds no constraint: a ControllerChanged event exists only when the
+    // controller changed, and every permanent has a controller (CR 110.2).
+    fn parse_you_change_control_of_self(i: &str) -> OracleResult<'_, ControlChangeSide> {
         all_consuming(preceded(
-            alt((tag("when "), tag("whenever "))),
-            value((), tag("you lose control of ~")),
+            (alt((tag("when "), tag("whenever "))), tag("you ")),
+            alt((
+                value(ControlChangeSide::Loses, tag("lose control of ~")),
+                value(
+                    ControlChangeSide::Gains,
+                    terminated(tag("gain control of ~"), opt(tag(" from another player"))),
+                ),
+            )),
         ))
         .parse(i)
     }
-    if parse_you_lose_control_of_self(lower).is_ok() {
+    if let Ok((_, side)) = parse_you_change_control_of_self(lower) {
         let mut def = make_base();
-        def.mode = TriggerMode::ChangesController;
+        def.mode = TriggerMode::ChangesController { side };
         def.valid_card = Some(TargetFilter::SelfRef);
-        return Some((TriggerMode::ChangesController, def));
+        return Some((def.mode.clone(), def));
     }
 
     if matches!(lower, "whenever you lose life" | "when you lose life") {
@@ -22129,26 +22202,6 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     Some((TriggerMode::CounterRemoved, def))
 }
 
-/// CR 700.4 + CR 603.6c + CR 109.5: Parse "is/are put into [possessive] graveyard
-/// [from <origin-possessive>]" patterns.
-///
-/// Handles all forms:
-/// - "is put into a graveyard from anywhere" (no origin restriction)
-/// - "is put into a graveyard from the battlefield" (equivalent to "dies")
-/// - "is put into your graveyard [from your library]" (controller filter + optional origin)
-/// - "is put into an opponent's graveyard from anywhere" (opponent controller filter)
-/// - "is put into an opponent's graveyard from their library" (CR 109.5: "their"
-///   anaphor binds back to the previously named opponent — Undead Alchemist class)
-/// - "is put into a player's graveyard from any library" (Bloodchief Ascension class)
-/// - "are put into your graveyard from your library" (plural form for batched triggers)
-///
-/// The graveyard's possessive narrows `valid_card.controller` (CR 109.5: a card
-/// going into player P's graveyard is P's card). This is what `match_changes_zone`
-/// actually reads when deciding to fire — historically the possessive only set
-/// `valid_target`, which `match_changes_zone` ignores for ChangesZone, so the
-/// trigger fired for any card going to any graveyard. `valid_target` is also
-/// preserved so downstream effect resolution (e.g. `target: ParentTarget`) keeps
-/// the narrowed scope.
 /// CR 603.6c: Parse the source-zone tail of a "put into a graveyard" clause.
 /// Handles "from the battlefield" → `Equals`, "from anywhere other than the
 /// battlefield" → `NotEquals`, "from anywhere" / no clause → `Any`, and the
@@ -22362,10 +22415,11 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
         if !tail.trim().is_empty() {
             return None;
         }
-        let valid_card = match possessive {
-            Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
-            None => Some(subject.clone()),
-        };
+        // CR 400.3 + CR 109.5: the graveyard possessive scopes the card's owner.
+        let valid_card = Some(scope_to_destination_owner(
+            subject.clone(),
+            graveyard_owner_scope(possessive),
+        ));
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
@@ -22433,6 +22487,27 @@ fn parse_disjunctive_zone_change_condition(condition: &str) -> Option<Vec<ZoneCh
     (clauses.len() >= 2).then_some(clauses)
 }
 
+/// CR 700.4 + CR 603.6c + CR 109.5: Parse "is/are put into [possessive] graveyard
+/// [from <origin-possessive>]" patterns.
+///
+/// Handles all forms:
+/// - "is put into a graveyard from anywhere" (no origin restriction)
+/// - "is put into a graveyard from the battlefield" (equivalent to "dies")
+/// - "is put into your graveyard [from your library]" (owner scope + optional origin)
+/// - "is put into an opponent's graveyard from anywhere" (opponent owner scope)
+/// - "is put into an opponent's graveyard from their library" (CR 109.5: "their"
+///   anaphor binds back to the previously named opponent — Undead Alchemist class)
+/// - "is put into a player's graveyard from any library" (Bloodchief Ascension class)
+/// - "are put into your graveyard from your library" (plural form for batched triggers)
+///
+/// The graveyard's possessive scopes `valid_card` ownership via `FilterProp::Owned`
+/// (CR 400.3 + CR 109.5: a card is only ever put into its owner's graveyard, so
+/// "your graveyard" means a card you own — see `scope_to_destination_owner`).
+/// This is what `match_changes_zone` actually reads when deciding to fire —
+/// historically the possessive only set `valid_target`, which `match_changes_zone`
+/// ignores for ChangesZone, so the trigger fired for any card going to any
+/// graveyard. `valid_target` carries the same possessive for the parse-details
+/// display only; `match_changes_zone` does not read it.
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -22446,6 +22521,7 @@ fn try_parse_put_into_graveyard(
     .ok()?;
 
     let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
+    let destination_owner = graveyard_owner_scope(possessive);
 
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
@@ -22468,17 +22544,18 @@ fn try_parse_put_into_graveyard(
     // consistency with the destination possessive (shared predicate with the
     // batched path); singles keep pre-existing behavior.
     if origin_zones.len() == 2
-        && !union_qualifier_consistent_with_destination(union_qualifier, possessive.clone())
+        && !union_qualifier_consistent_with_destination(union_qualifier, destination_owner.clone())
     {
         return None;
     }
 
-    let valid_card = match possessive.clone() {
-        Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
-        None => Some(subject.clone()),
-    };
+    // CR 400.3 + CR 109.5: the graveyard possessive scopes the card's owner.
+    let valid_card = Some(scope_to_destination_owner(
+        subject.clone(),
+        destination_owner.clone(),
+    ));
     let valid_target =
-        possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+        destination_owner.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
 
     let mut def = make_base();
     def.mode = TriggerMode::ChangesZone;
@@ -22490,27 +22567,64 @@ fn try_parse_put_into_graveyard(
     Some((TriggerMode::ChangesZone, def))
 }
 
-/// CR 109.5: Parse the graveyard possessive in "put into [possessive] graveyard".
-/// Returns the controller scope of the graveyard's owner, or `None` for unowned
-/// ("a graveyard"). Shared by `try_parse_put_into_graveyard` and the batched
-/// "one or more" variant so the two parse paths stay in lockstep.
-fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+/// CR 109.5 + CR 102.1: Parse the graveyard possessive in "put into [possessive]
+/// graveyard". Returns which players' graveyards the clause names, or `None` for
+/// "a graveyard", which names no player. Shared by `try_parse_put_into_graveyard`,
+/// the batched "one or more" variant and the disjunctive-clause path so the parse
+/// paths stay in lockstep. [`graveyard_owner_scope`] maps the result onto the owner
+/// scope those header builders put on the moving card; the head prover
+/// [`condition_names_destination_graveyard_owner`] reads it directly.
+fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<PlayerRelation>> {
     alt((
         value(None, tag("a graveyard")),
-        value(Some(ControllerRef::You), tag("your graveyard")),
+        value(Some(PlayerRelation::Controller), tag("your graveyard")),
         value(
-            Some(ControllerRef::Opponent),
+            Some(PlayerRelation::Opponent),
             tag("an opponent's graveyard"),
         ),
         // CR 109.5: "their graveyard" is an anaphor; in every "put into [...]
         // graveyard" pattern that uses it the antecedent is the opponent named
         // earlier in the same clause (Undead Alchemist class).
-        value(Some(ControllerRef::Opponent), tag("their graveyard")),
-        // CR 109.5: "a player's graveyard" — Bloodchief Ascension class. Bare
-        // "a player" leaves controller unscoped (matches any).
-        value(None, tag("a player's graveyard")),
+        value(Some(PlayerRelation::Opponent), tag("their graveyard")),
+        // CR 109.5: "a player's graveyard" — Bloodchief Ascension class. Any
+        // player's graveyard: no owner restriction on the moving card.
+        value(Some(PlayerRelation::All), tag("a player's graveyard")),
     ))
     .parse(input)
+}
+
+/// CR 400.3 + CR 109.5: the owner scope a graveyard possessive puts on the moving
+/// card. "Your graveyard" is the controller's, "an opponent's" / "their" an
+/// opponent's; "a player's" and "a graveyard" restrict no owner.
+fn graveyard_owner_scope(possessive: Option<PlayerRelation>) -> Option<ControllerRef> {
+    match possessive {
+        None | Some(PlayerRelation::All) => None,
+        Some(PlayerRelation::Controller) => Some(ControllerRef::You),
+        Some(PlayerRelation::Opponent) => Some(ControllerRef::Opponent),
+    }
+}
+
+/// CR 400.3 + CR 109.5: a possessive on an owner-keyed destination zone (library,
+/// graveyard, hand — "put into your graveyard") names that zone's owner, and an
+/// object only ever goes to its owner's library/graveyard/hand — so the possessive
+/// scopes the moving object's OWNER (`FilterProp::Owned`), never its controller.
+/// `TypedFilter.controller` stays the subject's own "you control" (the CR 603.10a
+/// look-back reading), and the zone-change record matcher reads `Owned` against
+/// `record.arrival.owner`. (Only the put-into-graveyard paths call it today; the hand
+/// destination still scopes the controller.)
+///
+/// `owner == None` ("a graveyard", "a player's graveyard") scopes nothing. A
+/// `SelfRef` subject ("when this creature is put into your graveyard") is left
+/// as-is: wrapping it would hide the `valid_card == SelfRef` identity that the
+/// self-trigger consumers key on, and it is the pre-existing behaviour
+/// (`add_controller` is a no-op on `SelfRef`). Known gap of the same phrase class,
+/// left for a separate change.
+fn scope_to_destination_owner(subject: TargetFilter, owner: Option<ControllerRef>) -> TargetFilter {
+    match (subject, owner) {
+        (subject, None) => subject,
+        (TargetFilter::SelfRef, Some(_)) => TargetFilter::SelfRef,
+        (subject, Some(owner)) => with_owner_scope(subject, owner),
+    }
 }
 
 /// CR 603.6c + CR 109.5: Parse the origin zone for a put-into-graveyard trigger.
@@ -22966,6 +23080,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         let Ok((after_gy, possessive)) = parse_graveyard_possessive.parse(after_put) else {
             continue;
         };
+        let destination_owner = graveyard_owner_scope(possessive);
 
         // Parse optional "from [zone]" clause using nom
         let after_gy = after_gy.trim_start();
@@ -22989,7 +23104,10 @@ fn try_parse_one_or_more_put_into_graveyard(
         // predicate with the single-card path); singles keep pre-existing
         // behavior.
         if origin_zones.len() == 2
-            && !union_qualifier_consistent_with_destination(union_qualifier, possessive.clone())
+            && !union_qualifier_consistent_with_destination(
+                union_qualifier,
+                destination_owner.clone(),
+            )
         {
             continue;
         }
@@ -23007,19 +23125,17 @@ fn try_parse_one_or_more_put_into_graveyard(
             continue;
         };
 
-        // CR 109.5: Merge the graveyard owner's controller scope into valid_card
-        // (the field `match_changes_zone` actually consults). valid_target is
-        // preserved for downstream effect targeting / displays.
-        let valid_card = match (base_filter, possessive.clone()) {
-            (Some(f), Some(ctrl)) => Some(add_controller(f, ctrl)),
-            (Some(f), None) => Some(f),
-            (None, Some(ctrl)) => {
-                Some(TargetFilter::Typed(TypedFilter::default().controller(ctrl)))
-            }
+        // CR 400.3 + CR 109.5: Scope the graveyard owner's possessive onto
+        // valid_card (the field `match_changes_zone` actually consults) as card
+        // ownership. valid_target keeps the possessive for the parse-details
+        // display only.
+        let valid_card = match (base_filter, destination_owner.clone()) {
+            (Some(f), p) => Some(scope_to_destination_owner(f, p)),
+            (None, Some(ctrl)) => Some(scope_to_destination_owner(TargetFilter::Any, Some(ctrl))),
             (None, None) => None,
         };
-        let valid_target =
-            possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+        let valid_target = destination_owner
+            .map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
 
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
