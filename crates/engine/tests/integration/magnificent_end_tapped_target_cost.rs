@@ -313,3 +313,51 @@ fn defiler_does_not_combine_with_an_instants_target_dependent_reduction() {
         spell
     ));
 }
+
+const TAPPED_TARGET_DISCOUNT: &str =
+    "Spells you cast that target a tapped creature cost {3} less to cast.";
+
+/// CR 601.2f: a battlefield static whose reduction reads the chosen targets
+/// also counts toward castability. With only two lands, an ordinary {4}{W}
+/// burn spell is castable when a tapped creature is a legal target, and stays
+/// uncastable (reach guard) when the only creature is untapped.
+#[test]
+fn battlefield_target_dependent_reduction_counts_toward_castability() {
+    for (target_tapped, castable) in [(true, true), (false, false)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P1, "Mark", 2, 2).id();
+        scenario.add_artifact_from_oracle(P0, "Discount Engine", TAPPED_TARGET_DISCOUNT);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Plain Bolt",
+                false,
+                "Plain Bolt deals 5 damage to target creature.",
+            )
+            .as_instant()
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 4,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&victim).unwrap().tapped = target_tapped;
+        assert_eq!(
+            engine::game::casting::can_cast_object_now(runner.state(), P0, spell),
+            castable,
+            "target tapped: {target_tapped}"
+        );
+        assert_eq!(
+            engine::ai_support::legal_actions(runner.state())
+                .iter()
+                .any(
+                    |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+                ),
+            castable
+        );
+    }
+}

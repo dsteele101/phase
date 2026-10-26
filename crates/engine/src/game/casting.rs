@@ -10768,6 +10768,18 @@ impl CollectedCostModifiers {
     fn ordered(&self) -> impl Iterator<Item = &CostModification> {
         self.non_floor.iter().chain(self.target_dependent.iter())
     }
+
+    /// CR 601.2c + CR 601.2f: this set with its target-dependent pass replaced
+    /// by one collected against a candidate target assignment. The
+    /// target-independent inputs are a function of the cast alone, so one
+    /// collection serves every candidate assignment of the same cast.
+    fn with_target_dependent(&self, target_dependent: Vec<CostModification>) -> Self {
+        Self {
+            non_floor: self.non_floor.clone(),
+            target_dependent,
+            generic_only_units: self.generic_only_units.clone(),
+        }
+    }
 }
 
 /// CR 601.2f: the cost floors (Trinisphere class) that apply to one pending
@@ -10807,6 +10819,29 @@ impl CollectedCostFloors {
             ),
         }
     }
+
+    /// CR 601.2f: the floors that do not read the chosen targets, with an empty
+    /// target-dependent half for [`Self::with_target_dependent`] to fill per
+    /// candidate target assignment.
+    fn collect_target_independent(
+        state: &GameState,
+        caster: PlayerId,
+        object_id: ObjectId,
+    ) -> Self {
+        Self {
+            target_independent: collect_cost_floors(state, caster, object_id, None, false, false),
+            target_dependent: Vec::new(),
+        }
+    }
+
+    /// CR 601.2c + CR 601.2f: these floors with the target-dependent half
+    /// replaced by one collected against a candidate target assignment.
+    fn with_target_dependent(&self, target_dependent: Vec<u32>) -> Self {
+        Self {
+            target_independent: self.target_independent.clone(),
+            target_dependent,
+        }
+    }
 }
 
 /// CR 601.2f: lazily-populated cache of the board reads one pending cast's
@@ -10832,6 +10867,14 @@ impl CollectedCastCosts {
         Self {
             modifiers: OnceCell::from(modifiers),
             floors: OnceCell::new(),
+        }
+    }
+
+    /// Seed both halves, so the recompute performs no board walk of its own.
+    fn seeded(modifiers: CollectedCostModifiers, floors: CollectedCostFloors) -> Self {
+        Self {
+            modifiers: OnceCell::from(modifiers),
+            floors: OnceCell::from(floors),
         }
     }
 
@@ -21172,16 +21215,19 @@ const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 4096;
 /// the targets before paying.
 ///
 /// Each assignment is priced from the announcement-time base through
-/// [`recompute_pending_mana_total_with`] — the authority payment uses — so
+/// [`recompute_pending_mana_total_using`] — the authority payment uses — so
 /// target-dependent reductions, an accepted Defiler reduction, and both cost
 /// floors (Trinisphere) apply in CR 601.2f order. An {X} spell is probed at
 /// X = 0, the cheapest announcement (CR 107.3a).
 ///
-/// Assignments that price identically are payability-checked once, so the scan
-/// is cheap. When the assignments exceed
-/// [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`] the unpriced remainder might
-/// hold a cheaper one, so the answer is conservatively `true`; payment still
-/// enforces the real total once targets are chosen.
+/// The scan runs only when a target-dependent reduction can apply to the
+/// spell at all. The target-independent modifiers and floors are collected
+/// once per probe; each assignment re-collects only the target-dependent
+/// halves. Assignments that price identically are payability-checked once.
+/// When the assignments exceed [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`]
+/// the unpriced remainder might hold a cheaper one, so the answer is
+/// conservatively `true`; payment still enforces the real total once targets
+/// are chosen.
 fn target_dependent_reduction_makes_payable(
     state: &GameState,
     player: PlayerId,
@@ -21191,7 +21237,16 @@ fn target_dependent_reduction_makes_payable(
     let Some(ability_def) = prepared.ability_def.as_ref() else {
         return false;
     };
+    // With clean layers the live state is authoritative, so the common
+    // no-reduction case is decided without the flush clone.
+    let layers_dirty = state.layers_dirty.is_dirty();
+    if !layers_dirty && !target_dependent_cost_reduction_present(state, player, prepared) {
+        return false;
+    }
     with_flushed_cast_state(state, player, probe, |flushed| {
+        if layers_dirty && !target_dependent_cost_reduction_present(flushed, player, prepared) {
+            return false;
+        }
         let resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
         let Ok(slots) = build_target_slots(flushed, &resolved) else {
             return false;
@@ -21212,11 +21267,13 @@ fn target_dependent_reduction_makes_payable(
             player,
             prepared.object_id,
         );
-        let price = |ability: &ResolvedAbility, accept_defiler: bool| {
+        // One priced cast per reduction set (with and without the Defiler
+        // payment), its target-independent modifiers collected once.
+        let collect_cast = |accept_defiler: bool| {
             let mut pending = PendingCast::new(
                 prepared.object_id,
                 prepared.card_id,
-                ability.clone(),
+                resolved.clone(),
                 prepared.mana_cost.clone(),
             );
             pending.base_cost = Some(prepared.base_mana_cost.clone());
@@ -21225,7 +21282,35 @@ fn target_dependent_reduction_makes_payable(
                 pending.accepted_cost_reductions.extend(defiler.clone());
             }
             let ctx = CostFinalizeContext::from_pending(&pending);
-            recompute_pending_mana_total_with(flushed, player, &pending, Some(0), &ctx)
+            let modifiers = CollectedCostModifiers::collect_for(
+                flushed,
+                player,
+                pending.object_id,
+                None,
+                Some(pending.casting_variant),
+                pending.casting_permission_index,
+                &ctx,
+            );
+            (pending, ctx, modifiers)
+        };
+        let plain_cast = collect_cast(false);
+        let defiler_cast = defiler.is_some().then(|| collect_cast(true));
+        let floors =
+            CollectedCostFloors::collect_target_independent(flushed, player, prepared.object_id);
+        let price = |(pending, ctx, modifiers): &(
+            PendingCast,
+            CostFinalizeContext,
+            CollectedCostModifiers,
+        ),
+                     chosen: &ResolvedAbility,
+                     target_dependent: &(Vec<CostModification>, Vec<u32>)| {
+            let mut pending = pending.clone();
+            *pending.ability = chosen.clone();
+            let collected = CollectedCastCosts::seeded(
+                modifiers.with_target_dependent(target_dependent.0.clone()),
+                floors.with_target_dependent(target_dependent.1.clone()),
+            );
+            recompute_pending_mana_total_using(flushed, player, &pending, Some(0), ctx, &collected)
         };
         let payable = |cost: &ManaCost| {
             can_feasibly_pay_harmonize_mana_cost_with_probe(
@@ -21246,10 +21331,30 @@ fn target_dependent_reduction_makes_payable(
             if assign_selected_slots_in_chain(flushed, &mut chosen, &assignment).is_err() {
                 continue;
             }
-            let priced = price(&chosen, false);
+            // CR 601.2f: the modifiers and floors that read this assignment's
+            // targets, shared by both reduction sets.
+            let target_dependent = (
+                collect_target_dependent_cost_modifiers(
+                    flushed,
+                    player,
+                    prepared.object_id,
+                    &chosen,
+                ),
+                collect_cost_floors(
+                    flushed,
+                    player,
+                    prepared.object_id,
+                    Some(&chosen),
+                    true,
+                    false,
+                ),
+            );
+            let priced = price(&plain_cast, &chosen, &target_dependent);
             // CR 601.2f: an accepted Defiler reduction stacks with the
             // target-dependent one, ahead of the floors.
-            let with_defiler = defiler.is_some().then(|| price(&chosen, true));
+            let with_defiler = defiler_cast
+                .as_ref()
+                .map(|cast| price(cast, &chosen, &target_dependent));
             // Payability depends only on the priced pair, so assignments that
             // price identically are checked once.
             if checked
@@ -21265,6 +21370,86 @@ fn target_dependent_reduction_makes_payable(
         }
         overflowed
     })
+}
+
+/// CR 601.2f: whether some cost REDUCTION whose `spell_filter` reads the chosen
+/// targets can apply to `prepared` — the gate for pricing its target
+/// assignments. Increases, floors and Strive only raise a target-dependent
+/// price above the pre-target one, so they never make an unpayable spell
+/// payable and are ignored. A superset is safe here (it only admits the exact
+/// pricing scan), so transient grants are admitted on their filter alone.
+fn target_dependent_cost_reduction_present(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+) -> bool {
+    let spell_id = prepared.object_id;
+    let casting_variant = Some(prepared.casting_variant);
+    let fused = prepared.casting_variant == CastingVariant::Fuse;
+    let reduces_by_targets = |mode: &CostModifyMode, filter: Option<&TargetFilter>, source| {
+        matches!(mode, CostModifyMode::Reduce)
+            && filter.is_some_and(|filter| {
+                analyze_cost_filter_before_targets_for(
+                    state, player, spell_id, filter, source, fused,
+                )
+                .is_target_dependent()
+            })
+    };
+
+    let Some(spell) = state.objects.get(&spell_id) else {
+        return false;
+    };
+    // "This spell costs {3} less to cast if it targets a tapped creature."
+    if spell.static_definitions.iter_all().any(|definition| {
+        matches!(
+            &definition.mode,
+            StaticMode::ModifyCost { mode, spell_filter, .. }
+                if reduces_by_targets(mode, spell_filter.as_ref(), spell_id)
+        ) && self_spell_cost_modifier_applies_before_targets(
+            state,
+            player,
+            spell_id,
+            definition,
+            casting_variant,
+        )
+    }) {
+        return true;
+    }
+
+    // CR 604.1: O(1) presence gate, as in `collect_battlefield_cost_modifiers`.
+    let has_static = static_kind_present(state, StaticModeKind::ModifyCost);
+    let has_transient = transient_modify_cost_present(state);
+    (has_static
+        && super::functioning_abilities::game_functioning_statics(state).any(
+            |(source, definition)| {
+                definition
+                    .board_wide_cost_modifier()
+                    .is_some_and(|modifier| {
+                        reduces_by_targets(&modifier.mode, modifier.spell_filter, source.id)
+                    })
+                    && battlefield_cost_modifier_applies_before_targets(
+                        state,
+                        player,
+                        spell_id,
+                        source,
+                        definition,
+                        fused,
+                        casting_variant,
+                    )
+            },
+        ))
+        || (has_transient
+            && state.transient_continuous_effects.iter().any(|tce| {
+                tce.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantStaticAbility { definition }
+                            if definition.board_wide_cost_modifier().is_some_and(|modifier| {
+                                reduces_by_targets(&modifier.mode, modifier.spell_filter, spell_id)
+                            })
+                    )
+                })
+            }))
 }
 
 /// Returns true if the player can pay this mana cost after auto-tapping
