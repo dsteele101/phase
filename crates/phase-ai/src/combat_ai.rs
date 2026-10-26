@@ -747,8 +747,18 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                     // for connecting combat damage through blockers, correctly accounting
                     // for unblocked attackers, menace restrictions, trample excess,
                     // double strike, and lethal damage assignment.
-                    let damage = if eligible.len() >= required {
-                        engine::game::combat_damage::combat_damage_to_defender(state, id, &eligible)
+                    // CR 509.1b: a "can't be blocked by more than N" cap bounds the
+                    // legal blocker group from above. A floor above the cap means no
+                    // legal block exists, so the attacker is unblocked.
+                    let max = engine::game::combat::max_blockers_allowed_from_precomputed(
+                        state,
+                        id,
+                        &slices.block_restriction,
+                    )
+                    .map_or(usize::MAX, |m| m as usize);
+                    let damage = if eligible.len() >= required && required <= max {
+                        let legal = &eligible[..eligible.len().min(max)];
+                        engine::game::combat_damage::combat_damage_to_defender(state, id, legal)
                     } else {
                         engine::game::combat_damage::combat_damage_to_defender(state, id, &[])
                     };
@@ -951,7 +961,7 @@ fn redirect_attackers_to_planeswalker(
     };
 
     // While racing, the face is what matters: don't empty it for a planeswalker.
-    if objective == CombatObjective::Race && redirected.len() == attacking_ids.len() {
+    if objective == CombatObjective::Race && redirected.len() == by_damage.len() {
         return all_at_player();
     }
 
@@ -7859,22 +7869,90 @@ mod tests {
         assert_eq!(redirected, vec![(ogre, AttackTarget::Player(PlayerId(1)))]);
     }
 
-    /// With two killable planeswalkers, the one with live abilities is chosen
-    /// over a bare, higher-loyalty one.
+    /// With two equal-loyalty killable planeswalkers, the one with live abilities
+    /// is chosen over a bare one in either insertion order, so neither the
+    /// positional nor the tie-break order can stand in for the threat score.
     #[test]
     fn picks_more_threatening_planeswalker_over_higher_loyalty() {
+        for engine_first in [true, false] {
+            let mut state = setup();
+            let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 5, 5, vec![]);
+            let (engine_pw, _bare) = if engine_first {
+                let e = add_planeswalker(&mut state, PlayerId(1), 3);
+                (e, add_planeswalker(&mut state, PlayerId(1), 3))
+            } else {
+                let b = add_planeswalker(&mut state, PlayerId(1), 3);
+                (add_planeswalker(&mut state, PlayerId(1), 3), b)
+            };
+            add_loyalty_ability(&mut state, engine_pw, 1);
+            add_loyalty_ability(&mut state, engine_pw, -2);
+            let attacks = declare_attacks(&state);
+            assert_eq!(
+                attack_target_of(&attacks, ogre),
+                Some(AttackTarget::Planeswalker(engine_pw)),
+                "engine_first={engine_first}"
+            );
+        }
+    }
+
+    /// Race guard counts damaging attackers: a fully blocked attacker deals no
+    /// damage, so redirecting the only connecting attacker would leave the face
+    /// with zero expected damage and must be refused while racing.
+    #[test]
+    fn race_keeps_only_connecting_attacker_on_face_despite_blocked_attacker() {
         let mut state = setup();
-        let ogre = add_creature(&mut state, PlayerId(0), "Ogre", 5, 5, vec![]);
-        // Equal loyalty, so only the threat score can separate them; the bare
-        // one is created first so a positional/tie-break choice would pick it.
-        let _bare = add_planeswalker(&mut state, PlayerId(1), 3);
-        let engine_pw = add_planeswalker(&mut state, PlayerId(1), 3);
-        add_loyalty_ability(&mut state, engine_pw, 1);
-        add_loyalty_ability(&mut state, engine_pw, -2);
+        let ground = add_creature(&mut state, PlayerId(0), "Ground", 4, 4, vec![]);
+        let flyer = add_creature(&mut state, PlayerId(0), "Flyer", 2, 2, vec![]);
+        add_planeswalker(&mut state, PlayerId(1), 2);
+        let targets = valid_targets(&state);
+        let redirected = redirect_attackers_to_planeswalker(
+            &state,
+            &[ground, flyer],
+            Some(&targets),
+            CombatObjective::Race,
+            PlayerId(1),
+            20,
+            &HashMap::from([(ground, 0), (flyer, 2)]),
+        );
+        assert_eq!(
+            redirected,
+            vec![
+                (ground, AttackTarget::Player(PlayerId(1))),
+                (flyer, AttackTarget::Player(PlayerId(1)))
+            ]
+        );
+    }
+
+    /// CR 509.1b: "can't be blocked by more than one creature" on a menace
+    /// attacker leaves no legal block, so its damage connects and kills the
+    /// planeswalker even against two potential blockers.
+    #[test]
+    fn contradictory_block_bounds_leave_attacker_unblocked() {
+        use engine::types::ability::StaticDefinition;
+        let mut state = setup();
+        let brute = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Brute",
+            3,
+            3,
+            vec![Keyword::Menace],
+        );
+        state
+            .objects
+            .get_mut(&brute)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan {
+                max: 1,
+            }));
+        add_creature(&mut state, PlayerId(1), "Chump A", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Chump B", 1, 1, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 3);
         let attacks = declare_attacks(&state);
         assert_eq!(
-            attack_target_of(&attacks, ogre),
-            Some(AttackTarget::Planeswalker(engine_pw))
+            attack_target_of(&attacks, brute),
+            Some(AttackTarget::Planeswalker(pw))
         );
     }
 
@@ -7902,10 +7980,9 @@ mod tests {
         add_creature(&mut state, PlayerId(1), "Chump", 1, 1, vec![]);
         let pw = add_planeswalker(&mut state, PlayerId(1), 4);
         let attacks = declare_attacks(&state);
-        assert_ne!(
-            attack_target_of(&attacks, brute),
-            Some(AttackTarget::Planeswalker(pw))
-        );
+        let target = attack_target_of(&attacks, brute);
+        assert!(target.is_some(), "the attacker must be declared");
+        assert_ne!(target, Some(AttackTarget::Planeswalker(pw)));
     }
 
     /// CR 702.111b: a single blocker cannot block a menace attacker, so its
