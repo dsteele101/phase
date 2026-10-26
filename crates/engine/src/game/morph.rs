@@ -5,7 +5,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -1027,6 +1027,18 @@ pub(crate) fn finish_paid_turn_face_up(
     announced_x: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 400.7: A paused payment saved before turn-face-up carried an incarnation
+    // deserializes with `LEGACY_INCARNATION`, which names no live object. That pause
+    // was keyed by `ObjectId` alone, so bind it to the live object's current
+    // incarnation rather than silently dropping a payment that was already made.
+    let source = if source.incarnation == LEGACY_INCARNATION {
+        state
+            .objects
+            .get(&source.object_id)
+            .map_or(source, ObjectIncarnationRef::from_object)
+    } else {
+        source
+    };
     // CR 702.37e + CR 400.7 + CR 101.3: If the permanent left the battlefield during
     // cost payment (e.g. returned itself to hand via Raven Guild Initiate + Maskwood Nexus),
     // it became a new object and the instruction to turn it face up is ignored.
@@ -1378,6 +1390,34 @@ mod tests {
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
+    }
+
+    /// CR 400.7 + CR 702.37e: a paused turn-face-up payment restored from a save that
+    /// predates incarnation tracking must still flip the face-down permanent.
+    #[test]
+    fn legacy_source_incarnation_still_turns_face_up_after_payment() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        assert!(state.objects[&id].face_down);
+
+        let legacy: ObjectIncarnationRef = serde_json::from_value(serde_json::json!(id.0)).unwrap();
+        assert_eq!(legacy.incarnation, LEGACY_INCARNATION);
+
+        finish_paid_turn_face_up(
+            &mut state,
+            player,
+            legacy,
+            TurnUpCostSource::Morph,
+            None,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!state.objects[&id].face_down);
+        assert_eq!(state.objects[&id].name, "Secret Creature");
     }
 
     #[test]

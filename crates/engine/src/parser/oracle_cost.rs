@@ -995,8 +995,11 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     }
                 }
                 // Flat "Pay N life" — no " for each " tail.
-                if all_consuming(tag::<_, _, E<'_>>("life"))
-                    .parse(after_n.trim().trim_end_matches(['.', ',']))
+                // The cost word ends at end-of-text or a sentence boundary; a
+                // trailing qualifier ("... if you control an artifact") is not
+                // consumed, so the cost is declined rather than read as unconditional.
+                if terminated(tag::<_, _, E<'_>>("life"), alt((eof, peek(tag(".")))))
+                    .parse(after_n.trim().trim_end_matches(','))
                     .is_ok()
                 {
                     return AbilityCost::PayLife {
@@ -5866,6 +5869,15 @@ mod tests {
             valid,
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 5 }
+            }
+        ));
+
+        // A sentence boundary after the cost word is not a qualifier.
+        let sentence = parse_oracle_cost("Pay 3 life. You gain 1 life.");
+        assert!(matches!(
+            sentence,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 }
             }
         ));
     }
