@@ -757,8 +757,31 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                     )
                     .map_or(usize::MAX, |m| m as usize);
                     let damage = if eligible.len() >= required && required <= max {
-                        let legal = &eligible[..eligible.len().min(max)];
-                        engine::game::combat_damage::combat_damage_to_defender(state, id, legal)
+                        // The defender picks the blocker group, so assume the one
+                        // that lets the least damage through: for each legal group
+                        // size, the highest-toughness blockers absorb the most
+                        // trample damage (CR 702.19b), and declining to block is
+                        // never better for the defender than blocking.
+                        let mut by_toughness = eligible.clone();
+                        by_toughness.sort_by_key(|bid| {
+                            std::cmp::Reverse(state.objects.get(bid).and_then(|o| o.toughness))
+                        });
+                        (required.max(1)..=by_toughness.len().min(max))
+                            .map(|n| {
+                                engine::game::combat_damage::combat_damage_to_defender(
+                                    state,
+                                    id,
+                                    &by_toughness[..n],
+                                )
+                            })
+                            .min()
+                            .unwrap_or_else(|| {
+                                engine::game::combat_damage::combat_damage_to_defender(
+                                    state,
+                                    id,
+                                    &[],
+                                )
+                            })
                     } else {
                         engine::game::combat_damage::combat_damage_to_defender(state, id, &[])
                     };
@@ -947,6 +970,11 @@ fn redirect_attackers_to_planeswalker(
                     return None;
                 }
                 let redirected = killing_subset(loyalty)?;
+                // While racing, the face is what matters: a kill that empties it
+                // is ineligible, leaving cheaper kills of other planeswalkers.
+                if objective == CombatObjective::Race && redirected.len() == by_damage.len() {
+                    return None;
+                }
                 Some((*id, loyalty, planeswalker_threat(state, *id), redirected))
             }
             _ => None,
@@ -959,11 +987,6 @@ fn redirect_attackers_to_planeswalker(
     let Some((pw_id, _, _, redirected)) = best_kill else {
         return all_at_player();
     };
-
-    // While racing, the face is what matters: don't empty it for a planeswalker.
-    if objective == CombatObjective::Race && redirected.len() == by_damage.len() {
-        return all_at_player();
-    }
 
     let pw_target = AttackTarget::Planeswalker(pw_id);
     attacking_ids
@@ -7920,6 +7943,79 @@ mod tests {
                 (ground, AttackTarget::Player(PlayerId(1))),
                 (flyer, AttackTarget::Player(PlayerId(1)))
             ]
+        );
+    }
+
+    /// While racing, a kill that would empty the face is dropped before
+    /// planeswalkers are ranked, so a cheaper kill of another planeswalker wins
+    /// even when the face-emptying one is more threatening (either order).
+    #[test]
+    fn race_prefers_cheaper_kill_over_more_threatening_face_emptying_kill() {
+        for threatening_first in [true, false] {
+            let mut state = setup();
+            let big = add_creature(&mut state, PlayerId(0), "Big", 3, 3, vec![]);
+            let small = add_creature(&mut state, PlayerId(0), "Small", 2, 2, vec![]);
+            let (threatening, cheap) = if threatening_first {
+                let t = add_planeswalker(&mut state, PlayerId(1), 5);
+                (t, add_planeswalker(&mut state, PlayerId(1), 3))
+            } else {
+                let c = add_planeswalker(&mut state, PlayerId(1), 3);
+                (add_planeswalker(&mut state, PlayerId(1), 5), c)
+            };
+            add_loyalty_ability(&mut state, threatening, 1);
+            add_loyalty_ability(&mut state, threatening, -2);
+            let targets = valid_targets(&state);
+            let redirected = redirect_attackers_to_planeswalker(
+                &state,
+                &[big, small],
+                Some(&targets),
+                CombatObjective::Race,
+                PlayerId(1),
+                20,
+                &HashMap::from([(big, 3), (small, 2)]),
+            );
+            assert_eq!(
+                redirected,
+                vec![
+                    (big, AttackTarget::Planeswalker(cheap)),
+                    (small, AttackTarget::Player(PlayerId(1)))
+                ],
+                "threatening_first={threatening_first}"
+            );
+        }
+    }
+
+    /// CR 509.1b + CR 702.19b: the defender chooses the blocker group within a
+    /// "can't be blocked by more than one creature" cap, so the high-toughness
+    /// blocker (not the first eligible one) bounds the trample damage through.
+    #[test]
+    fn capped_trampler_assumes_defenders_best_single_blocker() {
+        use engine::types::ability::StaticDefinition;
+        let mut state = setup();
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Rhino",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+        state
+            .objects
+            .get_mut(&trampler)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan {
+                max: 1,
+            }));
+        add_creature(&mut state, PlayerId(1), "Chump", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Wall", 0, 5, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 4);
+        let attacks = declare_attacks(&state);
+        assert_ne!(
+            attack_target_of(&attacks, trampler),
+            Some(AttackTarget::Planeswalker(pw)),
+            "a 0/5 wall absorbs all 5 trample damage, so the kill is not assured"
         );
     }
 
