@@ -25364,6 +25364,9 @@ mod attached_set_trigger_tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Card));
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
+            card.valid_card.as_ref().unwrap()
+        ));
 
         let bare = parse_trigger_line(
             "Whenever a creature becomes the target of a spell or ability, draw a card.",
@@ -25373,5 +25376,8 @@ mod attached_set_trigger_tests {
             panic!("expected typed subject, got {:?}", bare.valid_card);
         };
         assert!(!typed.type_filters.contains(&TypeFilter::Card));
+        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
+            bare.valid_card.as_ref().unwrap()
+        ));
     }
 }
