@@ -13697,6 +13697,10 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 116.2b + CR 702.37e: A turn-face-up special action is only backed out
+        // before any cost component is paid. `supported_for_turn_face_up` admits
+        // single-leaf costs only (Composite is rejected at the scope gate in
+        // `costs.rs`), so this prompt is always the first and only payment step.
         (
             WaitingFor::PayCost {
                 player,
