@@ -768,6 +768,9 @@ fn pay_turn_face_up_cost_object(
                 }
             }
         }
+        // CR 701.21a: Sacrifice is attributed to the sacrificing player, not a source
+        // object; `sacrifice_permanent` takes no source, matching every other
+        // sacrifice-as-cost payment path (`costs.rs`, `casting_costs.rs`).
         crate::types::game_state::TurnFaceUpMoveKind::Sacrifice => {
             match super::sacrifice::sacrifice_permanent(state, id, player, events)? {
                 super::sacrifice::SacrificeOutcome::Complete => Ok(None),
