@@ -366,7 +366,7 @@ export function GameMenu({
           <div className="my-1 border-t border-gray-700" />
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 px-3 py-1.5 text-[10px] text-slate-500">
             <a
-              href={`${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`}
+              href={buildHash ? `${__GIT_REPO_URL__}/commit/${buildHash}` : __GIT_REPO_URL__}
               target="_blank"
               rel="noopener noreferrer"
               className="transition-colors hover:text-white"

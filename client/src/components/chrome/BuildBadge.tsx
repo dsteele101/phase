@@ -81,7 +81,8 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   };
 
   const buildHash = displayedBuildHash();
-  const commitUrl = `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`;
+  // Link to the exact commit only when its hash is shown; otherwise the commit URL would expose the hash.
+  const versionUrl = buildHash ? `${__GIT_REPO_URL__}/commit/${buildHash}` : __GIT_REPO_URL__;
   const cardDataAge = cardDataMeta ? formatRelativeDate(cardDataMeta.generated_at) : null;
   const cardDataCommitUrl = cardDataMeta
     ? `${__GIT_REPO_URL__}/commit/${cardDataMeta.commit}`
@@ -153,7 +154,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
     >
       <div className="relative flex items-center gap-1 rounded-full border border-white/10 bg-black/18 px-2.5 py-1.5 text-[10px] text-slate-400 shadow-lg shadow-black/30 backdrop-blur-md overflow-hidden">
         <a
-          href={commitUrl}
+          href={versionUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-1 transition-colors hover:text-white"

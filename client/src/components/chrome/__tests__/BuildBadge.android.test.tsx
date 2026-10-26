@@ -146,5 +146,12 @@ it.each([
     expect(screen.getByText(`v${__APP_VERSION__}`)).toBeInTheDocument();
     if (shown) expect(screen.getByText(__BUILD_HASH__)).toBeInTheDocument();
     else expect(screen.queryByText(__BUILD_HASH__)).not.toBeInTheDocument();
+    // The wide layout links the version; compact layouts render a button or span instead.
+    if (!compact) {
+      expect(screen.getByText(`v${__APP_VERSION__}`).closest("a")).toHaveAttribute(
+        "href",
+        shown ? `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}` : __GIT_REPO_URL__,
+      );
+    }
   },
 );
