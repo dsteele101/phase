@@ -1109,7 +1109,13 @@ fn pay_ability_cost_inner(
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
-            PaymentScope::TurnFaceUp { .. } => unreachable!(),
+            // CR 702.37e: turn-face-up mana is paid through `TurnFaceUpCost::Mana`,
+            // never through the ability-cost resolver.
+            PaymentScope::TurnFaceUp { .. } => {
+                return Ok(payment_failed(
+                    "turn-face-up mana costs must be paid through TurnFaceUpCost::Mana",
+                ));
+            }
         },
         AbilityCost::Composite { costs } => {
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
