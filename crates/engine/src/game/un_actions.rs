@@ -211,10 +211,9 @@ fn append_gotcha_offers(state: &mut GameState, new_offers: Vec<GotchaOffer>) {
 ///
 /// CR 603.10: objects that exist immediately after an event are checked against
 /// the trigger conditions that event matched, so the eligible Gotcha sources and
-/// cards are resolved *now*, when the tell happens (the game "looks back in time"
-/// at the board state at tell time). The matched offers are announced at once
-/// when already at a Priority boundary, or queued in `pending_offers` to open
-/// once priority settles.
+/// cards are resolved by ordinary event-time matching when the tell happens. The
+/// matched offers are announced at once when already at a Priority boundary, or
+/// queued in `pending_offers` to open once priority settles.
 ///
 /// A player who has not opted in to Un-card actions is treated as having
 /// declined any say-it payment, so the "unless" branch simply happens
@@ -264,10 +263,10 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// incarnation, and expected zone) is what lets us detect a stale offer rather
 /// than trusting a bare ObjectId.
 ///
-/// CR 603.10: the eligibility of Gotcha sources is fixed at tell time (the game
-/// looks back at the board state then); this live-state check only withdraws an
-/// already-matched window when its source no longer functions, its holder opted
-/// out, or the returned card is no longer the same object.
+/// CR 603.10: the eligibility of Gotcha sources is matched at event time when the
+/// tell occurs; this live-state check ensures that before presenting or accepting
+/// a window, its source still functions in its current zone, its holder remains
+/// opted in, and the returned card has not moved or become a new object (CR 400.7).
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
     // The source must still exist and still carry a functioning Gotcha ability in
     // its current zone (gotcha_definitions applies both checks).
@@ -277,10 +276,7 @@ fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
         // CR 400.7: the returned card must be the same incarnation still in its expected
         // zone — a zone change makes it a new object, invalidating the window (a stale
         // ObjectId might now name a different card).
-        && offer.returns.reference.is_current(state)
-        && state.objects
-            .get(&offer.returns.reference.object_id)
-            .is_some_and(|object| object.zone == offer.returns.expected_zone)
+        && offer.returns.is_current(state)
 }
 
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
@@ -365,7 +361,7 @@ pub fn apply_un_action(
             let mut events = vec![GameEvent::GotchaSaid {
                 player: actor,
                 source_id,
-                returns: offer.returns.reference.object_id,
+                returns: offer.returns,
             }];
             let waiting_for = state.waiting_for.clone();
             let settled = super::engine_priority::run_post_action_pipeline_from_settled_priority(

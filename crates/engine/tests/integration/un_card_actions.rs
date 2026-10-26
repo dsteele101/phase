@@ -1051,3 +1051,125 @@ fn a_tell_by_another_player_leaves_a_pending_decision_answerable() {
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("P1's payment answer is still accepted after P0's gesture");
 }
+
+const NAME_DROPPING: &str = "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.";
+
+#[test]
+fn name_dropping_matches_real_plurals_of_name_words_and_rejects_invented_ones() {
+    // Unhinged FAQ: "The word must be used exactly. The only exception is
+    // plurals." — the real plural ("wolves"), not a regularized one ("wolfs").
+    for (name, invented, real) in [
+        ("Young Wolf", "wolfs", "wolves"),
+        ("Thief of Sanity", "thiefs", "thieves"),
+        ("Leaf Gilder", "leafs", "leaves"),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(P0, "Name Dropping", NAME_DROPPING);
+        let card = scenario.add_creature_to_graveyard(P0, name, 1, 1).id();
+        let mut runner = scenario.build();
+        un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+        un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+        tell(
+            &mut runner,
+            P1,
+            UnTell::Said {
+                text: format!("Look at all those {invented}"),
+            },
+        );
+        assert!(
+            runner.state().un_actions.gotcha_offers.is_empty(),
+            "{name}: '{invented}' is not the plural of a word in its name"
+        );
+        tell(
+            &mut runner,
+            P1,
+            UnTell::Said {
+                text: format!("Look at all those {real}"),
+            },
+        );
+        let offers = &runner.state().un_actions.gotcha_offers;
+        assert_eq!(offers.len(), 1, "{name}: '{real}' opens the window");
+        assert_eq!(offers[0].returns.reference.object_id, card);
+    }
+}
+
+#[test]
+fn name_droppings_return_leaves_a_card_reanimated_in_response_alone() {
+    // CR 400.7: the Gotcha return names the graveyard card. If that card is
+    // reanimated while the reflexive trigger waits on the stack, the creature
+    // on the battlefield is a new object and the trigger does nothing to it.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let name_dropping = scenario
+        .add_enchantment_from_oracle(P0, "Name Dropping", NAME_DROPPING)
+        .id();
+    let bear = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let reanimate = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Reanimation Spell",
+            true,
+            "Return target creature card from your graveyard to the battlefield.",
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::generic(1))
+        .id();
+    scenario.with_mana_pool(P0, generic_mana(1));
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    tell(
+        &mut runner,
+        P1,
+        UnTell::Said {
+            text: "bears".to_string(),
+        },
+    );
+    un_action(
+        &mut runner,
+        P0,
+        UnAction::SayGotcha {
+            source_id: name_dropping,
+            returns: bear,
+        },
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the Gotcha return waits on the stack"
+    );
+
+    // Respond: reanimate the named card above the Gotcha trigger.
+    drop(runner.cast(reanimate).target_object(bear).commit());
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "the response is on the stack"
+    );
+    assert!(
+        runner.state().players[0].mana_pool.is_empty(),
+        "the response's mana cost was paid"
+    );
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "reach guard: the response reanimated the card"
+    );
+    assert_eq!(runner.state().stack.len(), 1, "the Gotcha return is next");
+
+    runner.resolve_top();
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the Gotcha return resolved"
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "the reanimated creature is a new object; the return does not bounce it"
+    );
+}

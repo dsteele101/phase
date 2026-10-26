@@ -3714,7 +3714,7 @@ export type GameEvent =
   // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
   | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
   | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
-  | { type: "GotchaSaid"; data: { player: PlayerId; source_id: ObjectId; returns: ObjectId } }
+  | { type: "GotchaSaid"; data: { player: PlayerId; source_id: ObjectId; returns: ObjectIdentityBinding } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.

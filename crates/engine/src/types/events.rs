@@ -13,7 +13,9 @@ use super::ability::{
 use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
-use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::identifiers::{
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
+};
 use super::keywords::Keyword;
 use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
@@ -1488,12 +1490,13 @@ pub enum GameEvent {
         phrase: String,
     },
     /// Un-card Gotcha (no CR entry): `player` called "Gotcha!" for the Gotcha
-    /// ability on `source_id`, naming `returns` as the card to return. Consumed
-    /// by `TriggerMode::GotchaSaid` — the "When you do" reflexive trigger.
+    /// ability on `source_id`, naming `returns` (exact card occurrence) as the
+    /// card to return. Consumed by `TriggerMode::GotchaSaid` — the "When you do"
+    /// reflexive trigger.
     GotchaSaid {
         player: PlayerId,
         source_id: ObjectId,
-        returns: ObjectId,
+        returns: ObjectIdentityBinding,
     },
     CounterRemoved {
         object_id: ObjectId,

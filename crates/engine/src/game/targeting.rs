@@ -2312,6 +2312,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         }
         TargetFilter::TriggeringSource => {
             if let Some(event) = event {
+                // CR 400.7: Un-card Gotcha reflexively returns the exact occurrence of
+                // the named card. If that card left its expected zone, it is a new object
+                // with no memory of, or relation to, its previous existence; do not resolve
+                // it to a new object at the same storage id.
+                if let GameEvent::GotchaSaid { returns, .. } = event {
+                    return returns
+                        .is_current(state)
+                        .then_some(TargetRef::Object(returns.reference.object_id));
+                }
                 if let Some(obj_id) = extract_source_from_event(event) {
                     return Some(TargetRef::Object(obj_id));
                 }
@@ -2421,6 +2430,13 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                         if *object_id != source_id && to.is_public() =>
                     {
                         return Some(TargetRef::Object(*object_id));
+                    }
+                    // CR 400.7: Un-card Gotcha reflexively returns the exact occurrence of
+                    // the named card.
+                    crate::types::events::GameEvent::GotchaSaid { returns, .. } => {
+                        return returns
+                            .is_current(state)
+                            .then_some(TargetRef::Object(returns.reference.object_id));
                     }
                     _ => {}
                 }
@@ -2875,7 +2891,7 @@ pub(crate) fn extract_source_from_event(
         }
         GameEvent::Evolved { object_id } => Some(*object_id),
         // Un-card Gotcha: "that card" is the card being returned.
-        GameEvent::GotchaSaid { returns, .. } => Some(*returns),
+        GameEvent::GotchaSaid { returns, .. } => Some(returns.reference.object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),

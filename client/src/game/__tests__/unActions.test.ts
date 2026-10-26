@@ -36,7 +36,17 @@ describe("flashUnActionEvents", () => {
   it("fires the Gotcha gag and ignores unrelated events", () => {
     const events: GameEvent[] = [
       { type: "GameStarted" },
-      { type: "GotchaSaid", data: { player: 0, source_id: 4, returns: 4 } },
+      {
+        type: "GotchaSaid",
+        data: {
+          player: 0,
+          source_id: 4,
+          returns: {
+            reference: { object_id: 4, incarnation: 0 },
+            expected_zone: "Graveyard",
+          },
+        },
+      },
     ];
     flashUnActionEvents(events);
     expect(kinds()).toEqual(["gotcha"]);

@@ -197,6 +197,18 @@ const IRREGULAR_PLURALS: &[(&str, &str)] = &[
     ("foot", "feet"),
     ("tooth", "teeth"),
     ("ox", "oxen"),
+    ("man", "men"),
+    ("woman", "women"),
+    ("wolf", "wolves"),
+    ("thief", "thieves"),
+    ("leaf", "leaves"),
+    ("elf", "elves"),
+    ("knife", "knives"),
+    ("half", "halves"),
+    ("calf", "calves"),
+    ("shelf", "shelves"),
+    ("loaf", "loaves"),
+    ("sheaf", "sheaves"),
 ];
 
 /// Split spoken text into lowercase words. Hyphenated words are preserved as single words.

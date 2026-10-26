@@ -26163,7 +26163,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         }
         // Damage is the only one of these whose subject can be a player
         // (CR 120.1 — damage is dealt to a player, planeswalker, or
-        // creature). Valiant Farewell deals damage to creatures and players;
+        // creature). Spells and abilities can deal damage to players;
         // a player-scope target must never be rebound to ParentTarget, so
         // the object-effect guard does not apply here.
         Effect::DealDamage { target, .. }
