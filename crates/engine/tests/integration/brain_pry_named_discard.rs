@@ -50,7 +50,9 @@ fn setup(opponent_hand: &[&str]) -> (Setup, ObjectId) {
         ],
     );
     let mut runner = scenario.build();
-    runner.state_mut().all_card_names = ["Opt", "Shock", "Lightning Bolt"].map(String::from).into();
+    runner.state_mut().all_card_names = ["Opt", "Shock", "Lightning Bolt", "Éowyn, Shieldmaiden"]
+        .map(String::from)
+        .into();
     (Setup { runner, hand }, spell)
 }
 
@@ -169,6 +171,25 @@ fn no_matching_card_discards_nothing_and_controller_draws() {
         state.players[0].hand.len(),
         1,
         "\"if they can't\" draws a card"
+    );
+}
+
+/// CR 201.2a: the naming prompt accepts any casing, so a name typed in a
+/// different Unicode case ("éowyn" for "Éowyn") still names that card and the
+/// discard must match it rather than falling through to the draw.
+#[test]
+fn accented_name_typed_in_lowercase_matches_the_card_in_hand() {
+    let (mut setup, spell) = setup(&["Opt", "Éowyn, Shieldmaiden"]);
+    let (opt, eowyn) = (setup.hand[0], setup.hand[1]);
+    cast_naming(&mut setup, spell, "éowyn, shieldmaiden");
+    let state = setup.runner.state();
+
+    assert_eq!(state.objects[&eowyn].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&opt].zone, Zone::Hand);
+    assert_eq!(
+        state.players[0].hand.len(),
+        0,
+        "a discard happened: no draw"
     );
 }
 
