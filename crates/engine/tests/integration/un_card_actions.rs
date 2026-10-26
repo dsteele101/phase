@@ -368,6 +368,35 @@ fn touch_and_go_returns_to_hand_when_gotcha_is_called_after_the_opponent_touches
 }
 
 #[test]
+fn a_player_who_did_not_opt_in_cannot_perform_a_tell() {
+    let (mut runner, _card) = touch_and_go_scenario();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    let denied = apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::PerformTell {
+                tell: UnTell::Physical(PhysicalTell::TouchFace),
+            },
+        },
+    );
+    assert!(
+        denied.is_err(),
+        "P1 never opted in, so the tell is rejected"
+    );
+    assert!(
+        runner.state().un_actions.gotcha_offers.is_empty()
+            && runner.state().un_actions.pending_offers.is_empty(),
+        "a rejected tell opens no Gotcha window"
+    );
+
+    // Reach guard: once P1 opts in, the same tell opens P0's window.
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
+    assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);
+}
+
+#[test]
 fn gotcha_is_not_offered_for_a_different_gesture_or_to_a_player_who_did_not_opt_in() {
     let (mut runner, card) = touch_and_go_scenario();
     un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
