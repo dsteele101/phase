@@ -2329,6 +2329,9 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         if folded_rem.trim().is_empty() {
             folded_filter
         } else if count == 1
+            // CR 201.5: a by-name reference never starts with an article or count,
+            // so nothing may have been stripped ahead of the object phrase.
+            && rest_lower.trim_start().starts_with(filter_text)
             && folded_rem.trim() == filter_text.trim()
             && match &folded_filter {
                 TargetFilter::Any => true,
@@ -4831,26 +4834,36 @@ mod tests {
         }
     }
 
-    /// The source-name self-reference fallback names ONE object; a counted
-    /// return of an unreadable object phrase must not lower to an unpayable
-    /// `ReturnToHand { count: 2, filter: SelfRef }`.
+    /// The source-name self-reference fallback names ONE object; CR 201.5 by-name
+    /// references never carry an article or count, so an article- or count-led
+    /// unreadable object phrase must not lower to `ReturnToHand { filter: SelfRef }`.
     #[test]
     fn cost_counted_return_of_unreadable_phrase_is_not_self_ref() {
-        // Reach guard: the same object phrase with an article reaches the
-        // fallback and becomes the self-reference.
+        // Reach guard: the bare name reaches the fallback and becomes the self-reference.
         assert_eq!(
-            parse_oracle_cost("Return a Recurring Nightmare to its owner's hand"),
+            parse_oracle_cost("Return Recurring Nightmare to its owner's hand"),
             AbilityCost::ReturnToHand {
                 count: 1,
                 filter: Some(TargetFilter::SelfRef),
                 from_zone: None,
             }
         );
-        let cost = parse_oracle_cost("Return two Recurring Nightmares to their owner's hand");
-        assert!(
-            !matches!(cost, AbilityCost::ReturnToHand { .. }),
-            "counted unreadable phrase must not lower to ReturnToHand, got {cost:?}"
-        );
+        for text in [
+            "Return a Recurring Nightmare to its owner's hand",
+            "Return two Recurring Nightmares to their owner's hand",
+        ] {
+            let cost = parse_oracle_cost(text);
+            assert!(
+                !matches!(
+                    cost,
+                    AbilityCost::ReturnToHand {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                ),
+                "{text:?} must not lower to a SelfRef return, got {cost:?}"
+            );
+        }
     }
 
     #[test]
