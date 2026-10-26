@@ -257,19 +257,17 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// Whether a queued Gotcha offer still matches the live game state. The offer was
 /// matched when the tell was made; between then and the next priority boundary the
 /// source may have left play, its controller may have opted out, or the returned
-/// Whether a queued Gotcha offer still matches the live game state. The offer was
-/// matched when the tell was made; between then and the next priority boundary the
-/// source may have left play, its controller may have opted out, or the returned
 /// card may have moved zones — each of which invalidates the window.
 ///
 /// CR 400.7: an object that moves from one zone to another becomes a new object
-/// with no memory of its previous existence, so the `returns` binding (object id
-/// + incarnation + expected zone) is what lets us detect a stale offer rather than
-/// trusting a bare ObjectId.
+/// with no memory of its previous existence, so the `returns` binding (object id,
+/// incarnation, and expected zone) is what lets us detect a stale offer rather
+/// than trusting a bare ObjectId.
 ///
 /// CR 603.10: the eligibility of Gotcha sources is fixed at tell time (the game
-/// looks back at the board state then), so a source that later left play no longer
-/// gets a window.
+/// looks back at the board state then); this live-state check only withdraws an
+/// already-matched window when its source no longer functions, its holder opted
+/// out, or the returned card is no longer the same object.
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
     // The source must still exist and still carry a functioning Gotcha ability in
     // its current zone (gotcha_definitions applies both checks).

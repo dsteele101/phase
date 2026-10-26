@@ -18148,7 +18148,8 @@ pub fn ability_cost_has_x(cost: &crate::types::ability::AbilityCost) -> bool {
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
-        | AbilityCost::GetPlayerCounters { .. } => false,
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::SayPhrase { .. } => false,
     }
 }
 

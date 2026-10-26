@@ -9182,6 +9182,7 @@ fn ability_cost_reads_filter_population(
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
 }
@@ -9455,6 +9456,7 @@ fn trigger_matchers_read_filter_population(
         room_door: _,
         granting_object: _,
         attack_cost_condition,
+        gotcha_condition: _,
     } = trigger;
     [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()

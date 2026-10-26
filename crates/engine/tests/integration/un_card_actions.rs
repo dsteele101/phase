@@ -87,6 +87,7 @@ fn spank_p1(runner: &mut GameRunner, rod: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: rod,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation is accepted");
     if matches!(

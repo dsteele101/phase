@@ -24193,7 +24193,7 @@ declare_game_state! {
     /// Opt-in Un-card actions (Gotcha windows, say-it prompts). See
     /// [`crate::types::un_actions`].
     #[serde(default, skip_serializing_if = "super::un_actions::UnActionState::is_default")]
-    pub un_actions: super::un_actions::UnActionState,
+    pub un_actions: Box<super::un_actions::UnActionState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
