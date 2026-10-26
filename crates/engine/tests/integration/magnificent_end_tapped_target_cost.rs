@@ -211,7 +211,7 @@ fn trinisphere_floors_the_reduced_cost_in_castability() {
     }
 }
 
-/// CR 601.2h: with more legal targets than the pricing window, none tapped,
+/// CR 601.2h: with 65 untapped legal targets, none tapped,
 /// no assignment reduces the cost, so two lands still cannot pay {4}{W}.
 #[test]
 fn many_untapped_targets_do_not_make_the_spell_castable() {
@@ -242,18 +242,16 @@ fn many_untapped_targets_do_not_make_the_spell_castable() {
         .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)));
 }
 
-/// Paired positive control: with more legal targets than the pricing window, a
-/// tapped target inside the window changes the price, so the overflow fallback
-/// keeps the spell castable even though the discounted {1}{W} is still
-/// unaffordable with one land (payment enforces the real total later).
+/// CR 601.2c: a tapped target past the first 64 legal targets still discounts
+/// the spell, so two lands can cast it.
 #[test]
-fn many_targets_with_a_tapped_one_in_window_stay_castable_via_overflow_fallback() {
+fn tapped_target_after_many_untapped_targets_stays_castable() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let first = scenario.add_creature(P1, "Weary", 2, 2).id();
     for i in 0..64 {
         scenario.add_creature(P1, &format!("Fresh {i}"), 2, 2);
     }
+    let last = scenario.add_creature(P1, "Weary", 2, 2).id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Final Verdict", false, MAGNIFICENT_END)
         .as_instant()
@@ -262,9 +260,11 @@ fn many_targets_with_a_tapped_one_in_window_stay_castable_via_overflow_fallback(
             generic: 4,
         })
         .id();
-    scenario.add_basic_land(P0, ManaColor::White);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
     let mut runner = scenario.build();
-    runner.state_mut().objects.get_mut(&first).unwrap().tapped = true;
+    runner.state_mut().objects.get_mut(&last).unwrap().tapped = true;
     assert!(engine::game::casting::can_cast_object_now(
         runner.state(),
         P0,

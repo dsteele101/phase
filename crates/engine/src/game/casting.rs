@@ -21162,7 +21162,7 @@ fn can_cast_prepared_now_with_probe(
 
 /// Upper bound on the target assignments priced by
 /// [`target_dependent_reduction_makes_payable`].
-const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 64;
+const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 4096;
 
 /// CR 601.2c + CR 601.2f: a cost reduction that reads the chosen targets ("This
 /// spell costs {3} less to cast if it targets a tapped creature") is applied
@@ -21177,12 +21177,11 @@ const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 64;
 /// floors (Trinisphere) apply in CR 601.2f order. An {X} spell is probed at
 /// X = 0, the cheapest announcement (CR 107.3a).
 ///
-/// When the assignments exceed [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`]
-/// only the first ones are priced. The answer is then `true` only if some
-/// priced assignment actually changed the spell's price (a target-dependent
-/// modifier is in play, so an unpriced assignment might reach further);
-/// payment still enforces the real total once targets are chosen. A spell no
-/// target-dependent modifier touches stays at its unreduced, unpayable price.
+/// Assignments that price identically are payability-checked once, so the scan
+/// is cheap. When the assignments exceed
+/// [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`] the unpriced remainder might
+/// hold a cheaper one, so the answer is conservatively `true`; payment still
+/// enforces the real total once targets are chosen.
 fn target_dependent_reduction_makes_payable(
     state: &GameState,
     player: PlayerId,
@@ -21238,8 +21237,6 @@ fn target_dependent_reduction_makes_payable(
                 None,
             )
         };
-        let untargeted = price(&resolved, false);
-        let mut price_changed = false;
         let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
         for assignment in assignments
             .into_iter()
@@ -21250,7 +21247,6 @@ fn target_dependent_reduction_makes_payable(
                 continue;
             }
             let priced = price(&chosen, false);
-            price_changed |= priced != untargeted;
             // CR 601.2f: an accepted Defiler reduction stacks with the
             // target-dependent one, ahead of the floors.
             let with_defiler = defiler.is_some().then(|| price(&chosen, true));
@@ -21267,7 +21263,7 @@ fn target_dependent_reduction_makes_payable(
             }
             checked.push((priced, with_defiler));
         }
-        overflowed && price_changed
+        overflowed
     })
 }
 
