@@ -274,3 +274,42 @@ fn tapped_target_after_many_untapped_targets_stays_castable() {
         .iter()
         .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)));
 }
+
+const DEFILER_OF_DREAMS: &str = "Flying\nAs an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.\nWhenever you cast a blue permanent spell, draw a card.";
+
+/// CR 601.2f: a Defiler reduces only permanent spells, so it never combines with
+/// the target-dependent reduction of an instant. A blue {3}{U} Magnificent End
+/// variant with no mana stays uncastable even at a tapped target ({U} remains).
+#[test]
+fn defiler_does_not_combine_with_an_instants_target_dependent_reduction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P1, "Weary", 2, 2).id();
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        DEFILER_OF_DREAMS,
+        "Defiler of Dreams",
+        &["Flying".into()],
+        &["Creature".into()],
+        &[],
+    );
+    let mut defiler = scenario.add_creature(P0, "Defiler of Dreams", 3, 3);
+    for s in parsed.statics {
+        defiler.with_static_definition(s);
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blue Verdict", false, MAGNIFICENT_END)
+        .as_instant()
+        .with_color(vec![ManaColor::Blue])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&victim).unwrap().tapped = true;
+    assert!(!engine::game::casting::can_cast_object_now(
+        runner.state(),
+        P0,
+        spell
+    ));
+}
