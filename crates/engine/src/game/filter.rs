@@ -380,11 +380,13 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
 pub(crate) const UNPAIRED_READS: CharacteristicKinds =
     CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES);
 
-/// CR 303.4 + CR 702.103b: whether a source's "enchanted creature" is relative
-/// to the source itself. True for an Aura, and for a bestow card: while it is
-/// unattached it is a creature rather than an Aura, but its "enchanted creature"
-/// static still refers only to the creature it is attached to, never to
-/// creatures enchanted by other Auras.
+/// CR 303.4 + CR 702.103b + CR 702.103f: whether a source's "enchanted creature"
+/// is relative to the source itself. True for an Aura, and for a bestow card:
+/// CR 702.103b makes a bestowed spell and the permanent it becomes an Aura, and
+/// CR 702.103f ends that bestowed status when it becomes unattached, leaving a
+/// creature rather than an Aura. Its "enchanted creature" static still refers
+/// only to the creature it is attached to, never to creatures enchanted by
+/// other Auras.
 fn source_is_aura_or_bestow(subtypes: &[String], keywords: &[Keyword]) -> bool {
     subtypes.iter().any(|subtype| subtype == "Aura")
         || keywords.iter().any(|k| matches!(k, Keyword::Bestow(_)))
