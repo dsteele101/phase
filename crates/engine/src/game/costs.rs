@@ -2519,18 +2519,20 @@ pub(crate) fn can_pay(
         }
         PaymentScope::Resolution { ability, .. } => can_pay_resolution(state, payer, cost, ability),
         PaymentScope::TurnFaceUp { source, .. } => {
-            can_pay_turn_face_up(state, payer, source.object_id, cost)
+            can_pay_turn_face_up(state, payer, source.object_id, cost, scope)
         }
     }
 }
 
 /// CR 702.37e + CR 118.1 + CR 118.3: Whether `payer` can pay `cost` right now
-/// to turn `object_id` face up.
+/// to turn `object_id` face up. `scope` is the caller's `PaymentScope::TurnFaceUp`,
+/// forwarded to eligibility queries that are scope-aware.
 pub(crate) fn can_pay_turn_face_up(
     state: &GameState,
     payer: PlayerId,
     object_id: ObjectId,
     cost: &AbilityCost,
+    scope: &PaymentScope,
 ) -> bool {
     if !supported_for_turn_face_up(cost) {
         return false;
@@ -2608,14 +2610,7 @@ pub(crate) fn can_pay_turn_face_up(
                 object_id,
                 None,
                 &cost.target,
-                Some(&PaymentScope::TurnFaceUp {
-                    source: state
-                        .objects
-                        .get(&object_id)
-                        .map(ObjectIncarnationRef::from_object)
-                        .unwrap_or(ObjectIncarnationRef::of(object_id, 0)),
-                    cost_source: TurnUpCostSource::Morph,
-                }),
+                Some(scope),
             );
             eligible.len() >= count
         }
