@@ -4025,6 +4025,48 @@ mod tests {
         );
     }
 
+    /// CR 702.37e: Turn-face-up mana costs are paid through
+    /// `TurnFaceUpCost::Mana`. A mana cost that reaches the non-mana
+    /// turn-face-up entry point fails cleanly instead of panicking, and leaves
+    /// the permanent face down.
+    #[test]
+    fn turn_face_up_non_mana_entry_rejects_mana_cost_without_panicking() {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Face-Down Creature", 2, 2).id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .face_down = true;
+        let pin = ObjectIncarnationRef::from_object(&runner.state().objects[&source]);
+        let mut events = Vec::new();
+
+        for cost in [
+            AbilityCost::Mana {
+                cost: ManaCost::generic(3),
+            },
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Fixed { value: 3 },
+            },
+        ] {
+            let result = pay_ability_cost_for_turn_face_up(
+                runner.state_mut(),
+                P0,
+                pin,
+                TurnUpCostSource::Morph,
+                &cost,
+                &mut events,
+            );
+            assert!(
+                matches!(result, Err(EngineError::ActionNotAllowed(_))),
+                "{cost:?} through the non-mana turn-face-up entry must fail, got {result:?}"
+            );
+            assert!(runner.state().objects[&source].face_down);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Composite "{N}, <battlefield-removal>" mana-first affordability (CR 601.2g
     // / CR 601.2h ordering: the mana-leg detour pays mana FIRST on the intact
