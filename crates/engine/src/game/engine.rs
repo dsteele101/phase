@@ -14005,7 +14005,9 @@ fn apply_non_priority_pass_action(
                                 &mut events,
                             ) {
                                 super::effects::discard::DiscardOutcome::Complete => {}
-                                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
+                                    choice_player,
+                                ) => {
                                     super::morph::stamp_cost_move_departures(
                                         state,
                                         &mut events,
@@ -14039,11 +14041,12 @@ fn apply_non_priority_pass_action(
                                         0,
                                     );
                                     crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                                        state,
-                                        &events,
-                                        0,
+                                        state, &events, 0,
                                     );
-                                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                                    return Ok(ActionResult::applied(
+                                        events,
+                                        state.waiting_for.clone(),
+                                    ));
                                 }
                             }
                         }
@@ -14066,7 +14069,9 @@ fn apply_non_priority_pass_action(
                                 &mut events,
                             )? {
                                 super::sacrifice::SacrificeOutcome::Complete => {}
-                                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
+                                    choice_player,
+                                ) => {
                                     super::morph::stamp_cost_move_departures(
                                         state,
                                         &mut events,
@@ -14100,11 +14105,12 @@ fn apply_non_priority_pass_action(
                                         0,
                                     );
                                     crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                                        state,
-                                        &events,
-                                        0,
+                                        state, &events, 0,
                                     );
-                                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
+                                    return Ok(ActionResult::applied(
+                                        events,
+                                        state.waiting_for.clone(),
+                                    ));
                                 }
                             }
                         }
