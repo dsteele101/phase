@@ -2852,6 +2852,34 @@ mod tests {
 
     const P0: PlayerId = PlayerId(0);
 
+    /// Un-card: an activation whose cost is a spoken phrase is unpayable for a
+    /// player who has not opted in, and the dry run emits no event.
+    #[test]
+    fn say_phrase_activation_requires_un_actions_opt_in() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_enchantment_from_oracle(P0, "Phrase Source", "Flying")
+            .id();
+        let mut runner = scenario.build();
+        let cost = AbilityCost::SayPhrase {
+            phrase: "Gotcha!".to_string(),
+        };
+        let excluded = HashSet::new();
+        let scope = PaymentScope::Activation {
+            excluded_sources: &excluded,
+            ability_index: None,
+        };
+        assert!(
+            !can_pay(runner.state(), P0, source, &cost, &scope),
+            "opted-out player cannot pay a say-it activation cost"
+        );
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        assert!(
+            can_pay(runner.state(), P0, source, &cost, &scope),
+            "reach guard: opted-in player can pay"
+        );
+    }
+
     #[test]
     fn half_life_activation_lock_fixes_only_explicit_typed_leaf() {
         let mut scenario = GameScenario::new();
