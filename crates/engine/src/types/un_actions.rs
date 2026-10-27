@@ -190,6 +190,7 @@ const EXTRA_NUMBER_WORDS: &[&str] = &["zero", "hundred", "thousand", "million", 
 /// must be the listed plural exactly.
 const IRREGULAR_PLURALS: &[(&str, &str)] = &[
     ("life", "lives"),
+    ("quiz", "quizzes"),
     ("child", "children"),
     ("person", "people"),
     ("mouse", "mice"),

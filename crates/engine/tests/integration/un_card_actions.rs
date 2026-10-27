@@ -1065,6 +1065,7 @@ fn name_dropping_matches_real_plurals_of_name_words_and_rejects_invented_ones() 
         ("Sanity Check", "sanitys", "sanities"),
         ("Box Trap", "boxs", "boxes"),
         ("Monarch Lord", "monarches", "monarchs"),
+        ("Pop Quiz", "quizes", "quizzes"),
     ] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -1177,12 +1178,12 @@ fn name_droppings_return_leaves_a_card_reanimated_in_response_alone() {
     );
 }
 
-const INFERNAL_SPAWN: &str = "Flying, first strike, trample\n{1}{B}, Reveal this card from your hand, Say \"It's coming\": This card deals 1 damage to target opponent or planeswalker.";
+const INFERNAL_SPAWN: &str = "Flying, first strike\n{1}{B}, Reveal this card from your hand, Say \"It's coming\": This card deals 1 damage to target opponent or planeswalker. Activate only during your upkeep and only once each turn.";
 
 /// Infernal Spawn of Evil in P0's hand with {1}{B} available.
 fn infernal_spawn_scenario() -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+    scenario.at_phase(Phase::Upkeep);
     let spawn = scenario
         .add_creature_to_hand_from_oracle(P0, "Infernal Spawn of Evil", 4, 4, INFERNAL_SPAWN)
         .id();
