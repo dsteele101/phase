@@ -8707,6 +8707,9 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
         AbilityCost::Sacrifice(sacrifice) if sacrifice.target == TargetFilter::SelfRef => {
             Some(Zone::Battlefield)
         }
+        // CR 113.6b: an ability whose cost reveals its own card from hand
+        // ("Reveal this card from your hand") functions from the hand.
+        AbilityCost::Reveal { filter: None, .. } => Some(Zone::Hand),
         AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
         _ => None,
     }

@@ -16114,6 +16114,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }

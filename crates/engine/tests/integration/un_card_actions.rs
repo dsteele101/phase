@@ -1176,3 +1176,116 @@ fn name_droppings_return_leaves_a_card_reanimated_in_response_alone() {
         "the reanimated creature is a new object; the return does not bounce it"
     );
 }
+
+const INFERNAL_SPAWN: &str = "Flying, first strike, trample\n{1}{B}, Reveal this card from your hand, Say \"It's coming\": This card deals 1 damage to target opponent or planeswalker.";
+
+/// Infernal Spawn of Evil in P0's hand with {1}{B} available.
+fn infernal_spawn_scenario() -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spawn = scenario
+        .add_creature_to_hand_from_oracle(P0, "Infernal Spawn of Evil", 4, 4, INFERNAL_SPAWN)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    (scenario.build(), spawn)
+}
+
+fn activate_infernal_spawn(
+    runner: &mut GameRunner,
+    spawn: ObjectId,
+) -> Result<engine::types::game_state::ActionResult, engine::game::engine::EngineError> {
+    let index = runner.state().objects[&spawn]
+        .abilities
+        .iter()
+        .position(|a| a.cost.is_some())
+        .expect("Infernal Spawn has its activated ability");
+    runner.act(GameAction::ActivateAbility {
+        source_id: spawn,
+        ability_index: index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+    })
+}
+
+#[test]
+fn a_spoken_activation_cost_parses_to_say_phrase_not_an_effect_cost() {
+    let (runner, spawn) = infernal_spawn_scenario();
+    let ability = runner.state().objects[&spawn]
+        .abilities
+        .iter()
+        .find(|a| a.cost.is_some())
+        .expect("activated ability");
+    let AbilityCost::Composite { costs } = ability.cost.as_ref().expect("cost") else {
+        panic!("expected a composite cost, got {:?}", ability.cost);
+    };
+    assert!(
+        costs.contains(&AbilityCost::SayPhrase {
+            phrase: "It's coming".to_string()
+        }),
+        "the spoken cost is a direct SayPhrase component: {costs:?}"
+    );
+    assert!(
+        !costs
+            .iter()
+            .any(|c| matches!(c, AbilityCost::EffectCost { .. })),
+        "no unpayable effect-cost wrapper: {costs:?}"
+    );
+}
+
+#[test]
+fn infernal_spawn_of_evil_pays_its_spoken_cost_and_deals_damage_when_opted_in() {
+    let (mut runner, spawn) = infernal_spawn_scenario();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+
+    let result = activate_infernal_spawn(&mut runner, spawn).expect("activation is accepted");
+    let mut events = result.events;
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                })
+                .expect("P1 is a legal target")
+                .events,
+        );
+    }
+    for _ in 0..6 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes")
+                .events,
+        );
+    }
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::PhraseSaid { player, phrase } if *player == P0 && phrase == "It's coming"
+        )),
+        "the spoken cost was paid: {events:?}"
+    );
+    assert_eq!(runner.life(P1), 19, "the ability dealt 1 damage");
+    assert_settled(&runner, "Infernal Spawn activation");
+}
+
+#[test]
+fn infernal_spawn_of_evil_cannot_be_activated_without_the_un_actions_opt_in() {
+    let (mut runner, spawn) = infernal_spawn_scenario();
+    assert!(
+        activate_infernal_spawn(&mut runner, spawn).is_err(),
+        "a spoken cost is unpayable for a player who did not opt in"
+    );
+    assert_eq!(runner.life(P1), 20, "no damage was dealt");
+    assert_settled(&runner, "Infernal Spawn opted out");
+}

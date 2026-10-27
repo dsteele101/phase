@@ -12246,7 +12246,7 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
 
 /// Un-card: the body of a spoken payment after `say ` — a quoted phrase with an
 /// optional delivery qualifier (`in a robot voice`) and optional final period.
-fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> {
+pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> {
     let (rest, phrase) = super::parse_quoted_phrase(input)?;
     let (rest, _) = opt(preceded(
         tag(" in a "),
