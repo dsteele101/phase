@@ -762,9 +762,19 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                         // size, the highest-toughness blockers absorb the most
                         // trample damage (CR 702.19b), and declining to block is
                         // never better for the defender than blocking.
+                        // CR 702.19b: rank by the engine's lethal-damage authority so
+                        // damage already marked on a blocker lowers its absorption.
+                        let attacker_has_deathtouch = state
+                            .objects
+                            .get(&id)
+                            .is_some_and(|o| o.has_keyword(&Keyword::Deathtouch));
                         let mut by_toughness = eligible.clone();
-                        by_toughness.sort_by_key(|bid| {
-                            std::cmp::Reverse(state.objects.get(bid).and_then(|o| o.toughness))
+                        by_toughness.sort_by_key(|&bid| {
+                            std::cmp::Reverse(engine::game::combat_damage::lethal_damage_needed(
+                                state,
+                                bid,
+                                attacker_has_deathtouch,
+                            ))
                         });
                         let sizes = required.max(1)..=by_toughness.len().min(max);
                         // A token-heavy defender makes the sweep quadratic; past the
@@ -8058,6 +8068,41 @@ mod tests {
             attack_target_of(&attacks, trampler),
             Some(AttackTarget::Planeswalker(pw)),
             "a 0/5 wall absorbs all 5 trample damage, so the kill is not assured"
+        );
+    }
+
+    /// CR 702.19b: damage already marked on a blocker lowers what it absorbs, so
+    /// the defender's best single blocker is the undamaged 0/5, not the 0/6 with
+    /// 5 damage marked.
+    #[test]
+    fn capped_trampler_ranks_blockers_by_remaining_lethal_damage() {
+        use engine::types::ability::StaticDefinition;
+        let mut state = setup();
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Rhino",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+        state
+            .objects
+            .get_mut(&trampler)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan {
+                max: 1,
+            }));
+        let damaged = add_creature(&mut state, PlayerId(1), "Damaged Wall", 0, 6, vec![]);
+        state.objects.get_mut(&damaged).unwrap().damage_marked = 5;
+        add_creature(&mut state, PlayerId(1), "Wall", 0, 5, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 4);
+        let attacks = declare_attacks(&state);
+        assert_ne!(
+            attack_target_of(&attacks, trampler),
+            Some(AttackTarget::Planeswalker(pw)),
+            "the undamaged 0/5 absorbs all 5 trample damage, so the kill is not assured"
         );
     }
 
