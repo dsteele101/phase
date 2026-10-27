@@ -1357,6 +1357,7 @@ mod play_card_during_resolution;
 mod play_trace;
 mod player_action_recording_after_choice;
 mod player_hexproof_shroud_grants;
+mod player_leaves_game_ltb_triggers;
 mod player_scope_created_token_union;
 mod player_scope_linked_exile_batch;
 mod ponder_decline_shuffle_regression;
