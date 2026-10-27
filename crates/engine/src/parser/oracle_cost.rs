@@ -5848,10 +5848,20 @@ mod tests {
 
     #[test]
     fn incomplete_return_to_hand_cost_filter_is_rejected() {
+        // Production strips the leading "return " before this helper runs.
         assert!(try_parse_return_to_hand_cost(
-            "return two creatures you control with different names to their owners' hands"
+            "two creatures you control with different names to their owners' hands"
         )
         .is_none());
+        // Reach guard: the same counted subject without the unmodeled qualifier parses.
+        assert!(matches!(
+            try_parse_return_to_hand_cost("two creatures you control to their owners' hands"),
+            Some(AbilityCost::ReturnToHand {
+                count: 2,
+                filter: Some(_),
+                ..
+            })
+        ));
 
         let cost = parse_oracle_cost(
             "Return two creatures you control with different names to their owners' hands",
@@ -5887,17 +5897,29 @@ mod tests {
     #[test]
     fn x_count_cost_is_declined_instead_of_zero() {
         // CR 107.3a: a reveal count of X stays symbolic (never a fixed 0).
-        assert!(!matches!(
+        assert!(matches!(
             parse_oracle_cost("Reveal x blue cards in your hand"),
             AbilityCost::Reveal {
-                count: QuantityExpr::Fixed { .. },
-                ..
-            }
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { ref name },
+                },
+                filter: Some(_),
+            } if name == "X"
         ));
-        assert!(try_parse_return_to_hand_cost(
-            "return x creatures you control to their owner's hand"
-        )
-        .is_none());
+        // Production strips the leading "return " before this helper runs.
+        assert!(
+            try_parse_return_to_hand_cost("x creatures you control to their owner's hand")
+                .is_none()
+        );
+        // Reach guard: a fixed count in the same production form parses.
+        assert!(matches!(
+            try_parse_return_to_hand_cost("two creatures you control to their owner's hand"),
+            Some(AbilityCost::ReturnToHand {
+                count: 2,
+                filter: Some(_),
+                ..
+            })
+        ));
 
         let valid = parse_oracle_cost("Reveal a blue card in your hand.");
         assert!(matches!(
