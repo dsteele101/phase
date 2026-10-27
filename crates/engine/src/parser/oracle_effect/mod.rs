@@ -162,7 +162,7 @@ use crate::types::statics::CastFreeOrigin;
 use crate::types::statics::{
     ActivationExemption, CastFrequency, GraveyardPermissionPool, StaticMode,
 };
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::Zone;
 
 use self::conditions::*;
@@ -1516,6 +1516,64 @@ fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut Clause
     clause.condition = Some(merge_clause_conditions(outer.clone(), inner));
 }
 
+/// CR 608.2c + CR 614.6: an "instead" override's `condition` selects the
+/// replacement and its `else_ability` carries the unreplaced instructions, so a
+/// body with its own guard or otherwise branch resolves beneath a no-op carrier
+/// instead of surrendering them to the selector.
+pub(crate) fn instead_override_definition(
+    body: AbilityDefinition,
+    selector: AbilityCondition,
+) -> AbilityDefinition {
+    if body.condition.is_none() && body.else_ability.is_none() {
+        return body.condition(selector);
+    }
+    AbilityDefinition::new(body.kind, Effect::NoOp)
+        .condition(selector)
+        .sub_ability(body)
+}
+
+/// CR 608.2c: a trailing "<instruction> if <condition>, then" guards that
+/// instruction alone, so the instruction after it is the next independent one and a
+/// following instruction with its own trailing guard is evaluated on that guard.
+/// `pushed_from` is the clause count before the guarded chunk pushed anything.
+fn settle_trailing_guard(
+    clauses: &mut [ClauseIr],
+    pushed_from: Option<usize>,
+    released: &mut bool,
+) {
+    let guarded = pushed_from
+        .and_then(|start| clauses.get_mut(start..))
+        .and_then(<[ClauseIr]>::last_mut)
+        .filter(|clause| {
+            clause.condition.is_some()
+                && !clause.is_optional
+                && matches!(clause.disposition, ClauseDisposition::Emit { .. })
+        });
+    let Some(clause) = guarded else {
+        *released = false;
+        return;
+    };
+    if *released {
+        clause.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+    }
+    *released = matches!(clause.boundary, Some(ClauseBoundary::Then));
+    if *released {
+        clause.boundary = Some(ClauseBoundary::Sentence);
+    }
+}
+
+/// The replacement body of an [`instead_override_definition`] result: the
+/// carrier's sub when one was built, else the override itself.
+pub(crate) fn instead_override_body_mut(instead: &mut AbilityDefinition) -> &mut AbilityDefinition {
+    if matches!(*instead.effect, Effect::NoOp) && instead.sub_ability.is_some() {
+        return instead
+            .sub_ability
+            .as_deref_mut()
+            .expect("the carrier's body was checked");
+    }
+    instead
+}
+
 /// CR 608.2c: Propagate the committed `ChoiceType` from a chain's head
 /// `Effect::Choose` onto every `GuessSubject::CommittedChoice` in the assembled
 /// definition. The head `Choose` is the in-resolution authority for "the last
@@ -2763,11 +2821,13 @@ fn try_parse_lose_control_delayed_trigger(
         },
     );
 
-    // CR 603.7 + CR 603.2: a one-shot ThisTurn ChangesController delayed trigger,
-    // `valid_card` bound to the Equipment slot so it fires on the loss of that
-    // specific Equipment.
+    // CR 603.7 + CR 603.2 + CR 603.10d: a one-shot ThisTurn ChangesController
+    // delayed trigger, `valid_card` bound to the Equipment slot so it fires on the
+    // loss of that specific Equipment.
     Some(build_when_next_delayed_trigger(
-        TriggerMode::ChangesController,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        },
         valid_card,
         inner,
         None,
@@ -4183,12 +4243,21 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
 }
 
 /// CR 111.2 + CR 614.1a: "each token that would be created under <X> control
-/// this turn is created under <Y> control instead." Builds a self-installed
-/// CreateToken replacement with an opponent-token scope and a controller
-/// redirect, marked to expire at end of turn. Crafty Cutpurse is the
-/// canonical card; this also covers any future card with the same shape.
+/// this turn is created under <Y> control instead." Builds a CreateToken
+/// replacement with an opponent-token scope and a controller redirect, marked
+/// to expire at end of turn. Crafty Cutpurse is the canonical card; this also
+/// covers any future card with the same shape.
 /// CR 111.2: "The token enters the battlefield under that player's control"
 /// — the default this replacement overrides.
+///
+/// CR 113.7a + CR 611.2c: the redirect affects no object — it changes how
+/// tokens are created for the rest of the turn — so it exists independently
+/// of the ability's source and is installed floating
+/// (`TargetFilter::None`), exactly like Kaya, Geist Hunter's −2 token
+/// replacement, never hosted on the source: a source that left, or left and
+/// returned, before or after resolution does not end it. CR 109.5: "your" is
+/// the resolving ability's controller, which the floating installer latches
+/// as the replacement's `source_controller`.
 fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
     // Match "each token that would be created under " (or "any token ...") then
     // a controller phrase, then "control this turn is created under " then a
@@ -4245,7 +4314,7 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
-        target: TargetFilter::SelfRef,
+        target: TargetFilter::None,
     })
 }
 
@@ -20425,9 +20494,9 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
 ///     so the lowering default of `count: Fixed(1)` stands.
 ///   * `Exact`     — "two cards", "x cards": a concrete count on the effect.
 ///   * `TargetSet` — "any number of [other|another] target …" / "up to N target
-///     …": an ANNOUNCED target set (CR 601.2c). The number of targets is fixed
-///     at announcement, so the placement set is the chosen targets and `count`
-///     is deliberately left alone.
+///     …" / "<N> target …": an ANNOUNCED target set (CR 601.2c). The number of
+///     targets is fixed at announcement, so the placement set is the chosen
+///     targets and `count` is deliberately left alone.
 #[derive(Debug, PartialEq)]
 enum LibraryPlacementCardinality {
     Unstated,
@@ -20452,6 +20521,18 @@ fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinali
     // they start with a word rather than a numeral.
     if let (rest, Some(spec)) = strip_optional_target_prefix(input) {
         return (LibraryPlacementCardinality::TargetSet(spec), rest);
+    }
+    // CR 601.2c + CR 115.1a: an exact "<N> target …" / "x target …" count is
+    // an ANNOUNCED target set whose size the spell's text defines — not an
+    // effect count. `strip_exact_target_prefix` is the single authority for
+    // that grammar (article guard included) and leaves the article for
+    // `parse_target`. Tried before the bare-numeral arms below so "two target
+    // lands" can never be read as `Exact(2)`.
+    if let Some((count, rest)) = strip_exact_target_prefix(input) {
+        return (
+            LibraryPlacementCardinality::TargetSet(MultiTargetSpec::exact(count)),
+            rest,
+        );
     }
     // CR 107.1c + CR 115.10: untargeted "any number of <noun phrase>". Tried only
     // AFTER the target-set authority above has declined, so "any number of target
@@ -20483,6 +20564,26 @@ fn peel_library_placement_cardinality(input: &str) -> (LibraryPlacementCardinali
         }
     }
     (LibraryPlacementCardinality::Unstated, input)
+}
+
+/// CR 115.1 + CR 601.2c: does a positional placement's noun phrase name its
+/// objects as TARGETS — a target cardinality ("two target …", "up to N
+/// target …", "any number of target …") or a bare declared-target prefix
+/// ("target …", "another target …", "other target …", read by the shared
+/// `parse_declared_target_prefix` authority)? Decided by the cardinality
+/// authority above, so the placement router and the lowering
+/// (`refine_put_at_library_position`) can never disagree. Every peel arm is a
+/// prefix parser, so the input may run past the placement terminator.
+fn placement_noun_phrase_is_targeted(input: &str) -> bool {
+    match peel_library_placement_cardinality(input) {
+        (LibraryPlacementCardinality::TargetSet(_), _) => true,
+        (LibraryPlacementCardinality::Unstated, rest) => {
+            nom_target::parse_declared_target_prefix(rest).is_ok()
+        }
+        (LibraryPlacementCardinality::Exact(_) | LibraryPlacementCardinality::AnyNumber, _) => {
+            false
+        }
+    }
 }
 
 fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
@@ -20544,10 +20645,34 @@ fn is_ownership_candidate(reading: GuardReading, clause: &ParsedEffectClause) ->
         .is_some()
 }
 
+/// CR 608.2c + CR 101.1: does a positional placement's tail — the text from its
+/// terminator ("on top of" / "on the bottom of" / "into") onward — close the
+/// instruction with "in any order"? Only a closing "in any order" orders the
+/// placed cards as part of the instruction itself; a later clause is not read.
+fn placement_tail_orders_in_any_order(rest: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(rest, |i| {
+        (
+            tag::<_, _, OracleError<'_>>("in any order"),
+            opt(tag(".")),
+            eof,
+        )
+            .parse(i)
+    })
+    .is_some()
+}
+
+/// A placement's noun-phrase filter (`None` when it names nothing more specific
+/// than `Any`), its cardinality, and whether its tail closes with "in any order".
+type PlacementNounPhrase = (Option<TargetFilter>, LibraryPlacementCardinality, bool);
+
+/// `follower` is the player who follows this clause's instruction when the
+/// clause names one structurally (the controller of an imperative, CR 608.2c);
+/// `None` when the clause's grammar does not establish who follows it.
 fn refine_put_at_library_position(
     clause: &mut ParsedEffectClause,
     text: &str,
     ctx: &mut ParseContext,
+    follower: Option<&TargetFilter>,
 ) -> Option<MultiTargetSpec> {
     // "put [N] [type] on top/bottom of library" — the imperative parser
     // returns PutAtLibraryPosition { target: Any, count: Fixed(1) }
@@ -20563,6 +20688,7 @@ fn refine_put_at_library_position(
     if let Effect::PutAtLibraryPosition {
         ref mut target,
         ref mut count,
+        ref mut arranger,
         ..
     } = clause.effect
     {
@@ -20607,13 +20733,14 @@ fn refine_put_at_library_position(
                 };
             }
         }
-        let extracted = (|| -> Option<(Option<TargetFilter>, LibraryPlacementCardinality)> {
+        let extracted = (|| -> Option<PlacementNounPhrase> {
             let lower = text.to_lowercase();
             let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
                 .parse(lower.as_str())
                 .ok()?;
-            // Isolate the noun phrase before the first positional terminator.
-            let (_, before) = alt((
+            // Isolate the noun phrase before the first positional terminator;
+            // the remainder is the placement tail.
+            let (placement_tail, before) = alt((
                 take_until::<_, _, OracleError<'_>>(" on top of"),
                 take_until(" on the bottom of"),
                 take_until(" into "),
@@ -20632,9 +20759,13 @@ fn refine_put_at_library_position(
             } else {
                 Some(filter)
             };
-            Some((new_target, cardinality))
+            Some((
+                new_target,
+                cardinality,
+                placement_tail_orders_in_any_order(placement_tail),
+            ))
         })();
-        if let Some((maybe_filter, cardinality)) = extracted {
+        if let Some((maybe_filter, cardinality, orders_in_any_order)) = extracted {
             if *target == TargetFilter::Any {
                 if let Some(filter) = maybe_filter {
                     *target = filter;
@@ -20645,7 +20776,19 @@ fn refine_put_at_library_position(
                 LibraryPlacementCardinality::Exact(count_expr) => *count = count_expr,
                 // CR 601.2c + CR 115.1: the announced targets, rather than the
                 // effect's default count, define a targeted placement's size.
-                LibraryPlacementCardinality::TargetSet(spec) => placement_target_set = Some(spec),
+                LibraryPlacementCardinality::TargetSet(spec) => {
+                    // CR 608.2c + CR 101.1: "in any order" closing the controller's
+                    // instruction orders the announced set — the player following
+                    // the instruction arranges it, not each library's owner
+                    // (CR 401.4). A resolution-time selection ("put two cards …
+                    // in any order") is already placed in its selector's order.
+                    if orders_in_any_order {
+                        if let Some(follower) = follower {
+                            *arranger = Some(follower.clone());
+                        }
+                    }
+                    placement_target_set = Some(spec);
+                }
                 // CR 107.1c + CR 115.10a + CR 608.2d: untargeted "any number"
                 // selects zero through every card in the named population on resolution.
                 LibraryPlacementCardinality::AnyNumber => {
@@ -20671,7 +20814,14 @@ fn lower_clause_ast(
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
-            let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
+            // CR 608.2c: the controller of the spell or ability follows an
+            // imperative instruction.
+            let placement_target_set = refine_put_at_library_position(
+                &mut clause,
+                &text,
+                ctx,
+                Some(&TargetFilter::Controller),
+            );
             if clause.multi_target.is_none() {
                 clause.multi_target = placement_target_set;
             }
@@ -22400,6 +22550,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Keep the primary phrase's announcer on `ctx`; only a chooser printed in
     // the continuation itself may be attached to the chained sub-ability.
     continuation_ctx.target_chooser = None;
+    // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
+    // names the object the primary instruction acted on. When that object is the
+    // ability's source ("destroy it and all creatures it blocked this turn",
+    // Defiant Vanguard), pin the continuation's antecedent to `SelfRef`; the
+    // continuation context is otherwise blank, and a blank context is not evidence
+    // of any antecedent. Same pin the chunk loop applies when a continued
+    // instruction named the source (`parsed_clause_targets_self_ref`).
+    if uses_parent_target_reference && effect_targets_self_ref(&primary_effect) {
+        continuation_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+    }
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
     // "that player" in a MASS continuation names that object's controller
@@ -24504,6 +24664,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         if matches!(
             ast,
             ShuffleImperativeAst::ChangeZoneAllToLibrary { .. }
+                | ShuffleImperativeAst::SelfAndZonesToLibrary { .. }
                 | ShuffleImperativeAst::TargetedChangeZoneToLibrary { all: true, .. }
         ) {
             return Some(lower_shuffle_ast(ast));
@@ -26861,6 +27022,17 @@ fn has_explicit_player_target(effect: &Effect) -> bool {
         .is_some_and(target_filter_is_explicit_player_target)
 }
 
+/// CR 115.1 + CR 108.3: a clause announces a player when it targets one or when the cards it acts on are scoped to a target player's zone ("target player's graveyard").
+fn clause_announces_player(effect: &Effect) -> bool {
+    use crate::game::ability_utils::{
+        effect_bound_filter_matches, filter_binds_target_player, PlayerBindingAxis,
+    };
+    has_explicit_player_target(effect)
+        || effect_bound_filter_matches(effect, |filter| {
+            filter_binds_target_player(filter, PlayerBindingAxis::Owner)
+        })
+}
+
 /// CR 608.2c: Variant of `has_typed_target` that accepts compound filter
 /// shapes (`And` / `Or` wrapping a `Typed`). Effect-kind whitelist mirrors
 /// `has_typed_target` exactly — only the filter-shape recognition is
@@ -27048,6 +27220,18 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
 
 fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
+        // CR 115.1c + CR 608.2c: a declared "any target" prevention recipient
+        // (Elvish Healer) is a chosen referent later "instead" shorthand binds to.
+        || matches!(
+            effect,
+            Effect::PreventDamage {
+                target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
+                damage_source_filter: None,
+                amount: PreventionAmount::Next(_),
+                ..
+            }
+        )
         || matches!(
             effect,
             Effect::GenericEffect {
@@ -27910,7 +28094,7 @@ fn declared_player_reference(
 ) -> Option<TargetFilter> {
     let Some(index) = clauses
         .iter()
-        .rposition(|clause| has_explicit_player_target(&clause.parsed.effect))
+        .rposition(|clause| clause_announces_player(&clause.parsed.effect))
     else {
         return enclosing.clone();
     };
@@ -27974,7 +28158,7 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
         ) {
             continue;
         }
-        if has_explicit_player_target(&prev.parsed.effect) {
+        if clause_announces_player(&prev.parsed.effect) {
             return Some(prev);
         }
         if matches!(
@@ -28527,7 +28711,11 @@ fn lower_subject_predicate_ast_body(
             // pick rewrite in the player-target wrapper below), so sibling
             // predicates keep their original scope.
             let mut clause = lower_imperative_clause(&text, ctx);
-            let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
+            // A subject-led placement names its own follower, which this seam does
+            // not resolve to an arranger: no printed card puts an announced target
+            // set "in any order" under a subject, so the owner default stands.
+            let placement_target_set =
+                refine_put_at_library_position(&mut clause, &text, ctx, None);
             if clause.multi_target.is_none() {
                 clause.multi_target = placement_target_set;
             }
@@ -31447,7 +31635,7 @@ impl FromAmongBatchLowering {
 /// is lowered.
 ///
 /// Scoped to a FREE cast (`without_paying`) in `Cast` mode: CR 305.1 land plays
-/// are a special action with no during-resolution mechanism, and a PAID batch
+/// are a special action and no resolution-scoped batch window can play a land, and a PAID batch
 /// cast (Sanwell, Avenger Ace: "you may cast a Vehicle or artifact creature
 /// spell from among them") needs a mana-payment window the free-cast window
 /// primitive does not model, so both ask for the established permission path.
@@ -31488,7 +31676,7 @@ fn from_among_batch_cast_driver(
     // priority window". A PAID batch cast (Sanwell, Avenger Ace: "you may cast a
     // Vehicle or artifact creature spell from among them") needs a mana-payment
     // window the free-cast window primitive does not model, and a CR 305.1 land
-    // play is a special action with no during-resolution mechanism. A duration
+    // play is a special action no resolution-scoped batch window can play. A duration
     // stated INSIDE the clause is the third: Ral, Leyline Prodigy states it
     // mid-clause — "you may cast instant and sorcery spells from among them THIS
     // TURN without paying their mana costs" — where no positional strip seam
@@ -33033,11 +33221,27 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // resolution-only free cast (Bring to Light tutors a card into the
         // controller's own exile, then casts it AS this effect resolves — issue
         // #2880). The card goes on the stack now; no standing `ExileWithAltCost`
-        // permission lingers afterward. Restricted to `mode == Cast`: CR 305.1
-        // land plays are a special action, not a cast, and have no
-        // during-resolution casting mechanism — the Play-mode hideaway/wish
-        // cards (Mosswort Bridge, Djinn of Wishes, etc.) must stay on the
-        // lingering-permission path. An `alt_ability_cost` or an explicit
+        // permission lingers afterward.
+        //
+        // CR 701.18b + CR 608.2g + CR 305.2a: a FREE single-card "play the
+        // exiled card / that card / it" with no duration resolves now too
+        // (Hideaway: Shelldock Isle, Mosswort Bridge, Fight Rigging; Djinn of
+        // Wishes): playing a card means casting it or playing it as a land,
+        // whichever is appropriate, and the play happens as the ability
+        // resolves ("You can't play it later in the turn"). The resolver plays a
+        // land during resolution under the land-play allowance and own-turn
+        // rules (CR 305.2b / CR 305.3) and casts a spell as usual. A PAID Play
+        // stays lingering (the paid resolution offer has no land arm), and the
+        // batch anaphors ("cards exiled …", "one of those N cards") are excluded
+        // (no resolution-scoped batch window plays lands); the plural `Other`
+        // anaphors ("them", "those cards") select the driver and rely on the
+        // runtime single-card gate (`single_resolution_card`) to keep a
+        // multi-card binding on the lingering grant. CR 712.12: a
+        // land//land modal card, bound anywhere but the graveyard, keeps the
+        // lingering grant at runtime (`ResolutionPlayRoute::LingeringFaceElection`)
+        // — that covers Hideaway exile and Djinn-class library cards, which the
+        // grant delivers to exile; a spell//land MDFC is cast by its front face
+        // (CR 712.8a). An `alt_ability_cost` or an explicit
         // `duration` likewise keeps the lingering grant (Cruelclaw's discard
         // alt cost; Rebound-style durational recasts). A `constraint` (a
         // conditional free-cast such as Beseech the Mirror's "you may cast the
@@ -33071,7 +33275,14 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // batch an earlier instruction of this resolution produced (Invasion of
         // Alara's two exiled cards). The same during-resolution cast, offered as a
         // one-cast window over that batch rather than as a cast of each member.
-        let resolves_now = mode == CardPlayMode::Cast
+        let mode_resolves_now = match mode {
+            CardPlayMode::Cast => true,
+            CardPlayMode::Play => match matched_anaphor {
+                CastAnaphor::SingularExiledCard | CastAnaphor::Other => without_paying,
+                CastAnaphor::PluralCardsExiled | CastAnaphor::OneOfBatch => false,
+            },
+        };
+        let resolves_now = mode_resolves_now
             && alt_ability_cost.is_none()
             && duration.is_none()
             && constraint.is_none()
@@ -33627,27 +33838,37 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     });
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
-        // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
-        // that player's graveyard" (Tinybones, the Pickpocket; Wrexial, the
-        // Risen Deep) chooses the card as the trigger goes on the stack, in the
-        // graveyard of the player its event names — and a graveyard holds only
-        // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
-        // `InZone { Graveyard }`, so the owner is bound here, read off the same
-        // origin phrase the zone came from; without it any graveyard's card is a
-        // legal target. (`relative_player_scope` does not name that player here:
+        // CR 400.3 + CR 115.1: "cast … from that player's graveyard" casts from
+        // the graveyard of the player "that player" names, and a graveyard
+        // holds only its owner's cards. `scan_zone_phrase` reads the possessive
+        // as a bare `InZone { Graveyard }`, so the owner is bound here, read off
+        // the same origin phrase the zone came from; without it any graveyard's
+        // card matches. After a declared player target ("Target opponent mills
+        // nine cards, then you may cast … from that player's graveyard" —
+        // Sorcerous Squall) that player is the declared one (CR 608.2c). In a
+        // triggered ability that declares none, "cast target … card" (Tinybones,
+        // the Pickpocket; Wrexial, the Risen Deep) names the player the event
+        // names. (`relative_player_scope` does not name that player here:
         // `relative_player_scope_for_condition` reads a "~ deals combat damage
         // to a player" head as `TargetPlayer`.)
-        if ctx.in_trigger
-            && cast_target_is_chosen_graveyard_card(rest, &filter)
-            && cast_origin_is_that_players_graveyard(rest)
-        {
-            add_cast_target_props(
-                &mut filter,
-                &[FilterProp::Owned {
-                    controller: ControllerRef::TriggeringPlayer,
-                }],
-                None,
-            );
+        // CR 400.1 + CR 608.2c: "cast a spell from each opponent's graveyard"
+        // (Jetsam) allows one cast per graveyard; one pick across them all would
+        // allow only one, so the clause stays unsupported.
+        if cast_origin_names_each_graveyard(rest) {
+            return Some(Effect::unimplemented(PER_GRAVEYARD_CAST_GAP, rest));
+        }
+        if cast_origin_is_that_players_graveyard(rest) {
+            let owner = ctx.declared_player_scope.clone().or_else(|| {
+                (ctx.in_trigger && cast_target_is_chosen_graveyard_card(rest, &filter))
+                    .then_some(ControllerRef::TriggeringPlayer)
+            });
+            if let Some(owner) = owner {
+                add_cast_target_props(
+                    &mut filter,
+                    &[FilterProp::Owned { controller: owner }],
+                    None,
+                );
+            }
         }
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
         // CR 608.2g vs CR 611.2: shared filter-form driver authority. `mode` and
@@ -33839,6 +34060,25 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     .ok()?;
     eof::<_, E>(tail.trim_end_matches('.')).ok()?;
     Some(cost)
+}
+
+/// The parser gap name for a cast of one spell from EACH of several graveyards
+/// (`cast_origin_names_each_graveyard`).
+const PER_GRAVEYARD_CAST_GAP: &str = "per_graveyard_cast";
+
+/// The cast target's origin phrase is "from each [opponent's] graveyard".
+fn cast_origin_names_each_graveyard(rest: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    super::oracle_target::scan_zone_phrase_span(rest).is_some_and(|(span, ..)| {
+        (
+            opt(alt((tag::<_, _, E>("cards "), tag("card ")))),
+            tag("from each "),
+            alt((tag::<_, _, E>("opponent's graveyard"), tag("graveyard"))),
+            eof,
+        )
+            .parse(span)
+            .is_ok()
+    })
 }
 
 /// The origin phrase `apply_cast_target_suffixes` took the cast target's zone
@@ -43020,7 +43260,17 @@ fn parse_effect_chain_ir_body(
     // statement-level `return` — so no value can escape to the caller.
     let outer_declared_object_target = ctx.chain_declared_object_target.take();
     let outer_declared_slots = std::mem::take(&mut ctx.chain_declared_slots);
+    // CR 608.2c: the clause count before the previous chunk's trailing-guarded
+    // instruction was pushed, and whether the instruction settled before it
+    // released its successor (see `settle_trailing_guard`).
+    let mut pending_trailing_guard: Option<usize> = None;
+    let mut trailing_guard_released = false;
     'chunks: for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        settle_trailing_guard(
+            builder.clauses_mut(),
+            pending_trailing_guard.take(),
+            &mut trailing_guard_released,
+        );
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
         // (the producer for the "If <cond>, instead <body>" rider that carries
@@ -44520,6 +44770,22 @@ fn parse_effect_chain_ir_body(
         // <property> among <filter>" (Wretched Banquet class).
         let (superlative_target_cond, text) = strip_superlative_target_conditional(&text);
         let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
+        // CR 608.2c + CR 202.3: "<instruction> if it has the same <quality> as
+        // <object>" (Counterbalance, Hisoka). Only claimed when the final
+        // condition match below keeps it: never beside a leading general
+        // conditional (`guard_condition` keeps `condition` first), and under a
+        // reflexive connector only when that connector composes with a guard
+        // ("If you do" → `And`, a `When you do` marker → its guard). Any other
+        // reflexive ("If you don't", "if … this way") would be displaced by the
+        // rider, so the text keeps its base lowering instead.
+        let (same_quality_cond, text) = if condition.is_none()
+            && if_you_do.as_ref().is_none_or(|reflexive| {
+                reflexive.is_optional_effect_performed() || reflexive.has_when_you_do_marker()
+            }) {
+            strip_same_quality_as_conditional(&text, ctx)
+        } else {
+            (None, text)
+        };
         // A deferred `When you do, if <guard>, ...` retains its reflexive
         // marker in `if_you_do` while the ordered specialized parsers claim the
         // guard. Ordinary reflexive connectors still block these parsers, as
@@ -44532,6 +44798,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
         {
             strip_cast_from_zone_conditional(&text)
         } else {
@@ -44543,6 +44810,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
         {
             strip_card_type_conditional(&text)
@@ -44555,6 +44823,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
         {
@@ -44570,6 +44839,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44585,6 +44855,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44612,6 +44883,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44675,6 +44947,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44699,6 +44972,7 @@ fn parse_effect_chain_ir_body(
             .or(mv_cond)
             .or(superlative_target_cond)
             .or(target_supertype_cond)
+            .or(same_quality_cond)
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
@@ -44747,12 +45021,28 @@ fn parse_effect_chain_ir_body(
             );
             continue;
         }
+        if if_you_do.is_none()
+            && guard_condition.is_some()
+            && conditions::parse_leading_conditional_prefix(&normalized_text.to_lowercase())
+                .is_none()
+        {
+            pending_trailing_guard = Some(builder.clauses().len());
+        }
         let condition = match (if_you_do, guard_condition) {
             (Some(reflexive), Some(guard)) if reflexive.has_when_you_do_marker() => {
                 Some(reflexive.with_when_you_do_guard(guard))
             }
-            // Preserve the established specialized-condition precedence for
-            // non-marker reflexive connectors (for example "if they don't").
+            // CR 118.12 + CR 608.2c: "If you do, <instruction> if <gate>" — the
+            // instruction happens only if the optional action was performed AND its
+            // own gate holds; neither displaces the other (Counterbalance).
+            (Some(reflexive), Some(guard)) if reflexive.is_optional_effect_performed() => {
+                Some(AbilityCondition::And {
+                    conditions: vec![reflexive, guard],
+                })
+            }
+            // Preserve the established specialized-condition precedence for the
+            // remaining non-marker reflexive connectors (for example "if they
+            // don't").
             (_, Some(guard)) => Some(guard),
             (Some(reflexive), None) => Some(reflexive),
             (None, None) => None,
@@ -44848,6 +45138,25 @@ fn parse_effect_chain_ir_body(
                 ctx.next_declared_player_group = chain_declared_groups;
                 let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
                 chain_declared_groups = ctx.next_declared_player_group;
+                // CR 608.2c + CR 614.6: an "instead" body is one replacement of the
+                // earlier instruction, not N independently gated instructions.
+                if outer_condition.is_instead_override() && !builder.is_empty() {
+                    let def = instead_override_definition(
+                        lower_effect_chain_ir(&body_ir),
+                        outer_condition.clone(),
+                    );
+                    builder
+                        .clause(
+                            normalized_text,
+                            placeholder_parsed_clause("instead_clause_placeholder"),
+                            chunk.boundary_after,
+                            ClauseDisposition::ReplaceMeaning {
+                                kind: ReplaceMeaningKind::Instead(Box::new(def)),
+                            },
+                        )
+                        .push();
+                    continue;
+                }
                 if let Some(last) = body_ir.clauses.last_mut() {
                     if last.boundary.is_none() {
                         last.boundary = chunk.boundary_after;
@@ -45596,6 +45905,10 @@ fn parse_effect_chain_ir_body(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            // CR 608.2k: likewise the enclosing ability's cost payment
+            // components, so "the discarded card" in any effect chunk names the
+            // card discarded for the cost (Hisoka, Minamo Sensei).
+            current_ability_cost_components: ctx.current_ability_cost_components.clone(),
             parent_target_available,
             // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
             // chain already produces an exile, so a later singular "the
@@ -46890,9 +47203,25 @@ fn parse_effect_chain_ir_body(
                     }
                 )
             });
+        // CR 608.2c + CR 701.27a: "untap ~, then transform it" (Civilized
+        // Scholar, Cecil, Dark Knight's class) — the bare "it" of a transform
+        // clause names the source object the prior clause named via `~`. Left as
+        // `ParentTarget`, it resolves to whatever the chain carries down (for
+        // Civilized Scholar the discarded card, now in the graveyard), so the
+        // permanent never transforms. Rebinding to the source is rules-correct
+        // for every such chain; with no carried target the source was already the
+        // fallback subject, so those cards are unchanged.
+        let transform_anaphor_after_self_ref_clause = matches!(
+            &clause.effect,
+            Effect::Transform {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        );
         if (typed_trigger_subject
             || exile_then_return_transformed
-            || attach_anaphor_after_self_ref_transform)
+            || attach_anaphor_after_self_ref_transform
+            || transform_anaphor_after_self_ref_clause)
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && builder
                 .clauses()
@@ -47972,6 +48301,11 @@ fn parse_effect_chain_ir_body(
     ctx.chain_declared_object_target = outer_declared_object_target;
     ctx.chain_declared_slots = outer_declared_slots;
 
+    settle_trailing_guard(
+        builder.clauses_mut(),
+        pending_trailing_guard.take(),
+        &mut trailing_guard_released,
+    );
     // Once more after the loop: the final iteration's stamp has no next-iteration
     // top to check it. See the declaration of `pending_stamp` above.
     debug_assert!(
