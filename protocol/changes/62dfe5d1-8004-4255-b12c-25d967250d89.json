@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Keyword::Morph carries a tagged MorphCost (mana or non-mana AbilityCost) instead of a bare ManaCost, and turn-face-up payments add persisted resume variants (CostResume::TurnFaceUp, DeferredLifeCostResume::TurnFaceUp, PendingCostMoveResume::TurnFaceUpCostMove with departure_record_indices); older peers cannot decode these game states or actions."
+}
