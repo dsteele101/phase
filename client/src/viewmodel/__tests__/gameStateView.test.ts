@@ -370,6 +370,7 @@ describe("getBoardChoiceView", () => {
       objectIds: [4, 5],
       intent: "return",
       sourceId: 88,
+      cancelAction: { type: "CancelCast" },
     });
   });
 
@@ -401,6 +402,7 @@ describe("getBoardChoiceView", () => {
       objectIds: [4, 5],
       intent: "return",
       sourceId: 88,
+      cancelAction: { type: "CancelCast" },
     });
   });
 
@@ -438,7 +440,35 @@ describe("getBoardChoiceView", () => {
       objectIds: [4, 5],
       intent: "return",
       sourceId: 77,
+      cancelAction: { type: "CancelCast" },
     });
+  });
+
+  it("honors allowsCancelCast authority override for PayCost prompts", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "ReturnToHand" },
+        choices: [4, 5],
+        count: 2,
+        min_count: 0,
+        resume: {
+          type: "TurnFaceUp",
+          object_id: 88,
+          cost_source: "Morph",
+        },
+      },
+    };
+    const objects = buildObjectMap(
+      buildGameObject({ id: 4, zone: "Battlefield" }),
+      buildGameObject({ id: 5, zone: "Battlefield" }),
+    );
+    const denied = getBoardChoiceView(waitingFor, objects, false);
+    expect(denied?.cancelAction).toBeUndefined();
+
+    const allowed = getBoardChoiceView(waitingFor, objects, true);
+    expect(allowed?.cancelAction).toEqual({ type: "CancelCast" });
   });
 
   it("maps battlefield untap effects to board card selection", () => {

@@ -9338,7 +9338,7 @@ pub(crate) fn drain_pending_cost_move_resume(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
     ) {
-        super::morph::resume_turn_face_up_cost_move(state, events)?
+        super::morph::resume_turn_face_up_cost_move(state, events, action_event_start)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };

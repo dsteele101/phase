@@ -5677,30 +5677,51 @@ fn collect_pending_triggers_with_collection(
                 // damage-history conditions to choose between accepting every
                 // off-battlefield same-id source or rejecting valid co-death
                 // LKI. The record context preserves both cases precisely.
-                let observer_source_context = events.iter().find_map(|observer_event| {
-                    let GameEvent::ZoneChanged {
-                        object_id,
-                        record,
-                        ..
-                    } = observer_event
-                    else {
-                        return None;
-                    };
-                    if *object_id != observer_id || !record.co_departed.contains(moved_id) {
-                        return None;
-                    }
-                    match crate::types::game_state::battlefield_departure_trigger_source_context(
-                        observer_event,
-                    ) {
-                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
-                            context,
-                        ) => Some(context),
-                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
-                        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
-                            None
+                // CR 608.2h: A replacement-paused cost move can deliver the
+                // observer's departure in an earlier action fragment, so it is
+                // absent from `events`; its stamped per-turn record is the same
+                // authority and is consulted when the event is not at hand.
+                let observer_source_context = events
+                    .iter()
+                    .find_map(|observer_event| {
+                        let GameEvent::ZoneChanged {
+                            object_id,
+                            record,
+                            ..
+                        } = observer_event
+                        else {
+                            return None;
+                        };
+                        if *object_id != observer_id || !record.co_departed.contains(moved_id) {
+                            return None;
                         }
-                    }
-                });
+                        match crate::types::game_state::battlefield_departure_trigger_source_context(
+                            observer_event,
+                        ) {
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                                context,
+                            ) => Some(context),
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                            | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                                None
+                            }
+                        }
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        let record = co_departed_observer_record(state, observer_id, *moved_id)?;
+                        match crate::types::game_state::battlefield_departure_source_context_from_record(
+                            record,
+                        ) {
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                                context,
+                            ) => Some(context.clone()),
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                            | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                                None
+                            }
+                        }
+                    });
                 let Some(observer_source_context) = observer_source_context else {
                     continue;
                 };
@@ -5709,19 +5730,25 @@ fn collect_pending_triggers_with_collection(
                 // correctly for co-departed Curse Auras whose live
                 // `attached_to` was cleared by
                 // `sever_battlefield_attachment_graph_on_exit`.
-                let lki_attached_to = events.iter().find_map(|ev| {
-                    if let GameEvent::ZoneChanged {
-                        object_id: oid,
-                        record: rec,
-                        ..
-                    } = ev
-                    {
-                        if *oid == observer_id {
-                            return rec.attached_to;
+                let lki_attached_to = events
+                    .iter()
+                    .find_map(|ev| {
+                        if let GameEvent::ZoneChanged {
+                            object_id: oid,
+                            record: rec,
+                            ..
+                        } = ev
+                        {
+                            if *oid == observer_id {
+                                return rec.attached_to;
+                            }
                         }
-                    }
-                    None
-                });
+                        None
+                    })
+                    .or_else(|| {
+                        co_departed_observer_record(state, observer_id, *moved_id)
+                            .and_then(|record| record.attached_to)
+                    });
                 // The save/mutate/collect/restore discipline lives in one place
                 // and is shared with the CR 603.10f player-loss arm below.
                 let matched_triggers = collect_observer_triggers_under_lki_attachment(
@@ -5730,7 +5757,7 @@ fn collect_pending_triggers_with_collection(
                     lki_attached_to,
                     event,
                     events,
-                    observer_source_context,
+                    &observer_source_context,
                     &mut batched_this_pass,
                     &mut registered_this_event,
                     &active_suppress_triggers,
@@ -8556,6 +8583,20 @@ pub(crate) fn take_sba_choice_trigger_batch(
     }
     state.deferred_triggers = preexisting_ordinary;
     sba_choice
+}
+
+/// CR 603.10a + CR 608.2h: The most recent battlefield-departure record of
+/// `observer_id` that names `moved_id` in its simultaneous-departure group.
+fn co_departed_observer_record(
+    state: &GameState,
+    observer_id: ObjectId,
+    moved_id: ObjectId,
+) -> Option<&crate::types::game_state::ZoneChangeRecord> {
+    state.zone_changes_this_turn.iter().rev().find(|record| {
+        record.object_id == observer_id
+            && record.from_zone == Some(Zone::Battlefield)
+            && record.co_departed.contains(&moved_id)
+    })
 }
 
 /// CR 603.2 + CR 603.3b: Park observer triggers emitted during a resolution-time

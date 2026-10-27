@@ -702,10 +702,18 @@ fn park_turn_face_up_cost_move(
     chosen: Vec<ObjectId>,
     paused_at_index: usize,
     remaining_cost: Option<Box<AbilityCost>>,
+    mut departure_record_indices: Vec<usize>,
     choice_player: PlayerId,
     events: &mut Vec<GameEvent>,
     events_before: usize,
 ) {
+    stamp_cost_move_departures(
+        state,
+        events,
+        events_before,
+        &chosen,
+        &mut departure_record_indices,
+    );
     state.pending_cost_move_resume = Some(
         crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
             player,
@@ -715,6 +723,7 @@ fn park_turn_face_up_cost_move(
             chosen,
             paused_at_index,
             remaining_cost,
+            departure_record_indices,
         },
     );
     if state.pending_replacement.is_some() {
@@ -783,7 +792,10 @@ fn pay_turn_face_up_cost_object(
 }
 
 /// CR 702.37e: Pay each chosen object from `start` onward; parks on a replacement
-/// choice, otherwise continues with the remaining cost.
+/// choice, otherwise continues with the remaining cost. `events_before` is the
+/// start of this action's not-yet-scanned events (including any prefix delivered
+/// by a settled replacement choice), so observers of earlier paid objects are
+/// retained across repeated pauses (CR 603.2).
 #[allow(clippy::too_many_arguments)]
 fn pay_turn_face_up_cost_objects(
     state: &mut GameState,
@@ -794,6 +806,7 @@ fn pay_turn_face_up_cost_objects(
     chosen: Vec<ObjectId>,
     start: usize,
     remaining_cost: Option<Box<AbilityCost>>,
+    mut departure_record_indices: Vec<usize>,
     events_before: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -810,12 +823,27 @@ fn pay_turn_face_up_cost_objects(
                 chosen,
                 index,
                 remaining_cost,
+                departure_record_indices,
                 choice_player,
                 events,
                 events_before,
             );
             return Ok(state.waiting_for.clone());
         }
+    }
+    // CR 603.10a: Every permanent paid by this cost left the battlefield
+    // simultaneously; discards move cards from hand and have no departure.
+    if !matches!(
+        move_kind,
+        crate::types::game_state::TurnFaceUpMoveKind::Discard
+    ) {
+        stamp_cost_move_departures(
+            state,
+            events,
+            events_before,
+            &chosen,
+            &mut departure_record_indices,
+        );
     }
     finish_or_continue_turn_face_up(state, player, source, cost_source, remaining_cost, events)
 }
@@ -865,6 +893,7 @@ pub(crate) fn handle_turn_face_up_cost_selection(
             chosen.to_vec(),
             0,
             remaining_cost,
+            Vec::new(),
             0,
             events,
         ),
@@ -877,6 +906,7 @@ pub(crate) fn handle_turn_face_up_cost_selection(
             chosen.to_vec(),
             0,
             remaining_cost,
+            Vec::new(),
             0,
             events,
         ),
@@ -889,6 +919,7 @@ pub(crate) fn handle_turn_face_up_cost_selection(
             chosen.to_vec(),
             0,
             remaining_cost,
+            Vec::new(),
             0,
             events,
         ),
@@ -930,6 +961,7 @@ pub(crate) fn handle_turn_face_up_cost_selection(
 pub(crate) fn resume_turn_face_up_cost_move(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    action_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
     let Some(crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
         player,
@@ -939,12 +971,15 @@ pub(crate) fn resume_turn_face_up_cost_move(
         chosen,
         paused_at_index,
         remaining_cost,
+        departure_record_indices,
     }) = state.pending_cost_move_resume.take()
     else {
         return Ok(state.waiting_for.clone());
     };
 
-    let events_before = events.len();
+    // CR 603.2: Include the prefix delivered by the settled replacement choice so
+    // a second pause still parks observers of the earlier paid objects.
+    let events_before = action_event_start.unwrap_or(events.len());
     pay_turn_face_up_cost_objects(
         state,
         player,
@@ -954,9 +989,33 @@ pub(crate) fn resume_turn_face_up_cost_move(
         chosen,
         paused_at_index + 1,
         remaining_cost,
+        departure_record_indices,
         events_before,
         events,
     )
+}
+
+/// CR 603.10a: Stamp the battlefield departures a turn-face-up cost move has
+/// performed so far as one simultaneous departure, in both the current event
+/// buffer and the per-turn LKI records (which survive a replacement pause that
+/// splits the action's events). Look-back observers that leave together with
+/// another paid permanent (Blood Artist sacrificed alongside another creature)
+/// are then admitted through `record.co_departed`.
+pub(crate) fn stamp_cost_move_departures(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    current_start: usize,
+    chosen: &[ObjectId],
+    departure_record_indices: &mut Vec<usize>,
+) {
+    super::casting_costs::record_sacrifice_cost_departure_records(
+        departure_record_indices,
+        &events[current_start..],
+        chosen,
+    );
+    let departed = super::zones::departed_subset(state, chosen);
+    super::zones::mark_simultaneous_departures(&mut events[current_start..], &departed);
+    super::zones::mark_simultaneous_departure_records(state, departure_record_indices, &departed);
 }
 
 /// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through

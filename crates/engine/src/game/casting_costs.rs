@@ -3861,7 +3861,7 @@ fn pay_delve_at_commit(
 /// that has actually left the battlefield in this action fragment. The matching
 /// event copy is kept separately in the typed resume root so terminal stamping
 /// can update both event buffers and the authoritative LKI ledger.
-fn record_sacrifice_cost_departure_records(
+pub(crate) fn record_sacrifice_cost_departure_records(
     departure_record_indices: &mut Vec<usize>,
     events: &[GameEvent],
     chosen: &[ObjectId],

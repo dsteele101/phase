@@ -6,6 +6,7 @@
 //! When this creature is turned face up, draw two cards."
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::game_state::{AlternativeCastKeyword, CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaUnit};
@@ -3017,4 +3018,653 @@ fn turn_face_up_sacrifice_cost_unpaused_control_preserves_delayed_triggers() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+// CR 702.37e + CR 603.2 + CR 603.3b: Preserving delivered event prefix across resumed morph payment
+// that pauses again. When paying Skirk Volcanist's morph cost (Sacrifice two Mountains) with Mayhem Devil
+// on the battlefield, the first sacrifice pauses for an optional replacement redirect (Graveyard -> Exile).
+// Accepting the first replacement delivers the first sacrifice and resumes payment, which moves the second
+// Mountain and pauses for the second replacement redirect.
+// At this intermediate prompt, the first sacrifice must ALREADY have a retained Mayhem Devil observer.
+// Completing both sacrifices must produce exactly two Mayhem Devil triggers.
+#[test]
+fn turn_face_up_sacrifice_preserves_delivered_observer_prefix_across_second_replacement_pause() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ReplacementMode, TargetFilter, TargetRef,
+    };
+    use engine::types::game_state::PendingCostMoveResume;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::zones::EtbTapState;
+    use engine::types::ReplacementDefinition;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mountain1 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mountain2 = scenario.add_basic_land(P0, ManaColor::Red);
+    let mayhem_devil = scenario
+        .add_creature(P0, "Mayhem Devil", 3, 3)
+        .from_oracle_text(
+            "Whenever a player sacrifices a permanent, Mayhem Devil deals 1 damage to any target.",
+        )
+        .id();
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+
+    // Optional replacement redirect for graveyard moves (exile instead)
+    scenario
+        .add_creature(P1, "Redirector", 1, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .mode(ReplacementMode::Optional { decline: None })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Exile,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        enters_modified_if: None,
+                        face_down_profile: None,
+                    },
+                )),
+        );
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&volcanist].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: volcanist,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&volcanist].face_down);
+
+    runner
+        .act(GameAction::TurnFaceUp {
+            object_id: volcanist,
+            x: 0,
+        })
+        .expect("turn face up");
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![mountain1, mountain2],
+        })
+        .expect("select mountains");
+
+    // Pauses for optional replacement on first mountain
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "expected ReplacementChoice pause on first mountain, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 0);
+
+    // Accept replacement for first mountain (exiles instead of graveyard)
+    let _res1 = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("choose replacement for first mountain");
+
+    // First mountain moved to exile; its sacrifice event delivered before second mountain paused.
+    assert_eq!(runner.state().objects[&mountain1].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Battlefield);
+
+    // Second mountain must pause on ReplacementChoice
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "expected second ReplacementChoice pause on second mountain, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                paused_at_index: 1,
+                ..
+            })
+        ),
+        "TurnFaceUpCostMove must be paused at index 1"
+    );
+
+    // CR 603.2 + CR 603.3b discriminator: The first sacrifice must ALREADY have a retained observer in deferred_triggers
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        1,
+        "first sacrifice observer must be retained in deferred_triggers across the second replacement pause"
+    );
+
+    // Accept replacement for second mountain (exiles instead of graveyard)
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("choose replacement for second mountain");
+
+    assert_eq!(runner.state().objects[&mountain2].zone, Zone::Exile);
+    assert!(!runner.state().objects[&volcanist].face_down);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+
+    // CR 603.2 + CR 603.3b: Completing both sacrifices must produce exactly two Mayhem Devil triggers
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "must prompt for first Mayhem Devil trigger target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("select target for first Mayhem Devil trigger");
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "must prompt for second Mayhem Devil trigger target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("select target for second Mayhem Devil trigger");
+
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "must have exactly two Mayhem Devil triggers on the stack"
+    );
+    for entry in &runner.state().stack {
+        assert_eq!(entry.source_id, mayhem_devil);
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+// CR 702.37e + CR 603.2 + CR 603.7a-c: Preserving delivered delayed-observer trigger prefix
+// across resumed morph payment that pauses again.
+// When Saffi Eriksdotter's delayed return ability is active on a creature sacrificed to pay Skirk Volcanist's
+// morph cost (Sacrifice two Mountains), the first creature (a Mountain creature) pauses for an optional
+// replacement redirect (Graveyard -> Exile). The player declines the redirect (index 1), so the creature is
+// put into the graveyard, firing Saffi's delayed trigger.
+// Payment resumes and moves the second Mountain creature, pausing for the second replacement redirect.
+// At this intermediate prompt, Saffi's delayed return trigger must ALREADY be retained in deferred_triggers.
+// Answering the second replacement prompt completes payment and flips the permanent, and Saffi's delayed
+// trigger drains to the stack and returns the first creature to the battlefield.
+#[test]
+fn turn_face_up_sacrifice_preserves_delivered_delayed_trigger_prefix_across_second_replacement_pause(
+) {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ReplacementMode, TargetFilter,
+    };
+    use engine::types::game_state::PendingCostMoveResume;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::zones::EtbTapState;
+    use engine::types::ReplacementDefinition;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let saffi = scenario
+        .add_creature_from_oracle(P0, "Saffi Eriksdotter", 2, 2, SAFFI_ERIKSDOTTER_ORACLE)
+        .id();
+
+    // Two Mountain creatures eligible for Skirk Volcanist's "Sacrifice two Mountains" cost
+    let mountain_creature1 = scenario
+        .add_creature(P0, "Mountain Dryad 1", 1, 1)
+        .with_subtypes(vec!["Mountain"])
+        .id();
+    let mountain_creature2 = scenario
+        .add_creature(P0, "Mountain Dryad 2", 1, 1)
+        .with_subtypes(vec!["Mountain"])
+        .id();
+
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+            ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                volcanist,
+                false,
+                vec![],
+            ),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&volcanist].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: volcanist,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast face down");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("choose face down");
+    }
+    runner.resolve_top();
+    assert!(runner.state().objects[&volcanist].face_down);
+
+    // Activate Saffi targeting mountain_creature1 and resolve it
+    let activation = runner
+        .activate(saffi, 0)
+        .target_object(mountain_creature1)
+        .resolve();
+    assert_eq!(
+        activation.zone_of(saffi),
+        Zone::Graveyard,
+        "reach-guard: activating Saffi sacrifices her"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach-guard: Saffi's activation must install exactly one delayed trigger"
+    );
+
+    // Install optional replacement redirect on both Mountain creatures (Graveyard -> Exile)
+    let repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .mode(ReplacementMode::Optional { decline: None })
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                enters_modified_if: None,
+                face_down_profile: None,
+            },
+        ));
+
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&mountain_creature1)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mountain_creature1)
+        .unwrap()
+        .replacement_definitions
+        .push(repl.clone());
+
+    std::sync::Arc::make_mut(
+        &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&mountain_creature2)
+            .unwrap()
+            .base_replacement_definitions,
+    )
+    .push(repl.clone());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mountain_creature2)
+        .unwrap()
+        .replacement_definitions
+        .push(repl);
+
+    // Turn Skirk Volcanist face up
+    runner
+        .act(GameAction::TurnFaceUp {
+            object_id: volcanist,
+            x: 0,
+        })
+        .expect("turn face up");
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![mountain_creature1, mountain_creature2],
+        })
+        .expect("select mountain creatures");
+
+    // First mountain creature pauses on optional ReplacementChoice
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "expected ReplacementChoice pause on first mountain creature, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 0);
+
+    // Decline replacement for first mountain creature (index 1: decline, moves to Graveyard)
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline replacement for first mountain creature");
+
+    assert_eq!(
+        runner.state().objects[&mountain_creature1].zone,
+        Zone::Graveyard
+    );
+    assert_eq!(
+        runner.state().objects[&mountain_creature2].zone,
+        Zone::Battlefield
+    );
+
+    // Second mountain creature must pause on ReplacementChoice
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "expected second ReplacementChoice pause on second mountain creature, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                paused_at_index: 1,
+                ..
+            })
+        ),
+        "TurnFaceUpCostMove must be paused at index 1"
+    );
+
+    // CR 603.2 + CR 603.7c discriminator: Saffi's delayed return trigger must ALREADY be retained in deferred_triggers
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        1,
+        "Saffi's delayed trigger must be retained in deferred_triggers across the second replacement pause"
+    );
+
+    // Accept replacement for second mountain creature (exiles it)
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("choose replacement for second mountain creature");
+
+    assert_eq!(
+        runner.state().objects[&mountain_creature2].zone,
+        Zone::Exile
+    );
+    assert!(!runner.state().objects[&volcanist].face_down);
+    assert!(runner.state().pending_cost_move_resume.is_none());
+
+    // Saffi's delayed return trigger has drained to the stack
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Saffi's delayed return trigger must be on the stack"
+    );
+
+    // Resolve Saffi's delayed return trigger
+    runner.resolve_top();
+
+    // mountain_creature1 is returned to the battlefield
+    assert_eq!(
+        runner.state().objects[&mountain_creature1].zone,
+        Zone::Battlefield,
+        "mountain_creature1 must be returned to the battlefield by Saffi's delayed trigger"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Skirk Volcanist ("Morph—Sacrifice two Mountains") with two Mountain
+/// creatures: Blood Artist and a Mountain Goblin. `optional_graveyard_redirect`
+/// adds an optional Graveyard replacement so each sacrifice pauses for a choice.
+fn blood_artist_co_departure_runner(
+    optional_graveyard_redirect: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::ObjectId,
+    engine::types::ObjectId,
+    engine::types::ObjectId,
+) {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ReplacementMode, TargetFilter,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::zones::EtbTapState;
+    use engine::types::ReplacementDefinition;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let blood_artist = scenario
+        .add_creature(P0, "Blood Artist", 0, 1)
+        .from_oracle_text(
+            "Whenever Blood Artist or another creature dies, target player loses 1 life and you gain 1 life.",
+        )
+        .with_subtypes(vec!["Mountain"])
+        .id();
+    let goblin = scenario
+        .add_creature(P0, "Mountain Goblin", 1, 1)
+        .with_subtypes(vec!["Mountain"])
+        .id();
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    if optional_graveyard_redirect {
+        scenario
+            .add_creature(P1, "Redirector", 1, 1)
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            enters_modified_if: None,
+                            face_down_profile: None,
+                        },
+                    )),
+            );
+    }
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| {
+                ManaUnit::new(
+                    engine::types::mana::ManaType::Colorless,
+                    volcanist,
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    cast_face_down(&mut runner, volcanist);
+    runner
+        .act(GameAction::TurnFaceUp {
+            object_id: volcanist,
+            x: 0,
+        })
+        .expect("turn face up");
+    (runner, volcanist, blood_artist, goblin)
+}
+
+fn blood_artist_trigger_count(
+    runner: &mut engine::game::scenario::GameRunner,
+    blood_artist: engine::types::ObjectId,
+) -> usize {
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+            .expect("select Blood Artist target");
+    }
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == blood_artist)
+        .count()
+}
+
+// CR 603.10a + CR 702.37e: A look-back observer paid as part of the same
+// "Sacrifice two Mountains" cost leaves the battlefield simultaneously with the
+// other paid permanent, so Blood Artist sees both deaths.
+#[test]
+fn turn_face_up_sacrifice_cost_co_departing_observer_sees_both_deaths() {
+    let (mut runner, volcanist, blood_artist, goblin) = blood_artist_co_departure_runner(false);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![goblin, blood_artist],
+        })
+        .expect("sacrifice both Mountains");
+    assert!(!runner.state().objects[&volcanist].face_down);
+    assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&blood_artist].zone, Zone::Graveyard);
+    assert_eq!(
+        blood_artist_trigger_count(&mut runner, blood_artist),
+        2,
+        "Blood Artist must trigger for its own death and the co-departing creature"
+    );
+}
+
+// CR 603.10a + CR 614.6 + CR 616.1: The same simultaneous departure survives a
+// replacement-choice pause between the two sacrifices.
+#[test]
+fn turn_face_up_sacrifice_cost_co_departing_observer_survives_replacement_pause() {
+    let (mut runner, volcanist, blood_artist, goblin) = blood_artist_co_departure_runner(true);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![blood_artist, goblin],
+        })
+        .expect("sacrifice both Mountains");
+    let mut pauses = 0;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        pauses += 1;
+        // Decline the optional exile redirect so both creatures die.
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .expect("decline replacement");
+    }
+    assert_eq!(pauses, 2, "each sacrifice must pause for the replacement");
+    assert!(!runner.state().objects[&volcanist].face_down);
+    assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&blood_artist].zone, Zone::Graveyard);
+    assert_eq!(
+        blood_artist_trigger_count(&mut runner, blood_artist),
+        2,
+        "Blood Artist must trigger for its own death and the co-departing creature"
+    );
 }
