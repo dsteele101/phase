@@ -10705,7 +10705,7 @@ impl CollectedCostModifiers {
             state,
             caster,
             object_id,
-            None,
+            SpellCostTargets::Unchosen,
             false,
             casting_variant,
         );
@@ -10713,7 +10713,7 @@ impl CollectedCostModifiers {
             state,
             caster,
             object_id,
-            None,
+            SpellCostTargets::Unchosen,
             false,
             casting_variant,
         ));
@@ -10737,7 +10737,12 @@ impl CollectedCostModifiers {
         non_floor.extend(ctx.extra.iter().cloned());
 
         let target_dependent = ability.map_or_else(Vec::new, |ability| {
-            collect_target_dependent_cost_modifiers(state, caster, object_id, ability)
+            collect_target_dependent_cost_modifiers(
+                state,
+                caster,
+                object_id,
+                SpellCostTargets::Chosen(ability),
+            )
         });
 
         // CR 702.102b: derive the pre-payment fused hint from the casting variant
@@ -11848,7 +11853,12 @@ pub(super) fn apply_target_dependent_cost_modifiers(
         object_id,
         ability,
         mana_cost,
-        &collect_target_dependent_cost_modifiers(state, player, object_id, ability),
+        &collect_target_dependent_cost_modifiers(
+            state,
+            player,
+            object_id,
+            SpellCostTargets::Chosen(ability),
+        ),
         None,
     );
 }
@@ -11892,16 +11902,12 @@ fn collect_target_dependent_cost_modifiers(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    ability: &ResolvedAbility,
+    targets: SpellCostTargets<'_>,
 ) -> Vec<CostModification> {
     let mut collected =
-        collect_self_spell_cost_modifiers(state, player, object_id, Some(ability), true, None);
+        collect_self_spell_cost_modifiers(state, player, object_id, targets, true, None);
     collected.extend(collect_battlefield_cost_modifiers(
-        state,
-        player,
-        object_id,
-        Some(ability),
-        true,
+        state, player, object_id, targets, true,
         // CR 702.102b: this target-dependent pass runs after finalization sets the
         // `fused_split_spell` marker, so the marker (OR-gated inside
         // `spell_cast_record_for`) already yields the combined projection — no
@@ -11953,7 +11959,7 @@ pub(crate) fn compute_spend_only_on_x_generic_count(
         state,
         pending.ability.controller,
         pending.object_id,
-        Some(&pending.ability),
+        SpellCostTargets::Chosen(&pending.ability),
         false,
         casting_variant,
     );
@@ -11961,7 +11967,7 @@ pub(crate) fn compute_spend_only_on_x_generic_count(
         state,
         pending.ability.controller,
         pending.object_id,
-        Some(&pending.ability),
+        SpellCostTargets::Chosen(&pending.ability),
         false,
         casting_variant,
     ));
@@ -12446,7 +12452,14 @@ fn apply_self_spell_cost_modifiers(
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
-    let collected = collect_self_spell_cost_modifiers(state, caster, spell_id, None, false, None);
+    let collected = collect_self_spell_cost_modifiers(
+        state,
+        caster,
+        spell_id,
+        SpellCostTargets::Unchosen,
+        false,
+        None,
+    );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
@@ -12458,8 +12471,14 @@ pub(super) fn apply_self_spell_cost_modifiers_with_selected_targets(
     ability: &ResolvedAbility,
     mana_cost: &mut ManaCost,
 ) {
-    let collected =
-        collect_self_spell_cost_modifiers(state, caster, spell_id, Some(ability), true, None);
+    let collected = collect_self_spell_cost_modifiers(
+        state,
+        caster,
+        spell_id,
+        SpellCostTargets::Chosen(ability),
+        true,
+        None,
+    );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
@@ -12551,7 +12570,7 @@ fn collect_self_spell_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
-    selected_ability: Option<&ResolvedAbility>,
+    targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
     casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
@@ -12600,32 +12619,17 @@ fn collect_self_spell_cost_modifiers(
             _ => continue,
         };
 
-        let filter_analysis = spell_filter.as_ref().map_or(
-            PreTargetCostFilterAnalysis::TargetIndependentRelevant,
-            |filter| {
-                analyze_cost_filter_before_targets_for(
-                    state, caster, spell_id, filter, spell_id, fused,
-                )
-            },
-        );
-        if target_sensitive_only && !filter_analysis.is_target_dependent() {
+        if !spell_cost_filter_admits(
+            state,
+            caster,
+            spell_id,
+            spell_filter.as_ref(),
+            spell_id,
+            fused,
+            targets,
+            target_sensitive_only,
+        ) {
             continue;
-        }
-        if selected_ability.is_none() && filter_analysis.is_target_dependent() {
-            continue;
-        }
-
-        if let Some(ref filter) = spell_filter {
-            let matches = if let Some(ability) = selected_ability {
-                spell_matches_cost_filter_with_selected_targets_for(
-                    state, caster, spell_id, filter, spell_id, ability, fused,
-                )
-            } else {
-                spell_matches_cost_filter_for(state, caster, spell_id, filter, spell_id, fused)
-            };
-            if !matches {
-                continue;
-            }
         }
 
         // CR 604.1: Evaluate any trailing condition ("if you control a Wizard").
@@ -12662,6 +12666,55 @@ fn collect_self_spell_cost_modifiers(
     }
 
     collected
+}
+
+/// CR 601.2c + CR 601.2f: which targets the spell cost collectors read a
+/// target-gated modifier's `spell_filter` against.
+#[derive(Clone, Copy)]
+enum SpellCostTargets<'a> {
+    /// Targets are not chosen yet, so target-gated modifiers are skipped.
+    Unchosen,
+    /// The targets chosen for this ability.
+    Chosen(&'a ResolvedAbility),
+    /// Every target-gated modifier that passes its non-target gates, whatever
+    /// the targets. Bounds only: its reductions are the most any target
+    /// assignment can get.
+    Any,
+}
+
+/// CR 601.2f: whether a cost modifier with `spell_filter`, printed on
+/// `source_id`, applies to the spell under `targets`. With
+/// `target_sensitive_only` only filters that read the chosen targets qualify.
+#[allow(clippy::too_many_arguments)]
+fn spell_cost_filter_admits(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    spell_filter: Option<&TargetFilter>,
+    source_id: ObjectId,
+    fused: bool,
+    targets: SpellCostTargets<'_>,
+    target_sensitive_only: bool,
+) -> bool {
+    let Some(filter) = spell_filter else {
+        return !target_sensitive_only;
+    };
+    let analysis =
+        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source_id, fused);
+    if target_sensitive_only && !analysis.is_target_dependent() {
+        return false;
+    }
+    match targets {
+        SpellCostTargets::Unchosen => {
+            !analysis.is_target_dependent()
+                && spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, fused)
+        }
+        SpellCostTargets::Chosen(ability) => spell_matches_cost_filter_with_selected_targets_for(
+            state, caster, spell_id, filter, source_id, ability, fused,
+        ),
+        // The non-target part of the filter already matched in the analysis.
+        SpellCostTargets::Any => analysis.is_relevant(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13009,7 +13062,14 @@ fn apply_battlefield_cost_modifiers(
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
-    let collected = collect_battlefield_cost_modifiers(state, caster, spell_id, None, false, None);
+    let collected = collect_battlefield_cost_modifiers(
+        state,
+        caster,
+        spell_id,
+        SpellCostTargets::Unchosen,
+        false,
+        None,
+    );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
@@ -13021,8 +13081,14 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
     ability: &ResolvedAbility,
     mana_cost: &mut ManaCost,
 ) {
-    let collected =
-        collect_battlefield_cost_modifiers(state, caster, spell_id, Some(ability), true, None);
+    let collected = collect_battlefield_cost_modifiers(
+        state,
+        caster,
+        spell_id,
+        SpellCostTargets::Chosen(ability),
+        true,
+        None,
+    );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
@@ -13156,7 +13222,7 @@ fn collect_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,
-    selected_ability: Option<&ResolvedAbility>,
+    targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
     casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
@@ -13250,33 +13316,18 @@ fn collect_battlefield_cost_modifiers(
             } = modifier;
             let is_raise = matches!(mode, CostModifyMode::Raise);
 
-            let filter_analysis = spell_filter.map_or(
-                PreTargetCostFilterAnalysis::TargetIndependentRelevant,
-                |filter| {
-                    analyze_cost_filter_before_targets_for(
-                        state, caster, spell_id, filter, bf_id, fused,
-                    )
-                },
-            );
-            if target_sensitive_only && !filter_analysis.is_target_dependent() {
-                continue;
-            }
-            if selected_ability.is_none() && filter_analysis.is_target_dependent() {
-                continue;
-            }
-
             // CR 601.2f: Check spell type filter — does the spell match?
-            if let Some(filter) = spell_filter {
-                let matches = if let Some(ability) = selected_ability {
-                    spell_matches_cost_filter_with_selected_targets_for(
-                        state, caster, spell_id, filter, bf_id, ability, fused,
-                    )
-                } else {
-                    spell_matches_cost_filter_for(state, caster, spell_id, filter, bf_id, fused)
-                };
-                if !matches {
-                    continue;
-                }
+            if !spell_cost_filter_admits(
+                state,
+                caster,
+                spell_id,
+                spell_filter,
+                bf_id,
+                fused,
+                targets,
+                target_sensitive_only,
+            ) {
+                continue;
             }
 
             // CR 601.2f: Calculate the modification amount.
@@ -13407,33 +13458,17 @@ fn collect_battlefield_cost_modifiers(
                 // caster — which the caster-scope gate above already bound to
                 // the grantor. So "you" resolves to the right player either
                 // way, with no stale-source dependency.
-                let filter_analysis = spell_filter.map_or(
-                    PreTargetCostFilterAnalysis::TargetIndependentRelevant,
-                    |filter| {
-                        analyze_cost_filter_before_targets_for(
-                            state, caster, spell_id, filter, spell_id, fused,
-                        )
-                    },
-                );
-                if target_sensitive_only && !filter_analysis.is_target_dependent() {
+                if !spell_cost_filter_admits(
+                    state,
+                    caster,
+                    spell_id,
+                    spell_filter,
+                    spell_id,
+                    fused,
+                    targets,
+                    target_sensitive_only,
+                ) {
                     continue;
-                }
-                if selected_ability.is_none() && filter_analysis.is_target_dependent() {
-                    continue;
-                }
-                if let Some(filter) = spell_filter {
-                    let matches = if let Some(ability) = selected_ability {
-                        spell_matches_cost_filter_with_selected_targets_for(
-                            state, caster, spell_id, filter, spell_id, ability, fused,
-                        )
-                    } else {
-                        spell_matches_cost_filter_for(
-                            state, caster, spell_id, filter, spell_id, fused,
-                        )
-                    };
-                    if !matches {
-                        continue;
-                    }
                 }
                 let base_amount = amount.clone();
                 let multiplier = if let Some(qty_ref) = dynamic_count {
@@ -21229,10 +21264,13 @@ const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 4096;
 /// spell at all. The target-independent modifiers and floors are collected
 /// once per probe; each assignment re-collects only the target-dependent
 /// halves. Assignments that price identically are payability-checked once.
-/// When the assignments exceed [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`]
-/// the unpriced remainder might hold a cheaper one, so the answer is
-/// conservatively `true`; payment still enforces the real total once targets
-/// are chosen.
+/// Before any assignment is built, the best case (every target-gated
+/// reduction, no target-gated raise or floor) is priced; if it is unpayable
+/// the spell is, so the answer is `false` whatever the assignment count.
+/// Otherwise, when the assignments exceed
+/// [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`] the unpriced remainder might
+/// hold a cheaper one, so the answer is conservatively `true`; payment still
+/// enforces the real total once targets are chosen.
 fn target_dependent_reduction_makes_payable(
     state: &GameState,
     player: PlayerId,
@@ -21259,14 +21297,6 @@ fn target_dependent_reduction_makes_payable(
         if slots.is_empty() {
             return false;
         }
-        let assignments = build_target_assignments_for_ability_with_limit(
-            flushed,
-            &resolved,
-            &slots,
-            &ability_def.target_constraints,
-            Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
-        );
-        let overflowed = assignments.len() > TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
         let defiler = casting_costs::defiler_reduction_entry_if_affordable(
             flushed,
             player,
@@ -21327,6 +21357,37 @@ fn target_dependent_reduction_makes_payable(
                 None,
             )
         };
+        // CR 601.2f + CR 601.2h: the best case any assignment can reach takes
+        // every target-gated reduction and no target-gated raise or floor (a
+        // reduction never raises a total, a raise or floor never lowers one).
+        // If even that is unpayable, every assignment is, however many exist.
+        let best_case = (
+            collect_target_dependent_cost_modifiers(
+                flushed,
+                player,
+                prepared.object_id,
+                SpellCostTargets::Any,
+            )
+            .into_iter()
+            .filter(|modification| !modification.is_raise)
+            .collect(),
+            Vec::new(),
+        );
+        if !payable(&price(&plain_cast, &resolved, &best_case))
+            && !defiler_cast
+                .as_ref()
+                .is_some_and(|cast| payable(&price(cast, &resolved, &best_case)))
+        {
+            return false;
+        }
+        let assignments = build_target_assignments_for_ability_with_limit(
+            flushed,
+            &resolved,
+            &slots,
+            &ability_def.target_constraints,
+            Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
+        );
+        let overflowed = assignments.len() > TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
         let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
         for assignment in assignments
             .into_iter()
@@ -21343,7 +21404,7 @@ fn target_dependent_reduction_makes_payable(
                     flushed,
                     player,
                     prepared.object_id,
-                    &chosen,
+                    SpellCostTargets::Chosen(&chosen),
                 ),
                 collect_cost_floors(
                     flushed,

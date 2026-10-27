@@ -361,3 +361,58 @@ fn battlefield_target_dependent_reduction_counts_toward_castability() {
         );
     }
 }
+
+const KILLIAN: &str =
+    "Lifelink\nMenace\nSpells you cast that target a creature cost {2} less to cast.";
+
+/// CR 601.2f + CR 601.2h: with seven legal creatures (Killian among them) Hex
+/// has 7×6×5×4×3×2 = 5,040 ordered target assignments, past the pricing limit.
+/// Every assignment is at best {2}{B}{B} after Killian's {2}, so three Swamps
+/// can't cast it however many assignments go unpriced; four can.
+#[test]
+fn unaffordable_best_case_is_not_castable_past_the_assignment_limit() {
+    for (swamps, castable) in [(3, false), (4, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            KILLIAN,
+            "Killian, Ink Duelist",
+            &["Lifelink".into(), "Menace".into()],
+            &["Creature".into()],
+            &[],
+        );
+        let mut killian = scenario.add_creature(P0, "Killian, Ink Duelist", 2, 2);
+        for s in parsed.statics {
+            killian.with_static_definition(s);
+        }
+        for i in 0..6 {
+            scenario.add_creature(P1, &format!("Mark {i}"), 2, 2);
+        }
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Hex", false, "Destroy six target creatures.")
+            .as_sorcery()
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        for _ in 0..swamps {
+            scenario.add_basic_land(P0, ManaColor::Black);
+        }
+        let runner = scenario.build();
+        assert_eq!(
+            engine::game::casting::can_cast_object_now(runner.state(), P0, spell),
+            castable,
+            "{swamps} Swamps"
+        );
+        assert_eq!(
+            engine::ai_support::legal_actions(runner.state())
+                .iter()
+                .any(
+                    |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+                ),
+            castable,
+            "{swamps} Swamps"
+        );
+    }
+}
