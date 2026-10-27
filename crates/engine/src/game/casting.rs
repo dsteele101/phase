@@ -25882,10 +25882,10 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
             if obj.controller != player {
                 return false;
             }
-            // CR 702.37e: the permanent being turned face up cannot pay its own turn-up cost.
-            if is_turn_face_up && id == source_id {
-                return false;
-            }
+            // CR 702.37e: the permanent being turned face up is not excluded — the rule
+            // only requires paying the morph cost, so a face-down permanent matching the
+            // cost's filter may pay it with itself unless the cost says "another", which
+            // the filter carries.
             // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
             // for any cost regardless of payment scope (e.g. Assault Suit).
             if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
