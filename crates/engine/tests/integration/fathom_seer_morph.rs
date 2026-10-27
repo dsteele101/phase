@@ -1976,7 +1976,7 @@ fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spec
     let ripper = scenario
         .add_creature_to_hand(P0, "Ruthless Ripper", 1, 1)
         .from_oracle_text(
-            "Deathtouch\nMorph—Reveal a black card in your hand.\nWhen this creature is turned face up, target player loses 2 life if you cast it this turn.",
+            "Deathtouch\nMorph—Reveal a black card in your hand.\nWhen this creature is turned face up, target player loses 2 life.",
         )
         .id();
 

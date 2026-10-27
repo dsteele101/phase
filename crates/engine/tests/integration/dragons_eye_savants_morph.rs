@@ -1,4 +1,4 @@
-//! CR 702.37a + CR 702.37e + CR 701.20a + CR 708.8: Dragon's Eye Savants.
+//! CR 702.37a + CR 702.37e + CR 701.20a: Dragon's Eye Savants.
 //!
 //! "Morph—Reveal a blue card in your hand.
 //! When this creature is turned face up, look at target opponent's hand."
@@ -177,7 +177,7 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
     assert_eq!(obj.power, Some(0));
     assert_eq!(obj.toughness, Some(6));
 
-    // CR 708.8: "When this creature is turned face up" triggers.
+    // CR 702.37e: Turning face up is a special action; the "When this creature is turned face up" trigger fires afterward.
     // In a 3-player game, choose P1 as the target opponent.
     if let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
         runner
