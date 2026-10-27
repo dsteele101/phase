@@ -1277,7 +1277,8 @@ fn pay_ability_cost_inner(
                     kind: PayCostKind::Sacrifice,
                     choices: eligible,
                     count,
-                    min_count: 0,
+                    // CR 118.3: the turn-face-up handler requires exactly `count`.
+                    min_count: count,
                     resume: CostResume::TurnFaceUp {
                         source: *source,
                         cost_source: *cost_source,
@@ -1359,7 +1360,8 @@ fn pay_ability_cost_inner(
                 kind: PayCostKind::Discard,
                 choices: eligible,
                 count: count_num,
-                min_count: 0,
+                // CR 118.3: the turn-face-up handler requires exactly `count`.
+                min_count: count_num,
                 resume: CostResume::TurnFaceUp {
                     source: *source,
                     cost_source: *cost_source,
@@ -2228,7 +2230,8 @@ fn pay_ability_cost_inner(
                 kind: PayCostKind::ReturnToHand,
                 choices: eligible,
                 count: *count as usize,
-                min_count: 0,
+                // CR 118.3: the turn-face-up handler requires exactly `count`.
+                min_count: *count as usize,
                 resume: CostResume::TurnFaceUp {
                     source: *source,
                     cost_source: *cost_source,
@@ -2277,7 +2280,8 @@ fn pay_ability_cost_inner(
                 kind: PayCostKind::Reveal,
                 choices: eligible,
                 count,
-                min_count: 0,
+                // CR 118.3: the turn-face-up handler requires exactly `count`.
+                min_count: count,
                 resume: CostResume::TurnFaceUp {
                     source: *source,
                     cost_source: *cost_source,
