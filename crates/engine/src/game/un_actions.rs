@@ -258,19 +258,15 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// source may have left play, its controller may have opted out, or the returned
 /// card may have moved zones — each of which invalidates the window.
 ///
-/// CR 400.7: an object that moves from one zone to another becomes a new object
-/// with no memory of its previous existence, so the `returns` binding (object id,
-/// incarnation, and expected zone) is what lets us detect a stale offer rather
-/// than trusting a bare ObjectId.
-///
-/// CR 603.10: trigger eligibility is matched at event time (see `record_tell`);
-/// this check is not a CR 603.10 look-back. It only confirms the window is still
-/// live: the source still functions in its current zone, and the returned card is
-/// the same incarnation (CR 400.7). The holder's opt-in is Un-card-specific and
-/// has no Comprehensive Rules entry.
+/// CR 113.6m + CR 400.7: validates that a Gotcha offer's source and returned card
+/// remain intact on the live state. The source ability must continue to function in
+/// its current zone (CR 113.6m), the recipient must remain opted in to Un-card
+/// actions (an engine opt-in preference with no CR entry), and the returned card
+/// must be the same incarnation still in its expected zone rather than a new object
+/// that changed zones (CR 400.7).
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
-    // The source must still exist and still carry a functioning Gotcha ability in
-    // its current zone (gotcha_definitions applies both checks).
+    // CR 113.6m: the source must still exist and still carry a functioning Gotcha
+    // ability in its current zone (gotcha_definitions applies both checks).
     gotcha_definitions(state, offer.source_id).next().is_some()
         // The recipient must still be opted in to Un-card actions.
         && player_can_say_phrases(state, offer.player)
