@@ -21256,7 +21256,8 @@ const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 4096;
 /// X = 0, the cheapest announcement (CR 107.3a). Both reductions are priced
 /// together per assignment, so a spell payable only with both is castable.
 ///
-/// Only targets of the spell ability are enumerated. An Aura (CR 303.4a) or
+/// Only targets of the spell ability are enumerated — for a modal spell, of
+/// each legal mode selection (CR 700.2a, [`target_pricing_chains`]). An Aura (CR 303.4a) or
 /// a mutating spell (CR 702.140a) targets through its keyword, not its spell
 /// ability, so its target-dependent reductions are not priced here.
 ///
@@ -21291,10 +21292,8 @@ fn target_dependent_reduction_makes_payable(
             return false;
         }
         let resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
-        let Ok(slots) = build_target_slots(flushed, &resolved) else {
-            return false;
-        };
-        if slots.is_empty() {
+        let chains = target_pricing_chains(flushed, player, prepared, ability_def, &resolved);
+        if chains.is_empty() {
             return false;
         }
         let defiler = casting_costs::defiler_reduction_entry_if_affordable(
@@ -21380,20 +21379,29 @@ fn target_dependent_reduction_makes_payable(
         {
             return false;
         }
-        let assignments = build_target_assignments_for_ability_with_limit(
-            flushed,
-            &resolved,
-            &slots,
-            &ability_def.target_constraints,
-            Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
-        );
-        let overflowed = assignments.len() > TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
+        // CR 700.2a + CR 601.2b-c: every chain's assignments share one budget,
+        // so a modal spell prices no more assignments than a plain one.
+        let mut budget = TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
+        let mut overflowed = false;
         let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
-        for assignment in assignments
+        let assignments = chains.iter().flat_map(|(chain, slots, constraints)| {
+            build_target_assignments_for_ability_with_limit(
+                flushed,
+                chain,
+                slots,
+                constraints,
+                Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
+            )
             .into_iter()
-            .take(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT)
-        {
-            let mut chosen = resolved.clone();
+            .map(move |assignment| (chain, assignment))
+        });
+        for (chain, assignment) in assignments {
+            if budget == 0 {
+                overflowed = true;
+                break;
+            }
+            budget -= 1;
+            let mut chosen = chain.clone();
             if assign_selected_slots_in_chain(flushed, &mut chosen, &assignment).is_err() {
                 continue;
             }
@@ -21436,6 +21444,65 @@ fn target_dependent_reduction_makes_payable(
         }
         overflowed
     })
+}
+
+/// CR 700.2a + CR 601.2b-c: the targeted spell-ability chains whose target
+/// assignments [`target_dependent_reduction_makes_payable`] prices, each with
+/// its target slots and selection constraints. A modal spell's modes are
+/// chosen before its targets, so every legal mode selection — judged by the
+/// cast's own [`spell_mode_choice`] prompt — contributes its chained modes;
+/// any other spell contributes its spell ability. Chains with no target are
+/// omitted: their price is the pre-target one, already checked.
+fn target_pricing_chains(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    ability_def: &AbilityDefinition,
+    resolved: &ResolvedAbility,
+) -> Vec<(
+    ResolvedAbility,
+    Vec<TargetSelectionSlot>,
+    Vec<crate::types::game_state::TargetSelectionConstraint>,
+)> {
+    let with_slots =
+        |chain: ResolvedAbility,
+         constraints: Vec<crate::types::game_state::TargetSelectionConstraint>| {
+            build_target_slots(state, &chain)
+                .ok()
+                .filter(|slots| !slots.is_empty())
+                .map(|slots| (chain, slots, constraints))
+        };
+    let Some(modal) = prepared.modal.as_ref() else {
+        return with_slots(resolved.clone(), ability_def.target_constraints.clone())
+            .into_iter()
+            .collect();
+    };
+    let SpellModeChoice {
+        modal,
+        mode_abilities,
+        unavailable_modes,
+    } = spell_mode_choice(
+        state,
+        player,
+        prepared.object_id,
+        modal,
+        &crate::types::ability::SpellContext::default(),
+    );
+    let constraints = target_constraints_from_modal(&modal);
+    super::ability_utils::generate_modal_index_sequences(&modal)
+        .into_iter()
+        .filter(|indices| indices.iter().all(|idx| !unavailable_modes.contains(idx)))
+        .filter_map(|indices| {
+            let chain = super::ability_utils::build_chained_resolved(
+                &mode_abilities,
+                &indices,
+                prepared.object_id,
+                player,
+            )
+            .ok()?;
+            with_slots(chain, constraints.clone())
+        })
+        .collect()
 }
 
 /// CR 601.2f: whether some cost REDUCTION whose `spell_filter` reads the chosen

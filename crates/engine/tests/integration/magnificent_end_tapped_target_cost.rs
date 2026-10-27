@@ -3,6 +3,7 @@
 //! chosen target is tapped.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -414,5 +415,101 @@ fn unaffordable_best_case_is_not_castable_past_the_assignment_limit() {
             castable,
             "{swamps} Swamps"
         );
+    }
+}
+
+/// CR 700.2a + CR 601.2b-c + CR 601.2f: a modal spell's modes are chosen
+/// before its targets, so a mode selection that targets a creature earns
+/// Killian's {2}. Cryptic Command ({1}{U}{U}{U}, "Choose two —") with no spell
+/// on the stack can't choose "Counter target spell", its first mode, but
+/// "Return target permanent to its owner's hand" can target a creature: three
+/// Islands cast it for {U}{U}{U}; two can't (reach guard).
+#[test]
+fn modal_spell_mode_selection_targeting_a_creature_earns_the_reduction() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    for (islands, castable) in [(2, false), (3, true)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            KILLIAN,
+            "Killian, Ink Duelist",
+            &["Lifelink".into(), "Menace".into()],
+            &["Creature".into()],
+            &[],
+        );
+        let mut killian = scenario.add_creature(P0, "Killian, Ink Duelist", 2, 2);
+        for s in parsed.statics {
+            killian.with_static_definition(s);
+        }
+        let victim = scenario.add_creature(P1, "Mark", 2, 2).id();
+        let command = scenario.add_real_card(P0, "Cryptic Command", Zone::Hand, db);
+        for _ in 0..islands {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        let mut runner = scenario.build();
+        assert_eq!(
+            engine::game::casting::can_cast_object_now(runner.state(), P0, command),
+            castable,
+            "{islands} Islands"
+        );
+        assert_eq!(
+            engine::ai_support::legal_actions(runner.state())
+                .iter()
+                .any(
+                    |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == command)
+                ),
+            castable,
+            "{islands} Islands"
+        );
+        if !castable {
+            continue;
+        }
+        let card_id = runner.state().objects[&command].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: command,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("castable: a mode selection targets a creature");
+        let WaitingFor::ModeChoice {
+            unavailable_modes, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("expected mode choice, got {:?}", runner.state().waiting_for);
+        };
+        assert!(unavailable_modes.contains(&0), "no spell to counter");
+        // "Return target permanent to its owner's hand" + "Draw a card".
+        runner
+            .act(GameAction::SelectModes {
+                indices: vec![1, 3],
+            })
+            .unwrap();
+        let mut action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(victim)),
+        };
+        for _ in 0..4 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner.act(action).unwrap();
+            action = GameAction::PassPriority;
+        }
+        assert_eq!(runner.state().objects[&command].zone, Zone::Stack);
+        let untapped_islands = runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| {
+                o.zone == Zone::Battlefield && o.controller == P0 && o.name == "Island" && !o.tapped
+            })
+            .count();
+        assert_eq!(untapped_islands, 0, "{{U}}{{U}}{{U}} after Killian's {{2}}");
     }
 }
