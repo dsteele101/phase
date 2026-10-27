@@ -234,13 +234,15 @@ fn fathom_seer_duplicate_island_selection_rejected() {
         })
         .expect("turn face up");
 
-    // Guard exact prompt before duplicate selection (N3)
+    // Guard exact prompt before duplicate selection (N3). CR 118.3: the prompt
+    // publishes the exact minimum the handler enforces.
     assert!(
         matches!(
             runner.state().waiting_for,
             WaitingFor::PayCost {
                 kind: PayCostKind::ReturnToHand,
                 count: 2,
+                min_count: 2,
                 ..
             }
         ),
@@ -1379,11 +1381,22 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
         "must be on first Mountain's NamedChoice prompt, got {:?}",
         runner.state().waiting_for
     );
-    // CR 603.2 + CR 603.3b: Exactly one Mayhem Devil sacrifice observer retained across initial pause
-    assert_eq!(
-        runner.state().deferred_triggers.len(),
-        1,
-        "must retain exactly one observer trigger after first sacrifice pause"
+    // CR 603.2c + CR 603.10a: both Mountains leave together, so the first
+    // sacrifice's events wait in the payment ledger instead of being collected
+    // as their own event across the initial pause.
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "no observer may be collected for a partial departure group"
+    );
+    assert!(
+        matches!(
+            &runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                deferred_cost_events,
+                ..
+            }) if !deferred_cost_events.is_empty()
+        ),
+        "first sacrifice's events must be retained in the payment ledger"
     );
     assert!(
         runner.state().objects[&volcanist].face_down,
@@ -1449,11 +1462,24 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
         "must be on second Mountain's NamedChoice prompt, got {:?}",
         runner.state().waiting_for
     );
-    // CR 603.2 + CR 603.3b: Exactly two Mayhem Devil sacrifice observers retained across second pause
-    assert_eq!(
-        runner.state().deferred_triggers.len(),
-        2,
-        "must retain exactly two observer triggers after second sacrifice pause"
+    // CR 603.2c + CR 603.10a: the second delivery tail still holds the payment
+    // open, so both sacrifices' events stay in the ledger until it settles.
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "no observer may be collected before the payment's group settles"
+    );
+    assert!(
+        matches!(
+            &runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                deferred_cost_events,
+                ..
+            }) if deferred_cost_events.iter().filter(|e| matches!(
+                e,
+                engine::types::events::GameEvent::PermanentSacrificed { .. }
+            )).count() == 2
+        ),
+        "both sacrifices' events must be retained in the payment ledger"
     );
     assert!(
         runner.state().objects[&volcanist].face_down,
@@ -3180,11 +3206,22 @@ fn turn_face_up_sacrifice_preserves_delivered_observer_prefix_across_second_repl
         "TurnFaceUpCostMove must be paused at index 1"
     );
 
-    // CR 603.2 + CR 603.3b discriminator: The first sacrifice must ALREADY have a retained observer in deferred_triggers
-    assert_eq!(
-        runner.state().deferred_triggers.len(),
-        1,
-        "first sacrifice observer must be retained in deferred_triggers across the second replacement pause"
+    // CR 603.2c + CR 603.10a discriminator: both Mountains leave together, so the
+    // first sacrifice's events are withheld in the payment ledger (not collected
+    // as their own event) until the second sacrifice completes the group.
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "no observer may be collected for a partial departure group"
+    );
+    assert!(
+        matches!(
+            &runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                deferred_cost_events,
+                ..
+            }) if !deferred_cost_events.is_empty()
+        ),
+        "first sacrifice's events must be retained in the payment ledger across the second pause"
     );
 
     // Accept replacement for second mountain (exiles instead of graveyard)
@@ -3463,11 +3500,22 @@ fn turn_face_up_sacrifice_preserves_delivered_delayed_trigger_prefix_across_seco
         "TurnFaceUpCostMove must be paused at index 1"
     );
 
-    // CR 603.2 + CR 603.7c discriminator: Saffi's delayed return trigger must ALREADY be retained in deferred_triggers
-    assert_eq!(
-        runner.state().deferred_triggers.len(),
-        1,
-        "Saffi's delayed trigger must be retained in deferred_triggers across the second replacement pause"
+    // CR 603.2c + CR 603.7c + CR 603.10a discriminator: the first death is withheld
+    // in the payment ledger until the departure group completes, so Saffi's delayed
+    // trigger is not collected from a partial group.
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "no delayed trigger may be collected for a partial departure group"
+    );
+    assert!(
+        matches!(
+            &runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                deferred_cost_events,
+                ..
+            }) if !deferred_cost_events.is_empty()
+        ),
+        "the first death must be retained in the payment ledger across the second pause"
     );
 
     // Accept replacement for second mountain creature (exiles it)
@@ -3505,12 +3553,15 @@ fn turn_face_up_sacrifice_preserves_delivered_delayed_trigger_prefix_across_seco
 }
 
 /// Skirk Volcanist ("Morph—Sacrifice two Mountains") with two Mountain
-/// creatures: Blood Artist and a Mountain Goblin. `optional_graveyard_redirect`
-/// adds an optional Graveyard replacement so each sacrifice pauses for a choice.
+/// creatures: Blood Artist and a Mountain Goblin, watched by an opponent's
+/// Chainsaw ("Whenever one or more creatures die, put a rev counter on this
+/// Equipment."). `optional_graveyard_redirect` adds an optional Graveyard
+/// replacement so each sacrifice pauses for a choice.
 fn blood_artist_co_departure_runner(
     optional_graveyard_redirect: bool,
 ) -> (
     engine::game::scenario::GameRunner,
+    engine::types::ObjectId,
     engine::types::ObjectId,
     engine::types::ObjectId,
     engine::types::ObjectId,
@@ -3534,6 +3585,15 @@ fn blood_artist_co_departure_runner(
     let goblin = scenario
         .add_creature(P0, "Mountain Goblin", 1, 1)
         .with_subtypes(vec!["Mountain"])
+        .id();
+    // CR 603.2c: a batch observer controlled by the opponent, so its trigger
+    // never shares an ordering prompt with Blood Artist's.
+    let chainsaw = scenario
+        .add_artifact_from_oracle(
+            P1,
+            "Chainsaw",
+            "Whenever one or more creatures die, put a rev counter on this Equipment.",
+        )
         .id();
     let volcanist = scenario
         .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
@@ -3591,12 +3651,14 @@ fn blood_artist_co_departure_runner(
             x: 0,
         })
         .expect("turn face up");
-    (runner, volcanist, blood_artist, goblin)
+    (runner, volcanist, blood_artist, goblin, chainsaw)
 }
 
-fn blood_artist_trigger_count(
+/// Answer every Blood Artist target prompt, then count the stacked triggers
+/// whose source is `source`.
+fn co_departure_trigger_count(
     runner: &mut engine::game::scenario::GameRunner,
-    blood_artist: engine::types::ObjectId,
+    source: engine::types::ObjectId,
 ) -> usize {
     while matches!(
         runner.state().waiting_for,
@@ -3612,7 +3674,7 @@ fn blood_artist_trigger_count(
         .state()
         .stack
         .iter()
-        .filter(|entry| entry.source_id == blood_artist)
+        .filter(|entry| entry.source_id == source)
         .count()
 }
 
@@ -3621,7 +3683,8 @@ fn blood_artist_trigger_count(
 // other paid permanent, so Blood Artist sees both deaths.
 #[test]
 fn turn_face_up_sacrifice_cost_co_departing_observer_sees_both_deaths() {
-    let (mut runner, volcanist, blood_artist, goblin) = blood_artist_co_departure_runner(false);
+    let (mut runner, volcanist, blood_artist, goblin, chainsaw) =
+        blood_artist_co_departure_runner(false);
     runner
         .act(GameAction::SelectCards {
             cards: vec![goblin, blood_artist],
@@ -3631,9 +3694,15 @@ fn turn_face_up_sacrifice_cost_co_departing_observer_sees_both_deaths() {
     assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&blood_artist].zone, Zone::Graveyard);
     assert_eq!(
-        blood_artist_trigger_count(&mut runner, blood_artist),
+        co_departure_trigger_count(&mut runner, blood_artist),
         2,
         "Blood Artist must trigger for its own death and the co-departing creature"
+    );
+    // CR 603.2c: both deaths are one event, so Chainsaw triggers exactly once.
+    assert_eq!(
+        co_departure_trigger_count(&mut runner, chainsaw),
+        1,
+        "Chainsaw must trigger once for the single simultaneous death event"
     );
 }
 
@@ -3641,7 +3710,10 @@ fn turn_face_up_sacrifice_cost_co_departing_observer_sees_both_deaths() {
 // replacement-choice pause between the two sacrifices.
 #[test]
 fn turn_face_up_sacrifice_cost_co_departing_observer_survives_replacement_pause() {
-    let (mut runner, volcanist, blood_artist, goblin) = blood_artist_co_departure_runner(true);
+    use engine::types::game_state::PendingCostMoveResume;
+
+    let (mut runner, volcanist, blood_artist, goblin, chainsaw) =
+        blood_artist_co_departure_runner(true);
     runner
         .act(GameAction::SelectCards {
             cards: vec![blood_artist, goblin],
@@ -3653,6 +3725,25 @@ fn turn_face_up_sacrifice_cost_co_departing_observer_survives_replacement_pause(
         WaitingFor::ReplacementChoice { .. }
     ) {
         pauses += 1;
+        if pauses == 2 {
+            // CR 603.2c + CR 603.10a: the first death waits in the payment's
+            // ledger rather than being collected as its own event.
+            assert_eq!(runner.state().objects[&blood_artist].zone, Zone::Graveyard);
+            assert!(
+                runner.state().deferred_triggers.is_empty(),
+                "no trigger may be collected for a partial departure group"
+            );
+            assert!(
+                matches!(
+                    &runner.state().pending_cost_move_resume,
+                    Some(PendingCostMoveResume::TurnFaceUpCostMove {
+                        deferred_cost_events,
+                        ..
+                    }) if !deferred_cost_events.is_empty()
+                ),
+                "the first sacrifice's events must be withheld in the payment ledger"
+            );
+        }
         // Decline the optional exile redirect so both creatures die.
         runner
             .act(GameAction::ChooseReplacement { index: 1 })
@@ -3663,8 +3754,15 @@ fn turn_face_up_sacrifice_cost_co_departing_observer_survives_replacement_pause(
     assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&blood_artist].zone, Zone::Graveyard);
     assert_eq!(
-        blood_artist_trigger_count(&mut runner, blood_artist),
+        co_departure_trigger_count(&mut runner, blood_artist),
         2,
         "Blood Artist must trigger for its own death and the co-departing creature"
+    );
+    // CR 603.2c: the pause splits the payment across actions, not the event;
+    // Chainsaw triggers exactly once.
+    assert_eq!(
+        co_departure_trigger_count(&mut runner, chainsaw),
+        1,
+        "Chainsaw must trigger once for the single simultaneous death event"
     );
 }

@@ -4,7 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PendingCostMoveResume, TurnFaceUpMoveKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
@@ -12,6 +12,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
 
+use super::casting_costs::CostMoveLedger;
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::printed_cards::apply_back_face_to_object;
 
@@ -697,7 +698,7 @@ pub(crate) fn resume_turn_face_up_cost_move(
     events: &mut Vec<GameEvent>,
     action_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
-    let Some(crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
+    let Some(PendingCostMoveResume::TurnFaceUpCostMove {
         player,
         source,
         cost_source,
@@ -705,208 +706,166 @@ pub(crate) fn resume_turn_face_up_cost_move(
         chosen,
         paused_at_index,
         remaining_cost,
-        mut departure_record_indices,
+        deferred_cost_events,
+        departure_record_indices,
     }) = state.pending_cost_move_resume.take()
     else {
         return Ok(state.waiting_for.clone());
     };
 
-    let events_before = action_event_start.unwrap_or(events.len());
-    for (index, &card_id) in chosen.iter().enumerate().skip(paused_at_index + 1) {
-        match move_kind {
-            crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand => {
-                match crate::game::zone_pipeline::move_object(
-                    state,
-                    crate::game::zone_pipeline::ZoneMoveRequest::cost(
-                        card_id,
-                        Zone::Hand,
-                        source.object_id,
-                    ),
-                    events,
-                ) {
-                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
-                        stamp_cost_move_departures(
-                            state,
-                            events,
-                            events_before,
-                            &chosen,
-                            &mut departure_record_indices,
-                        );
-                        state.pending_cost_move_resume = Some(
-                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                player,
-                                source,
-                                cost_source,
-                                move_kind,
-                                chosen,
-                                paused_at_index: index,
-                                remaining_cost,
-                                departure_record_indices,
-                            },
-                        );
-                        if state.pending_replacement.is_some() {
-                            super::costs::pause_cost_payment_for_replacement_choice(
-                                state,
-                                choice_player,
-                            );
-                        }
-                        // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                        // across the resumed interactive pause until priority can drain them.
-                        crate::game::triggers::park_observer_triggers_if_paused(
-                            state,
-                            events,
-                            events_before,
-                        );
-                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                            state,
-                            events,
-                            events_before,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        unreachable!()
-                    }
-                }
-            }
-            crate::types::game_state::TurnFaceUpMoveKind::Discard => {
-                match super::effects::discard::discard_as_cost_with_source(
-                    state,
-                    card_id,
-                    player,
-                    Some(source.object_id),
-                    events,
-                ) {
-                    super::effects::discard::DiscardOutcome::Complete => {}
-                    super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
-                        choice_player,
-                    ) => {
-                        stamp_cost_move_departures(
-                            state,
-                            events,
-                            events_before,
-                            &chosen,
-                            &mut departure_record_indices,
-                        );
-                        state.pending_cost_move_resume = Some(
-                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                player,
-                                source,
-                                cost_source,
-                                move_kind,
-                                chosen,
-                                paused_at_index: index,
-                                remaining_cost,
-                                departure_record_indices,
-                            },
-                        );
-                        if state.pending_replacement.is_some() {
-                            super::costs::pause_cost_payment_for_replacement_choice(
-                                state,
-                                choice_player,
-                            );
-                        }
-                        // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                        // across the resumed interactive pause until priority can drain them.
-                        crate::game::triggers::park_observer_triggers_if_paused(
-                            state,
-                            events,
-                            events_before,
-                        );
-                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                            state,
-                            events,
-                            events_before,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
-            crate::types::game_state::TurnFaceUpMoveKind::Sacrifice => {
-                match super::sacrifice::sacrifice_permanent(state, card_id, player, events)? {
-                    super::sacrifice::SacrificeOutcome::Complete => {}
-                    super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                        stamp_cost_move_departures(
-                            state,
-                            events,
-                            events_before,
-                            &chosen,
-                            &mut departure_record_indices,
-                        );
-                        state.pending_cost_move_resume = Some(
-                            crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                player,
-                                source,
-                                cost_source,
-                                move_kind,
-                                chosen,
-                                paused_at_index: index,
-                                remaining_cost,
-                                departure_record_indices,
-                            },
-                        );
-                        if state.pending_replacement.is_some() {
-                            super::costs::pause_cost_payment_for_replacement_choice(
-                                state,
-                                choice_player,
-                            );
-                        }
-                        // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                        // across the resumed interactive pause until priority can drain them.
-                        crate::game::triggers::park_observer_triggers_if_paused(
-                            state,
-                            events,
-                            events_before,
-                        );
-                        crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                            state,
-                            events,
-                            events_before,
-                        );
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
+    let cost_event_start = action_event_start.unwrap_or(events.len());
+    move_turn_face_up_cost_objects(
+        state,
+        TurnFaceUpCostMoveRequest {
+            player,
+            source,
+            cost_source,
+            move_kind,
+            chosen,
+            start_at_index: paused_at_index + 1,
+            remaining_cost,
+        },
+        CostMoveLedger::resumed(deferred_cost_events, departure_record_indices),
+        cost_event_start,
+        events,
+    )
+}
+
+/// One turn-face-up cost move: the selected objects and where the payment
+/// continues once they have all moved.
+pub(crate) struct TurnFaceUpCostMoveRequest {
+    pub(crate) player: PlayerId,
+    pub(crate) source: ObjectIncarnationRef,
+    pub(crate) cost_source: TurnUpCostSource,
+    pub(crate) move_kind: TurnFaceUpMoveKind,
+    pub(crate) chosen: Vec<ObjectId>,
+    pub(crate) start_at_index: usize,
+    pub(crate) remaining_cost: Option<Box<AbilityCost>>,
+}
+
+/// CR 702.37e + CR 118.3 + CR 616.1: Move `chosen[start_at_index..]` as one
+/// turn-face-up cost component. A move that parks for a replacement choice
+/// leaves a `TurnFaceUpCostMove` root holding the departure `ledger`; the
+/// payment continues once every selected object has moved.
+///
+/// CR 603.2c + CR 603.10a: the selected objects move simultaneously, so the
+/// shared `CostMoveLedger` withholds a paused fragment's events while a
+/// departure group can still form and settles the whole group once, so a
+/// "one or more creatures die" observer (Chainsaw) triggers once for the
+/// payment however many replacement choices interrupt it.
+pub(crate) fn move_turn_face_up_cost_objects(
+    state: &mut GameState,
+    request: TurnFaceUpCostMoveRequest,
+    mut ledger: CostMoveLedger,
+    cost_event_start: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let TurnFaceUpCostMoveRequest {
+        player,
+        source,
+        cost_source,
+        move_kind,
+        chosen,
+        start_at_index,
+        remaining_cost,
+    } = request;
+    for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
+        let Some(choice_player) =
+            move_turn_face_up_cost_object(state, move_kind, object_id, player, source, events)?
+        else {
+            continue;
+        };
+        let withhold = ledger.retain_paused_fragment(state, &events[cost_event_start..], &chosen);
+        let (deferred_cost_events, departure_record_indices) = ledger.into_parts();
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::TurnFaceUpCostMove {
+            player,
+            source,
+            cost_source,
+            move_kind,
+            chosen,
+            paused_at_index: index,
+            remaining_cost,
+            deferred_cost_events,
+            departure_record_indices,
+        });
+        if state.pending_replacement.is_some() {
+            super::costs::pause_cost_payment_for_replacement_choice(state, choice_player);
         }
+        if !withhold {
+            // CR 603.2 + CR 603.3b: No departure group can still form, so retain
+            // this fragment's ordinary cost-move observers across the
+            // interactive pause until priority can drain them.
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                cost_event_start,
+            );
+            crate::game::triggers::park_delayed_observer_triggers_if_paused(
+                state,
+                events,
+                cost_event_start,
+            );
+        }
+        return Ok(state.waiting_for.clone());
     }
 
-    if !matches!(
-        move_kind,
-        crate::types::game_state::TurnFaceUpMoveKind::Discard
-    ) {
-        stamp_cost_move_departures(
-            state,
-            events,
-            events_before,
-            &chosen,
-            &mut departure_record_indices,
-        );
-    }
+    ledger.settle(state, None, &chosen, events, cost_event_start);
     finish_or_continue_turn_face_up(state, player, source, cost_source, remaining_cost, events)
 }
 
-/// CR 603.10a: Stamp the battlefield departures a turn-face-up cost move has
-/// performed so far as one simultaneous departure, in both the current event
-/// buffer and the per-turn LKI records (which survive a replacement pause that
-/// splits the action's events). Look-back observers that leave together with
-/// another paid permanent (Blood Artist sacrificed alongside another creature)
-/// are then admitted through `record.co_departed`.
-pub(crate) fn stamp_cost_move_departures(
+/// Move one selected object for a turn-face-up cost. `Some(player)` means the
+/// move paused for that player's replacement choice.
+fn move_turn_face_up_cost_object(
     state: &mut GameState,
-    events: &mut [GameEvent],
-    current_start: usize,
-    chosen: &[ObjectId],
-    departure_record_indices: &mut Vec<usize>,
-) {
-    super::casting_costs::record_sacrifice_cost_departure_records(
-        departure_record_indices,
-        &events[current_start..],
-        chosen,
-    );
-    let departed = super::zones::departed_subset(state, chosen);
-    super::zones::mark_simultaneous_departures(&mut events[current_start..], &departed);
-    super::zones::mark_simultaneous_departure_records(state, departure_record_indices, &departed);
+    move_kind: TurnFaceUpMoveKind,
+    object_id: ObjectId,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<PlayerId>, EngineError> {
+    Ok(match move_kind {
+        TurnFaceUpMoveKind::ReturnToHand => {
+            match crate::game::zone_pipeline::move_object(
+                state,
+                crate::game::zone_pipeline::ZoneMoveRequest::cost(
+                    object_id,
+                    Zone::Hand,
+                    source.object_id,
+                ),
+                events,
+            ) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => None,
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                    Some(choice_player)
+                }
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a cost move to Hand cannot require Aura attachment")
+                }
+            }
+        }
+        TurnFaceUpMoveKind::Discard => {
+            match super::effects::discard::discard_as_cost_with_source(
+                state,
+                object_id,
+                player,
+                Some(source.object_id),
+                events,
+            ) {
+                super::effects::discard::DiscardOutcome::Complete => None,
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                    Some(choice_player)
+                }
+            }
+        }
+        TurnFaceUpMoveKind::Sacrifice => {
+            match super::sacrifice::sacrifice_permanent(state, object_id, player, events)? {
+                super::sacrifice::SacrificeOutcome::Complete => None,
+                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                    Some(choice_player)
+                }
+            }
+        }
+    })
 }
 
 /// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through

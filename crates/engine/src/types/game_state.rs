@@ -9015,6 +9015,11 @@ pub enum PendingCostMoveResume {
         paused_at_index: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_cost: Option<Box<AbilityCost>>,
+        /// CR 603.2c + CR 603.10a: Cost events emitted in earlier actions of
+        /// this one logical move, withheld from trigger collection so the
+        /// group is stamped and its triggers collected once at completion.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred_cost_events: Vec<GameEvent>,
         /// CR 603.10a: `zone_changes_this_turn` indices of the battlefield
         /// departures already performed by this payment, so the whole selection
         /// is stamped as one simultaneous departure across replacement pauses.
@@ -10067,6 +10072,10 @@ fn visit_cost_move_resume_events(
         | PendingCostMoveResume::SacrificeForCost {
             deferred_cost_events,
             ..
+        }
+        | PendingCostMoveResume::TurnFaceUpCostMove {
+            deferred_cost_events,
+            ..
         } => deferred_cost_events.iter_mut().for_each(&mut *f),
         PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
             CollectEvidenceResume::ManaAbility {
@@ -10094,8 +10103,7 @@ fn visit_cost_move_resume_events(
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::ActivationMillPayment { .. }
         | PendingCostMoveResume::CounterCostRemovalPayment { .. }
-        | PendingCostMoveResume::LoyaltyActivation { .. }
-        | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {}
+        | PendingCostMoveResume::LoyaltyActivation { .. } => {}
     }
 }
 

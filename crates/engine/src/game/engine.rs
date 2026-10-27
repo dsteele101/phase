@@ -13920,213 +13920,29 @@ fn apply_non_priority_pass_action(
                     }
                 }
                 match kind {
-                    PayCostKind::ReturnToHand => {
-                        let mut departure_record_indices = Vec::new();
-                        for (index, &id) in chosen.iter().enumerate() {
-                            match crate::game::zone_pipeline::move_object(
-                                state,
-                                crate::game::zone_pipeline::ZoneMoveRequest::cost(
-                                    id,
-                                    Zone::Hand,
-                                    source.object_id,
-                                ),
-                                &mut events,
-                            ) {
-                                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
-                                    super::morph::stamp_cost_move_departures(
-                                        state,
-                                        &mut events,
-                                        0,
-                                        &chosen,
-                                        &mut departure_record_indices,
-                                    );
-                                    state.pending_cost_move_resume = Some(
-                                        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                            player: *player,
-                                            source: *source,
-                                            cost_source: *cost_source,
-                                            move_kind: crate::types::game_state::TurnFaceUpMoveKind::ReturnToHand,
-                                            chosen: chosen.clone(),
-                                            paused_at_index: index,
-                                            remaining_cost: remaining_cost.clone(),
-                                        departure_record_indices,
-                                        },
-                                    );
-                                    if state.pending_replacement.is_some() {
-                                        super::costs::pause_cost_payment_for_replacement_choice(
-                                            state,
-                                            choice_player,
-                                        );
-                                    }
-                                    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                                    // across the interactive pause until priority can drain them.
-                                    crate::game::triggers::park_observer_triggers_if_paused(
-                                        state,
-                                        &mut events,
-                                        0,
-                                    );
-                                    crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                                        state,
-                                        &events,
-                                        0,
-                                    );
-                                    return Ok(ActionResult::applied(events, state.waiting_for.clone()));
-                                }
-                                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                                    unreachable!("a cost move to Hand cannot require Aura attachment");
-                                }
-                            }
-                        }
-                        super::morph::stamp_cost_move_departures(
+                    PayCostKind::ReturnToHand | PayCostKind::Discard | PayCostKind::Sacrifice => {
+                        use crate::types::game_state::TurnFaceUpMoveKind;
+                        let move_kind = match kind {
+                            PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
+                            PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
+                            _ => TurnFaceUpMoveKind::Sacrifice,
+                        };
+                        // CR 702.37e + CR 118.3: the selected objects move together as
+                        // one cost component through the shared turn-face-up move loop.
+                        let cost_event_start = events.len();
+                        super::morph::move_turn_face_up_cost_objects(
                             state,
-                            &mut events,
-                            0,
-                            &chosen,
-                            &mut departure_record_indices,
-                        );
-                        super::morph::finish_or_continue_turn_face_up(
-                            state,
-                            *player,
-                            *source,
-                            *cost_source,
-                            remaining_cost.clone(),
-                            &mut events,
-                        )?
-                    }
-                    PayCostKind::Discard => {
-                        let mut departure_record_indices = Vec::new();
-                        for (index, &id) in chosen.iter().enumerate() {
-                            match super::effects::discard::discard_as_cost_with_source(
-                                state,
-                                id,
-                                *player,
-                                Some(source.object_id),
-                                &mut events,
-                            ) {
-                                super::effects::discard::DiscardOutcome::Complete => {}
-                                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
-                                    choice_player,
-                                ) => {
-                                    super::morph::stamp_cost_move_departures(
-                                        state,
-                                        &mut events,
-                                        0,
-                                        &chosen,
-                                        &mut departure_record_indices,
-                                    );
-                                    state.pending_cost_move_resume = Some(
-                                        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                            player: *player,
-                                            source: *source,
-                                            cost_source: *cost_source,
-                                            move_kind: crate::types::game_state::TurnFaceUpMoveKind::Discard,
-                                            chosen: chosen.clone(),
-                                            paused_at_index: index,
-                                            remaining_cost: remaining_cost.clone(),
-                                        departure_record_indices,
-                                        },
-                                    );
-                                    if state.pending_replacement.is_some() {
-                                        super::costs::pause_cost_payment_for_replacement_choice(
-                                            state,
-                                            choice_player,
-                                        );
-                                    }
-                                    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                                    // across the interactive pause until priority can drain them.
-                                    crate::game::triggers::park_observer_triggers_if_paused(
-                                        state,
-                                        &mut events,
-                                        0,
-                                    );
-                                    crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                                        state, &events, 0,
-                                    );
-                                    return Ok(ActionResult::applied(
-                                        events,
-                                        state.waiting_for.clone(),
-                                    ));
-                                }
-                            }
-                        }
-                        super::morph::finish_or_continue_turn_face_up(
-                            state,
-                            *player,
-                            *source,
-                            *cost_source,
-                            remaining_cost.clone(),
-                            &mut events,
-                        )?
-                    }
-                    PayCostKind::Sacrifice => {
-                        let mut departure_record_indices = Vec::new();
-                        for (index, &id) in chosen.iter().enumerate() {
-                            match super::sacrifice::sacrifice_permanent(
-                                state,
-                                id,
-                                *player,
-                                &mut events,
-                            )? {
-                                super::sacrifice::SacrificeOutcome::Complete => {}
-                                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
-                                    choice_player,
-                                ) => {
-                                    super::morph::stamp_cost_move_departures(
-                                        state,
-                                        &mut events,
-                                        0,
-                                        &chosen,
-                                        &mut departure_record_indices,
-                                    );
-                                    state.pending_cost_move_resume = Some(
-                                        crate::types::game_state::PendingCostMoveResume::TurnFaceUpCostMove {
-                                            player: *player,
-                                            source: *source,
-                                            cost_source: *cost_source,
-                                            move_kind: crate::types::game_state::TurnFaceUpMoveKind::Sacrifice,
-                                            chosen: chosen.clone(),
-                                            paused_at_index: index,
-                                            remaining_cost: remaining_cost.clone(),
-                                        departure_record_indices,
-                                        },
-                                    );
-                                    if state.pending_replacement.is_some() {
-                                        super::costs::pause_cost_payment_for_replacement_choice(
-                                            state,
-                                            choice_player,
-                                        );
-                                    }
-                                    // CR 603.2 + CR 603.3b: Retain ordinary cost-move observers
-                                    // across the interactive pause until priority can drain them.
-                                    crate::game::triggers::park_observer_triggers_if_paused(
-                                        state,
-                                        &mut events,
-                                        0,
-                                    );
-                                    crate::game::triggers::park_delayed_observer_triggers_if_paused(
-                                        state, &events, 0,
-                                    );
-                                    return Ok(ActionResult::applied(
-                                        events,
-                                        state.waiting_for.clone(),
-                                    ));
-                                }
-                            }
-                        }
-                        super::morph::stamp_cost_move_departures(
-                            state,
-                            &mut events,
-                            0,
-                            &chosen,
-                            &mut departure_record_indices,
-                        );
-                        super::morph::finish_or_continue_turn_face_up(
-                            state,
-                            *player,
-                            *source,
-                            *cost_source,
-                            remaining_cost.clone(),
+                            super::morph::TurnFaceUpCostMoveRequest {
+                                player: *player,
+                                source: *source,
+                                cost_source: *cost_source,
+                                move_kind,
+                                chosen: chosen.clone(),
+                                start_at_index: 0,
+                                remaining_cost: remaining_cost.clone(),
+                            },
+                            super::casting_costs::CostMoveLedger::default(),
+                            cost_event_start,
                             &mut events,
                         )?
                     }
