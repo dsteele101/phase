@@ -223,7 +223,7 @@ get.
 
 ### Android APKs
 
-Android builds require Node.js 22, pnpm 9.15.9, JDK 17, Android SDK platform
+Android builds require Node.js 22 (exception to the general 24+ requirement), pnpm 9.15.9, JDK 17, Android SDK platform
 36/build-tools 36.0.0, Android NDK 28.2.13676358, and the Rust Android targets:
 
 ```bash
