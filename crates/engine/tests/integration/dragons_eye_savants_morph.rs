@@ -178,14 +178,20 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
     assert_eq!(obj.toughness, Some(6));
 
     // CR 702.37e: Turning face up is a special action; the "When this creature is turned face up" trigger fires afterward.
-    // In a 3-player game, choose P1 as the target opponent.
-    if let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
-        runner
-            .act(GameAction::SelectTargets {
-                targets: vec![engine::types::ability::TargetRef::Player(P1)],
-            })
-            .expect("target P1");
-    }
+    // CR 603.3d: With two opponents, the target opponent must be chosen; select P1.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "three-player game must prompt for the target opponent, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![engine::types::ability::TargetRef::Player(P1)],
+        })
+        .expect("target P1");
     assert!(
         !runner.state().stack.is_empty(),
         "turned-face-up trigger must be on the stack"
@@ -200,6 +206,11 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
     assert_eq!(runner.state().objects[&opponent_card].zone, Zone::Hand);
     assert_eq!(runner.state().objects[&third_player_card].zone, Zone::Hand);
     assert!(runner.state().stack.is_empty());
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected priority after the look resolves, got {:?}",
+        runner.state().waiting_for
+    );
 
     // CR 701.20e: Verify player-visible projections through filter_state_for_viewer:
     // P0 (looker) sees the privately looked-at card in P1's hand, but not P2's card.
