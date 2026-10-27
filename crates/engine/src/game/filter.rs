@@ -8696,10 +8696,26 @@ fn filter_inner_for_object(
                 triggering_object,
                 granting_object,
             );
-            let linked = if trigger_source.is_some() {
-                source_ctx.linked_exile_snapshot
-            } else {
-                crate::game::players::linked_exile_cards_for_source(state, source_id).to_vec()
+            let linked = match trigger_source {
+                // CR 607.2a + CR 707.10b + CR 607.3: a copy of the linked ability
+                // that resolves after the departure has the same source; its exile
+                // is kept in the departed incarnation's linked-exile LKI, not in
+                // the snapshot frozen at departure.
+                Some(source) => {
+                    let departed = (source.identity.reference.object_id == source_id)
+                        .then_some(source.identity.reference.incarnation);
+                    let mut linked = source_ctx.linked_exile_snapshot;
+                    linked.extend(departed.into_iter().flat_map(|incarnation| {
+                        crate::game::exile_links::lki_snapshots_for_reader(
+                            state,
+                            source_id,
+                            Some(incarnation),
+                        )
+                        .cloned()
+                    }));
+                    linked
+                }
+                None => crate::game::players::linked_exile_cards_for_source(state, source_id),
             };
             linked
                 .iter()

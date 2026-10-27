@@ -195,6 +195,101 @@ fn copied_tidehollow_sculler_etb_returns_both_linked_cards() {
     assert_eq!(zone_of(&runner, second_card), Zone::Hand);
 }
 
+/// CR 607.2a + CR 707.10b + CR 607.3: a copy of Sculler's ETB made after Sculler
+/// has left (in response to its leaves trigger) has the same source, so the card
+/// it exiles is linked to the departed Sculler and the leaves trigger, resolving
+/// after the copy, returns it. The original ETB resolves after the leaves trigger,
+/// so its card stays exiled.
+#[test]
+fn tidehollow_sculler_returns_card_exiled_by_etb_copy_made_after_it_left() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let sculler = scenario
+        .add_creature_to_hand_from_oracle(P0, "Tidehollow Sculler", 2, 2, TIDEHOLLOW_SCULLER)
+        .id();
+    let copied_card = scenario.add_card_to_hand(P1, "Doom Blade");
+    let original_card = scenario.add_card_to_hand(P1, "Counterspell");
+    let resonator = scenario
+        .add_artifact_from_oracle(P0, "Strionic Resonator", STRIONIC_RESONATOR)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    drop(runner.cast(sculler).target_player(P1).commit());
+    pass_until(&mut runner, "Sculler's ETB trigger on the stack", |r| {
+        zone_of(r, sculler) == Zone::Battlefield && !r.state().stack.is_empty()
+    });
+    let etb = runner.state().stack[0].id;
+
+    // Destroy Sculler in response, so its leaves trigger goes above the ETB.
+    drop(runner.cast(destroy).target_object(sculler).commit());
+    pass_until(&mut runner, "Sculler's leaves trigger above its ETB", |r| {
+        zone_of(r, sculler) == Zone::Graveyard
+            && r.state().stack.len() == 2
+            && r.state()
+                .stack
+                .iter()
+                .all(|entry| entry.source_id == sculler)
+    });
+
+    // In response to the leaves trigger, copy the still-pending ETB.
+    let activation = runner.activate(resonator, 0).target_object(etb).resolve();
+    if matches!(
+        activation.final_waiting_for(),
+        WaitingFor::CopyRetarget { .. }
+    ) {
+        runner
+            .act(GameAction::KeepAllCopyTargets)
+            .expect("keep the copied ETB's existing opponent target");
+    }
+    pass_until(&mut runner, "the copied ETB's exile choice", |r| {
+        matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
+    });
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "the leaves trigger and the original ETB still wait below the copy"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![copied_card],
+        })
+        .expect("choose the copied ETB's card");
+    assert_eq!(zone_of(&runner, copied_card), Zone::Exile);
+
+    // The leaves trigger resolves next, then the original ETB asks for its card.
+    pass_until(&mut runner, "the original ETB's exile choice", |r| {
+        matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
+    });
+    assert_eq!(
+        zone_of(&runner, copied_card),
+        Zone::Hand,
+        "the leaves trigger returns the card the post-departure copy exiled"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![original_card],
+        })
+        .expect("choose the original ETB's card");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        zone_of(&runner, original_card),
+        Zone::Exile,
+        "the original ETB resolved after the leaves trigger, so its card stays exiled"
+    );
+    assert_eq!(zone_of(&runner, copied_card), Zone::Hand);
+}
+
 #[test]
 fn mesmeric_fiend_returns_exiled_card_to_hand_when_it_leaves_play() {
     let mut scenario = GameScenario::new();
