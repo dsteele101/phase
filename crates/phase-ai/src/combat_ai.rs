@@ -95,7 +95,7 @@ impl BlockLegalitySlices {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CombatObjective {
+pub(crate) enum CombatObjective {
     PushLethal,
     Stabilize,
     PreserveAdvantage,
@@ -2542,7 +2542,7 @@ fn commander_chump_unsafe(
         >= headroom
 }
 
-fn determine_attack_objective(
+pub(crate) fn determine_attack_objective(
     state: &GameState,
     player: PlayerId,
     opponents: &[PlayerId],

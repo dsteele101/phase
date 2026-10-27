@@ -8717,6 +8717,11 @@ mod tests {
         let pw = add_planeswalker(&mut state, PlayerId(1), 2);
         let attacks = root_attacks(state);
         assert!(
+            attacks.iter().any(|(id, t)| *id == attacker
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "attacker must still attack the player: {attacks:?}"
+        );
+        assert!(
             attacks.iter().all(|(id, t)| {
                 *id != attacker || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
             }),
@@ -8785,10 +8790,75 @@ mod tests {
             "got {attacks:?}"
         );
         assert!(
+            attacks.iter().any(|(id, t)| *id == ground
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "blocked ground attacker must still attack the player: {attacks:?}"
+        );
+        assert!(
             attacks.iter().all(|(id, t)| {
                 *id != ground || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
             }),
             "blocked ground attacker must not be sent at the planeswalker: {attacks:?}"
+        );
+    }
+
+    /// Production declaration path: while in Race objective, a kill that empties
+    /// face damage from all damaging attackers is ineligible even if blocked
+    /// attackers also swing. Here the 2/2 flyer connects while the 3/3 ground
+    /// attacker is absorbed by a 0/6 blocker; diverting the flyer to the planeswalker
+    /// would leave zero damage connecting to the player being raced.
+    #[test]
+    fn root_attack_declaration_race_guard_keeps_connecting_attacker_on_player() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        state.players[0].life = 12;
+        state.players[1].life = 20;
+        let flyer = add_creature(&mut state, PlayerId(0), 2, 2);
+        state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let ground = add_creature(&mut state, PlayerId(0), 3, 3);
+        let blocker = add_creature(&mut state, PlayerId(1), 0, 6);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        assert_eq!(
+            crate::combat_ai::determine_attack_objective(
+                &state,
+                PlayerId(0),
+                &[PlayerId(1)],
+                &[flyer, ground],
+                &[blocker],
+                &config.profile,
+            ),
+            crate::combat_ai::CombatObjective::Race,
+            "board fixture must actually select CombatObjective::Race"
+        );
+
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == flyer
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "connecting flyer must stay on player while racing: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().any(|(id, t)| *id == ground
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "blocked ground attacker must still attack player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != flyer || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "connecting flyer must not be diverted to planeswalker: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != ground || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "blocked ground attacker must not be sent at planeswalker: {attacks:?}"
         );
     }
 
