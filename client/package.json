@@ -4,9 +4,6 @@
   "version": "0.115.0",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
-  "engines": {
-    "node": ">=24"
-  },
   "scripts": {
     "dev": "pnpm run protocol:generate && vite",
     "build": "pnpm run protocol:generate && pnpm run protocol:check && tsc -b && vite build",
