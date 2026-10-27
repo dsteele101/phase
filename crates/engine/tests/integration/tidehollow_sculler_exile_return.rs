@@ -507,9 +507,34 @@ fn tidehollow_sculler_leaving_before_etb_resolves_exiles_indefinitely() {
         2,
         "both Sculler triggers are on the stack"
     );
-    pass_until(&mut runner, "the exile choice", |r| {
-        matches!(r.state().waiting_for, WaitingFor::RevealChoice { .. })
-    });
+    // Drive priority by hand so the leaves trigger's resolution is observed.
+    let mut events = Vec::new();
+    for _ in 0..12 {
+        if matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }) {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority until the exile choice")
+                .events,
+        );
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
+        "never reached the exile choice"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::ChangeZoneAll,
+                source_id,
+                ..
+            } if *source_id == sculler
+        )),
+        "Sculler's leaves trigger must have resolved before the ETB asks for its card"
+    );
     assert_eq!(zone_of(&runner, sculler), Zone::Graveyard);
 
     runner
