@@ -5258,6 +5258,7 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
         state.resolving_stack_entry = None;
         state.resolving_trigger_firing = None;
         state.resolving_spell_final_part = None;
+        state.resolving_stack_object = None;
         state.resolution_source_relatch = None;
     }
 }
@@ -9278,6 +9279,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);

@@ -2152,8 +2152,20 @@ pub(super) fn parse_targeted_action_ast(
         ))
         .parse(noun_lower.as_str())
         .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
+        // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
+        // card name chosen earlier in this resolution (Brain Pry). It composes onto
+        // whatever type qualifier precedes it.
+        let (noun, has_chosen_name) = match terminated(
+            take_until::<_, _, OracleError<'_>>(" with that name"),
+            all_consuming(tag(" with that name")),
+        )
+        .parse(noun)
+        {
+            Ok((_, base)) => (base, true),
+            Err(_) => (noun, false),
+        };
         let plain_noun = noun.to_lowercase();
-        let filter = if all_consuming((
+        let type_filter = if all_consuming((
             opt(tag::<_, _, OracleError<'_>>("additional ")),
             alt((tag("cards"), tag("card"))),
         ))
@@ -2163,6 +2175,13 @@ pub(super) fn parse_targeted_action_ast(
             None
         } else {
             Some(parse_discard_card_filter(noun)?)
+        };
+        let filter = match (type_filter, has_chosen_name) {
+            (filter, false) => filter,
+            (None, true) => Some(TargetFilter::HasChosenName),
+            (Some(filter), true) => Some(TargetFilter::And {
+                filters: vec![filter, TargetFilter::HasChosenName],
+            }),
         };
         return Some(TargetedImperativeAst::Discard {
             count,
@@ -8811,7 +8830,7 @@ pub(super) fn parse_put_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<PutImperativeAst> {
-    tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
+    let (after_put, _) = tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
 
     // CR 100.7 + CR 608.2c: refuse "… onto the battlefield combined into one
     // creature …" before any specialized put interpretation or the generic
@@ -8974,12 +8993,25 @@ pub(super) fn parse_put_ast(
     let is_this_way_partition = nom_primitives::scan_contains(lower, "the rest")
         && nom_primitives::scan_contains(lower, "revealed this way");
 
-    // "put X on top of Y's library" — specific position, no auto-shuffle.
+    // CR 400.3: a positional put names its destination library. The singular
+    // "library" always does. The plural "their owners' libraries" sends each
+    // moved object to its own owner's library, and is a positional placement
+    // only when the subject names TARGETS (Plow Under, Rebuking Ceremony:
+    // "two target lands"). Mass subjects ("all creatures" — Terminus) stay the
+    // `ChangeZoneAll` move that carries the position itself, and anaphoric or
+    // compound subjects ("the rest", "this creature and …") keep their own
+    // routes; neither begins with a target phrase.
+    let names_placement_library = nom_primitives::scan_contains(lower, "library")
+        || (nom_primitives::scan_contains(lower, "libraries")
+            && super::placement_noun_phrase_is_targeted(after_put));
+
+    // "put X on top of Y's library / their owners' libraries" — specific
+    // position, no auto-shuffle.
     // Must check before try_parse_put_zone_change which would emit ChangeZone (auto-shuffles).
     // Fixed-count forms with an origin zone ("from your graveyard") remain library
     // reposition effects; mass "all"/"each" forms move a whole source zone.
     if nom_primitives::scan_contains(lower, "on top of")
-        && nom_primitives::scan_contains(lower, "library")
+        && names_placement_library
         && !has_mass_zone_origin
         && !is_this_way_partition
     {
@@ -8992,11 +9024,11 @@ pub(super) fn parse_put_ast(
         return Some(PutImperativeAst::TopOfLibrary);
     }
 
-    // "put X on the bottom of Y's library" — specific position. Fixed-count
-    // origin-zone forms remain library reposition effects; mass "all"/"each"
-    // forms move a whole source zone.
+    // "put X on the bottom of Y's library / their owners' libraries" — specific
+    // position. Fixed-count origin-zone forms remain library reposition
+    // effects; mass "all"/"each" forms move a whole source zone.
     if nom_primitives::scan_contains(lower, "on the bottom of")
-        && nom_primitives::scan_contains(lower, "library")
+        && names_placement_library
         && !has_mass_zone_origin
         && !is_this_way_partition
     {
@@ -9325,21 +9357,25 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
+            arranger: None,
         },
         PutImperativeAst::BottomOfLibrary => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         },
         PutImperativeAst::NthFromTop { n } => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::NthFromTop { n },
+            arranger: None,
         },
         PutImperativeAst::BeneathTop { depth } => Effect::PutAtLibraryPosition {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::BeneathTop { depth },
+            arranger: None,
         },
         PutImperativeAst::PutTopCardsIntoHandMatchingExileCount => Effect::Mill {
             count: QuantityExpr::Ref {

@@ -3457,6 +3457,9 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
                 // as before this field existed.
                 was_prepared: false,
                 attachments: Vec::new(),
+                // The reveal subject carries no intensity; no reader asks a
+                // revealed card's intensity.
+                intensity: 0,
             },
             incarnation: subject.identity.incarnation,
         }),
@@ -3524,6 +3527,9 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         // CR 701.3d), so carry it through rather than dropping it on the way into the
         // LKI.
         attachments: record.attachments.clone(),
+        // `ZoneChangeRecord` carries no intensity; the intensity readers
+        // (`QuantityRef::Intensity { Source }`) read the source's own LKI.
+        intensity: 0,
     }
 }
 
@@ -8958,7 +8964,9 @@ fn effect_fields_read_filter_population(
         Effect::Discover { player, .. } => has_filter(player),
         Effect::PhysicalContest { contestant, .. } => has_filter(contestant),
         Effect::Heist { target, .. } => has_filter(target),
-        Effect::PutAtLibraryPosition { target, .. } => has_filter(target),
+        Effect::PutAtLibraryPosition {
+            target, arranger, ..
+        } => has_filter(target) || arranger.as_ref().is_some_and(has_filter),
         Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => has_filter(player),
         Effect::PutOnTopOrBottom { target, chooser } => has_filter(target) || has_filter(chooser),
         Effect::Goad { target } => has_filter(target),
@@ -16225,6 +16233,13 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // retains the original whole-ability dry-run, which keeps successful
             // zone-selection fallbacks feasible while preserving other errors.
             if matches!(mode, CardPlayMode::Cast) {
+                // CR 608.2d: an untargeted free graveyard pick with nothing
+                // castable is impossible whatever follows it, so an "If you do"
+                // rider (Jarsyl, Dark Age Scion) does not run on a no-op.
+                if let Some(true) = cast_from_zone::graveyard_pick_eligible_is_empty(state, ability)
+                {
+                    return true;
+                }
                 // CR 608.2d: An optional hand-pick cast ("you may cast a permanent
                 // spell … from your hand") with no eligible card is impossible.
                 // This only needs to be treated as infeasible up front when the
@@ -30835,6 +30850,7 @@ mod tests {
             target,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
+            arranger: None,
         })
     }
 
@@ -31567,6 +31583,7 @@ mod tests {
                         ),
                         count,
                         position: crate::types::ability::LibraryPosition::Bottom,
+                        arranger: None,
                     },
                     vec![],
                     source,
@@ -34617,6 +34634,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -34811,6 +34829,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             targets,
             source,
@@ -38707,6 +38726,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         let events = vec![
@@ -58168,6 +58188,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
         );
         let ability = build_resolved_from_def(&pure_peek_definition(put, 1), source, PlayerId(0));

@@ -93,7 +93,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
 use crate::types::triggers::{
-    AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
+    AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 use std::str::FromStr;
@@ -8702,7 +8702,8 @@ fn try_extract_entering_object_name_comparison(
 /// `try_extract_entering_object_name_comparison`. See that function's doc.
 fn parse_entering_object_name_comparison(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if it ").parse(input)?;
-    let (rest, prop) = crate::parser::oracle_effect::parse_search_name_reference_suffix(rest)?;
+    let (rest, prop) =
+        crate::parser::oracle_effect::parse_search_name_reference_suffix(rest, None)?;
     let FilterProp::SharesQuality {
         quality,
         reference,
@@ -13224,6 +13225,15 @@ pub(crate) fn parse_trigger_condition(
     if let Some((mode, mut def)) = try_parse_event(&subject, rest, &lower, ctx) {
         // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
         ctx.diagnostics.extend(subject_diagnostics);
+        // CR 109.2: the type-phrase parser swallows the trailing "card" of "a
+        // creature card", but the word is what stops the subject from denoting
+        // only battlefield permanents. Restore it for becomes-target subjects,
+        // whose matcher reads it (`filter_denotes_battlefield_permanent`).
+        if def.mode == TriggerMode::BecomesTarget
+            && subject_ends_with_card_noun(&after_keyword[..after_keyword.len() - rest.len()])
+        {
+            def.valid_card = def.valid_card.take().map(with_card_qualifier);
+        }
         if is_batched {
             def.batched = true;
         }
@@ -13635,7 +13645,30 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::SelfRef);
     }
 
+    // CR 509.3a + CR 608.2k + CR 603.7e: a self-subject block condition that names
+    // no other object ("~ blocks" / "~ attacks or blocks") introduces only the
+    // source, so a bare "it" in the body names it. Without the pin, `ParentTarget`
+    // resolves the BlockersDeclared event to the blocked ATTACKER — through
+    // `delayed_trigger::parent_target_snapshot` for "at end of combat" bodies and
+    // the parentless-ParentTarget event fallback for immediate bodies — so Cinder
+    // Wall destroyed, and Zephyr Spirit bounced, the creature it blocked.
+    if matches!(trigger_subject, TargetFilter::SelfRef)
+        && nom_primitives::scan_at_word_boundaries(after_keyword, parse_intransitive_blocks)
+            .is_some()
+    {
+        return Some(TargetFilter::SelfRef);
+    }
+
     None
+}
+
+/// CR 509.3a: a terminal intransitive "blocks" ("~ blocks", "~ attacks or
+/// blocks") — the condition names no object other than its subject. Rejects
+/// "blocks a creature", "blocks or becomes blocked" and every other form with a
+/// trailing object or qualifier, because only end of input (optionally after the
+/// condition's closing comma) may follow.
+fn parse_intransitive_blocks(input: &str) -> OracleResult<'_, ()> {
+    value((), terminated(tag("blocks"), (opt(tag(",")), eof))).parse(input)
 }
 
 /// CR 509.3c + CR 608.2k: the object a bare-pronoun pin names, where the pinned
@@ -14909,6 +14942,31 @@ fn collapse_or(mut filters: Vec<TargetFilter>) -> TargetFilter {
         filters.pop().expect("len checked")
     } else {
         TargetFilter::Or { filters }
+    }
+}
+
+/// CR 109.2: does the consumed subject phrase end in the noun "card"/"cards"?
+fn subject_ends_with_card_noun(consumed: &str) -> bool {
+    let last_word = consumed.trim_end().rsplit(' ').next().unwrap_or_default();
+    all_consuming(alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))))
+        .parse(last_word)
+        .is_ok()
+}
+
+/// CR 109.2: add the `Card` type qualifier to every typed leaf of a subject
+/// filter whose printed phrase carried the word "card".
+fn with_card_qualifier(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed.type_filters.contains(&TypeFilter::Card) {
+                typed.type_filters.push(TypeFilter::Card);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(with_card_qualifier).collect(),
+        },
+        other => other,
     }
 }
 
@@ -20172,25 +20230,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
-    // CR 603.2 + CR 613.3: "When you lose control of ~" — fires after a
-    // controller change on the source object. Maps to ChangesController so
-    // the trigger fires on the GainControl/GiveControl effect-resolved event.
-    // valid_card = SelfRef gates the trigger to changes on this specific object.
-    // The trigger controller is the previous controller (still Khârn's holder
-    // at trigger-scan time, because layer re-evaluation runs after trigger
-    // collection in the post-action pipeline).
-    fn parse_you_lose_control_of_self(i: &str) -> OracleResult<'_, ()> {
+    // CR 603.2 + CR 603.10 + CR 603.10d: "When[ever] you lose control of ~" /
+    // "When[ever] you gain control of ~[ from another player]". Maps to
+    // ChangesController, which fires on the `ControllerChanged` event published by
+    // the control-changing instructions (not by control the layer pass assigns or
+    // retires, #9903).
+    // valid_card = SelfRef gates the trigger to
+    // changes on this specific object; the `side` names which endpoint of the
+    // change is "you" (CR 603.3a: the trigger's controller). "From another player"
+    // adds no constraint: a ControllerChanged event exists only when the
+    // controller changed, and every permanent has a controller (CR 110.2).
+    fn parse_you_change_control_of_self(i: &str) -> OracleResult<'_, ControlChangeSide> {
         all_consuming(preceded(
-            alt((tag("when "), tag("whenever "))),
-            value((), tag("you lose control of ~")),
+            (alt((tag("when "), tag("whenever "))), tag("you ")),
+            alt((
+                value(ControlChangeSide::Loses, tag("lose control of ~")),
+                value(
+                    ControlChangeSide::Gains,
+                    terminated(tag("gain control of ~"), opt(tag(" from another player"))),
+                ),
+            )),
         ))
         .parse(i)
     }
-    if parse_you_lose_control_of_self(lower).is_ok() {
+    if let Ok((_, side)) = parse_you_change_control_of_self(lower) {
         let mut def = make_base();
-        def.mode = TriggerMode::ChangesController;
+        def.mode = TriggerMode::ChangesController { side };
         def.valid_card = Some(TargetFilter::SelfRef);
-        return Some((TriggerMode::ChangesController, def));
+        return Some((def.mode.clone(), def));
     }
 
     if matches!(lower, "whenever you lose life" | "when you lose life") {
@@ -21699,7 +21766,9 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     // CR 608.2b: "that has the same name as a card in your graveyard"
     // (Pyromancer's Ascension). Reuse the search-filter name-reference suffix
     // combinator so graveyard SharesQuality semantics stay aligned.
-    if let Ok((rest, prop)) = super::oracle_effect::parse_search_name_reference_suffix(modifier) {
+    if let Ok((rest, prop)) =
+        super::oracle_effect::parse_search_name_reference_suffix(modifier, None)
+    {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![prop]),
@@ -25314,6 +25383,36 @@ mod attached_set_trigger_tests {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::Host { filter }
             } if **filter == TargetFilter::Typed(TypedFilter::creature())
+        ));
+    }
+
+    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
+    /// becomes-target subject, while "a creature" stays a bare permanent type.
+    #[test]
+    fn becomes_target_subject_keeps_card_qualifier() {
+        let card = parse_trigger_line(
+            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
+            "Test",
+        );
+        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
+            panic!("expected typed subject, got {:?}", card.valid_card);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
+            card.valid_card.as_ref().unwrap()
+        ));
+
+        let bare = parse_trigger_line(
+            "Whenever a creature becomes the target of a spell or ability, draw a card.",
+            "Test",
+        );
+        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
+            panic!("expected typed subject, got {:?}", bare.valid_card);
+        };
+        assert!(!typed.type_filters.contains(&TypeFilter::Card));
+        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
+            bare.valid_card.as_ref().unwrap()
         ));
     }
 }
