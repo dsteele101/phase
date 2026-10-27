@@ -7135,7 +7135,7 @@ mod router_registry_tests {
             "partially parsed morph cost must be rejected: {hostile1:?}"
         );
 
-        // CR 107.3a: no X is announced when turning face up.
+        // CR 107.3d: variable non-mana morph costs are not supported yet.
         let hostile_x = "Morph—Reveal X blue cards in your hand";
         assert!(
             parse_router_keyword_line(hostile_x).is_none(),
@@ -7149,7 +7149,8 @@ mod router_registry_tests {
         );
     }
 
-    /// CR 107.3a: variable-count morph costs are rejected (no X is announced when turning face up).
+    /// CR 107.3d: variable-count non-mana morph costs are not supported yet, so
+    /// the parser rejects them and they stay unsupported in coverage.
     #[test]
     fn parse_morph_cost_rejects_variable_counts() {
         for line in [

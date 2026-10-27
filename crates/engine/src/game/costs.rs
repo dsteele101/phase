@@ -2278,8 +2278,10 @@ fn pay_ability_cost_inner(
                     .copied()
                     .collect(),
             };
-            // CR 107.3a: X is never announced for a turn-face-up special action,
-            // so a symbolic count reads 0 (the parser declines X morph reveals).
+            // CR 107.3d: an X in a morph cost is chosen before paying it, but
+            // variable non-mana morph costs are not supported yet — the parser
+            // and `is_ability_cost_supported_for_morph` decline symbolic counts,
+            // so this only ever resolves a fixed count.
             let count = resolve_cost_quantity(state, count, player, source.object_id, scope).max(0)
                 as usize;
             if eligible.len() < count {
@@ -2624,7 +2626,8 @@ pub(crate) fn can_pay_turn_face_up(
                     .copied()
                     .collect(),
             };
-            // CR 107.3a: no X is announced for a special action; read it as 0.
+            // CR 107.3d: variable non-mana morph costs are not supported yet and
+            // are declined upstream, so this resolves a fixed count.
             let count = super::quantity::resolve_quantity(state, count, payer, object_id).max(0);
             eligible.len() >= count as usize
         }
