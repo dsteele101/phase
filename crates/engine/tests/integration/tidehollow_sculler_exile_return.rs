@@ -482,6 +482,19 @@ fn tidehollow_sculler_leaving_before_etb_resolves_exiles_indefinitely() {
     drop(runner.cast(destroy).target_object(sculler).commit());
     pass_until(
         &mut runner,
+        "Sculler's leaves trigger above its ETB trigger",
+        |r| {
+            zone_of(r, sculler) == Zone::Graveyard
+                && r.state()
+                    .stack
+                    .iter()
+                    .filter(|e| e.source_id == sculler)
+                    .count()
+                    == 2
+        },
+    );
+    pass_until(
+        &mut runner,
         "both Sculler triggers with its leaves trigger above its ETB trigger",
         |r| {
             zone_of(r, sculler) == Zone::Graveyard
