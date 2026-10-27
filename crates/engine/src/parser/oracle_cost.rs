@@ -5955,5 +5955,15 @@ mod tests {
             }
         ));
 
+        // Reach guard: an article-led subject the grammar can fold still parses
+        // to a typed ReturnToHand filter rather than SelfRef.
+        assert!(matches!(
+            parse_oracle_cost("Return a creature you control to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::Typed(_)),
+                ..
+            }
+        ));
     }
 }
