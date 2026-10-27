@@ -263,10 +263,11 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// incarnation, and expected zone) is what lets us detect a stale offer rather
 /// than trusting a bare ObjectId.
 ///
-/// CR 603.10: the eligibility of Gotcha sources is matched at event time when the
-/// tell occurs; this live-state check ensures that before presenting or accepting
-/// a window, its source still functions in its current zone, its holder remains
-/// opted in, and the returned card has not moved or become a new object (CR 400.7).
+/// CR 603.10: trigger eligibility is matched at event time (see `record_tell`);
+/// this check is not a CR 603.10 look-back. It only confirms the window is still
+/// live: the source still functions in its current zone, and the returned card is
+/// the same incarnation (CR 400.7). The holder's opt-in is Un-card-specific and
+/// has no Comprehensive Rules entry.
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
     // The source must still exist and still carry a functioning Gotcha ability in
     // its current zone (gotcha_definitions applies both checks).
