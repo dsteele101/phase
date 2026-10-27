@@ -1062,6 +1062,9 @@ fn name_dropping_matches_real_plurals_of_name_words_and_rejects_invented_ones() 
         ("Young Wolf", "wolfs", "wolves"),
         ("Thief of Sanity", "thiefs", "thieves"),
         ("Leaf Gilder", "leafs", "leaves"),
+        ("Sanity Check", "sanitys", "sanities"),
+        ("Box Trap", "boxs", "boxes"),
+        ("Monarch Lord", "monarches", "monarchs"),
     ] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);

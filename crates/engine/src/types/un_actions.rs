@@ -209,6 +209,13 @@ const IRREGULAR_PLURALS: &[(&str, &str)] = &[
     ("shelf", "shelves"),
     ("loaf", "loaves"),
     ("sheaf", "sheaves"),
+    // /k/-sounding "ch" words take a plain "+s".
+    ("monarch", "monarchs"),
+    ("stomach", "stomachs"),
+    ("patriarch", "patriarchs"),
+    ("matriarch", "matriarchs"),
+    ("epoch", "epochs"),
+    ("eunuch", "eunuchs"),
 ];
 
 /// Split spoken text into lowercase words. Hyphenated words are preserved as single words.
@@ -240,34 +247,21 @@ pub fn word_matches(watched: &str, spoken: &str) -> bool {
     {
         return s == plural;
     }
-    // 1. y -> ies (e.g. "cherry" -> "cherries", "ability" -> "abilities"; but not vowel+y like "guy")
-    if w.ends_with('y') && w.len() > 1 {
-        let prev = w.as_bytes()[w.len() - 2] as char;
-        let is_vowel = matches!(prev, 'a' | 'e' | 'i' | 'o' | 'u');
-        if !is_vowel {
-            let base = &w[..w.len() - 1];
-            if s.len() == base.len() + 3 && s.starts_with(base) && s.ends_with("ies") {
-                return true;
-            }
+    // Once a special-plural branch applies to the watched word, it alone decides:
+    // "sanitys" is not the plural of "sanity" and "boxs" is not the plural of "box".
+    // 1. consonant+y -> ies (e.g. "cherry" -> "cherries"; vowel+y like "guy" takes "+s")
+    if let Some(base) = w.strip_suffix('y') {
+        if !base.is_empty() && !base.ends_with(['a', 'e', 'i', 'o', 'u']) {
+            return s.strip_prefix(base).is_some_and(|tail| tail == "ies");
         }
     }
-    // 2. +es for words ending in s, x, z, ch, sh (e.g. "box" -> "boxes", "match" -> "matches")
-    if (w.ends_with('s')
-        || w.ends_with('x')
-        || w.ends_with('z')
-        || w.ends_with("ch")
-        || w.ends_with("sh"))
-        && s.len() == w.len() + 2
-        && s.starts_with(&w)
-        && s.ends_with("es")
-    {
-        return true;
+    // 2. +es for words ending in s, x, z, ch, sh (e.g. "box" -> "boxes", "match" -> "matches").
+    // /k/ "ch" words ("monarch", "stomach") are listed in IRREGULAR_PLURALS.
+    if w.ends_with(['s', 'x', 'z']) || w.ends_with("ch") || w.ends_with("sh") {
+        return s.strip_prefix(w.as_str()).is_some_and(|tail| tail == "es");
     }
     // 3. +s for regular words (e.g. "guy" -> "guys", "creature" -> "creatures")
-    if !w.ends_with('s') && s.len() == w.len() + 1 && s.starts_with(&w) && s.ends_with('s') {
-        return true;
-    }
-    false
+    s.strip_prefix(w.as_str()).is_some_and(|tail| tail == "s")
 }
 
 /// Whether a single spoken word names a number. Delegates to the shared number
