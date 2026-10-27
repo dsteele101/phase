@@ -1714,6 +1714,36 @@ pub(crate) fn finish_pending_cost_or_cast(
                 pending,
             ));
         }
+        // CR 118.9d + CR 601.2b: a one-shot optional cost (Buyback) handed over
+        // with an alternative cost (Bolas's Citadel) or behind a keyword-cost
+        // queue is still offered. Mirror the ordinary optional-cost dispatch: the
+        // deferred required cost (an imposed tax) takes its place in the flow so
+        // it is paid after the decision.
+        let optional_cost = optional_cost.clone();
+        pending.additional_cost_flow = pending
+            .deferred_required_additional_cost
+            .take()
+            .map(AdditionalCost::Required);
+        // CR 601.2b: an optional cost with no legal object choice is skipped as
+        // if the player declined to pay it.
+        if !additional_cost_declaration_is_offerable(
+            state,
+            player,
+            &pending,
+            optional_cost.clone(),
+        )? {
+            return finish_pending_cost_or_cast(state, player, pending, events);
+        }
+        return Ok(make_optional_cost_choice(
+            state,
+            player,
+            AdditionalCost::Optional {
+                cost: optional_cost,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            },
+            0,
+            pending,
+        ));
     }
 
     // CR 601.2b/c: General deferred target selection — fires after an optional

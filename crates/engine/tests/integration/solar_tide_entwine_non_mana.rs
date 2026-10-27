@@ -873,3 +873,134 @@ fn targeted_spell_offers_conspire_after_casualty_queue() {
     );
     assert_eq!(state.objects[&bolt].zone, Zone::Stack);
 }
+
+const CAPSIZE: &str = "Buyback {3} (You may pay an additional {3} as you cast this spell. If the buyback cost was paid, put this spell into its owner's hand instead of into that player's graveyard as it resolves.)\nReturn target permanent to its owner's hand.";
+
+/// Cast Capsize from the top of the library with Bolas's Citadel, targeting an
+/// opponent's Terror of the Peaks, answering the Buyback offer with `pay_buyback`.
+/// Returns the runner with Capsize on the stack and whether Buyback was offered.
+fn cast_capsize_with_citadel_under_terror(pay_buyback: bool) -> (GameRunner, ObjectId, bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Bolas's Citadel", 0, 0)
+        .as_artifact()
+        .from_oracle_text(BOLAS_ORACLE);
+    let terror = scenario
+        .add_creature_from_oracle(P1, "Terror of the Peaks", 5, 4, TERROR_OF_THE_PEAKS)
+        .id();
+    let capsize = scenario
+        .add_spell_to_library_top(P0, "Capsize", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 1,
+        })
+        .from_oracle_text(CAPSIZE)
+        .id();
+    scenario.with_life(P0, 20);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Colorless, 3);
+
+    let card_id = runner.state().objects[&capsize].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: capsize,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("initiate cast from library top");
+
+    let mut buyback_offered = false;
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![engine::types::ability::TargetRef::Object(terror)],
+                    })
+                    .expect("target Terror of the Peaks");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                assert!(!buyback_offered, "Buyback must be offered exactly once");
+                buyback_offered = true;
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: pay_buyback })
+                    .expect("decide Buyback");
+            }
+            _ => break,
+        }
+    }
+    (runner, capsize, buyback_offered)
+}
+
+/// CR 702.27a + CR 118.9d: Buyback stays offered when Bolas's Citadel's life
+/// payment is the alternative cost, and accepting it adds {3} while Citadel's
+/// MV life and Terror of the Peaks' imposed 3 life are both still paid.
+#[test]
+fn citadel_capsize_accepting_buyback_pays_mana_and_terror_tax() {
+    let (runner, capsize, buyback_offered) = cast_capsize_with_citadel_under_terror(true);
+    let state = runner.state();
+    assert!(buyback_offered, "Buyback must be offered under Citadel");
+    assert_eq!(
+        state.objects[&capsize].zone,
+        Zone::Stack,
+        "Capsize must be on the stack, found {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.players[0].life, 14,
+        "Citadel pays MV 3 plus Terror's 3 imposed life (20 - 6 = 14)"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        0,
+        "accepted Buyback {{3}} must be paid from the pool"
+    );
+    let engine::types::game_state::StackEntryKind::Spell {
+        ability: Some(ability),
+        ..
+    } = &state.stack[0].kind
+    else {
+        panic!("expected Capsize on the stack");
+    };
+    assert!(
+        ability.context.additional_cost_paid,
+        "Buyback payment must be recorded"
+    );
+}
+
+/// CR 702.27a + CR 118.9d: declining Buyback under Citadel leaves the pool
+/// untouched but still pays Citadel's MV life plus Terror's imposed 3 life.
+#[test]
+fn citadel_capsize_declining_buyback_still_pays_terror_tax() {
+    let (runner, capsize, buyback_offered) = cast_capsize_with_citadel_under_terror(false);
+    let state = runner.state();
+    assert!(buyback_offered, "Buyback must be offered under Citadel");
+    assert_eq!(
+        state.objects[&capsize].zone,
+        Zone::Stack,
+        "Capsize must be on the stack, found {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.players[0].life, 14,
+        "Citadel pays MV 3 plus Terror's 3 imposed life (20 - 6 = 14)"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        3,
+        "declined Buyback must not spend mana"
+    );
+    let engine::types::game_state::StackEntryKind::Spell {
+        ability: Some(ability),
+        ..
+    } = &state.stack[0].kind
+    else {
+        panic!("expected Capsize on the stack");
+    };
+    assert!(
+        !ability.context.additional_cost_paid,
+        "declined Buyback must not be recorded as paid"
+    );
+}
