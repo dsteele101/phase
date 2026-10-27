@@ -180,6 +180,7 @@ pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
         | AbilityCost::PerCounter { .. }
         | AbilityCost::KeywordCostOfCastSpell { .. }
         | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }

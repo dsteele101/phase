@@ -765,6 +765,7 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
         },
         None,
         Some(cost),
+        false,
     )?;
     match outcome {
         PaymentOutcome::Paid => {
