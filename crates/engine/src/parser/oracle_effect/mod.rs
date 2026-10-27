@@ -46425,9 +46425,22 @@ fn parse_effect_chain_ir_body(
                     }
                 )
             });
+        // CR 608.2c + CR 701.27a: "untap ~ and transform it" (Civilized Scholar,
+        // "When you discard a creature card this way, untap ~ and transform it"):
+        // the bare-pronoun Transform follows a clause that already named the
+        // source via `~`, so "it" is that source — not the reflexive gate's
+        // discarded card that `ParentTarget` would resolve to.
+        let transform_anaphor_after_self_ref = matches!(
+            &clause.effect,
+            Effect::Transform {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        );
         if (typed_trigger_subject
             || exile_then_return_transformed
-            || attach_anaphor_after_self_ref_transform)
+            || attach_anaphor_after_self_ref_transform
+            || transform_anaphor_after_self_ref)
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && builder
                 .clauses()

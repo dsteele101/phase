@@ -2048,6 +2048,7 @@ mod search_result_conditional_destination;
 mod search_result_missing_referent;
 
 mod celes_kotis_graveyard_origin_batch;
+mod civilized_scholar_transform;
 mod put_target_count_entry_counters;
 mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
