@@ -13069,15 +13069,18 @@ fn apply_non_priority_pass_action(
                         &chosen,
                         &mut events,
                     )?,
-                    PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
-                        state,
-                        *player,
-                        *pending_cast.clone(),
-                        *count,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?,
+                    PayCostKind::Reveal { shared_quality } => {
+                        engine_casting::handle_reveal_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            &chosen,
+                            shared_quality.clone(),
+                            &mut events,
+                        )?
+                    }
                     PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
                         state,
                         *player,
@@ -13292,7 +13295,7 @@ fn apply_non_priority_pass_action(
                 // add the corresponding mana-ability handler instead of
                 // routing it through the spell pipeline.
                 PayCostKind::ReturnToHand
-                | PayCostKind::Reveal
+                | PayCostKind::Reveal { shared_quality: _ }
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::ExilePermanent { .. }
@@ -13340,7 +13343,7 @@ fn apply_non_priority_pass_action(
                     state.waiting_for.clone()
                 }
                 PayCostKind::Discard
-                | PayCostKind::Reveal
+                | PayCostKind::Reveal { shared_quality: _ }
                 | PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExilePermanent { .. }

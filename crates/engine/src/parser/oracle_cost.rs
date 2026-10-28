@@ -18,7 +18,7 @@ use super::oracle_nom::target::{
 };
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{
-    distribute_shared_properties, fold_article_led_type_union, parse_target,
+    distribute_shared_properties, fold_article_led_type_union, parse_shared_quality, parse_target,
     parse_type_phrase_folding,
 };
 use super::oracle_util::parse_count_expr;
@@ -1439,69 +1439,60 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal N [Type] card(s) from your hand [that share a COLOR]" — reveal
-    // from hand with optional count, filter, and shared-quality constraint.
+    // "Reveal N [Type] card(s) [that share a QUALITY] from your hand [that share
+    // a QUALITY]" — reveal from hand with optional count, type filter, and
+    // shared-quality constraint (Illuminated Folio: "Reveal two cards from your
+    // hand that share a color"). The clause may sit on either side of the zone.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if let Ok((_, (before, after))) = split_once_on(&rest_lower, "from your hand") {
-            let mut filter_raw = before.trim();
-            let mut count = 1u32;
-            let mut shared_quality = None;
-
-            // Parse optional count: "two", "three", "a", "one", etc.
-            if let Some((n, after_count)) = crate::parser::oracle_util::parse_number(&filter_raw) {
-                count = n;
-                filter_raw = after_count.trim();
-            }
-
-            // Strip "card" or "cards"
-            filter_raw = filter_raw
-                .strip_suffix(" card")
-                .or_else(|| filter_raw.strip_suffix(" cards"))
-                .unwrap_or(filter_raw)
-                .trim();
-
-            // Parse "that share a COLOR" / "that share a CREATURE TYPE" etc.
-            // The shared-quality clause can appear either before or after "from your hand"
-            // Oracle text: "Reveal two cards from your hand that share a color"
-            //   -> before = "two cards", after = "that share a color"
-            // So we check both parts.
-            let share_search = if let Some(after_share) = filter_raw.strip_prefix("that share a ") {
-                Some(after_share.trim())
-            } else if let Some(after_share) = after.trim().strip_prefix("that share a ") {
-                Some(after_share.trim())
-            } else {
-                None
-            };
-
-            if let Some(quality_str) = share_search {
-                shared_quality = match quality_str {
-                    "color" => Some(crate::types::ability::SharedQuality::Color),
-                    "creature type" => Some(crate::types::ability::SharedQuality::CreatureType),
-                    "card type" => Some(crate::types::ability::SharedQuality::CardType),
-                    "name" => Some(crate::types::ability::SharedQuality::Name),
-                    "mana value" => Some(crate::types::ability::SharedQuality::ManaValue),
-                    "power" => Some(crate::types::ability::SharedQuality::Power),
-                    "toughness" => Some(crate::types::ability::SharedQuality::Toughness),
-                    _ => None,
+            let before = before.trim();
+            let (count, card_phrase) =
+                match terminated(nom_primitives::parse_number, tag(" ")).parse(before) {
+                    Ok((card_phrase, count)) => (count, card_phrase),
+                    Err(_) => (1, strip_article(before, before)),
                 };
-                // Remove the shared quality part from the filter
-                if shared_quality.is_some() {
-                    filter_raw = before.trim(); // reset to before "that share"
-                }
-            }
-
-            // Parse the remaining filter (if any)
-            let filter = if filter_raw.is_empty() || filter_raw == "a" || filter_raw == "one" {
-                None
-            } else {
-                let (filter, _) = parse_target(&format!("target {filter_raw}"));
-                Some(filter)
+            let (card_phrase, leading_quality) = match split_once_on(card_phrase, "that share ") {
+                Ok((_, (card_phrase, quality))) => (card_phrase.trim(), Some(quality)),
+                Err(_) => (card_phrase, None),
             };
-
+            let trailing_quality = preceded(
+                tag::<_, _, super::oracle_nom::error::OracleError<'_>>("that share "),
+                nom::combinator::rest,
+            )
+            .parse(after.trim())
+            .ok()
+            .map(|(_, quality)| quality);
+            // CR 701.20a: A present shared-quality clause the engine cannot type
+            // stays a parse gap rather than becoming a permissive reveal.
+            let shared_quality = match leading_quality.or(trailing_quality) {
+                None => None,
+                Some(quality) => match all_consuming(preceded(
+                    opt(alt((
+                        tag::<_, _, super::oracle_nom::error::OracleError<'_>>("a "),
+                        tag("an "),
+                    ))),
+                    parse_shared_quality,
+                ))
+                .parse(quality.trim())
+                {
+                    Ok((_, quality)) => Some(quality),
+                    Err(_) => {
+                        return AbilityCost::Unimplemented {
+                            description: text.to_string(),
+                        }
+                    }
+                },
+            };
+            let type_phrase = card_phrase
+                .strip_suffix("cards")
+                .or_else(|| card_phrase.strip_suffix("card"))
+                .unwrap_or(card_phrase)
+                .trim();
+            let (filter, _) = parse_target(&format!("target {type_phrase} card"));
             return AbilityCost::Reveal {
                 count,
-                filter,
+                filter: Some(filter),
                 shared_quality,
             };
         }

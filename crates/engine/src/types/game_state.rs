@@ -11219,8 +11219,14 @@ pub enum PayCostKind {
     /// CR 701.20a + CR 601.2b: Reveal a card from hand matching the cost's
     /// filter as an additional/alternative cast cost. The chosen card stays
     /// in hand (revealing doesn't move it) and becomes the resolving
-    /// ability's cost-paid-object referent (CR 608.2k).
-    Reveal,
+    /// ability's cost-paid-object referent (CR 608.2k). Carries the optional
+    /// shared-quality constraint (e.g., "two cards that share a color") so the
+    /// payment validator can enforce it per-leg without relying on the
+    /// activation_cost_snapshot.
+    Reveal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shared_quality: Option<crate::types::ability::SharedQuality>,
+    },
     Sacrifice,
     ReturnToHand,
     /// Exile objects from the specified zone.

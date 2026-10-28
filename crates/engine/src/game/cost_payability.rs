@@ -22,8 +22,8 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
     CounterCostSelection, DiscardSelfScope, FilterProp, NinjutsuVariant, PlayerFilter,
-    QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetFilter, TypedFilter, EXILE_COST_X,
+    QuantityExpr, QuantityRef, SacrificeCost, SharedQuality, TapCreaturesAggregateStat,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
@@ -1033,7 +1033,7 @@ pub(crate) fn restrict_activation_prompt_to_joint_payment(
             |c| super::casting::find_battlefield_exile_cost(c).is_some()
         }
         PayCostKind::ReturnToHand => |c| super::casting::find_return_to_hand_cost(c).is_some(),
-        PayCostKind::Reveal
+        PayCostKind::Reveal { .. }
         | PayCostKind::ExileMaterials { .. }
         | PayCostKind::ExileFromManaZone { .. }
         | PayCostKind::UnattachFrom { .. }
@@ -1638,22 +1638,28 @@ impl AbilityCost {
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
+            // CR 701.20a: A shared-quality constraint additionally requires a
+            // count-sized subset of those cards to share the quality.
             AbilityCost::Reveal {
                 count,
                 filter,
-                shared_quality: _,
+                shared_quality,
             } => match filter {
                 None => true,
                 Some(f) => {
-                    super::casting::find_eligible_reveal_targets(
+                    let eligible = super::casting::find_eligible_reveal_targets(
                         state,
                         player,
                         source,
                         granting_object,
                         f,
-                    )
-                    .len()
-                        >= *count as usize
+                    );
+                    match shared_quality {
+                        None => eligible.len() >= *count as usize,
+                        Some(quality) => {
+                            has_subset_sharing_quality(state, &eligible, *count as usize, quality)
+                        }
+                    }
                 }
             },
             AbilityCost::Behold {
@@ -1786,6 +1792,75 @@ impl AbilityCost {
             AbilityCost::GetPlayerCounters { .. } => true,
         }
     }
+}
+
+/// CR 701.20a: Whether every object in `cards` has at least one value of
+/// `quality` in common with all the others ("two cards that share a color").
+/// The single authority for reveal-cost shared-quality checks, used by both the
+/// payability probe and the payment validator. Colorless cards share no color,
+/// so a set whose running intersection is empty never qualifies.
+pub(crate) fn cards_share_quality(
+    state: &GameState,
+    cards: &[ObjectId],
+    quality: &SharedQuality,
+) -> bool {
+    let mut values = cards.iter().map(|id| {
+        state.objects.get(id).map_or_else(Default::default, |obj| {
+            super::filter::object_shared_quality_values_public(
+                obj,
+                quality,
+                &state.all_creature_types,
+            )
+        })
+    });
+    let Some(mut shared) = values.next() else {
+        return true;
+    };
+    for card_values in values {
+        shared.retain(|value| card_values.contains(value));
+        if shared.is_empty() {
+            return false;
+        }
+    }
+    !shared.is_empty()
+}
+
+/// CR 601.2b + CR 701.20a: Whether some `count`-sized subset of `eligible`
+/// cards shares `quality`, i.e. whether a reveal cost with a shared-quality
+/// constraint has a legal selection.
+fn has_subset_sharing_quality(
+    state: &GameState,
+    eligible: &[ObjectId],
+    count: usize,
+    quality: &SharedQuality,
+) -> bool {
+    fn extend(
+        state: &GameState,
+        eligible: &[ObjectId],
+        count: usize,
+        quality: &SharedQuality,
+        chosen: &mut Vec<ObjectId>,
+    ) -> bool {
+        if !cards_share_quality(state, chosen, quality) {
+            return false;
+        }
+        if chosen.len() == count {
+            return true;
+        }
+        eligible.iter().enumerate().any(|(index, &id)| {
+            chosen.push(id);
+            let found = extend(state, &eligible[index + 1..], count, quality, chosen);
+            chosen.pop();
+            found
+        })
+    }
+    extend(
+        state,
+        eligible,
+        count,
+        quality,
+        &mut Vec::with_capacity(count),
+    )
 }
 
 /// CR 601.2b: A `TapCreatures` cost is payable iff the untapped, filter-matching

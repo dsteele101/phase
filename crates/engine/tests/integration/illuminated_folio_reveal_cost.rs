@@ -12,6 +12,7 @@
 //! 5. Revealing only one card is rejected.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::EngineError;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -229,10 +230,13 @@ fn illuminated_folio_reveal_blue_and_red_fails() {
 
     // Activate and try to pay with blue + red (should fail)
     let result = activate_and_pay(&mut runner, folio, &[blue1, red1]);
-    assert!(
-        result.is_err(),
-        "revealing cards that don't share a color must be rejected"
-    );
+    match result {
+        Err(EngineError::InvalidAction(msg)) => assert!(
+            msg.contains("must share"),
+            "rejection must come from the shared-color check, got: {msg}"
+        ),
+        other => panic!("expected shared-color rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -266,16 +270,14 @@ fn illuminated_folio_reveal_only_one_card_fails() {
     let mut runner = scenario.build();
 
     // Try to activate with only one card (should fail - need exactly 2)
-    let result = runner.act(GameAction::ActivateAbility {
-        source_id: folio,
-        ability_index: 0,
-    });
-    if result.is_err() {
-        // Expected - cannot pay activation cost
-        return;
-    }
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: folio,
+            ability_index: 0,
+        })
+        .expect("activating Illuminated Folio must be accepted");
 
-    // If activation succeeded, drive the pay-cost prompt but only select 1 card
+    // Drive the pay-cost prompt but only select 1 card
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ManaPayment { .. } => {
@@ -399,8 +401,11 @@ fn illuminated_folio_reveal_colorless_cards_fails() {
 
     // Activate and try to pay with two colorless cards (should fail - no shared color)
     let result = activate_and_pay(&mut runner, folio, &[colorless1, colorless2]);
-    assert!(
-        result.is_err(),
-        "revealing two colorless cards must be rejected (no shared color)"
-    );
+    match result {
+        Err(EngineError::InvalidAction(msg)) => assert!(
+            msg.contains("must share"),
+            "rejection must come from the shared-color check, got: {msg}"
+        ),
+        other => panic!("expected shared-color rejection, got {other:?}"),
+    }
 }
