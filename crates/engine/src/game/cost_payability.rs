@@ -108,6 +108,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -302,6 +303,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -351,7 +353,10 @@ pub(crate) fn discard_legs_jointly_payable(
     let Some(player_state) = state.players.get(player.0 as usize) else {
         return true;
     };
-    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
     let legs: Vec<(usize, Vec<ObjectId>)> = costs
         .iter()
         .filter_map(|cost| {
@@ -1137,7 +1142,10 @@ impl AbilityCost {
                 let resolved =
                     super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
                 let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
-                let ctx = FilterContext::from_source(state, source).with_granting_object(granter);
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                let ctx = FilterContext::from_source_with_controller(source, player)
+                    .with_granting_object(granter);
                 p.hand
                     .iter()
                     .filter(|&&id| {
@@ -1388,8 +1396,10 @@ impl AbilityCost {
                 let resolved =
                     super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
                 let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
-                let ctx =
-                    FilterContext::from_source(state, source).with_granting_object(granting_object);
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                let ctx = FilterContext::from_source_with_controller(source, player)
+                    .with_granting_object(granting_object);
                 p.hand
                     .iter()
                     .filter(|&&id| {
@@ -1517,7 +1527,9 @@ impl AbilityCost {
                             >= *count
                     }
                     Some(tf) => {
-                        let ctx = FilterContext::from_source(state, source)
+                        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                        // activated ability).
+                        let ctx = FilterContext::from_source_with_controller(source, player)
                             .with_granting_object(granting_object);
                         let matching_counts = state.battlefield.iter().filter_map(|&id| {
                             state.objects.get(&id).and_then(|o| {
@@ -1647,6 +1659,10 @@ impl AbilityCost {
             } => match filter {
                 None => true,
                 Some(f) => {
+                    // CR 107.3a: X = 0 is a legal announcement, so before X is
+                    // announced a symbolic count reads 0 (mirrors Discard).
+                    let count = super::quantity::resolve_quantity(state, count, player, source)
+                        .max(0) as usize;
                     let eligible = super::casting::find_eligible_reveal_targets(
                         state,
                         player,
@@ -1654,12 +1670,12 @@ impl AbilityCost {
                         granting_object,
                         f,
                     );
-                    match shared_quality {
-                        None => eligible.len() >= *count as usize,
-                        Some(quality) => {
-                            has_subset_sharing_quality(state, &eligible, *count as usize, quality)
-                        }
-                    }
+                    reveal_cost_has_legal_selection(
+                        state,
+                        &eligible,
+                        count,
+                        shared_quality.as_ref(),
+                    )
                 }
             },
             AbilityCost::Behold {
@@ -1825,15 +1841,18 @@ pub(crate) fn cards_share_quality(
     !shared.is_empty()
 }
 
-/// CR 601.2b + CR 701.20a: Whether some `count`-sized subset of `eligible`
-/// cards shares `quality`, i.e. whether a reveal cost with a shared-quality
-/// constraint has a legal selection.
-fn has_subset_sharing_quality(
+/// CR 601.2b + CR 701.20a: Whether a reveal cost has a legal selection —
+/// `count` of the `eligible` cards, all sharing `shared_quality` when the cost
+/// carries one. Single payability authority for every reveal-cost route.
+pub(crate) fn reveal_cost_has_legal_selection(
     state: &GameState,
     eligible: &[ObjectId],
     count: usize,
-    quality: &SharedQuality,
+    shared_quality: Option<&SharedQuality>,
 ) -> bool {
+    let Some(quality) = shared_quality else {
+        return eligible.len() >= count;
+    };
     fn extend(
         state: &GameState,
         eligible: &[ObjectId],
@@ -1878,7 +1897,10 @@ fn has_enough_tap_creatures(
     filter: &TargetFilter,
     exclude_source: bool,
 ) -> bool {
-    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
     let eligible = state.battlefield.iter().copied().filter(|&id| {
         if exclude_source && id == source {
             return false;
@@ -1983,7 +2005,10 @@ pub(super) fn eligible_exile_cost_objects(
     };
     let effective_filter = cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
-    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
     ids.filter(|&id| {
         id != source
             && !super::casting::is_spell_being_cast(state, id)
@@ -2048,7 +2073,9 @@ pub(crate) fn eligible_craft_materials(
     source: ObjectId,
     materials: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let ctx = FilterContext::from_source(state, source);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player);
     let mut out: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -2121,6 +2148,62 @@ mod tests {
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
+
+    /// CR 701.20a: "Cards that share a color" needs one color common to EVERY
+    /// revealed card. Blue-red + blue + red pairwise-overlap with the first card
+    /// but share nothing as a set; and the payability probe finds a legal pair
+    /// only when one exists in the eligible pool.
+    #[test]
+    fn shared_quality_reveal_intersects_across_every_card() {
+        use crate::types::mana::{ManaColor, ManaCost};
+        let mut scenario = GameScenario::new();
+        let mut card = |name: &str, colors: Vec<ManaColor>| {
+            scenario
+                .add_creature_to_hand(P0, name, 1, 1)
+                .with_mana_cost(ManaCost::generic(1))
+                .with_color(colors)
+                .id()
+        };
+        let blue_red = card("Blue Red", vec![ManaColor::Blue, ManaColor::Red]);
+        let blue = card("Blue", vec![ManaColor::Blue]);
+        let red = card("Red", vec![ManaColor::Red]);
+        let green = card("Green", vec![ManaColor::Green]);
+        let runner = scenario.build();
+        let state = runner.state();
+        let color = SharedQuality::Color;
+
+        assert!(cards_share_quality(state, &[blue_red, blue], &color));
+        assert!(cards_share_quality(state, &[blue_red, red], &color));
+        assert!(
+            !cards_share_quality(state, &[blue_red, blue, red], &color),
+            "blue-red, blue, red share no single color"
+        );
+
+        assert!(reveal_cost_has_legal_selection(
+            state,
+            &[green, blue, blue_red],
+            2,
+            Some(&color)
+        ));
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &[green, blue, red],
+            2,
+            Some(&color)
+        ));
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &[blue_red, blue, red],
+            3,
+            Some(&color)
+        ));
+        assert!(reveal_cost_has_legal_selection(
+            state,
+            &[green, blue, red],
+            2,
+            None
+        ));
+    }
 
     /// CR 109.2 + CR 118.3: the zone a zone-less exile cost reads from is
     /// decided by whether its filter describes a permanent. A description

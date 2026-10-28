@@ -14,7 +14,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::EngineError;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{PayCostKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -47,6 +47,7 @@ fn activate_and_pay(
         .act(GameAction::ActivateAbility {
             source_id: folio,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Illuminated Folio must be accepted");
 
@@ -79,7 +80,7 @@ fn activate_and_pay(
                 }
             }
             WaitingFor::PayCost {
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal { .. },
                 choices,
                 count,
                 ..
@@ -216,6 +217,15 @@ fn illuminated_folio_reveal_blue_and_red_fails() {
         })
         .id();
 
+    // A second blue card keeps a legal pair in hand, so the cost is payable
+    // and the shared-color check is what rejects the chosen pair.
+    scenario
+        .add_creature_to_hand(P0, "Blue Card 2", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        });
+
     scenario.with_mana_pool(
         P0,
         vec![ManaUnit::new(
@@ -257,6 +267,15 @@ fn illuminated_folio_reveal_only_one_card_fails() {
         })
         .id();
 
+    // A second blue card keeps a legal pair in hand, so the cost is payable
+    // and the card-count check is what rejects the single card.
+    scenario
+        .add_creature_to_hand(P0, "Blue Card 2", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        });
+
     scenario.with_mana_pool(
         P0,
         vec![ManaUnit::new(
@@ -274,6 +293,7 @@ fn illuminated_folio_reveal_only_one_card_fails() {
         .act(GameAction::ActivateAbility {
             source_id: folio,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Illuminated Folio must be accepted");
 
@@ -293,7 +313,7 @@ fn illuminated_folio_reveal_only_one_card_fails() {
                 }
             }
             WaitingFor::PayCost {
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal { .. },
                 count,
                 ..
             } => {
@@ -387,6 +407,21 @@ fn illuminated_folio_reveal_colorless_cards_fails() {
         .with_mana_cost(ManaCost::generic(3))
         .id();
 
+    // Two blue cards keep a legal pair in hand, so the cost is payable
+    // and the shared-color check is what rejects the chosen pair.
+    scenario
+        .add_creature_to_hand(P0, "Blue Card 1", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        });
+    scenario
+        .add_creature_to_hand(P0, "Blue Card 2", 3, 3)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        });
+
     scenario.with_mana_pool(
         P0,
         vec![ManaUnit::new(
@@ -408,4 +443,62 @@ fn illuminated_folio_reveal_colorless_cards_fails() {
         ),
         other => panic!("expected shared-color rejection, got {other:?}"),
     }
+}
+
+/// CR 601.2b + CR 701.20a: With enough cards in hand but no two sharing a
+/// color, the reveal cost is unpayable, so the Folio cannot be activated. The
+/// same board plus a second blue card activates (positive guard).
+#[test]
+fn illuminated_folio_unpayable_without_a_pair_sharing_a_color() {
+    let build = |with_second_blue: bool| {
+        let mut scenario = setup_scenario();
+        let folio = scenario
+            .add_creature(P0, "Illuminated Folio", 0, 0)
+            .as_artifact()
+            .from_oracle_text(ILLUMINATED_FOLIO_ORACLE)
+            .id();
+        let mut colored = vec![
+            ("Blue Card 1", ManaCostShard::Blue),
+            ("Red Card 1", ManaCostShard::Red),
+            ("Green Card 1", ManaCostShard::Green),
+        ];
+        if with_second_blue {
+            colored.push(("Blue Card 2", ManaCostShard::Blue));
+        }
+        for (name, shard) in colored {
+            scenario
+                .add_creature_to_hand(P0, name, 2, 2)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![shard],
+                    generic: 1,
+                });
+        }
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(91_001),
+                false,
+                vec![],
+            )],
+        );
+        (scenario.build(), folio)
+    };
+    let activate = |runner: &mut GameRunner, folio| {
+        runner.act(GameAction::ActivateAbility {
+            source_id: folio,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+    };
+
+    let (mut runner, folio) = build(false);
+    assert!(
+        activate(&mut runner, folio).is_err(),
+        "no two cards in hand share a color, so the reveal cost is unpayable"
+    );
+    assert!(runner.state().stack.is_empty());
+
+    let (mut runner, folio) = build(true);
+    activate(&mut runner, folio).expect("two blue cards make the reveal cost payable");
 }

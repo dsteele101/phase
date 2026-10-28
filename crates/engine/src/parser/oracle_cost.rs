@@ -995,9 +995,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     }
                 }
                 // Flat "Pay N life" — no " for each " tail.
-                return AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: n as i32 },
-                };
+                // The cost word ends at end-of-text or a sentence boundary; a
+                // trailing qualifier ("... if you control an artifact") is not
+                // consumed, so the cost is declined rather than read as unconditional.
+                if terminated(tag::<_, _, E<'_>>("life"), alt((eof, peek(tag(".")))))
+                    .parse(after_n.trim().trim_end_matches(','))
+                    .is_ok()
+                {
+                    return AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    };
+                }
             }
         }
         // Pay speed: "pay x speed" / "pay N speed"
@@ -1032,93 +1040,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Discard a card" / "Discard N cards"
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("discard ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        // CR 207.2c: "Discard this card" — Channel self-ref cost (ability word, not keyword).
-        if rest_lower == "this card" {
-            return AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
-            };
-        }
-        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
-            .parse(rest_lower.as_str())
-            .is_ok()
-        {
-            return AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            };
-        }
-        if rest_lower == "your hand" {
-            return AbilityCost::Discard {
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller,
-                    },
-                },
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            };
-        }
-        // CR 701.9b: Random is a selection mode on an otherwise ordinary
-        // hand-discard cost. Accept only the complete unfiltered grammar used
-        // by the measured card corpus. A typed or malformed random phrase must
-        // fail closed below instead of falling through to the chosen parser and
-        // silently giving the payer a choice.
-        if let Ok((_, count)) =
-            all_consuming(parse_random_discard_cost_body).parse(rest_lower.as_str())
-        {
-            return AbilityCost::Discard {
-                count,
-                filter: None,
-                selection: crate::types::ability::CardSelectionMode::Random,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            };
-        }
-        if preceded(take_until::<_, _, E<'_>>(" at random"), tag(" at random"))
-            .parse(rest_lower.as_str())
-            .is_ok()
-        {
-            return AbilityCost::Unimplemented {
-                description: text.to_string(),
-            };
-        }
-        // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
-        // card-type filter so only matching cards can pay the cost (Lotleth
-        // Troll: "Discard a creature card:"). Without this the typed
-        // restriction is dropped and any card pays the cost. Mirrors the
-        // effect-form discard and the trigger-side cost parser, which both
-        // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
-        // leading count token ("a "/"two ") and the remainder is the typed noun
-        // phrase. Ordered before the plain `parse_number` arm so "two creature
-        // cards" is not swallowed as an untyped count.
-        if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
-            let noun = after_count.trim_start();
-            if let Some(filter) = parse_discard_card_filter(noun) {
-                return AbilityCost::Discard {
-                    count,
-                    filter: Some(filter),
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                };
-            }
-            // CR 107.3a: an untyped "discard X cards" keeps X symbolic so the
-            // announced value is discarded, not the X→0 of `parse_number`.
-            if all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card"))))
-                .parse(noun)
-                .is_ok()
-            {
-                return AbilityCost::Discard {
-                    count,
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                };
-            }
+        if let Some(cost) = parse_discard_cost_body(text, &rest_lower) {
+            return cost;
         }
         if let Some((n, _)) = parse_number(&rest_lower) {
             return AbilityCost::Discard {
@@ -1426,74 +1349,53 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal this card from your hand" — reveal self cost
+    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
-        value((), tag("reveal this card from your hand")).parse(i)
+        value(
+            (),
+            alt((
+                tag("reveal this card from your hand"),
+                tag("reveal this card in your hand"),
+            )),
+        )
+        .parse(i)
     })
     .is_some()
     {
         return AbilityCost::Reveal {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: None,
             shared_quality: None,
         };
     }
 
-    // "Reveal N [Type] card(s) [that share a QUALITY] from your hand [that share
-    // a QUALITY]" — reveal from hand with optional count, type filter, and
-    // shared-quality constraint (Illuminated Folio: "Reveal two cards from your
-    // hand that share a color"). The clause may sit on either side of the zone.
+    // CR 701.20a + CR 107.3a: "Reveal <N|X> <card phrase> from your hand" — a
+    // counted, typed reveal. X stays symbolic so the value announced while
+    // casting or activating is the number revealed (Martyr cycle).
+    if let Ok((body, _)) = tag::<_, _, E<'_>>("reveal ").parse(lower.as_str()) {
+        if let Some(cost) = parse_reveal_from_hand_cost_body(body) {
+            return cost;
+        }
+    }
+
+    // "Reveal a [Type] card from your hand" — fallback for reveal shapes the
+    // strict `parse_reveal_from_hand_cost_body` grammar declines (self-name
+    // reveals).
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if let Ok((_, (before, after))) = split_once_on(&rest_lower, "from your hand") {
-            let before = before.trim();
-            let (count, card_phrase) =
-                match terminated(nom_primitives::parse_number, tag(" ")).parse(before) {
-                    Ok((card_phrase, count)) => (count, card_phrase),
-                    Err(_) => (1, strip_article(before, before)),
-                };
-            let (card_phrase, leading_quality) = match split_once_on(card_phrase, "that share ") {
-                Ok((_, (card_phrase, quality))) => (card_phrase.trim(), Some(quality)),
-                Err(_) => (card_phrase, None),
-            };
-            let trailing_quality = preceded(
-                tag::<_, _, super::oracle_nom::error::OracleError<'_>>("that share "),
-                nom::combinator::rest,
-            )
-            .parse(after.trim())
-            .ok()
-            .map(|(_, quality)| quality);
-            // CR 701.20a: A present shared-quality clause the engine cannot type
-            // stays a parse gap rather than becoming a permissive reveal.
-            let shared_quality = match leading_quality.or(trailing_quality) {
-                None => None,
-                Some(quality) => match all_consuming(preceded(
-                    opt(alt((
-                        tag::<_, _, super::oracle_nom::error::OracleError<'_>>("a "),
-                        tag("an "),
-                    ))),
-                    parse_shared_quality,
-                ))
-                .parse(quality.trim())
-                {
-                    Ok((_, quality)) => Some(quality),
-                    Err(_) => {
-                        return AbilityCost::Unimplemented {
-                            description: text.to_string(),
-                        }
-                    }
-                },
-            };
-            let type_phrase = card_phrase
-                .strip_suffix("cards")
-                .or_else(|| card_phrase.strip_suffix("card"))
-                .unwrap_or(card_phrase)
+        if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
+            let filter_raw = before.trim();
+            let filter_raw = strip_article(filter_raw, filter_raw);
+            let filter_raw = filter_raw
+                .strip_suffix(" card")
+                .or_else(|| filter_raw.strip_suffix(" cards"))
+                .unwrap_or(filter_raw)
                 .trim();
-            let (filter, _) = parse_target(&format!("target {type_phrase} card"));
+            let (filter, _) = parse_target(&format!("target {filter_raw}"));
             return AbilityCost::Reveal {
-                count,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(filter),
-                shared_quality,
+                shared_quality: None,
             };
         }
     }
@@ -1602,6 +1504,176 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     AbilityCost::Unimplemented {
         description: text.to_string(),
     }
+}
+
+/// CR 701.20a + CR 107.3a: Strict grammar for a counted reveal-from-hand
+/// cost body (the lowercase text after "reveal "):
+/// `<a|an|N|x> <card phrase> from your hand`. The card phrase delegates to
+/// `parse_discard_card_filter`, the shared hand-card noun authority, so a
+/// color ("red cards") or type ("Dragon card") restricts what can pay.
+/// `None` for an untyped noun, a trailing clause, or any other shape —
+/// the caller's fallback keeps handling those.
+fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let (_, (count, noun, trailing_quality)) = all_consuming((
+        terminated(
+            nom_quantity::parse_quantity_expr_number,
+            tag::<_, _, E<'_>>(" "),
+        ),
+        alt((
+            terminated(take_until(" from your hand"), tag(" from your hand")),
+            terminated(
+                take_until(" in your hand"),
+                terminated(tag(" in your hand"), opt(tag("."))),
+            ),
+        )),
+        opt(preceded(tag(" that share "), rest)),
+    ))
+    .parse(body)
+    .ok()?;
+    // CR 701.20a: The shared-quality clause may precede the zone ("two cards
+    // that share a color from your hand") or follow it (Illuminated Folio:
+    // "two cards from your hand that share a color").
+    let (noun, leading_quality) = match (
+        take_until::<_, _, E<'_>>(" that share "),
+        tag(" that share "),
+        rest,
+    )
+        .parse(noun)
+    {
+        Ok((_, (noun, _, quality))) => (noun, Some(quality)),
+        Err(_) => (noun, None),
+    };
+    let shared_quality = match leading_quality.or(trailing_quality) {
+        None => None,
+        Some(quality) => match all_consuming(preceded(
+            opt(alt((tag::<_, _, E<'_>>("a "), tag("an ")))),
+            parse_shared_quality,
+        ))
+        .parse(quality)
+        {
+            Ok((_, quality)) => Some(quality),
+            // A present clause naming a quality the engine cannot type stays a
+            // parse gap rather than becoming a permissive reveal.
+            Err(_) => {
+                return Some(AbilityCost::Unimplemented {
+                    description: format!("reveal {body}"),
+                })
+            }
+        },
+    };
+    // An untyped noun ("two cards") reveals any card from hand.
+    let filter = match all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card")))).parse(noun) {
+        Ok(_) => TargetFilter::Typed(TypedFilter::card()),
+        Err(_) => parse_discard_card_filter(noun)?,
+    };
+    Some(AbilityCost::Reveal {
+        count,
+        filter: Some(filter),
+        shared_quality,
+    })
+}
+
+/// CR 701.9a + CR 701.9b: Strict grammar for a hand-discard cost body (the
+/// lowercase text after "discard "). Single authority shared by
+/// `parse_single_cost` and the ward-cost reader. `None` when no modeled shape
+/// consumes the whole body; `Some(Unimplemented)` for the recognized-but-
+/// unmodeled typed random discard. `text` is the full original cost text,
+/// used only for that description.
+pub(crate) fn parse_discard_cost_body(text: &str, body: &str) -> Option<AbilityCost> {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    // CR 207.2c: "Discard this card" — Channel self-ref cost (ability word, not keyword).
+    if all_consuming(tag::<_, _, E<'_>>("this card"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+        });
+    }
+    if all_consuming(tag::<_, _, E<'_>>("a card"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    if all_consuming(tag::<_, _, E<'_>>("your hand"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    // CR 701.9b: Random is a selection mode on an otherwise ordinary
+    // hand-discard cost. Accept only the complete unfiltered grammar used
+    // by the measured card corpus. A typed or malformed random phrase must
+    // fail closed below instead of falling through to the chosen parser and
+    // silently giving the payer a choice.
+    if let Ok((_, count)) = all_consuming(parse_random_discard_cost_body).parse(body) {
+        return Some(AbilityCost::Discard {
+            count,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Random,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    if preceded(take_until::<_, _, E<'_>>(" at random"), tag(" at random"))
+        .parse(body)
+        .is_ok()
+    {
+        return Some(AbilityCost::Unimplemented {
+            description: text.to_string(),
+        });
+    }
+    // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
+    // card-type filter so only matching cards can pay the cost (Lotleth
+    // Troll: "Discard a creature card:"). Without this the typed
+    // restriction is dropped and any card pays the cost. Mirrors the
+    // effect-form discard and the trigger-side cost parser, which both
+    // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
+    // leading count token ("a "/"two ") and the remainder is the typed noun
+    // phrase. Ordered before the plain `parse_number` arm so "two creature
+    // cards" is not swallowed as an untyped count.
+    let (count, after_count) = parse_count_expr(body)?;
+    let noun = after_count.trim_start();
+    if let Some(filter) = parse_discard_card_filter(noun) {
+        return Some(AbilityCost::Discard {
+            count,
+            filter: Some(filter),
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    // CR 107.3a: an untyped "discard X cards" keeps X symbolic so the
+    // announced value is discarded, not the X→0 of `parse_number`.
+    if all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card"))))
+        .parse(noun)
+        .is_ok()
+    {
+        return Some(AbilityCost::Discard {
+            count,
+            filter: None,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        });
+    }
+    None
 }
 
 /// CR 701.9b: Complete grammar for the unfiltered random discard-cost body.
@@ -2289,13 +2361,35 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
             });
         }
     }
+
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase_folding(filter_text);
-        filter
+        let (folded_filter, folded_rem) = parse_type_phrase_folding(filter_text);
+        if folded_rem.trim().is_empty() {
+            folded_filter
+        } else if count == 1
+            // CR 201.5: a by-name reference never starts with an article or count,
+            // so nothing may have been stripped ahead of the object phrase.
+            && rest_lower.trim_start().starts_with(filter_text)
+            && folded_rem.trim() == filter_text.trim()
+            && match &folded_filter {
+                TargetFilter::Any => true,
+                TargetFilter::Typed(tf) => {
+                    tf.type_filters.is_empty()
+                        && tf.properties.is_empty()
+                        && tf.controller.is_none()
+                }
+                _ => false,
+            }
+        {
+            // CR 201.5: By-name self-reference fallback (e.g. "Recurring Nightmare")
+            folded_filter
+        } else {
+            return None;
+        }
     };
     let filter = match filter {
         // CR 201.5: A cost using the source card's own name, such as
@@ -2398,16 +2492,7 @@ fn parse_life_equal_to_quantity_nom(
     i: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
     let (i, _) = value((), tag("life equal to the number of colors in ")).parse(i)?;
-    let (i, _) = value(
-        (),
-        alt((
-            tag("your commander's "),
-            tag("your commanders' "),
-            tag("your commanders "),
-        )),
-    )
-    .parse(i)?;
-    let (i, _) = tag("color identity").parse(i)?;
+    let (i, ()) = nom_primitives::parse_your_commanders_color_identity(i)?;
     Ok((i, QuantityRef::ColorsInCommandersColorIdentity))
 }
 
@@ -4791,26 +4876,36 @@ mod tests {
         }
     }
 
-    /// The source-name self-reference fallback names ONE object; a counted
-    /// return of an unreadable object phrase must not lower to an unpayable
-    /// `ReturnToHand { count: 2, filter: SelfRef }`.
+    /// The source-name self-reference fallback names ONE object; CR 201.5 by-name
+    /// references never carry an article or count, so an article- or count-led
+    /// unreadable object phrase must not lower to `ReturnToHand { filter: SelfRef }`.
     #[test]
     fn cost_counted_return_of_unreadable_phrase_is_not_self_ref() {
-        // Reach guard: the same object phrase with an article reaches the
-        // fallback and becomes the self-reference.
+        // Reach guard: the bare name reaches the fallback and becomes the self-reference.
         assert_eq!(
-            parse_oracle_cost("Return a Recurring Nightmare to its owner's hand"),
+            parse_oracle_cost("Return Recurring Nightmare to its owner's hand"),
             AbilityCost::ReturnToHand {
                 count: 1,
                 filter: Some(TargetFilter::SelfRef),
                 from_zone: None,
             }
         );
-        let cost = parse_oracle_cost("Return two Recurring Nightmares to their owner's hand");
-        assert!(
-            !matches!(cost, AbilityCost::ReturnToHand { .. }),
-            "counted unreadable phrase must not lower to ReturnToHand, got {cost:?}"
-        );
+        for text in [
+            "Return a Recurring Nightmare to its owner's hand",
+            "Return two Recurring Nightmares to their owner's hand",
+        ] {
+            let cost = parse_oracle_cost(text);
+            assert!(
+                !matches!(
+                    cost,
+                    AbilityCost::ReturnToHand {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                ),
+                "{text:?} must not lower to a SelfRef return, got {cost:?}"
+            );
+        }
     }
 
     #[test]
@@ -4818,8 +4913,165 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Reveal this card from your hand"),
             AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
+                shared_quality: None,
+            }
+        );
+    }
+
+    /// CR 701.20a + CR 107.3a: the Martyr cycle's "Reveal X <color> cards
+    /// from your hand" keeps X symbolic (the announced value) and restricts
+    /// the reveal to the named color. Verbatim cost text for all five cards.
+    #[test]
+    fn cost_reveal_x_colored_cards_keeps_x_symbolic_and_color() {
+        use crate::types::mana::ManaColor;
+        let cases = [
+            (
+                "{2}, Reveal X red cards from your hand, Sacrifice this creature",
+                2,
+                ManaColor::Red,
+            ),
+            (
+                "{1}, Reveal X black cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::Black,
+            ),
+            (
+                "{2}, Reveal X blue cards from your hand, Sacrifice this creature",
+                2,
+                ManaColor::Blue,
+            ),
+            (
+                "{1}, Reveal X white cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::White,
+            ),
+            (
+                "{1}, Reveal X green cards from your hand, Sacrifice this creature",
+                1,
+                ManaColor::Green,
+            ),
+        ];
+        for (text, generic, color) in cases {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic,
+                            },
+                        },
+                        AbilityCost::Reveal {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { name: "X".into() },
+                            },
+                            filter: Some(TargetFilter::Typed(
+                                TypedFilter::card()
+                                    .properties(vec![FilterProp::HasColor { color }]),
+                            )),
+                            shared_quality: None,
+                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 701.20a: a fixed-count typed reveal keeps its count of one and its
+    /// type filter through the strict grammar.
+    #[test]
+    fn cost_reveal_typed_card_from_hand_keeps_fixed_count() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a Dragon card from your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().subtype("Dragon".to_string())
+                )),
+                shared_quality: None,
+            }
+        );
+    }
+
+    /// CR 701.20a: Illuminated Folio's verbatim cost reveals two cards that
+    /// must share a color; the clause is read on either side of "from your
+    /// hand" and the untyped noun reveals any card.
+    #[test]
+    fn cost_reveal_cards_that_share_a_quality() {
+        use crate::types::ability::SharedQuality;
+        let expected = |quality| AbilityCost::Reveal {
+            count: QuantityExpr::Fixed { value: 2 },
+            filter: Some(TargetFilter::Typed(TypedFilter::card())),
+            shared_quality: Some(quality),
+        };
+        assert_eq!(
+            parse_oracle_cost("{1}, {T}, Reveal two cards from your hand that share a color"),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Tap,
+                    expected(SharedQuality::Color),
+                ],
+            }
+        );
+        assert_eq!(
+            parse_oracle_cost("Reveal two cards that share a color from your hand"),
+            expected(SharedQuality::Color)
+        );
+        assert_eq!(
+            parse_oracle_cost("Reveal two cards from your hand that share a creature type"),
+            expected(SharedQuality::CreatureType)
+        );
+    }
+
+    /// CR 701.20a: a typed reveal keeps its type filter alongside the
+    /// shared-quality constraint.
+    #[test]
+    fn cost_reveal_typed_cards_that_share_a_quality_keep_filter() {
+        assert_eq!(
+            parse_oracle_cost("Reveal three creature cards from your hand that share a card type"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 3 },
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                shared_quality: Some(crate::types::ability::SharedQuality::CardType),
+            }
+        );
+    }
+
+    /// A present shared-quality clause naming an unmodeled quality must stay a
+    /// parse gap, never a reveal that ignores the restriction.
+    #[test]
+    fn cost_reveal_unsupported_shared_quality_is_unimplemented() {
+        for text in [
+            "Reveal two cards from your hand that share a supertype",
+            "Reveal two cards that share a supertype from your hand",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text}: {:?}",
+                parse_oracle_cost(text)
+            );
+        }
+    }
+
+    #[test]
+    fn cost_reveal_black_card_from_hand() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a black card in your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Black
+                    }
+                ]))),
                 shared_quality: None,
             }
         );
@@ -5683,5 +5935,144 @@ mod tests {
         let fow = parse_oracle_cost("pay 1 life and exile a blue card from your hand");
         assert!(matches!(&fow, AbilityCost::Composite { costs } if costs.len() == 2));
         assert!(!fow.contains_unimplemented());
+    }
+
+    #[test]
+    fn qualified_reveal_cost_is_rejected_without_dropping_condition() {
+        let cost = parse_oracle_cost("Reveal a black card in your hand if you control an artifact");
+        assert!(!matches!(cost, AbilityCost::Reveal { .. }));
+
+        let valid = parse_oracle_cost("Reveal a blue card in your hand.");
+        assert!(matches!(
+            valid,
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(_),
+                shared_quality: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn incomplete_return_to_hand_cost_filter_is_rejected() {
+        // Production strips the leading "return " before this helper runs.
+        assert!(try_parse_return_to_hand_cost(
+            "two creatures you control with different names to their owners' hands"
+        )
+        .is_none());
+        // Reach guard: the same counted subject without the unmodeled qualifier parses.
+        assert!(matches!(
+            try_parse_return_to_hand_cost("two creatures you control to their owners' hands"),
+            Some(AbilityCost::ReturnToHand {
+                count: 2,
+                filter: Some(_),
+                ..
+            })
+        ));
+
+        let cost = parse_oracle_cost(
+            "Return two creatures you control with different names to their owners' hands",
+        );
+        assert!(!matches!(cost, AbilityCost::ReturnToHand { .. }));
+    }
+
+    #[test]
+    fn qualified_pay_life_cost_is_rejected() {
+        let cost = parse_oracle_cost("Pay 5 life if you control an artifact");
+        assert!(!matches!(cost, AbilityCost::PayLife { .. }));
+
+        let valid = parse_oracle_cost("Pay 5 life");
+        assert!(matches!(
+            valid,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 }
+            }
+        ));
+
+        // A sentence boundary after the cost word is not a qualifier.
+        let sentence = parse_oracle_cost("Pay 3 life. You gain 1 life.");
+        assert!(matches!(
+            sentence,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 }
+            }
+        ));
+    }
+
+    /// CR 107.3a: an announced X is chosen and announced, never a fixed 0.
+    /// A standalone X count must decline rather than silently become zero.
+    #[test]
+    fn x_count_cost_is_declined_instead_of_zero() {
+        // CR 107.3a: a reveal count of X stays symbolic (never a fixed 0).
+        assert!(matches!(
+            parse_oracle_cost("Reveal x blue cards in your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { ref name },
+                },
+                filter: Some(_),
+                shared_quality: None,
+            } if name == "X"
+        ));
+        // Production strips the leading "return " before this helper runs.
+        assert!(
+            try_parse_return_to_hand_cost("x creatures you control to their owner's hand")
+                .is_none()
+        );
+        // Reach guard: a fixed count in the same production form parses.
+        assert!(matches!(
+            try_parse_return_to_hand_cost("two creatures you control to their owner's hand"),
+            Some(AbilityCost::ReturnToHand {
+                count: 2,
+                filter: Some(_),
+                ..
+            })
+        ));
+
+        let valid = parse_oracle_cost("Reveal a blue card in your hand.");
+        assert!(matches!(
+            valid,
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(_),
+                shared_quality: None,
+            }
+        ));
+    }
+
+    /// CR 201.5: a by-name reference ("Return Recurring Nightmare ...") still
+    /// resolves to the source, but an article-led subject the grammar cannot
+    /// fold must not collapse to SelfRef just because count == 1.
+    #[test]
+    fn by_name_self_ref_requires_complete_subject_text() {
+        let cost = parse_oracle_cost("Return Recurring Nightmare to its owner's hand");
+        assert!(matches!(
+            cost,
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+
+        assert!(!matches!(
+            parse_oracle_cost(
+                "Return a nonland card with mana value 3 or less to its owner's hand"
+            ),
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+
+        // Reach guard: an article-led subject the grammar can fold still parses
+        // to a typed ReturnToHand filter rather than SelfRef.
+        assert!(matches!(
+            parse_oracle_cost("Return a creature you control to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::Typed(_)),
+                ..
+            }
+        ));
     }
 }
