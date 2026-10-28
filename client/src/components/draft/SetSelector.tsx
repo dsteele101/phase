@@ -536,7 +536,13 @@ function RandomButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={menuButtonClass({ tone: "neutral", size: "xs", ghost: true, disabled })}
+      className={menuButtonClass({
+        tone: "neutral",
+        size: "xs",
+        ghost: true,
+        disabled,
+        className: "min-h-11",
+      })}
     >
       {label}
     </button>
