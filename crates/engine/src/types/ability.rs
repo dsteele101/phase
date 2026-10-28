@@ -18026,7 +18026,7 @@ pub enum AbilityCost {
         /// None means reveal any card (self-reveal).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
-        /// CR 701.20a: The revealed cards must share this quality (e.g., "two cards
+        /// The revealed cards must share this quality (e.g., "two cards
         /// that share a color" → `SharedQuality::Color`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shared_quality: Option<SharedQuality>,

@@ -2493,10 +2493,14 @@ pub fn candidate_actions_broad_with_probe(
             choices,
             [*count],
             SELECTION_POOL_CAP,
-            SELECTION_CANDIDATE_CAP,
+            // The pool cap already bounds the enumeration; the candidate cap
+            // applies after the shared-quality filter so payable combinations
+            // are not crowded out by earlier non-matching ones.
+            usize::MAX,
         )
         .into_iter()
         .filter(|combo| crate::game::cost_payability::cards_share_quality(state, combo, quality))
+        .take(SELECTION_CANDIDATE_CAP)
         .map(|combo| {
             candidate(
                 GameAction::SelectCards { cards: combo },

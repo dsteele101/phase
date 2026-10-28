@@ -1841,6 +1841,29 @@ pub(crate) fn cards_share_quality(
     !shared.is_empty()
 }
 
+/// CR 701.20a: Size of the largest subset of `cards` that satisfies
+/// `cards_share_quality` — the most cards sharing one value of `quality`.
+pub(crate) fn largest_shared_quality_group(
+    state: &GameState,
+    cards: &[ObjectId],
+    quality: &SharedQuality,
+) -> usize {
+    let mut tally: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for id in cards {
+        let Some(obj) = state.objects.get(id) else {
+            continue;
+        };
+        for value in super::filter::object_shared_quality_values_public(
+            obj,
+            quality,
+            &state.all_creature_types,
+        ) {
+            *tally.entry(value).or_default() += 1;
+        }
+    }
+    tally.into_values().max().unwrap_or(0)
+}
+
 /// CR 601.2b + CR 701.20a: Whether a reveal cost has a legal selection —
 /// `count` of the `eligible` cards, all sharing `shared_quality` when the cost
 /// carries one. Single payability authority for every reveal-cost route.
@@ -1853,6 +1876,9 @@ pub(crate) fn reveal_cost_has_legal_selection(
     let Some(quality) = shared_quality else {
         return eligible.len() >= count;
     };
+    if count > eligible.len() {
+        return false;
+    }
     fn extend(
         state: &GameState,
         eligible: &[ObjectId],
@@ -2194,6 +2220,18 @@ mod tests {
         assert!(!reveal_cost_has_legal_selection(
             state,
             &[blue_red, blue, red],
+            3,
+            Some(&color)
+        ));
+        // Largest group sharing one color bounds a symbolic reveal count.
+        assert_eq!(
+            largest_shared_quality_group(state, &[blue_red, blue, red, green], &color),
+            2
+        );
+        assert_eq!(largest_shared_quality_group(state, &[], &color), 0);
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &[blue_red, blue],
             3,
             Some(&color)
         ));

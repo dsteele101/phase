@@ -11402,24 +11402,29 @@ fn additional_cost_x_max(
             .unwrap_or(0),
         ),
         // CR 107.3a + CR 601.2h: X in a reveal count is announced before the
-        // reveal; the engine caps it at the matching cards in hand, since
-        // revealing more is an unpayable cost (CR 118.3).
+        // reveal; the engine caps it at the matching cards in hand (or, with a
+        // shared quality, the largest group sharing it), since revealing more
+        // is an unpayable cost (CR 118.3).
         AbilityCost::Reveal {
             count,
             filter: Some(filter),
-            shared_quality: _,
-        } if is_bare_x_count(count) => Some(
-            super::casting::find_eligible_reveal_targets(
+            shared_quality,
+        } if is_bare_x_count(count) => {
+            let eligible = super::casting::find_eligible_reveal_targets(
                 state,
                 player,
                 source_id,
                 granting_object,
                 filter,
-            )
-            .len()
-            .try_into()
-            .unwrap_or(u32::MAX),
-        ),
+            );
+            let max = match shared_quality {
+                Some(quality) => {
+                    super::cost_payability::largest_shared_quality_group(state, &eligible, quality)
+                }
+                None => eligible.len(),
+            };
+            Some(max.try_into().unwrap_or(u32::MAX))
+        }
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
         {
