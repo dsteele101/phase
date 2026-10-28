@@ -556,8 +556,9 @@ fn choose_action_with_session_inner(
     // never again by the scorer below or by any sampled world it runs.
     let ensemble_deadline = ensemble_deadline(config);
     let root_domain = RootPriorityDomain::new(state, ai_player);
-    let root_answer = certified_lethal_action(config, ensemble_deadline, &root_domain)
-        .or_else(|| fast_priority_action(&root_domain, config, session, Some(contract)));
+    let root_answer =
+        certified_lethal_action(config, ensemble_deadline, &root_domain, Some(contract))
+            .or_else(|| fast_priority_action(&root_domain, config, session, Some(contract)));
     // Only an absent answer is reusable. `None` means certification declined
     // and then the priority shortcut ran last on this state and found nothing
     // (certification takes no session, so it cannot change what the shortcut
@@ -722,6 +723,8 @@ impl<'a> RootPriorityDomain<'a> {
 
     fn actions(&self) -> &[GameAction] {
         self.actions.get_or_init(|| {
+            #[cfg(test)]
+            ROOT_DOMAIN_BUILDS.with(|count| count.set(count.get() + 1));
             engine::ai_support::flat_priority_actions(self.state)
                 .into_iter()
                 .filter(|action| root_action_is_allowed(self.state, self.ai_player, action))
@@ -803,6 +806,7 @@ fn certified_lethal_action(
     config: &AiConfig,
     deadline: engine::util::Deadline,
     domain: &RootPriorityDomain<'_>,
+    issued: Option<&AiDecisionContract>,
 ) -> Option<GameAction> {
     let (state, ai_player) = (domain.state, domain.ai_player);
     if !config.play_lookahead {
@@ -810,6 +814,22 @@ fn certified_lethal_action(
     }
     match state.waiting_for {
         WaitingFor::Priority { player } if player == ai_player => {
+            // On an empty stack a line opens with a non-mana cast or
+            // activation (`reach_sources`), and the validated domain only
+            // removes issued actions. An issued contract holding none has no
+            // line to certify, so the domain is never built for it.
+            if state.stack.is_empty()
+                && issued.is_some_and(|contract| {
+                    !contract.candidates.iter().any(|candidate| {
+                        matches!(
+                            candidate.action,
+                            GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+                        ) && !candidate.action.is_mana_ability()
+                    })
+                })
+            {
+                return None;
+            }
             certified_lethal_priority_action(state, ai_player, config, domain.actions(), deadline)
         }
         _ => certified_lethal_prompt_action(state, ai_player, config, deadline),
@@ -902,6 +922,9 @@ thread_local! {
     /// Test witness: how many worlds the search has run lethal-reach priority
     /// certification in, on this thread.
     pub(crate) static CERTIFICATION_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Test witness: how many root priority domains have been enumerated on
+    /// this thread.
+    pub(crate) static ROOT_DOMAIN_BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// CR 400.2: the action `decide` takes in every one of the `k` determinized
@@ -2958,7 +2981,7 @@ pub(crate) fn score_candidates_with_session(
     // information model and its shared budget.
     let deadline = ensemble_deadline(config);
     let root_domain = RootPriorityDomain::new(state, ai_player);
-    if let Some(action) = certified_lethal_action(config, deadline, &root_domain) {
+    if let Some(action) = certified_lethal_action(config, deadline, &root_domain, None) {
         return vec![(action, 1.0)];
     }
     score_candidates_uncertified(&root_domain, config, session, deadline, RootReuse::Fresh)
@@ -19249,7 +19272,9 @@ one on the bottom of your library.";
         let state = make_state();
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
+        assert!(config.play_lookahead, "reach-guard: certification runs");
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        ROOT_DOMAIN_BUILDS.with(|count| count.set(0));
         assert_eq!(
             choose_action(
                 &state,
@@ -19262,6 +19287,11 @@ one on the bottom of your library.";
         assert_eq!(
             FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
             0
+        );
+        assert_eq!(
+            ROOT_DOMAIN_BUILDS.with(std::cell::Cell::get),
+            0,
+            "certification must not enumerate a forced pass's domain"
         );
     }
 
