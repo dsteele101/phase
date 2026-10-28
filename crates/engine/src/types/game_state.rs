@@ -5405,6 +5405,12 @@ pub struct PendingPlayerScopeSacrificeChoice {
     /// continuation can run.
     #[serde(default)]
     pub completion: PendingPlayerScopeSacrificeCompletion,
+    /// CR 608.2c: the stack entry whose resolution opened this collection or
+    /// parked this batch. A carrier is consumed only by an answer of that same
+    /// resolution; `None` (older saves, or no resolving entry) binds on the
+    /// instruction source and carrier shape alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
 }
 
 /// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
@@ -40838,6 +40844,7 @@ mod tests {
                 deferred_events: vec![event.clone()],
                 ..PendingPlayerScopeSacrificeCompletion::default()
             },
+            resolving_entry: None,
         });
         let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut state
             .stack
@@ -49608,6 +49615,54 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: a player-scope sacrifice carrier saved before it recorded the
+    /// resolution that wrote it decodes with no entry provenance, so it binds on
+    /// its instruction source and carrier shape alone; a carrier with no
+    /// provenance writes none.
+    #[test]
+    fn pending_player_scope_sacrifice_choice_decodes_without_entry_provenance() {
+        let pending = PendingPlayerScopeSacrificeChoice {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 1,
+                },
+                Vec::new(),
+                ObjectId(10),
+                PlayerId(0),
+            )),
+            remaining_players: vec![PlayerId(1)],
+            selections: vec![(PlayerId(0), vec![ObjectId(11)])],
+            completion: PendingPlayerScopeSacrificeCompletion::default(),
+            resolving_entry: Some(ObjectId(12)),
+        };
+        let mut wire = serde_json::to_value(&pending).unwrap();
+        assert_eq!(wire["resolving_entry"], serde_json::json!(12));
+        wire.as_object_mut()
+            .expect("the carrier serializes as an object")
+            .remove("resolving_entry");
+
+        let decoded: PendingPlayerScopeSacrificeChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            decoded.resolving_entry, None,
+            "an older save without entry provenance binds on the instruction source alone"
+        );
+        assert_eq!(
+            decoded,
+            PendingPlayerScopeSacrificeChoice {
+                resolving_entry: None,
+                ..pending
+            }
+        );
+
+        let reserialized = serde_json::to_value(&decoded).unwrap();
+        assert!(
+            reserialized.get("resolving_entry").is_none(),
+            "a carrier with no entry provenance writes no `resolving_entry` key"
+        );
+    }
+
     /// CR 101.4 + CR 401.4 + CR 608.2c: the orders owners have already chosen
     /// and the resolution that opened the arrangement survive a save, so a
     /// reloaded arrangement still delivers every owner's cards together.
@@ -54215,6 +54270,7 @@ mod restored_exact_attack_authority_tests {
                             remaining_players: vec![],
                             selections: vec![],
                             completion: Default::default(),
+                            resolving_entry: None,
                         });
                     state.waiting_for.clone()
                 }

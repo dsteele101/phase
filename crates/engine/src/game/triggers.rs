@@ -15040,6 +15040,7 @@ fn delayed_trigger_event_with_index(
                 matches!(
                     e,
                     GameEvent::ZoneChanged {
+                        object_id,
                         from: Some(Zone::Battlefield),
                         to: Zone::Graveyard | Zone::Exile,
                         record,
@@ -15047,7 +15048,7 @@ fn delayed_trigger_event_with_index(
                     } if record.departure.observed_leaving_battlefield(true)
                 ) && matches!(
                     e,
-                    GameEvent::ZoneChanged { object_id, .. }
+                    GameEvent::ZoneChanged { object_id, to, record, .. }
                         if delayed_zone_change_filter_matches(
                             state,
                             *object_id,
@@ -15055,6 +15056,9 @@ fn delayed_trigger_event_with_index(
                             source_id,
                             controller,
                             source_context,
+                            record,
+                            Some(Zone::Battlefield),
+                            Some(*to),
                         )
                 )
             })
@@ -15162,10 +15166,48 @@ fn delayed_zone_change_event_with_index(
                         source_id,
                         controller,
                         source_context,
+                        record,
+                        from,
+                        to,
                     )
             )
         })
         .map(|(idx, event)| (idx, event.clone()))
+}
+
+/// CR 603.2 + CR 503.1a + CR 117.3a: Is a beginning-of-phase trigger `def`, on a permanent
+/// `controller` controls, scoped to fire during `active`'s turn? "At the beginning of your
+/// upkeep" fires only on its controller's turn; "each player's" (no turn constraint) fires on
+/// every player's. Only the turn-scoping constraints narrow it; per-turn counters, class levels
+/// and event-source constraints don't decide whose phase it is and answer yes. Read-only, for
+/// callers asking whether a phase will open with a trigger, where yes is the conservative answer.
+pub fn phase_trigger_scoped_to_turn_of(
+    state: &GameState,
+    def: &crate::types::ability::TriggerDefinition,
+    controller: PlayerId,
+    active: PlayerId,
+) -> bool {
+    use crate::types::ability::TriggerConstraint;
+    match &def.constraint {
+        None => true,
+        Some(
+            TriggerConstraint::OnlyDuringYourTurn | TriggerConstraint::OnlyDuringYourMainPhase,
+        ) => active == controller,
+        // CR 102.3: team-aware, the same authority as the live constraint check.
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn) => {
+            super::players::is_opponent(state, controller, active)
+        }
+        Some(
+            TriggerConstraint::OncePerTurn
+            | TriggerConstraint::OncePerGame
+            | TriggerConstraint::NthSpellThisTurn { .. }
+            | TriggerConstraint::NthDrawThisTurn { .. }
+            | TriggerConstraint::AtClassLevel { .. }
+            | TriggerConstraint::MaxTimesPerTurn { .. }
+            | TriggerConstraint::OncePerOpponentPerTurn
+            | TriggerConstraint::EventSourceControlledBy { .. },
+        ) => true,
+    }
 }
 
 /// Match a delayed zone-change subject against its condition filter.
@@ -15175,6 +15217,7 @@ fn delayed_zone_change_event_with_index(
 /// current source lookup. The event is being consumed at the same boundary at
 /// which it was emitted, so comparing its subject id is attribution-only; all
 /// source facts in every other filter arm still flow through the exact context.
+#[allow(clippy::too_many_arguments)] // Each input is an independent fact of the zone-change event or trigger source.
 fn delayed_zone_change_filter_matches(
     state: &GameState,
     object_id: ObjectId,
@@ -15182,20 +15225,32 @@ fn delayed_zone_change_filter_matches(
     source_id: ObjectId,
     controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    from: Option<Zone>,
+    to: Option<Zone>,
 ) -> bool {
     if matches!(filter, crate::types::ability::TargetFilter::SelfRef) && source_context.is_some() {
         return object_id == source_id;
     }
 
-    crate::game::filter::matches_target_filter(
-        state,
-        object_id,
-        filter,
-        &source_context.map_or_else(
-            || FilterContext::from_source_with_controller(source_id, controller),
-            |source| FilterContext::from_trigger_source_with_controller(source, controller),
-        ),
-    )
+    let ctx = source_context.map_or_else(
+        || FilterContext::from_source_with_controller(source_id, controller),
+        |source| FilterContext::from_trigger_source_with_controller(source, controller),
+    );
+
+    // CR 603.10 + CR 603.6a: a battlefield-entry observer reads the entrant as it
+    // existed immediately after the entry event, not the departure look-back.
+    if to == Some(Zone::Battlefield) {
+        return crate::game::filter::matches_target_filter_on_entry_observation(
+            state, record, from, filter, &ctx,
+        );
+    }
+
+    // CR 603.10a: Leaves-the-battlefield abilities look back in time, so the
+    // departed object is evaluated through its exit snapshot `record` rather
+    // than its post-departure live characteristics. This also covers a token
+    // that ceased to exist (CR 111.7) and is absent from `state.objects`.
+    crate::game::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
 }
 
 /// Check whether a trigger's constraint allows it to fire.
