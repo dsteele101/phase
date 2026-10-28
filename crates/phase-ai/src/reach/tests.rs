@@ -758,6 +758,7 @@ fn strike_below_krenko(opponent_life: i32) -> GameRunner {
         .act(GameAction::ActivateAbility {
             source_id: krenko,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Krenko's ability is activatable");
     let state = runner.state();
@@ -1342,6 +1343,7 @@ fn a_response_whose_source_the_settlement_destroys_is_still_certified() {
         Some(GameAction::ActivateAbility {
             source_id: spewer,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
     );
     assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
@@ -1491,6 +1493,7 @@ fn a_certified_response_survives_the_casts_target_prompt() {
         Some(GameAction::ActivateAbility {
             source_id: spewer,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
     );
     assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));

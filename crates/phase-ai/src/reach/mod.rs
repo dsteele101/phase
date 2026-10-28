@@ -247,6 +247,7 @@ fn certified_pending_step(
                 GameAction::ActivateAbility {
                     source_id,
                     ability_index: index,
+                    ..
                 },
                 Some(pending_index),
             ) => *source_id == object_id && *index == pending_index,
@@ -567,10 +568,12 @@ pub(crate) fn issued_counterpart(issued: &[GameAction], step: &GameAction) -> Op
                 GameAction::ActivateAbility {
                     source_id: a,
                     ability_index: i,
+                    ..
                 },
                 GameAction::ActivateAbility {
                     source_id: b,
                     ability_index: j,
+                    ..
                 },
             ) => a == b && i == j,
             _ => *action == step,

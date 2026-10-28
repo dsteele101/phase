@@ -203,6 +203,7 @@ pub(super) fn reach_sources(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => push_activation_sources(
                 state,
                 ai_player,
@@ -364,6 +365,7 @@ fn cast_source(
                 action: GameAction::ActivateAbility {
                     source_id: object_id,
                     ability_index: follow_up.ability_index,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 },
                 mode: None,
                 x: None,

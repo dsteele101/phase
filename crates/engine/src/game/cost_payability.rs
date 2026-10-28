@@ -108,6 +108,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -302,6 +303,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -351,7 +353,10 @@ pub(crate) fn discard_legs_jointly_payable(
     let Some(player_state) = state.players.get(player.0 as usize) else {
         return true;
     };
-    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
     let legs: Vec<(usize, Vec<ObjectId>)> = costs
         .iter()
         .filter_map(|cost| {
@@ -367,6 +372,7 @@ pub(crate) fn discard_legs_jointly_payable(
                     .copied()
                     .filter(|&id| {
                         id != source
+                            && !super::casting::is_spell_being_cast(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -762,7 +768,13 @@ fn object_leg_demand_and_candidates(
         // their graveyard.
         ObjectLegKind::CollectEvidence => (
             ObjectLegDemand::Unmodeled,
-            state.graveyard_of(player).iter().copied().collect(),
+            state
+                .graveyard_of(player)
+                .iter()
+                .copied()
+                // CR 601.2a: a spell being cast is on the stack.
+                .filter(|&id| !super::casting::is_spell_being_cast(state, id))
+                .collect(),
         ),
         // CR 702.49a: ninjutsu returns an unblocked attacker the player controls.
         ObjectLegKind::Ninjutsu { variant } => (
@@ -1130,7 +1142,10 @@ impl AbilityCost {
                 let resolved =
                     super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
                 let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
-                let ctx = FilterContext::from_source(state, source).with_granting_object(granter);
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                let ctx = FilterContext::from_source_with_controller(source, player)
+                    .with_granting_object(granter);
                 p.hand
                     .iter()
                     .filter(|&&id| {
@@ -1381,12 +1396,15 @@ impl AbilityCost {
                 let resolved =
                     super::quantity::resolve_quantity(state, count, player, source).max(0) as usize;
                 let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
-                let ctx =
-                    FilterContext::from_source(state, source).with_granting_object(granting_object);
+                // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                // activated ability).
+                let ctx = FilterContext::from_source_with_controller(source, player)
+                    .with_granting_object(granting_object);
                 p.hand
                     .iter()
                     .filter(|&&id| {
                         id != source
+                            && !super::casting::is_spell_being_cast(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -1509,7 +1527,9 @@ impl AbilityCost {
                             >= *count
                     }
                     Some(tf) => {
-                        let ctx = FilterContext::from_source(state, source)
+                        // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+                        // activated ability).
+                        let ctx = FilterContext::from_source_with_controller(source, player)
                             .with_granting_object(granting_object);
                         let matching_counts = state.battlefield.iter().filter_map(|&id| {
                             state.objects.get(&id).and_then(|o| {
@@ -1633,6 +1653,10 @@ impl AbilityCost {
             AbilityCost::Reveal { count, filter } => match filter {
                 None => true,
                 Some(f) => {
+                    // CR 107.3a: X = 0 is a legal announcement, so before X is
+                    // announced a symbolic count reads 0 (mirrors Discard).
+                    let count = super::quantity::resolve_quantity(state, count, player, source)
+                        .max(0) as usize;
                     super::casting::find_eligible_reveal_targets(
                         state,
                         player,
@@ -1641,7 +1665,7 @@ impl AbilityCost {
                         f,
                     )
                     .len()
-                        >= *count as usize
+                        >= count
                 }
             },
             AbilityCost::Behold {
@@ -1791,7 +1815,10 @@ fn has_enough_tap_creatures(
     filter: &TargetFilter,
     exclude_source: bool,
 ) -> bool {
-    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
     let eligible = state.battlefield.iter().copied().filter(|&id| {
         if exclude_source && id == source {
             return false;
@@ -1844,7 +1871,8 @@ pub(super) fn exile_cost_effective_zone(zone: Option<Zone>, filter: Option<&Targ
 }
 
 /// CR 117.1 + CR 118.3: Objects in `zone` (`player`'s own for hand/graveyard/library) that
-/// can be exiled to pay a non-self `AbilityCost::Exile`, excluding `source`.
+/// can be exiled to pay a non-self `AbilityCost::Exile`, excluding `source` and,
+/// CR 601.2a, any spell being cast (`casting::is_spell_being_cast`).
 ///
 /// `Zone::Library` is deterministic top-of-library payment, not a choice. Only
 /// the top `count` cards are eligible, and filtered library exile costs are not
@@ -1895,9 +1923,13 @@ pub(super) fn eligible_exile_cost_objects(
     };
     let effective_filter = cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
-    let ctx = FilterContext::from_source(state, source).with_granting_object(granting_object);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
     ids.filter(|&id| {
         id != source
+            && !super::casting::is_spell_being_cast(state, id)
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
@@ -1932,7 +1964,12 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
     };
     zone_ids
         .into_iter()
-        .filter(|&id| id != source && matches_target_filter_in_owner_zone(state, id, filter, &ctx))
+        .filter(|&id| {
+            id != source
+                // CR 601.2a: a spell being cast is on the stack, not in `zone`.
+                && !super::casting::is_spell_being_cast(state, id)
+                && matches_target_filter_in_owner_zone(state, id, filter, &ctx)
+        })
         .collect()
 }
 
@@ -1954,7 +1991,9 @@ pub(crate) fn eligible_craft_materials(
     source: ObjectId,
     materials: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let ctx = FilterContext::from_source(state, source);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = FilterContext::from_source_with_controller(source, player);
     let mut out: Vec<ObjectId> = state
         .battlefield
         .iter()

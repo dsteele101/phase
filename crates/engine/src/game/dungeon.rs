@@ -1,50 +1,11 @@
 use std::collections::BTreeSet;
-use std::fmt;
-use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::format::FormatConfig;
 use crate::types::player::PlayerId;
 
-// ─── Dungeon Identity ────────────────────────────────────────────────────────
-
-/// CR 309: The five dungeon cards across D&D crossover sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum DungeonId {
-    LostMineOfPhandelver,
-    DungeonOfTheMadMage,
-    TombOfAnnihilation,
-    Undercity,
-    BaldursGateWilderness,
-}
-
-impl fmt::Display for DungeonId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LostMineOfPhandelver => write!(f, "Lost Mine of Phandelver"),
-            Self::DungeonOfTheMadMage => write!(f, "Dungeon of the Mad Mage"),
-            Self::TombOfAnnihilation => write!(f, "Tomb of Annihilation"),
-            Self::Undercity => write!(f, "Undercity"),
-            Self::BaldursGateWilderness => write!(f, "Baldur's Gate Wilderness"),
-        }
-    }
-}
-
-impl FromStr for DungeonId {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "LostMineOfPhandelver" => Ok(Self::LostMineOfPhandelver),
-            "DungeonOfTheMadMage" => Ok(Self::DungeonOfTheMadMage),
-            "TombOfAnnihilation" => Ok(Self::TombOfAnnihilation),
-            "Undercity" => Ok(Self::Undercity),
-            "BaldursGateWilderness" => Ok(Self::BaldursGateWilderness),
-            _ => Err(format!("Unknown dungeon: {s}")),
-        }
-    }
-}
+pub use crate::types::dungeon::DungeonId;
 
 // ─── Venture Source ──────────────────────────────────────────────────────────
 
@@ -774,6 +735,7 @@ pub fn room_effects(
                         single_use: false,
                         cast_cost_modifier: None,
                         alt_ability_cost: None,
+                        without_paying_mana_cost: false,
                         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     },
                     target: TargetFilter::Any,
@@ -2028,6 +1990,8 @@ pub fn has_completed_dungeon(
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::types::mana::ManaCost;
     use crate::types::statics::CostModifyMode;
