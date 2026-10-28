@@ -1061,6 +1061,14 @@ fn parse_morph_cost(cost_text: &str) -> Option<crate::types::keywords::MorphCost
     if clean.is_empty() {
         return None;
     }
+    // CR 702.37e: Morph costs must be fully parsed — reject if semantic text
+    // (conditions like "if ", "unless ") remains unconsumed. The cost parser
+    // may return a valid cost for a prefix (e.g. "Pay 5 life" from
+    // "Pay 5 life if you control an artifact"), but the morph keyword requires
+    // the entire cost text to be a valid, self-contained morph cost.
+    if clean.contains(" if ") || clean.contains(" unless ") {
+        return None;
+    }
     let cost = super::oracle_cost::parse_oracle_cost(clean);
     if !crate::types::keywords::is_ability_cost_supported_for_morph(&cost) {
         return None;

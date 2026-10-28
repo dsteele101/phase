@@ -2286,10 +2286,11 @@ fn try_parse_energy_cost(lower: &str) -> Option<QuantityExpr> {
 /// hand | their owners' hands | your hand>" costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     // CR 400.3 + CR 601.2h: shared destination/count grammar (also used by
-    // trigger unless-costs). `trailing` is ignored exactly as before.
+    // trigger unless-costs).
     let CountedReturnObject {
         count,
         object: filter_text,
+        original_object,
         ..
     } = split_counted_return_to_hand_object(rest_lower)?;
     // CR 201.5 / CR 201.5a: "~" / "this X" is the host self-reference; the
@@ -2334,7 +2335,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
         } else if count == 1
             // CR 201.5: a by-name reference never starts with an article or count,
             // so nothing may have been stripped ahead of the object phrase.
-            && rest_lower.trim_start().starts_with(filter_text)
+            && original_object.trim() == filter_text.trim()
             && folded_rem.trim() == filter_text.trim()
             && match &folded_filter {
                 TargetFilter::Any => true,

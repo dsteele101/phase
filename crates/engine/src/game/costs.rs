@@ -1234,7 +1234,13 @@ fn pay_ability_cost_inner(
                 PaymentScope::Resolution { .. } => {
                     super::life_costs::pay_life_as_cost(state, player, amount, events)
                 }
-                PaymentScope::TurnFaceUp { .. } => unreachable!(),
+                PaymentScope::TurnFaceUp { .. } => {
+                    // TurnFaceUp is handled above with a dedicated return; this arm is
+                    // logically unreachable but kept for exhaustiveness.
+                    return Ok(payment_failed(
+                        "PayLife cost not supported for turn-face-up in this code path",
+                    ));
+                }
             };
             match result {
                 super::life_costs::PayLifeCostResult::Paid { .. } => {}

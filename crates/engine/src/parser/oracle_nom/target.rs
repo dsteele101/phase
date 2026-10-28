@@ -763,6 +763,8 @@ pub struct CountedReturnObject<'a> {
     pub count: u32,
     /// The object phrase with the count token removed.
     pub object: &'a str,
+    /// The original object phrase before count/article stripping (for CR 201.5 by-name fallback).
+    pub original_object: &'a str,
     /// Text after the destination, left to the caller.
     pub trailing: &'a str,
 }
@@ -774,7 +776,8 @@ pub struct CountedReturnObject<'a> {
 /// phrase is not declined here; no printed cost carries one). Lowercase input.
 pub fn split_counted_return_to_hand_object(input: &str) -> Option<CountedReturnObject<'_>> {
     let (before, number, trailing) = scan_preceded(input, parse_return_to_hand_destination)?;
-    let object = before.trim_end();
+    let original_object = before.trim_end();
+    let object = original_object;
     let (object, count) = opt(terminated(
         verify(parse_number, |n: &u32| *n >= 1),
         tag(" "),
@@ -802,6 +805,7 @@ pub fn split_counted_return_to_hand_object(input: &str) -> Option<CountedReturnO
     Some(CountedReturnObject {
         count,
         object,
+        original_object,
         trailing,
     })
 }
@@ -1601,6 +1605,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 2,
                 object: "islands you control",
+                original_object: "two islands you control",
                 trailing: ".",
             })
         );
@@ -1623,6 +1628,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 1,
                 object: "creature card from your graveyard",
+                original_object: "a creature card from your graveyard",
                 trailing: "",
             })
         );
@@ -1644,6 +1650,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 1,
                 object: "land you control",
+                original_object: "a land you control",
                 trailing: "",
             })
         );
@@ -1653,6 +1660,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 1,
                 object: "another creature you control",
+                original_object: "another creature you control",
                 trailing: "",
             })
         );
@@ -1662,6 +1670,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 1,
                 object: "two-headed giant",
+                original_object: "two-headed giant",
                 trailing: "",
             })
         );
@@ -1686,6 +1695,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 2,
                 object: "lands you control",
+                original_object: "two lands you control",
                 trailing: "",
             })
         );
@@ -1694,6 +1704,7 @@ mod tests {
             Some(CountedReturnObject {
                 count: 1,
                 object: "land you control",
+                original_object: "a land you control",
                 trailing: "",
             })
         );
