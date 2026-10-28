@@ -3008,6 +3008,7 @@ mod tests {
             AbilityCost::Reveal { .. } => AbilityCost::Reveal {
                 count: 1,
                 filter: None,
+                shared_quality: None,
             },
             AbilityCost::Behold { .. } => AbilityCost::Behold {
                 count: 1,
@@ -3131,6 +3132,7 @@ mod tests {
             AbilityCost::Reveal {
                 count: 0,
                 filter: None,
+                shared_quality: None,
             },
             AbilityCost::Behold {
                 count: 0,

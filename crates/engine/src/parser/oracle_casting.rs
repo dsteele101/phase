@@ -2129,6 +2129,7 @@ Trample";
                 AbilityCost::Reveal {
                     count: 1,
                     filter: Some(_),
+                    shared_quality: _,
                 },
                 AbilityCost::Mana { .. },
             )) => {}
@@ -2147,6 +2148,7 @@ Trample";
             Some(AdditionalCost::Required(AbilityCost::Reveal {
                 count: 1,
                 filter: Some(_),
+                shared_quality: _,
             })) => {}
             other => panic!("Expected Required(Reveal with filter), got {:?}", other),
         }

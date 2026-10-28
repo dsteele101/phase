@@ -1435,24 +1435,74 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         return AbilityCost::Reveal {
             count: 1,
             filter: None,
+            shared_quality: None,
         };
     }
 
-    // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
+    // "Reveal N [Type] card(s) from your hand [that share a COLOR]" — reveal
+    // from hand with optional count, filter, and shared-quality constraint.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
-            let filter_raw = before.trim();
-            let filter_raw = strip_article(filter_raw, filter_raw);
-            let filter_raw = filter_raw
+        if let Ok((_, (before, after))) = split_once_on(&rest_lower, "from your hand") {
+            let mut filter_raw = before.trim();
+            let mut count = 1u32;
+            let mut shared_quality = None;
+
+            // Parse optional count: "two", "three", "a", "one", etc.
+            if let Some((n, after_count)) = crate::parser::oracle_util::parse_number(&filter_raw) {
+                count = n;
+                filter_raw = after_count.trim();
+            }
+
+            // Strip "card" or "cards"
+            filter_raw = filter_raw
                 .strip_suffix(" card")
                 .or_else(|| filter_raw.strip_suffix(" cards"))
                 .unwrap_or(filter_raw)
                 .trim();
-            let (filter, _) = parse_target(&format!("target {filter_raw}"));
+
+            // Parse "that share a COLOR" / "that share a CREATURE TYPE" etc.
+            // The shared-quality clause can appear either before or after "from your hand"
+            // Oracle text: "Reveal two cards from your hand that share a color"
+            //   -> before = "two cards", after = "that share a color"
+            // So we check both parts.
+            let share_search = if let Some(after_share) = filter_raw.strip_prefix("that share a ") {
+                Some(after_share.trim())
+            } else if let Some(after_share) = after.trim().strip_prefix("that share a ") {
+                Some(after_share.trim())
+            } else {
+                None
+            };
+
+            if let Some(quality_str) = share_search {
+                shared_quality = match quality_str {
+                    "color" => Some(crate::types::ability::SharedQuality::Color),
+                    "creature type" => Some(crate::types::ability::SharedQuality::CreatureType),
+                    "card type" => Some(crate::types::ability::SharedQuality::CardType),
+                    "name" => Some(crate::types::ability::SharedQuality::Name),
+                    "mana value" => Some(crate::types::ability::SharedQuality::ManaValue),
+                    "power" => Some(crate::types::ability::SharedQuality::Power),
+                    "toughness" => Some(crate::types::ability::SharedQuality::Toughness),
+                    _ => None,
+                };
+                // Remove the shared quality part from the filter
+                if shared_quality.is_some() {
+                    filter_raw = before.trim(); // reset to before "that share"
+                }
+            }
+
+            // Parse the remaining filter (if any)
+            let filter = if filter_raw.is_empty() || filter_raw == "a" || filter_raw == "one" {
+                None
+            } else {
+                let (filter, _) = parse_target(&format!("target {filter_raw}"));
+                Some(filter)
+            };
+
             return AbilityCost::Reveal {
-                count: 1,
-                filter: Some(filter),
+                count,
+                filter,
+                shared_quality,
             };
         }
     }
@@ -4778,7 +4828,8 @@ mod tests {
             parse_oracle_cost("Reveal this card from your hand"),
             AbilityCost::Reveal {
                 count: 1,
-                filter: None
+                filter: None,
+                shared_quality: None,
             }
         );
     }

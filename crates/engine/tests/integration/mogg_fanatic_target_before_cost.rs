@@ -452,6 +452,7 @@ fn targeted_activation_surfaces_reveal_cost_after_target_selection() {
         .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Reveal {
             count: 1,
             filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            shared_quality: None,
         }))
         .id();
     let revealed = scenario

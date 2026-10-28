@@ -6876,11 +6876,13 @@ fn surface_next_interactive_activation_cost_leg(
         }));
     }
 
-    if let Some(AbilityCost::Reveal { count, filter }) =
-        first_activation_cost_component_matching(cost, |cost| {
-            matches!(cost, AbilityCost::Reveal { .. })
-        })
-    {
+    if let Some(AbilityCost::Reveal {
+        count,
+        filter,
+        shared_quality: _,
+    }) = first_activation_cost_component_matching(cost, |cost| {
+        matches!(cost, AbilityCost::Reveal { .. })
+    }) {
         if let Some(filter) = filter {
             let choices = super::casting::find_eligible_reveal_targets(
                 state,
@@ -10473,7 +10475,11 @@ fn pay_additional_cost_with_source(
                 },
             });
         }
-        AbilityCost::Reveal { count, filter } => {
+        AbilityCost::Reveal {
+            count,
+            filter,
+            shared_quality: _,
+        } => {
             let mut pending = pending;
             // CR 701.20a: A filter-less reveal is the spell revealing itself —
             // there is no choice to make, the object is already known.
@@ -10586,6 +10592,53 @@ pub(crate) fn handle_reveal_for_cost(
         }
     }
 
+    // CR 701.20a: If the reveal cost has a shared-quality constraint (e.g.,
+    // "two cards that share a color"), validate that all chosen cards share
+    // at least one value of that quality.
+    // The shared_quality is stored in the activation_cost_snapshot (the full cost
+    // at announcement), not in activation_cost (which only has remaining unpaid costs).
+    let shared_quality = pending
+        .activation_cost_snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            if let AbilityCost::Composite { costs } = &snapshot.base_cost {
+                costs.iter().find_map(|c| {
+                    if let AbilityCost::Reveal {
+                        shared_quality: Some(q),
+                        ..
+                    } = c
+                    {
+                        Some(q.clone())
+                    } else {
+                        None
+                    }
+                })
+            } else if let AbilityCost::Reveal {
+                shared_quality: Some(q),
+                ..
+            } = &snapshot.base_cost
+            {
+                Some(q.clone())
+            } else {
+                None
+            }
+        });
+
+    if let Some(quality) = shared_quality {
+        if !chosen.is_empty() {
+            let shared_values = get_shared_quality_values(state, chosen[0], &quality);
+            for &card_id in &chosen[1..] {
+                let card_values = get_shared_quality_values(state, card_id, &quality);
+                if shared_values.intersection(&card_values).count() == 0 {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Revealed cards must share a {:?}",
+                        quality
+                    )));
+                }
+            }
+        }
+    }
+
     let mut revealed_names = Vec::with_capacity(chosen.len());
     for (index, &card_id) in chosen.iter().enumerate() {
         let obj = state.objects.get(&card_id).ok_or_else(|| {
@@ -10610,6 +10663,82 @@ pub(crate) fn handle_reveal_for_cost(
 
     pending.mark_activation_cost_committed();
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// Get the set of values for a shared quality (e.g., colors) for an object.
+fn get_shared_quality_values(
+    state: &GameState,
+    object_id: ObjectId,
+    quality: &crate::types::ability::SharedQuality,
+) -> std::collections::HashSet<String> {
+    use crate::types::ability::SharedQuality;
+    let mut values = std::collections::HashSet::new();
+    if let Some(obj) = state.objects.get(&object_id) {
+        match quality {
+            SharedQuality::Color => {
+                for color in &obj.color {
+                    values.insert(format!("{:?}", color));
+                }
+            }
+            SharedQuality::CreatureType => {
+                for subtype in &obj.card_types.subtypes {
+                    values.insert(subtype.clone());
+                }
+            }
+            SharedQuality::CardType => {
+                for core_type in &obj.card_types.core_types {
+                    values.insert(format!("{:?}", core_type));
+                }
+            }
+            SharedQuality::Name => {
+                values.insert(obj.name.clone());
+            }
+            SharedQuality::ManaValue => {
+                values.insert(obj.effective_mana_value().to_string());
+            }
+            SharedQuality::Power => {
+                if let Some(power) = obj.power {
+                    values.insert(power.to_string());
+                }
+            }
+            SharedQuality::Toughness => {
+                if let Some(toughness) = obj.toughness {
+                    values.insert(toughness.to_string());
+                }
+            }
+            SharedQuality::TotalPowerToughness => {
+                if let (Some(power), Some(toughness)) = (obj.power, obj.toughness) {
+                    values.insert((power + toughness).to_string());
+                }
+            }
+            SharedQuality::LandType => {
+                for subtype in &obj.card_types.subtypes {
+                    if matches!(
+                        subtype.as_str(),
+                        "Plains" | "Island" | "Swamp" | "Mountain" | "Forest"
+                    ) {
+                        values.insert(subtype.clone());
+                    }
+                }
+            }
+            SharedQuality::PermanentType => {
+                for core_type in &obj.card_types.core_types {
+                    if matches!(
+                        core_type,
+                        crate::types::card_type::CoreType::Artifact
+                            | crate::types::card_type::CoreType::Battle
+                            | crate::types::card_type::CoreType::Creature
+                            | crate::types::card_type::CoreType::Enchantment
+                            | crate::types::card_type::CoreType::Land
+                            | crate::types::card_type::CoreType::Planeswalker
+                    ) {
+                        values.insert(format!("{:?}", core_type));
+                    }
+                }
+            }
+        }
+    }
+    values
 }
 
 pub(crate) fn is_exile_any_number_effect_cost(cost: &AbilityCost) -> bool {
@@ -29159,6 +29288,7 @@ its replicate cost was paid.)\nDraw a card.";
                 AbilityCost::Reveal {
                     count: 1,
                     filter: None,
+                    shared_quality: None,
                 },
             ),
             (
