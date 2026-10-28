@@ -1283,6 +1283,25 @@ fn infernal_spawn_of_evil_pays_its_spoken_cost_and_deals_damage_when_opted_in() 
 #[test]
 fn infernal_spawn_of_evil_cannot_be_activated_without_the_un_actions_opt_in() {
     let (mut runner, spawn) = infernal_spawn_scenario();
+    let offers_spawn = |runner: &GameRunner, spawn: ObjectId| {
+        engine::ai_support::legal_actions(runner.state())
+            .iter()
+            .any(|a| matches!(a, GameAction::ActivateAbility { source_id, .. } if *source_id == spawn))
+    };
+    // Activation legality gates the spoken cost on the opt-in before any dry-run
+    // payment: the opted-out activation is never offered.
+    assert!(
+        !offers_spawn(&runner, spawn),
+        "an opted-out player is not offered the spoken activation"
+    );
+    // Reach guard: the same board offers it once P0 opts in, so the negative is
+    // the opt-in gate and not some other missing resource.
+    let (mut opted_in, opted_in_spawn) = infernal_spawn_scenario();
+    un_action(&mut opted_in, P0, UnAction::SetEnabled { enabled: true });
+    assert!(
+        offers_spawn(&opted_in, opted_in_spawn),
+        "opting in makes the spoken activation legal"
+    );
     assert!(
         activate_infernal_spawn(&mut runner, spawn).is_err(),
         "a spoken cost is unpayable for a player who did not opt in"
