@@ -1323,6 +1323,7 @@ pub(super) fn handle_discard_for_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_reveal_for_cost(
     state: &mut GameState,
     player: PlayerId,
