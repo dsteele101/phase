@@ -217,6 +217,18 @@ const IRREGULAR_PLURALS: &[(&str, &str)] = &[
     ("matriarch", "matriarchs"),
     ("epoch", "epochs"),
     ("eunuch", "eunuchs"),
+    // Words ending in "o" with standard "-oes" plural.
+    ("hero", "heroes"),
+    ("echo", "echoes"),
+    ("torpedo", "torpedoes"),
+    ("veto", "vetoes"),
+    ("embargo", "embargoes"),
+    ("mosquito", "mosquitoes"),
+    // Words with two accepted spellings: both "-oes" and plain "+s" are standard.
+    ("volcano", "volcanoes"),
+    ("volcano", "volcanos"),
+    ("tornado", "tornadoes"),
+    ("tornado", "tornados"),
 ];
 
 /// Split spoken text into lowercase words. Hyphenated words are preserved as single words.
@@ -238,15 +250,21 @@ pub fn word_matches(watched: &str, spoken: &str) -> bool {
         return true;
     }
     // Irregular plurals ("life" -> "lives", "child" -> "children", ...).
-    // When the watched word is irregular, only its listed plural matches —
+    // When the watched word is irregular, only its listed plural(s) match —
     // "lifes" is not the plural of "life" and must not fall through to the
-    // regular "+s" rule.
-    if let Some(plural) = IRREGULAR_PLURALS
+    // regular "+s" rule. Some words have two accepted plurals (e.g. "volcano"
+    // -> "volcanoes" and "volcanos"); all listed forms are accepted.
+    if IRREGULAR_PLURALS
         .iter()
-        .find(|(singular, _)| *singular == w)
-        .map(|(_, plural)| *plural)
+        .any(|(singular, plural)| *singular == w && *plural == s)
     {
-        return s == plural;
+        return true;
+    }
+    // If the watched word has irregular entries but the spoken form doesn't match
+    // any of them, don't fall through to the regular rules — the irregular branch
+    // alone decides for that word.
+    if IRREGULAR_PLURALS.iter().any(|(singular, _)| *singular == w) {
+        return false;
     }
     // Once a special-plural branch applies to the watched word, it alone decides:
     // "sanitys" is not the plural of "sanity" and "boxs" is not the plural of "box".

@@ -265,6 +265,14 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// must be the same incarnation still in its expected zone rather than a new object
 /// that changed zones (CR 400.7).
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
+    // CR 113.6m + CR 400.7: validates that a Gotcha offer's source and returned card
+    // remain intact on the live state. The source ability must continue to function in
+    // its current zone (CR 113.6m), the recipient must remain opted in to Un-card
+    // actions (an engine opt-in preference with no CR entry), and the returned card
+    // must be the same incarnation still in its expected zone rather than a new object
+    // that changed zones (CR 400.7). This live-state invalidation applies before the
+    // reflexive Gotcha trigger is created; CR 603.3 (handling an already-triggered
+    // ability) does not govern it.
     // CR 113.6m: the source must still exist and still carry a functioning Gotcha
     // ability in its current zone (gotcha_definitions applies both checks).
     gotcha_definitions(state, offer.source_id).next().is_some()

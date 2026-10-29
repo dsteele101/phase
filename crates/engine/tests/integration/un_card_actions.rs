@@ -1066,6 +1066,20 @@ fn name_dropping_matches_real_plurals_of_name_words_and_rejects_invented_ones() 
         ("Box Trap", "boxs", "boxes"),
         ("Monarch Lord", "monarches", "monarchs"),
         ("Pop Quiz", "quizes", "quizzes"),
+        // Words ending in "o" with standard "-oes" plural.
+        ("Hero of Bladehold", "heros", "heroes"),
+        ("Echo of Eons", "echos", "echoes"),
+        ("Torpedo Fish", "torpedos", "torpedoes"),
+        ("Veto Power", "vetos", "vetoes"),
+        ("Embargo Order", "embargos", "embargoes"),
+        ("Mosquito Bite", "mosquitos", "mosquitoes"),
+        // Words with two accepted spellings: both "-oes" and plain "+s" are standard.
+        // Use invalid plural "volcanoses" as the invented form since both "volcanos" and "volcanoes" are valid.
+        ("Volcano Hellion", "volcanoses", "volcanoes"),
+        ("Volcano Hellion", "volcanoses", "volcanos"),
+        // Same for tornado - both "tornados" and "tornadoes" are valid.
+        ("Tornado Elemental", "tornadoeses", "tornados"),
+        ("Tornado Elemental", "tornadoeses", "tornadoes"),
     ] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
