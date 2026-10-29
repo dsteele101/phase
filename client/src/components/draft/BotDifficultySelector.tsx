@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import { DIFFICULTY_NAMES, useDraftStore } from "../../stores/draftStore";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 
 // ── Component ───────────────────────────────────────────────────────────
 
@@ -18,6 +19,8 @@ export function BotDifficultySelector() {
   const { t } = useTranslation("draft");
   const difficulty = useDraftStore((s) => s.difficulty);
   const setDifficulty = useDraftStore((s) => s.setDifficulty);
+  const pickEnhancements = usePreferencesStore((s) => s.draftPickEnhancements);
+  const setPickEnhancements = usePreferencesStore((s) => s.setDraftPickEnhancements);
 
   return (
     <div className="flex flex-col gap-2">
@@ -44,6 +47,18 @@ export function BotDifficultySelector() {
           );
         })}
       </div>
+      <label className="flex max-w-md cursor-pointer items-start gap-2 text-xs text-white/70">
+        <input
+          type="checkbox"
+          checked={pickEnhancements}
+          onChange={(event) => setPickEnhancements(event.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-emerald-400"
+        />
+        <span className="flex flex-col">
+          <span className="font-medium text-white/85">{t("setSelector.pickEnhancements.label")}</span>
+          <span className="text-[11px] text-white/45">{t("setSelector.pickEnhancements.hint")}</span>
+        </span>
+      </label>
     </div>
   );
 }
