@@ -15,6 +15,7 @@
 //!   return ..." clause (CR 603.12 reflexive trigger shape) puts the return on
 //!   the stack through the ordinary trigger pipeline.
 
+use crate::game::game_object::{ObjectIdentityBindingExt, ObjectIncarnationRefExt};
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};

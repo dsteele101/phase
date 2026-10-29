@@ -247,16 +247,6 @@ impl ObjectIdentityBinding {
             expected_zone,
         }
     }
-
-    /// CR 400.7: whether this binding still matches the live object — the same
-    /// incarnation still in its expected zone.
-    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
-        self.reference.is_current(state)
-            && state
-                .objects
-                .get(&self.reference.object_id)
-                .is_some_and(|object| object.zone == self.expected_zone)
-    }
 }
 
 /// CR 400.7 + CR 603.4 + CR 603.6a: the identity of the object whose zone change

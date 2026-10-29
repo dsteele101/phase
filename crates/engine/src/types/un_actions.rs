@@ -293,7 +293,7 @@ fn is_number_word(word: &str) -> bool {
     if matches!(word, "a" | "an") {
         return false;
     }
-    crate::parser::oracle_nom::primitives::parse_number(word).is_ok_and(|(rest, _)| rest.is_empty())
+    crate::types::text_grammar::parse_number(word).is_ok_and(|(rest, _)| rest.is_empty())
 }
 
 impl GotchaCondition {
