@@ -22,6 +22,7 @@ use crate::game::filter::{
     CHARACTERISTIC_READ_DEPTH, UNPAIRED_READS,
 };
 use crate::game::game_object::DisplaySource;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
     is_runtime_host_lifetime_replacement, is_runtime_target_die_exile_replacement,
@@ -1547,6 +1548,22 @@ impl ConditionContext {
     }
 }
 
+thread_local! {
+    /// CR 611.3a: set by every evaluator arm that reads the step in progress, so a layer pass
+    /// knows its result can change when a step begins.
+    static STEP_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `pass` and returns whether it evaluated a step-reading condition; an enclosing pass
+/// keeps its own reads.
+fn record_step_reads(pass: impl FnOnce()) -> bool {
+    let outer = STEP_READ.replace(false);
+    pass();
+    let read = STEP_READ.get();
+    STEP_READ.set(outer || read);
+    read
+}
+
 /// Evaluate a `StaticCondition` for the given controller and source object.
 /// Returns `true` if the condition is met (effect should apply), `false` otherwise.
 ///
@@ -2833,6 +2850,7 @@ fn evaluate_condition_inner(
         // must be the phase in progress (shared predicate; the composed
         // possessive form carries its `DuringYourTurn` scope separately).
         StaticCondition::FirstCombatPhaseOfTurn => {
+            STEP_READ.set(true);
             super::conditions::first_combat_phase_in_progress(state)
         }
         // CR 103.1: True when the scoped player took the first turn of the
@@ -3631,6 +3649,12 @@ fn evaluate_layers_with_retirement_owner(
     state: &mut GameState,
     retirement_owner: StateDurationRetirementOwner,
 ) {
+    // CR 611.3a: a full pass re-derives everything, so its reads replace the record.
+    let read = record_step_reads(|| evaluate_all_layers(state, retirement_owner));
+    state.layers_read_current_step = read;
+}
+
+fn evaluate_all_layers(state: &mut GameState, retirement_owner: StateDurationRetirementOwner) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
@@ -5511,28 +5535,37 @@ fn flush_layers_with_retirement_owner(
                 flush_lapsed_durations(state, retirement_owner);
                 return;
             }
-            if let Some(prepared) =
-                prepare_incremental_flush(state, &ids, StaticGateTruth::Evaluate)
-            {
-                super::perf_counters::record_layers_incremental();
-                apply_layers_incremental(state, prepared, retirement_owner);
-                // Rebuild the presence index so the incremental arm leaves a PRECISE index
-                // (not a conservative superset). The incremental path is already
-                // O(battlefield): `prepare_incremental_flush` unconditionally calls
-                // `StaticSourceIndex::rebuild_from_state`, so a full presence rebuild here is
-                // DRY, matches the sibling-cache convention, and adds no asymptotic cost.
-                refresh_static_mode_presence(state);
-                for id in &ids {
-                    super::public_state::mark_public_state_object_dirty(state, *id);
-                }
-                super::public_state::mark_battlefield_display_dirty(state);
-            } else {
-                super::perf_counters::record_layers_escalated();
-                super::perf_counters::record_layers_full_eval();
-                evaluate_layers_with_retirement_owner(state, retirement_owner);
-                super::public_state::mark_public_state_all_dirty(state);
-            }
+            // CR 611.3a: an incremental pass keeps the cached results it does not re-derive,
+            // so its reads add to the record.
+            let read = record_step_reads(|| flush_entered_objects(state, &ids, retirement_owner));
+            state.layers_read_current_step |= read;
         }
+    }
+}
+
+fn flush_entered_objects(
+    state: &mut GameState,
+    ids: &BTreeSet<ObjectId>,
+    retirement_owner: StateDurationRetirementOwner,
+) {
+    if let Some(prepared) = prepare_incremental_flush(state, ids, StaticGateTruth::Evaluate) {
+        super::perf_counters::record_layers_incremental();
+        apply_layers_incremental(state, prepared, retirement_owner);
+        // Rebuild the presence index so the incremental arm leaves a PRECISE index
+        // (not a conservative superset). The incremental path is already
+        // O(battlefield): `prepare_incremental_flush` unconditionally calls
+        // `StaticSourceIndex::rebuild_from_state`, so a full presence rebuild here is
+        // DRY, matches the sibling-cache convention, and adds no asymptotic cost.
+        refresh_static_mode_presence(state);
+        for id in ids {
+            super::public_state::mark_public_state_object_dirty(state, *id);
+        }
+        super::public_state::mark_battlefield_display_dirty(state);
+    } else {
+        super::perf_counters::record_layers_escalated();
+        super::perf_counters::record_layers_full_eval();
+        evaluate_layers_with_retirement_owner(state, retirement_owner);
+        super::public_state::mark_public_state_all_dirty(state);
     }
 }
 
