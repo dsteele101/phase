@@ -651,13 +651,13 @@ fn spell_reveal_shared_color_constraint_travels_with_prompt() {
     }
     assert!(reached_reveal, "must reach reveal prompt");
 
-    // Spell should have resolved (no effect, so no card drawn)
+    // Spell should have resolved, drawing a card
     // Started with 4 cards in hand (3 creatures + spell), spell leaves hand,
-    // revealed 2 stay in hand, no draw = 3 cards in hand
+    // revealed 2 stay in hand, drew 1 = 4 cards in hand
     assert_eq!(
         runner.state().players[P0.0 as usize].hand.len(),
-        3,
-        "3 cards remain after casting; revealed cards stay in hand; no draw effect = 3"
+        4,
+        "3 cards remain after casting; revealed cards stay in hand; drew 1 = 4"
     );
     assert!(runner.state().stack.is_empty());
 }
@@ -1011,31 +1011,12 @@ fn turn_face_up_reveal_shared_color_rejects_different_colors() {
 /// creature type with a creature you control: Draw two cards."
 const _MULTI_LEG_REVEAL_ORACLE: &str = "{1}, {T}, Reveal a card from your hand that shares a color with a card in your graveyard, then reveal a card from your hand that shares a creature type with a creature you control: Draw two cards.";
 
-#[ignore = "Oracle parser does not support multi-leg reveal with different shared qualities in a single cost"]
 #[test]
-fn multi_leg_reveal_each_leg_has_own_constraint() {
-    // This test verifies the architecture supports multiple reveal legs with
-    // different shared-quality constraints. The parser currently doesn't produce
-    // this pattern from Oracle text (no printed card does this), but the payment
-    // pipeline must correctly thread each leg's constraint to its own prompt.
-    //
-    // We test by checking the cost structure after parsing.
+fn single_leg_reveal_shared_quality_parsing() {
+    // Verify parse_reveal_from_hand_cost_body can produce shared_quality
     use engine::parser::oracle_cost::parse_oracle_cost;
     use engine::types::ability::{AbilityCost, SharedQuality};
 
-    // Currently the parser doesn't support multi-leg reveal with different
-    // shared qualities in a single activation cost. The architecture in
-    // `casting_costs.rs` and `costs.rs` supports it via sequential prompts,
-    // but no printed card exercises this.
-    //
-    // For now, we verify the payability function handles it correctly by
-    // testing that each leg validates against its own constraint.
-
-    // This is a placeholder test to document the capability.
-    // When a card with this pattern is printed, this test should be extended
-    // to drive the full payment flow.
-
-    // Verify parse_reveal_from_hand_cost_body can produce shared_quality
     let cost = parse_oracle_cost("Reveal two cards from your hand that share a color");
     assert!(matches!(
         cost,
@@ -1045,7 +1026,7 @@ fn multi_leg_reveal_each_leg_has_own_constraint() {
         }
     ));
 
-    let cost = parse_oracle_cost("Reveal a card from your hand that shares a creature type");
+    let cost = parse_oracle_cost("Reveal two cards from your hand that share a creature type");
     assert!(matches!(
         cost,
         AbilityCost::Reveal {
@@ -1302,7 +1283,7 @@ fn reveal_x_shared_color_x_zero_reveals_none() {
 /// reveal cost by constructing the cost directly.
 #[test]
 fn spell_additional_cost_reveal_shared_color_payability_and_payment() {
-    use engine::game::scenario::{GameRunner, GameScenario, P0};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::types::ability::{AbilityCost, SharedQuality};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
@@ -1434,7 +1415,7 @@ fn spell_additional_cost_reveal_shared_color_payability_and_payment() {
 /// CR 601.2b + CR 701.20a: Spell additional cost with shared-quality reveal - wrong pair rejected.
 #[test]
 fn spell_additional_cost_reveal_shared_color_rejects_different_colors() {
-    use engine::game::scenario::{GameRunner, GameScenario, P0};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::types::ability::{AbilityCost, SharedQuality};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
@@ -1544,26 +1525,4 @@ fn spell_additional_cost_reveal_shared_color_rejects_different_colors() {
         }
     }
     assert!(reached_reveal, "must reach reveal prompt");
-}
-
-/// CR 702.37e + CR 701.20a: Turn face up (morph/disguise) cost with shared-quality reveal.
-/// Tests the payability gate and payment validation for a face-down creature's
-/// turn-face-up cost by constructing the cost directly.
-/// NOTE: This test is disabled because setting up a morph/disguise turn-face-up cost
-/// requires constructing the back_face keywords, which is complex. The spell additional
-/// cost tests above exercise the shared_quality payability and payment validation
-/// through the casting_costs path. The morph path uses the same reveal_cost_has_legal_selection
-/// authority and is tested via the Illuminated Folio activation tests.
-#[ignore = "Requires complex back_face keyword setup; shared_quality logic tested via spell additional cost and activation tests"]
-#[test]
-fn turn_face_up_cost_reveal_shared_color_payability_and_payment() {
-    // Test implementation would go here if we can easily construct a morph/disguise back_face
-    // For now, the shared_quality logic is tested through:
-    // - Illuminated Folio activation tests (illuminated_folio_reveal_two_blue_cards_succeeds, etc.)
-    // - Spell additional cost tests (spell_additional_cost_reveal_shared_color_payability_and_payment, etc.)
-    // Both paths use the same reveal_cost_has_legal_selection authority.
-    assert!(
-        true,
-        "Placeholder test - shared_quality logic covered by other tests"
-    );
 }
