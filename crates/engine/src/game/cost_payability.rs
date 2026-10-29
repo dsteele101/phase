@@ -1815,30 +1815,23 @@ impl AbilityCost {
 /// The single authority for reveal-cost shared-quality checks, used by both the
 /// payability probe and the payment validator. Colorless cards share no color,
 /// so a set whose running intersection is empty never qualifies.
+///
+/// For fewer than two cards, this returns `false` because a reveal cost
+/// requiring shared quality cannot be satisfied with fewer than the required
+/// number of cards. The group-check authority in `filter::objects_have_common_quality_value`
+/// treats fewer than two as vacuously true for target validation, so we handle
+/// the reveal-specific cardinality requirement here before delegating.
 pub(crate) fn cards_share_quality(
     state: &GameState,
     cards: &[ObjectId],
     quality: &SharedQuality,
 ) -> bool {
-    let mut values = cards.iter().map(|id| {
-        state.objects.get(id).map_or_else(Default::default, |obj| {
-            super::filter::object_shared_quality_values_public(
-                obj,
-                quality,
-                &state.all_creature_types,
-            )
-        })
-    });
-    let Some(mut shared) = values.next() else {
-        return true;
-    };
-    for card_values in values {
-        shared.retain(|value| card_values.contains(value));
-        if shared.is_empty() {
-            return false;
-        }
+    // Reveal costs require at least 2 cards to share a quality.
+    // This differs from target validation which is vacuously true for < 2.
+    if cards.len() < 2 {
+        return false;
     }
-    !shared.is_empty()
+    super::filter::objects_have_common_quality_value(state, cards, quality)
 }
 
 /// CR 701.20a: Size of the largest subset of `cards` that satisfies
@@ -1876,7 +1869,17 @@ pub(crate) fn reveal_cost_has_legal_selection(
     let Some(quality) = shared_quality else {
         return eligible.len() >= count;
     };
+    // CR 107.3a: X = 0 is a legal announcement. Revealing 0 cards trivially
+    // satisfies any shared-quality constraint (vacuous truth).
+    if count == 0 {
+        return true;
+    }
     if count > eligible.len() {
+        return false;
+    }
+    if count < 2 {
+        // Reveal costs with shared quality require at least 2 cards to share.
+        // If count < 2 (and not 0), the constraint cannot be satisfied.
         return false;
     }
     fn extend(
@@ -1886,11 +1889,9 @@ pub(crate) fn reveal_cost_has_legal_selection(
         quality: &SharedQuality,
         chosen: &mut Vec<ObjectId>,
     ) -> bool {
-        if !cards_share_quality(state, chosen, quality) {
-            return false;
-        }
         if chosen.len() == count {
-            return true;
+            // Only check shared quality when we have a complete selection
+            return cards_share_quality(state, chosen, quality);
         }
         eligible.iter().enumerate().any(|(index, &id)| {
             chosen.push(id);

@@ -2481,6 +2481,10 @@ pub fn candidate_actions_broad_with_probe(
         }
         // CR 701.20a: A shared-quality reveal ("two cards that share a color")
         // offers only selections the payment validator accepts.
+        // CR 701.20a: The AI must consider the full eligible pool, not just the
+        // first SELECTION_POOL_CAP cards. Group by shared quality value first,
+        // then enumerate combinations within each qualifying group so legal pairs
+        // beyond the pool boundary are not omitted.
         WaitingFor::PayCost {
             player,
             kind: PayCostKind::Reveal {
@@ -2489,26 +2493,73 @@ pub fn candidate_actions_broad_with_probe(
             choices,
             count,
             ..
-        } => bounded_combinations_for_sizes(
-            choices,
-            [*count],
-            SELECTION_POOL_CAP,
-            // The pool cap already bounds the enumeration; the candidate cap
-            // applies after the shared-quality filter so payable combinations
-            // are not crowded out by earlier non-matching ones.
-            usize::MAX,
-        )
-        .into_iter()
-        .filter(|combo| crate::game::cost_payability::cards_share_quality(state, combo, quality))
-        .take(SELECTION_CANDIDATE_CAP)
-        .map(|combo| {
-            candidate(
-                GameAction::SelectCards { cards: combo },
-                TacticalClass::Selection,
-                Some(*player),
-            )
-        })
-        .collect(),
+        } => {
+            // Group eligible cards by each quality value they have.
+            // A card can belong to multiple groups (e.g., a multicolor card).
+            // We need combinations of `count` cards that share at least one quality value.
+            // Approach: find the largest qualifying groups and enumerate combinations within them.
+            use std::collections::HashMap;
+
+            // `count` is `&usize` because we match on a reference to `WaitingFor::PayCost`
+            let count = *count;
+            if choices.len() < count {
+                return Vec::new();
+            }
+
+            // Build mapping from quality value -> list of card IDs that have that value
+            let mut value_to_cards: HashMap<String, Vec<ObjectId>> = HashMap::new();
+            for &id in choices {
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                let values = crate::game::filter::object_shared_quality_values_public(
+                    obj,
+                    quality,
+                    &state.all_creature_types,
+                );
+                for value in values {
+                    value_to_cards.entry(value).or_default().push(id);
+                }
+            }
+
+            let mut all_combos = Vec::new();
+            for (_, cards_with_value) in value_to_cards {
+                if cards_with_value.len() < count {
+                    continue;
+                }
+                // Enumerate combinations within this group using the FULL group as the pool.
+                // The pool cap (SELECTION_POOL_CAP) must NOT be applied here — a legal
+                // combination beyond the first 12 cards of a qualifying group would
+                // otherwise be omitted. The output cap (SELECTION_CANDIDATE_CAP) still
+                // bounds total work.
+                let group_combos = bounded_combinations_for_sizes(
+                    &cards_with_value,
+                    [count],
+                    cards_with_value.len(), // full group, no pool cap
+                    SELECTION_CANDIDATE_CAP,
+                );
+                for combo in group_combos {
+                    if all_combos.len() >= SELECTION_CANDIDATE_CAP {
+                        break;
+                    }
+                    all_combos.push(combo);
+                }
+                if all_combos.len() >= SELECTION_CANDIDATE_CAP {
+                    break;
+                }
+            }
+
+            all_combos
+                .into_iter()
+                .map(|combo| {
+                    candidate(
+                        GameAction::SelectCards { cards: combo },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::PayCost {
             player,
             choices,
