@@ -23,7 +23,11 @@ import type {
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
-import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
+import {
+  supportsAiDecisionDiagnostics,
+  supportsDebugHandReveal,
+  supportsMatchConcede,
+} from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -33,6 +37,7 @@ import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
+import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
 import { CardTextReference } from "../components/card/CardTextReference.tsx";
@@ -137,6 +142,7 @@ import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
 import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
+import { DayNightBadge } from "../components/hud/HudBadges.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
@@ -1066,6 +1072,7 @@ function GamePageContent({
       adapter.setAiDecisionDiagnosticsEnabled(false);
     };
   }, [adapter, aiDecisionCaptureEnabled]);
+  useDebugHandReveal(showAiHand);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
@@ -1566,7 +1573,7 @@ function GamePageContent({
             <>
               <div aria-hidden />
               <div className="min-w-0">
-                <OpponentHand showCards={showAiHand} />
+                <OpponentHand />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
@@ -1614,7 +1621,6 @@ function GamePageContent({
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
-            showOpponentCards={showAiHand}
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
@@ -1706,6 +1712,7 @@ function GamePageContent({
             <div className="flex flex-col gap-1 max-lg:gap-1">
               <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
+              <DayNightBadge />
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
@@ -1725,7 +1732,10 @@ function GamePageContent({
             <CombatPhaseIndicator />
           </div>
           {isSpectatorMode ? (
-            <TurnStatusLine />
+            <div className="flex flex-row items-center gap-1.5">
+              <TurnStatusLine />
+              <DayNightBadge />
+            </div>
           ) : (
             <>
               <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
@@ -1737,6 +1747,7 @@ function GamePageContent({
                 <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
+                <DayNightBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
@@ -1757,7 +1768,7 @@ function GamePageContent({
       {/* Game menu — top-left hamburger */}
       <GameMenu
         gameId={gameId}
-        isAiMode={mode === "ai"}
+        isAiMode={mode === "ai" && supportsDebugHandReveal(adapter)}
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
