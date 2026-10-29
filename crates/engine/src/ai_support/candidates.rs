@@ -2545,7 +2545,7 @@ pub fn candidate_actions_broad_with_probe(
 
             // Sort groups by size descending for fair remainder distribution.
             let mut groups_by_size = qualifying_groups.clone();
-            groups_by_size.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            groups_by_size.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
             let mut per_group_cap: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
