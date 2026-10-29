@@ -464,6 +464,100 @@ fn a_player_cannot_gotcha_their_own_gesture() {
 }
 
 #[test]
+fn eliminated_player_cannot_perform_tells_or_open_gotcha_offers_in_multiplayer() {
+    const P2: engine::types::player::PlayerId = engine::types::player::PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario
+        .add_spell_to_graveyard(P0, "Touch and Go", false)
+        .from_oracle_text(TOUCH_AND_GO)
+        .id();
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P2, UnAction::SetEnabled { enabled: true });
+
+    // P1 concedes; multiplayer game continues between P0 and P2 per CR 800.4.
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes");
+    assert!(
+        !engine::game::players::is_alive(runner.state(), P1),
+        "P1 has left the game"
+    );
+    assert!(
+        engine::game::players::is_alive(runner.state(), P2),
+        "P2 is still alive in the game"
+    );
+
+    // CR 102.1, CR 800.4: departed P1 cannot take game actions or produce rules-relevant tells.
+    let tell_result = apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::PerformTell {
+                tell: UnTell::Physical(PhysicalTell::TouchFace),
+            },
+        },
+    );
+    assert!(
+        tell_result.is_err(),
+        "eliminated player cannot perform tells"
+    );
+    assert!(
+        runner.state().un_actions.gotcha_offers.is_empty(),
+        "eliminated player's tell opens no Gotcha offers"
+    );
+
+    // Departed P1 also cannot say Gotcha.
+    let gotcha_result = apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::SayGotcha {
+                source_id: card,
+                returns: card,
+            },
+        },
+    );
+    assert!(
+        gotcha_result.is_err(),
+        "eliminated player cannot say Gotcha"
+    );
+
+    // Paired control: living opponent P2 performs the tell and opens P0's Touch and Go offer.
+    tell(&mut runner, P2, UnTell::Physical(PhysicalTell::TouchFace));
+    let offers = runner.state().un_actions.gotcha_offers.clone();
+    assert_eq!(
+        offers.len(),
+        1,
+        "living opponent's tell opens one Gotcha window"
+    );
+    assert_eq!(
+        (offers[0].player, offers[0].source_id),
+        (P0, card),
+        "the offer is for P0's Touch and Go"
+    );
+
+    // Living P0 says Gotcha, putting the reflexive trigger on the stack.
+    un_action(
+        &mut runner,
+        P0,
+        UnAction::SayGotcha {
+            source_id: card,
+            returns: card,
+        },
+    );
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&card].zone,
+        Zone::Hand,
+        "Touch and Go returned to P0's hand"
+    );
+}
+
+#[test]
 fn spoken_gotchas_match_whole_words_and_numbers() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

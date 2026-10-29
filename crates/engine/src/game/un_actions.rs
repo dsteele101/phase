@@ -134,12 +134,19 @@ pub fn open_gotcha_offers(
     performer: PlayerId,
     tell: &UnTell,
 ) -> Vec<GotchaOffer> {
+    // CR 102.1, CR 800.4: an eliminated player has left the game; their gestures
+    // cannot satisfy opponent trigger conditions.
+    if !super::players::is_alive(state, performer) {
+        return Vec::new();
+    }
     let mut offers = Vec::new();
     for (&source_id, _) in state.objects.iter() {
         let Some(holder) = holder_of(state, source_id) else {
             continue;
         };
+        // CR 102.1, CR 800.4: holder must still be alive and in the game.
         if holder == performer
+            || !super::players::is_alive(state, holder)
             || !player_can_say_phrases(state, holder)
             || !super::players::is_opponent(state, holder, performer)
         {
@@ -220,6 +227,9 @@ fn append_gotcha_offers(state: &mut GameState, new_offers: Vec<GotchaOffer>) {
 /// declined any say-it payment, so the "unless" branch simply happens
 /// (CR 118.12a).
 pub fn record_tell(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
+    if !super::players::is_alive(state, performer) {
+        return;
+    }
     let offers = open_gotcha_offers(state, performer, tell);
     if offers.is_empty() {
         return;
@@ -259,24 +269,20 @@ pub fn announce_pending_tells(state: &mut GameState) {
 /// source may have left play, its controller may have opted out, or the returned
 /// card may have moved zones — each of which invalidates the window.
 ///
-/// CR 113.6 + CR 400.7: validates that a Gotcha offer's source and returned card
+/// CR 113.6m + CR 400.7: validates that a Gotcha offer's source and returned card
 /// remain intact on the live state. The source ability must continue to function in
 /// its current zone (CR 113.6: abilities function only in the zones they specify;
-/// Gotcha abilities on graveyard cards function from the graveyard per CR 113.6b),
-/// the recipient must remain opted in to Un-card actions (an engine opt-in
-/// preference with no CR entry), and the returned card must be the same incarnation
-/// still in its expected zone rather than a new object that changed zones (CR 400.7).
+/// Gotcha abilities on graveyard cards function from the graveyard per CR 113.6m),
+/// the recipient must remain in the game (CR 102.1, CR 800.4) and opted in to Un-card
+/// actions (an engine opt-in preference with no CR entry), and the returned card must
+/// be the same incarnation still in its expected zone rather than a new object that
+/// changed zones (CR 400.7).
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
-    // CR 113.6 + CR 400.7: validates that a Gotcha offer's source and returned card
-    // remain intact on the live state. The source ability must continue to function in
-    // its current zone (CR 113.6: abilities function only in the zones they specify;
-    // Gotcha abilities on graveyard cards function from the graveyard per CR 113.6b),
-    // the recipient must remain opted in to Un-card actions (an engine opt-in
-    // preference with no CR entry), and the returned card must be the same incarnation
-    // still in its expected zone rather than a new object that changed zones (CR 400.7).
-    // CR 113.6: the source must still exist and still carry a functioning Gotcha
-    // ability in its current zone (gotcha_definitions applies both checks).
-    gotcha_definitions(state, offer.source_id).next().is_some()
+    // CR 102.1, CR 800.4: recipient must still be in the game.
+    super::players::is_alive(state, offer.player)
+        // CR 113.6m: the source must still exist and still carry a functioning Gotcha
+        // ability in its current zone (gotcha_definitions applies both checks).
+        && gotcha_definitions(state, offer.source_id).next().is_some()
         // The recipient must still be opted in to Un-card actions.
         && player_can_say_phrases(state, offer.player)
         // CR 400.7: the returned card must be the same incarnation still in its expected
@@ -331,6 +337,13 @@ pub fn apply_un_action(
             Ok(ActionResult::applied(vec![], state.waiting_for.clone()))
         }
         UnAction::PerformTell { tell } => {
+            // CR 102.1, CR 800.4: an eliminated player has left the game and
+            // cannot take game actions or produce rules-relevant tells.
+            if !super::players::is_alive(state, actor) {
+                return Err(EngineError::InvalidAction(
+                    "Player has left the game".to_string(),
+                ));
+            }
             if !state.un_actions.is_enabled(actor) {
                 return Err(EngineError::InvalidAction(
                     "Player has not opted in to Un-card actions".to_string(),
@@ -344,6 +357,13 @@ pub fn apply_un_action(
             Ok(ActionResult::applied(events, state.waiting_for.clone()))
         }
         UnAction::SayGotcha { source_id, returns } => {
+            // CR 102.1, CR 800.4: an eliminated player has left the game and
+            // cannot take game actions.
+            if !super::players::is_alive(state, actor) {
+                return Err(EngineError::InvalidAction(
+                    "Player has left the game".to_string(),
+                ));
+            }
             let Some(position) = state.un_actions.gotcha_offers.iter().position(|o| {
                 o.player == actor
                     && o.source_id == source_id
