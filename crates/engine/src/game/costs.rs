@@ -67,6 +67,7 @@ use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
+use super::un_actions::cost_requires_unavailable_speech;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::ResolvedAbility;
 
@@ -703,6 +704,14 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    // Un-card: fail payment if the payer has disabled Un-card spoken actions.
+    if matches!(cost, AbilityCost::SayPhrase { .. })
+        && !super::un_actions::player_can_say_phrases(state, payer)
+    {
+        return Ok(payment_failed(
+            "Player has not opted in to Un-card spoken actions".to_string(),
+        ));
+    }
     let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
@@ -2498,6 +2507,10 @@ pub(crate) fn can_pay(
 ) -> bool {
     match scope {
         PaymentScope::Activation { ability_index, .. } => {
+            // Un-card: fail payability if the payer has disabled Un-card spoken actions.
+            if cost_requires_unavailable_speech(state, payer, cost) {
+                return false;
+            }
             // CR 601.2f + CR 602.2b: Judge an offer using the cost that would
             // lock before mana abilities, without committing that lock here.
             let locked = lock_half_life_activation_cost(state, payer, source_id, cost);
