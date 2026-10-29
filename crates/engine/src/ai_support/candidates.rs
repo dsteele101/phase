@@ -2498,7 +2498,6 @@ pub fn candidate_actions_broad_with_probe(
             // A card can belong to multiple groups (e.g., a multicolor card).
             // We need combinations of `count` cards that share at least one quality value.
             // Approach: find the largest qualifying groups and enumerate combinations within them.
-            use std::collections::HashMap;
 
             // `count` is `&usize` because we match on a reference to `WaitingFor::PayCost`
             let count = *count;
@@ -2506,8 +2505,11 @@ pub fn candidate_actions_broad_with_probe(
                 return Vec::new();
             }
 
-            // Build mapping from quality value -> list of card IDs that have that value
-            let mut value_to_cards: HashMap<String, Vec<ObjectId>> = HashMap::new();
+            // Build mapping from quality value -> list of card IDs that have that value.
+            // Use BTreeMap for stable iteration order so candidate generation is
+            // deterministic across runs.
+            let mut value_to_cards: std::collections::BTreeMap<String, Vec<ObjectId>> =
+                std::collections::BTreeMap::new();
             for &id in choices {
                 let Some(obj) = state.objects.get(&id) else {
                     continue;
@@ -2522,10 +2524,46 @@ pub fn candidate_actions_broad_with_probe(
                 }
             }
 
+            // Filter to qualifying groups (those with at least `count` cards) and
+            // collect them in stable order.
+            let qualifying_groups: Vec<_> = value_to_cards
+                .into_iter()
+                .filter(|(_, _cards)| _cards.len() >= count)
+                .collect();
+
+            if qualifying_groups.is_empty() {
+                return Vec::new();
+            }
+
+            // Allocate the SELECTION_CANDIDATE_CAP budget fairly across qualifying
+            // groups so a single large group cannot consume the entire cap before
+            // later groups contribute candidates. Give each group a base share, then
+            // distribute remaining slots round-robin by group size (largest first).
+            let num_groups = qualifying_groups.len();
+            let base_share = SELECTION_CANDIDATE_CAP / num_groups;
+            let mut remaining = SELECTION_CANDIDATE_CAP % num_groups;
+
+            // Sort groups by size descending for fair remainder distribution.
+            let mut groups_by_size = qualifying_groups.clone();
+            groups_by_size.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+            let mut per_group_cap: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (value, _cards) in &groups_by_size {
+                let mut cap = base_share;
+                if remaining > 0 {
+                    cap += 1;
+                    remaining -= 1;
+                }
+                // Ensure at least 1 slot per qualifying group.
+                per_group_cap.insert(value.clone(), cap.max(1));
+            }
+
             let mut all_combos = Vec::new();
-            for (_, cards_with_value) in value_to_cards {
-                if cards_with_value.len() < count {
-                    continue;
+            for (value, cards_with_value) in qualifying_groups {
+                let group_cap = *per_group_cap.get(&value).unwrap_or(&1);
+                if all_combos.len() >= SELECTION_CANDIDATE_CAP {
+                    break;
                 }
                 // Enumerate combinations within this group using the FULL group as the pool.
                 // The pool cap (SELECTION_POOL_CAP) must NOT be applied here — a legal
@@ -2536,16 +2574,13 @@ pub fn candidate_actions_broad_with_probe(
                     &cards_with_value,
                     [count],
                     cards_with_value.len(), // full group, no pool cap
-                    SELECTION_CANDIDATE_CAP,
+                    group_cap,
                 );
                 for combo in group_combos {
                     if all_combos.len() >= SELECTION_CANDIDATE_CAP {
                         break;
                     }
                     all_combos.push(combo);
-                }
-                if all_combos.len() >= SELECTION_CANDIDATE_CAP {
-                    break;
                 }
             }
 
