@@ -1510,7 +1510,7 @@ pub fn candidate_actions_broad_with_probe(
             };
             sizes
                 .into_iter()
-                .flat_map(|size| combinations(&beam_cards, size))
+                .flat_map(|size| combinations_generic(&beam_cards, size))
                 // CR 608.2c: Drop combinations that violate the printed-text
                 // selection restriction (e.g., Gifts Ungiven's "with different
                 // names") so the AI never scores or submits an illegal pick.
@@ -1537,7 +1537,7 @@ pub fn candidate_actions_broad_with_probe(
             cards,
             primary_count,
             ..
-        } => combinations(cards, *primary_count as usize)
+        } => combinations_generic(cards, *primary_count as usize)
             .into_iter()
             .map(|combo| {
                 candidate(
@@ -2565,15 +2565,16 @@ pub fn candidate_actions_broad_with_probe(
                 if all_combos.len() >= SELECTION_CANDIDATE_CAP {
                     break;
                 }
-                // Enumerate combinations within this group using the FULL group as the pool.
-                // The pool cap (SELECTION_POOL_CAP) must NOT be applied here — a legal
+                // Enumerate combinations within this group using the full group as the pool.
+                // The pool cap (SELECTION_POOL_CAP) must not be applied here — a legal
                 // combination beyond the first 12 cards of a qualifying group would
-                // otherwise be omitted. The output cap (SELECTION_CANDIDATE_CAP) still
-                // bounds total work.
+                // otherwise be omitted. Combinatorial blowup is prevented because
+                // bounded_combinations_for_sizes stops recursion as soon as the output budget
+                // (group_cap) is reached while keeping the full eligible pool.
                 let group_combos = bounded_combinations_for_sizes(
                     &cards_with_value,
                     [count],
-                    cards_with_value.len(), // full group, no pool cap
+                    cards_with_value.len(),
                     group_cap,
                 );
                 for combo in group_combos {
@@ -5980,7 +5981,7 @@ fn bottom_card_actions(
         )];
     }
 
-    combinations(&hand, count as usize)
+    combinations_generic(&hand, count as usize)
         .into_iter()
         .map(|combo| {
             candidate(
@@ -6247,7 +6248,7 @@ where
 
     let mut actions = Vec::new();
     for size in 1..=creatures_with_power.len() {
-        for combo in combinations(&ids, size) {
+        for combo in combinations_generic(&ids, size) {
             let total: i32 = combo
                 .iter()
                 .filter_map(|id| {
@@ -6350,27 +6351,40 @@ fn cap_search_choice_pool(
     }
 }
 
-fn combinations(
+fn generate_bounded_combinations(
     items: &[crate::types::identifiers::ObjectId],
     k: usize,
-) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
+    prefix: &mut Vec<crate::types::identifiers::ObjectId>,
+    output_cap: usize,
+    seen: &mut HashSet<Vec<u64>>,
+    output: &mut Vec<Vec<crate::types::identifiers::ObjectId>>,
+) {
+    if output.len() >= output_cap {
+        return;
+    }
     if k == 0 {
-        return vec![Vec::new()];
+        push_object_combo(output, seen, prefix.iter().copied());
+        return;
     }
     if items.len() < k {
-        return Vec::new();
+        return;
     }
     if items.len() == k {
-        return vec![items.to_vec()];
+        let mut combo = prefix.clone();
+        combo.extend_from_slice(items);
+        push_object_combo(output, seen, combo);
+        return;
     }
 
-    let mut result = Vec::new();
-    for mut combo in combinations(&items[1..], k - 1) {
-        combo.insert(0, items[0]);
-        result.push(combo);
+    prefix.push(items[0]);
+    generate_bounded_combinations(&items[1..], k - 1, prefix, output_cap, seen, output);
+    prefix.pop();
+
+    if output.len() >= output_cap {
+        return;
     }
-    result.extend(combinations(&items[1..], k));
-    result
+
+    generate_bounded_combinations(&items[1..], k, prefix, output_cap, seen, output);
 }
 
 fn bounded_combinations_for_sizes(
@@ -6391,12 +6405,15 @@ fn bounded_combinations_for_sizes(
             continue;
         }
         let pool_len = items.len().min(pool_cap);
-        for combo in combinations(&items[..pool_len], size) {
-            push_object_combo(&mut output, &mut seen, combo);
-            if output.len() >= output_cap {
-                break;
-            }
-        }
+        let mut prefix = Vec::with_capacity(size);
+        generate_bounded_combinations(
+            &items[..pool_len],
+            size,
+            &mut prefix,
+            output_cap,
+            &mut seen,
+            &mut output,
+        );
     }
 
     output
@@ -10403,5 +10420,71 @@ mod tests {
             !candidate_actions(&state).is_empty(),
             "reach: the bottoming prompt still has candidates"
         );
+    }
+
+    #[test]
+    fn bounded_combinations_large_pool_and_size_stops_at_budget() {
+        let items: Vec<ObjectId> = (1..=30).map(ObjectId).collect();
+        // 30 choose 15 would be 155,117,520 combinations without early bounding.
+        let combos = bounded_combinations_for_sizes(&items, [15], 30, 64);
+        assert_eq!(combos.len(), 64);
+        for combo in &combos {
+            assert_eq!(combo.len(), 15);
+        }
+    }
+
+    #[test]
+    fn shared_quality_reveal_candidate_generation_bounds_large_group() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{SharedQuality, TurnUpCostSource};
+        use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let cards: Vec<ObjectId> = (1..=30)
+            .map(|i| {
+                scenario
+                    .add_creature_to_hand(P0, &format!("Blue Dude {i}"), 1, 1)
+                    .with_color(vec![ManaColor::Blue])
+                    .id()
+            })
+            .collect();
+        let runner = scenario.build();
+        let prompt = WaitingFor::PayCost {
+            player: P0,
+            kind: PayCostKind::Reveal {
+                shared_quality: Some(SharedQuality::Color),
+            },
+            choices: cards.clone(),
+            count: 15,
+            min_count: 15,
+            resume: CostResume::TurnFaceUp {
+                source: ObjectIncarnationRef::from_object(&runner.state().objects[&ObjectId(1)]),
+                cost_source: TurnUpCostSource::Morph,
+                remaining_cost: None,
+            },
+        };
+        let mut state = runner.state().clone();
+        state.waiting_for = prompt;
+        let actions = crate::ai_support::legal_actions(&state);
+        // Filter for SelectCards actions (CancelCast is also legal for PayCost)
+        let select_cards_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, GameAction::SelectCards { .. }))
+            .collect();
+        assert!(
+            !select_cards_actions.is_empty(),
+            "expected at least one SelectCards action"
+        );
+        assert!(select_cards_actions.len() <= SELECTION_CANDIDATE_CAP);
+        for action in &select_cards_actions {
+            let GameAction::SelectCards { cards } = action else {
+                panic!("expected SelectCards, got {action:?}");
+            };
+            assert_eq!(cards.len(), 15);
+        }
     }
 }

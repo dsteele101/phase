@@ -13,6 +13,10 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::EngineError;
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef, SharedQuality,
+    TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -532,20 +536,20 @@ fn illuminated_folio_unpayable_without_a_pair_sharing_a_color() {
 // =============================================================================
 // Discriminating tests for shared-quality reveal continuation routes
 // =============================================================================
-// NOTE: The following tests are marked #[ignore] because the Oracle parser does
-// not yet support these patterns. No printed cards currently use these patterns.
-// When parser support is added, these tests should be enabled.
+// NOTE: The following tests manually construct the reveal cost with shared_quality
+// because the Oracle parser does not yet support these patterns. No printed cards
+// currently use these patterns. When parser support is added, these tests can use
+// the parser path directly.
 
 /// CR 601.2b + CR 701.20a: A spell with an additional reveal cost that requires
 /// shared quality. The constraint travels with the spell's reveal prompt.
 ///
 /// Oracle: "As an additional cost to cast this spell, reveal two cards from your
 /// hand that share a color. Draw a card."
-const SPELL_REVEAL_SHARED_COLOR_ORACLE: &str = "As an additional cost to cast this spell, reveal two cards from your hand that share a color. Draw a card.";
-
-#[ignore = "Oracle parser does not support 'As an additional cost to cast this spell, reveal...' pattern"]
 #[test]
 fn spell_reveal_shared_color_constraint_travels_with_prompt() {
+    use engine::types::ability::{AbilityCost, AdditionalCost, SharedQuality};
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -586,16 +590,33 @@ fn spell_reveal_shared_color_constraint_travels_with_prompt() {
         )],
     );
 
-    let mut builder = scenario.add_spell_to_hand_from_oracle(
-        P0,
-        "Spell Reveal Shared Color",
-        false,
-        SPELL_REVEAL_SHARED_COLOR_ORACLE,
-    );
+    // Add a spell with an additional cost: reveal two cards that share a color
+    let mut builder = scenario.add_spell_to_hand(P0, "Spell Reveal Shared Color", false);
     builder.with_mana_cost(ManaCost::generic(0));
     let spell = builder.id();
 
     let mut runner = scenario.build();
+
+    // Manually inject the additional cost into the pending cast
+    let spell_obj = runner.state_mut().objects.get_mut(&spell).unwrap();
+    spell_obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Reveal {
+        count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+        filter: Some(engine::types::ability::TargetFilter::Typed(
+            engine::types::ability::TypedFilter::card(),
+        )),
+        shared_quality: Some(SharedQuality::Color),
+    }));
+
+    // Add the spell effect: "Draw a card"
+    let spell_abilities = std::sync::Arc::make_mut(&mut spell_obj.abilities);
+    spell_abilities.push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+
     let card_id = runner.state().objects[&spell].card_id;
 
     // Cast and pay with two blue cards - should succeed
@@ -663,9 +684,10 @@ fn spell_reveal_shared_color_constraint_travels_with_prompt() {
 }
 
 /// CR 601.2b + CR 701.20a: Spell reveal with shared quality - wrong pair rejected.
-#[ignore = "Oracle parser does not support 'As an additional cost to cast this spell, reveal...' pattern"]
 #[test]
 fn spell_reveal_shared_color_rejects_different_colors() {
+    use engine::types::ability::{AbilityCost, AdditionalCost, SharedQuality};
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -710,16 +732,21 @@ fn spell_reveal_shared_color_rejects_different_colors() {
         )],
     );
 
-    let mut builder = scenario.add_spell_to_hand_from_oracle(
-        P0,
-        "Spell Reveal Shared Color",
-        false,
-        SPELL_REVEAL_SHARED_COLOR_ORACLE,
-    );
+    let mut builder = scenario.add_spell_to_hand(P0, "Spell Reveal Shared Color", false);
     builder.with_mana_cost(ManaCost::generic(0));
     let spell = builder.id();
 
     let mut runner = scenario.build();
+
+    let spell_obj = runner.state_mut().objects.get_mut(&spell).unwrap();
+    spell_obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Reveal {
+        count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+        filter: Some(engine::types::ability::TargetFilter::Typed(
+            engine::types::ability::TypedFilter::card(),
+        )),
+        shared_quality: Some(SharedQuality::Color),
+    }));
+
     let card_id = runner.state().objects[&spell].card_id;
 
     runner
@@ -770,14 +797,17 @@ fn spell_reveal_shared_color_rejects_different_colors() {
 /// CR 702.37e + CR 701.20a: A turn-face-up (morph/disguise) cost with a reveal
 /// leg requiring shared quality. The constraint is validated at payment time.
 ///
-/// Oracle: "Disguise {2}{U} (You may cast this card face down for {3} as a 2/2
-/// creature with ward {2}. Turn it face up any time for its disguise cost:
-/// Reveal two cards from your hand that share a color.)"
-const DISGUISE_REVEAL_SHARED_COLOR_ORACLE: &str = "Disguise {2}{U} (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost: Reveal two cards from your hand that share a color.)";
-
-#[ignore = "Oracle parser does not support Disguise/Morph with reveal cost in turn-face-up ability"]
+/// This test manually constructs a face-down creature with a Morph keyword
+/// whose turn-face-up cost is "Reveal two cards from your hand that share a color".
 #[test]
 fn turn_face_up_reveal_shared_color_constraint_enforced() {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::{AbilityCost, SharedQuality};
+    use engine::types::identifiers::ObjectId;
+    use engine::types::keywords::{Keyword, MorphCost};
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -806,14 +836,12 @@ fn turn_face_up_reveal_shared_color_constraint_enforced() {
         })
         .id();
 
+    // Add a creature with a simple Morph keyword (parser supports this)
+    // Use a pure mana cost Morph which the parser recognizes, then manually
+    // replace with the reveal cost on the back face.
     let ambusher = scenario
-        .add_creature_to_hand_from_oracle(
-            P0,
-            "Disguise Ambusher",
-            2,
-            2,
-            DISGUISE_REVEAL_SHARED_COLOR_ORACLE,
-        )
+        .add_creature_to_hand(P0, "Morph Ambusher", 2, 2)
+        .from_oracle_text_with_keywords(&["Morph"], "Morph {2}{U}")
         .id();
 
     scenario.with_mana_pool(
@@ -826,6 +854,22 @@ fn turn_face_up_reveal_shared_color_constraint_enforced() {
     );
 
     let mut runner = scenario.build();
+
+    // Manually add Morph keyword since parser doesn't handle parameterized Morph in keyword-only line
+    {
+        let obj = runner.state_mut().objects.get_mut(&ambusher).unwrap();
+        use engine::types::keywords::{Keyword, MorphCost};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+        let morph_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 2,
+        };
+        obj.keywords
+            .push(Keyword::Morph(MorphCost::Mana(morph_cost.clone())));
+        obj.base_keywords
+            .push(Keyword::Morph(MorphCost::Mana(morph_cost)));
+    }
+
     let card_id = runner.state().objects[&ambusher].card_id;
 
     // Cast face down
@@ -836,6 +880,29 @@ fn turn_face_up_reveal_shared_color_constraint_enforced() {
         })
         .expect("cast face down");
     assert!(runner.state().objects[&ambusher].face_down);
+
+    // Manually replace the back face's Morph cost with one that requires
+    // revealing two cards that share a color.
+    {
+        let obj = runner.state_mut().objects.get_mut(&ambusher).unwrap();
+        let back_face = obj
+            .back_face
+            .as_mut()
+            .expect("face-down card must have back_face");
+        // Find and replace the Morph keyword (match any Morph variant)
+        for kw in &mut back_face.keywords {
+            if let Keyword::Morph(_) = kw {
+                *kw = Keyword::Morph(MorphCost::NonMana(AbilityCost::Reveal {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+                    filter: Some(engine::types::ability::TargetFilter::Typed(
+                        engine::types::ability::TypedFilter::card(),
+                    )),
+                    shared_quality: Some(SharedQuality::Color),
+                }));
+                break;
+            }
+        }
+    }
 
     // Turn face up - this should prompt for the reveal cost with shared quality
     runner
@@ -895,9 +962,18 @@ fn turn_face_up_reveal_shared_color_constraint_enforced() {
 }
 
 /// CR 702.37e + CR 701.20a: Turn face up reveal - wrong pair rejected.
-#[ignore = "Oracle parser does not support Disguise/Morph with reveal cost in turn-face-up ability"]
+///
+/// This test manually constructs a face-down creature with a Morph keyword
+/// whose turn-face-up cost is "Reveal two cards from your hand that share a color".
 #[test]
 fn turn_face_up_reveal_shared_color_rejects_different_colors() {
+    use engine::game::scenario::{GameScenario, P0};
+    use engine::types::ability::{AbilityCost, SharedQuality};
+    use engine::types::identifiers::ObjectId;
+    use engine::types::keywords::{Keyword, MorphCost};
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -931,14 +1007,12 @@ fn turn_face_up_reveal_shared_color_rejects_different_colors() {
             generic: 2,
         });
 
+    // Add a creature with a simple Morph keyword (parser supports this)
+    // Use a pure mana cost Morph which the parser recognizes, then manually
+    // replace with the reveal cost on the back face.
     let ambusher = scenario
-        .add_creature_to_hand_from_oracle(
-            P0,
-            "Disguise Ambusher",
-            2,
-            2,
-            DISGUISE_REVEAL_SHARED_COLOR_ORACLE,
-        )
+        .add_creature_to_hand(P0, "Morph Ambusher", 2, 2)
+        .from_oracle_text_with_keywords(&["Morph"], "Morph {2}{U}")
         .id();
 
     scenario.with_mana_pool(
@@ -951,15 +1025,57 @@ fn turn_face_up_reveal_shared_color_rejects_different_colors() {
     );
 
     let mut runner = scenario.build();
+
+    // Manually add Morph keyword since parser doesn't handle parameterized Morph in keyword-only line
+    {
+        let obj = runner.state_mut().objects.get_mut(&ambusher).unwrap();
+        use engine::types::keywords::{Keyword, MorphCost};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+        let morph_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 2,
+        };
+        obj.keywords
+            .push(Keyword::Morph(MorphCost::Mana(morph_cost.clone())));
+        obj.base_keywords
+            .push(Keyword::Morph(MorphCost::Mana(morph_cost)));
+    }
+
     let card_id = runner.state().objects[&ambusher].card_id;
 
+    // Cast face down
     runner
         .act(GameAction::PlayFaceDown {
             object_id: ambusher,
             card_id,
         })
         .expect("cast face down");
+    assert!(runner.state().objects[&ambusher].face_down);
 
+    // Manually replace the back face's Morph cost with one that requires
+    // revealing two cards that share a color.
+    {
+        let obj = runner.state_mut().objects.get_mut(&ambusher).unwrap();
+        let back_face = obj
+            .back_face
+            .as_mut()
+            .expect("face-down card must have back_face");
+        // Find and replace the Morph keyword (match any Morph variant)
+        for kw in &mut back_face.keywords {
+            if let Keyword::Morph(_) = kw {
+                *kw = Keyword::Morph(MorphCost::NonMana(AbilityCost::Reveal {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 2 },
+                    filter: Some(engine::types::ability::TargetFilter::Typed(
+                        engine::types::ability::TypedFilter::card(),
+                    )),
+                    shared_quality: Some(SharedQuality::Color),
+                }));
+                break;
+            }
+        }
+    }
+
+    // Turn face up - this should prompt for the reveal cost with shared quality
     runner
         .act(GameAction::TurnFaceUp {
             object_id: ambusher,
@@ -1039,11 +1155,6 @@ fn single_leg_reveal_shared_quality_parsing() {
 /// CR 701.20a + CR 107.3a: Reveal X cards where X is announced and the cards
 /// must share a quality. X is bounded by the largest qualifying group.
 ///
-/// Oracle: "{X}, {T}, Reveal X cards from your hand that share a color: Draw X cards."
-const REVEAL_X_SHARED_COLOR_ORACLE: &str =
-    "{X}, {T}, Reveal X cards from your hand that share a color: Draw X cards.";
-
-#[ignore = "Oracle parser does not support variable X in reveal count with shared quality"]
 #[test]
 fn reveal_x_shared_color_x_bounded_by_largest_group() {
     let mut scenario = GameScenario::new();
@@ -1108,13 +1219,41 @@ fn reveal_x_shared_color_x_bounded_by_largest_group() {
         ],
     );
 
-    let folio = scenario
-        .add_creature(P0, "X Reveal Folio", 0, 0)
-        .as_artifact()
-        .from_oracle_text(REVEAL_X_SHARED_COLOR_ORACLE)
-        .id();
+    // Add an artifact with an activated ability that has a reveal X cost
+    let mut builder = scenario.add_creature(P0, "X Reveal Folio", 0, 0);
+    builder.as_artifact();
+    // We need to manually inject the ability since parser doesn't support X in reveal count with shared quality
+    let folio = builder.id();
 
     let mut runner = scenario.build();
+
+    // Manually inject the activated ability with a variable X reveal cost
+    let folio_obj = runner.state_mut().objects.get_mut(&folio).unwrap();
+    let abilities = std::sync::Arc::make_mut(&mut folio_obj.abilities);
+    let x_quantity = QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    };
+    abilities.push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: x_quantity.clone(),
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Reveal {
+                    count: x_quantity,
+                    filter: Some(TargetFilter::Typed(TypedFilter::card())),
+                    shared_quality: Some(SharedQuality::Color),
+                },
+            ],
+        }),
+    );
 
     // Try to activate with X=3 - should fail because no 3 cards share a color
     runner
@@ -1133,7 +1272,7 @@ fn reveal_x_shared_color_x_bounded_by_largest_group() {
         );
     };
 
-    // Try X=3 - should be rejected
+    // Try X=3 - should be rejected (max is 2)
     let result = runner.act(GameAction::ChooseX { value: 3 });
     assert!(
         result.is_err(),
@@ -1144,18 +1283,10 @@ fn reveal_x_shared_color_x_bounded_by_largest_group() {
         "ability should not go on stack"
     );
 
-    // Re-activate with X=2
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: folio,
-            ability_index: 0,
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("activation accepted, then X announcement");
-
+    // Still at ChooseXValue - choose X=2 instead (no need to re-activate)
     let WaitingFor::ChooseXValue { .. } = runner.state().waiting_for else {
         panic!(
-            "expected ChooseXValue, got {:?}",
+            "expected ChooseXValue after X=3 rejection, got {:?}",
             runner.state().waiting_for
         );
     };
@@ -1211,7 +1342,6 @@ fn reveal_x_shared_color_x_bounded_by_largest_group() {
     assert_eq!(runner.state().players[P0.0 as usize].hand.len(), 7);
 }
 
-#[ignore = "Oracle parser does not support variable X in reveal count with shared quality"]
 #[test]
 fn reveal_x_shared_color_x_zero_reveals_none() {
     let mut scenario = GameScenario::new();
@@ -1236,13 +1366,41 @@ fn reveal_x_shared_color_x_zero_reveals_none() {
         )],
     );
 
-    let folio = scenario
-        .add_creature(P0, "X Reveal Folio", 0, 0)
-        .as_artifact()
-        .from_oracle_text(REVEAL_X_SHARED_COLOR_ORACLE)
-        .id();
+    // Add an artifact with an activated ability that has a reveal X cost
+    let mut builder = scenario.add_creature(P0, "X Reveal Folio", 0, 0);
+    builder.as_artifact();
+    // We need to manually inject the ability since parser doesn't support X in reveal count with shared quality
+    let folio = builder.id();
 
     let mut runner = scenario.build();
+
+    // Manually inject the activated ability with a variable X reveal cost
+    let folio_obj = runner.state_mut().objects.get_mut(&folio).unwrap();
+    let abilities = std::sync::Arc::make_mut(&mut folio_obj.abilities);
+    let x_quantity = QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    };
+    abilities.push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: x_quantity.clone(),
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Reveal {
+                    count: x_quantity,
+                    filter: Some(TargetFilter::Typed(TypedFilter::card())),
+                    shared_quality: Some(SharedQuality::Color),
+                },
+            ],
+        }),
+    );
 
     // Activate with X=0 - should succeed without revealing
     runner

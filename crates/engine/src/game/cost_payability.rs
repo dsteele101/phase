@@ -1882,31 +1882,9 @@ pub(crate) fn reveal_cost_has_legal_selection(
         // If count < 2 (and not 0), the constraint cannot be satisfied.
         return false;
     }
-    fn extend(
-        state: &GameState,
-        eligible: &[ObjectId],
-        count: usize,
-        quality: &SharedQuality,
-        chosen: &mut Vec<ObjectId>,
-    ) -> bool {
-        if chosen.len() == count {
-            // Only check shared quality when we have a complete selection
-            return cards_share_quality(state, chosen, quality);
-        }
-        eligible.iter().enumerate().any(|(index, &id)| {
-            chosen.push(id);
-            let found = extend(state, &eligible[index + 1..], count, quality, chosen);
-            chosen.pop();
-            found
-        })
-    }
-    extend(
-        state,
-        eligible,
-        count,
-        quality,
-        &mut Vec::with_capacity(count),
-    )
+    // CR 701.20a: A selection of `count` cards that share `quality` exists iff
+    // the largest subset sharing any single value of `quality` is at least `count`.
+    largest_shared_quality_group(state, eligible, quality) >= count
 }
 
 /// CR 601.2b: A `TapCreatures` cost is payable iff the untapped, filter-matching
@@ -2241,6 +2219,41 @@ mod tests {
             &[green, blue, red],
             2,
             None
+        ));
+
+        // CR 601.2h: 30 cards (29 blue, 1 red) with reveal count 30.
+        // Cardinality check passes (30 == 30), but largest shared group is 29 < 30.
+        // Must reject in O(N) without exponential search.
+        let mut large_scenario = GameScenario::new();
+        let mut large_pool = Vec::new();
+        for i in 1..=29 {
+            large_pool.push(
+                large_scenario
+                    .add_creature_to_hand(PlayerId(0), &format!("Blue {i}"), 1, 1)
+                    .with_color(vec![ManaColor::Blue])
+                    .id(),
+            );
+        }
+        // Create red card in the SAME scenario to avoid ObjectId collision
+        large_pool.push(
+            large_scenario
+                .add_creature_to_hand(PlayerId(0), "Red", 1, 1)
+                .with_color(vec![ManaColor::Red])
+                .id(),
+        );
+        let runner = large_scenario.build();
+        let state = runner.state();
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &large_pool,
+            30,
+            Some(&color)
+        ));
+        assert!(reveal_cost_has_legal_selection(
+            state,
+            &large_pool[..29],
+            29,
+            Some(&color)
         ));
     }
 
