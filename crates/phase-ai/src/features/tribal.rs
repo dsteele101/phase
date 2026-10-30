@@ -581,6 +581,7 @@ mod tests {
                     "Elf".to_string(),
                 )))),
                 dynamic_count: None,
+                reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
             }));
 
         let plain_elf = creature_face("Plain Elf", vec!["Elf"]);
@@ -611,6 +612,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),

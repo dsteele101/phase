@@ -17,7 +17,7 @@ pub struct StickerLocator {
 }
 
 /// Sticker state carried by an object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppliedSticker {
     /// `position` stores how many words were before the sticker when it was
@@ -64,6 +64,36 @@ impl AppliedSticker {
             | Self::Ability { locator, .. }
             | Self::PowerToughness { locator, .. }
             | Self::Art { locator, .. } => locator,
+        }
+    }
+
+    /// CR 613.7k: A sticker receives a new timestamp each time it's put on an
+    /// object and immediately after its object's new timestamp.
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Self::Name { timestamp, .. }
+            | Self::Ability { timestamp, .. }
+            | Self::PowerToughness { timestamp, .. }
+            | Self::Art { timestamp, .. } => *timestamp,
+        }
+    }
+
+    /// CR 613.7k: A sticker receives a new timestamp each time it's put on an
+    /// object and immediately after its object's new timestamp.
+    pub fn set_timestamp(&mut self, value: u64) {
+        match self {
+            Self::Name { timestamp, .. }
+            | Self::Ability { timestamp, .. }
+            | Self::PowerToughness { timestamp, .. }
+            | Self::Art { timestamp, .. } => *timestamp = value,
+        }
+    }
+
+    /// CR 123.6d + CR 123.6e: The text printed on a name sticker; `None` for every other sticker kind.
+    pub fn name_text(&self) -> Option<&str> {
+        match self {
+            Self::Name { text, .. } => Some(text),
+            Self::Ability { .. } | Self::PowerToughness { .. } | Self::Art { .. } => None,
         }
     }
 }

@@ -120,6 +120,102 @@ impl Phase {
     }
 }
 
+impl PhaseGroup {
+    /// CR 500.1: the last step of a phase of this group. The steps of a phase
+    /// proceed in order, and a main phase has no steps, so it is its own last
+    /// step (CR 505.2).
+    pub fn last_step(self) -> Phase {
+        match self {
+            // CR 501.1: untap, upkeep, draw.
+            PhaseGroup::Beginning => Phase::Draw,
+            PhaseGroup::PrecombatMain => Phase::PreCombatMain,
+            // CR 506.1: beginning of combat, …, end of combat.
+            PhaseGroup::Combat => Phase::EndCombat,
+            PhaseGroup::PostcombatMain => Phase::PostCombatMain,
+            // CR 512.1: end, cleanup.
+            PhaseGroup::Ending => Phase::Cleanup,
+        }
+    }
+
+    /// CR 500.1: the steps of a phase of this group, in turn order. A main
+    /// phase has no steps, so it is its own single entry (CR 505.2).
+    ///
+    /// The single authority for "the steps of a phase": callers that need
+    /// the whole combat phase (CR 506.1) read `PhaseGroup::Combat.steps()`
+    /// instead of re-listing the five steps.
+    pub fn steps(self) -> &'static [Phase] {
+        match self {
+            // CR 501.1: untap, upkeep, draw.
+            PhaseGroup::Beginning => &[Phase::Untap, Phase::Upkeep, Phase::Draw],
+            // CR 505.1 + CR 505.2: the precombat main phase has no steps; it is its own single entry.
+            PhaseGroup::PrecombatMain => &[Phase::PreCombatMain],
+            // CR 506.1: beginning of combat, declare attackers, declare
+            // blockers, combat damage, end of combat.
+            PhaseGroup::Combat => &[
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ],
+            // CR 505.1 + CR 505.2: the postcombat main phase has no steps; it is its own single entry.
+            PhaseGroup::PostcombatMain => &[Phase::PostCombatMain],
+            // CR 512.1: end, cleanup.
+            PhaseGroup::Ending => &[Phase::End, Phase::Cleanup],
+        }
+    }
+}
+
+/// CR 500.8 + CR 500.9 + CR 500.10: what an effect adds to a turn. The turn
+/// enters the segment at `first_step`; when `final_step` ends, it continues as
+/// though the step the segment was added after had just ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TurnSegment {
+    /// CR 500.8: a whole added phase, with all of its steps.
+    Phase(PhaseGroup),
+    /// CR 500.10 + CR 500.11: a phase created after a phase to hold only this
+    /// step; the phase's other steps are skipped.
+    CreatedPhase(Phase),
+    /// CR 500.9: a step added directly after a step of the phase in progress.
+    Step(Phase),
+}
+
+impl TurnSegment {
+    /// The step the segment begins with.
+    pub fn first_step(self) -> Phase {
+        match self {
+            // CR 501.1: untap, upkeep, draw.
+            Self::Phase(PhaseGroup::Beginning) => Phase::Untap,
+            // CR 505.1a: only the turn's first main phase is a precombat main
+            // phase, so an added main phase is a postcombat main phase.
+            Self::Phase(PhaseGroup::PrecombatMain | PhaseGroup::PostcombatMain) => {
+                Phase::PostCombatMain
+            }
+            // CR 506.1: beginning of combat, …, end of combat.
+            Self::Phase(PhaseGroup::Combat) => Phase::BeginCombat,
+            // CR 512.1: end, cleanup.
+            Self::Phase(PhaseGroup::Ending) => Phase::End,
+            Self::CreatedPhase(step) | Self::Step(step) => step,
+        }
+    }
+
+    /// The step that ends the segment.
+    pub fn final_step(self) -> Phase {
+        match self {
+            // CR 505.1a + CR 505.2: an added main phase is a postcombat main
+            // phase, which has no steps.
+            Self::Phase(PhaseGroup::PrecombatMain | PhaseGroup::PostcombatMain) => {
+                Phase::PostCombatMain
+            }
+            Self::Phase(
+                group @ (PhaseGroup::Beginning | PhaseGroup::Combat | PhaseGroup::Ending),
+            ) => group.last_step(),
+            Self::CreatedPhase(step) | Self::Step(step) => step,
+        }
+    }
+}
+
 /// Turn-direction scope for a phase stop (MTGO-style). Determines on whose
 /// turns a stop fires, by comparing the stop's owner against the active player.
 ///
@@ -207,6 +303,136 @@ mod tests {
             Phase::Cleanup,
         ];
         assert_eq!(phases.len(), 12);
+    }
+
+    /// CR 500.1: a group's steps are exactly the steps `Phase::group` assigns
+    /// to it, in turn order, and every step belongs to exactly one group.
+    #[test]
+    fn phase_group_steps_agree_with_phase_group() {
+        let phases = [
+            Phase::Untap,
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::End,
+            Phase::Cleanup,
+        ];
+        let groups = [
+            PhaseGroup::Beginning,
+            PhaseGroup::PrecombatMain,
+            PhaseGroup::Combat,
+            PhaseGroup::PostcombatMain,
+            PhaseGroup::Ending,
+        ];
+        for group in groups {
+            for phase in phases {
+                assert_eq!(
+                    group.steps().contains(&phase),
+                    phase.group() == group,
+                    "{group:?} / {phase:?}"
+                );
+            }
+            let steps = group.steps();
+            assert!(
+                steps.windows(2).all(|pair| pair[0] < pair[1]),
+                "{group:?} steps are in turn order"
+            );
+            assert_eq!(steps.last().copied(), Some(group.last_step()), "{group:?}");
+        }
+        let total: usize = groups.iter().map(|g| g.steps().len()).sum();
+        assert_eq!(total, phases.len());
+    }
+
+    /// CR 500.1: each group's last step is the latest step of that group in
+    /// turn order (`Phase` derives `Ord` in turn order).
+    #[test]
+    fn phase_group_last_step_is_the_groups_latest_step() {
+        let phases = [
+            Phase::Untap,
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::End,
+            Phase::Cleanup,
+        ];
+        for group in [
+            PhaseGroup::Beginning,
+            PhaseGroup::PrecombatMain,
+            PhaseGroup::Combat,
+            PhaseGroup::PostcombatMain,
+            PhaseGroup::Ending,
+        ] {
+            let latest = phases.iter().copied().filter(|p| p.group() == group).max();
+            assert_eq!(Some(group.last_step()), latest, "{group:?}");
+        }
+    }
+
+    /// CR 500.8 + CR 500.9 + CR 500.10 + CR 505.1a: each segment's first and
+    /// final step, over every group and every step.
+    #[test]
+    fn turn_segment_first_and_final_steps() {
+        let whole_phases = [
+            // CR 501.1
+            (PhaseGroup::Beginning, Phase::Untap, Phase::Draw),
+            // CR 505.1a: an added main phase is a postcombat main phase.
+            (
+                PhaseGroup::PrecombatMain,
+                Phase::PostCombatMain,
+                Phase::PostCombatMain,
+            ),
+            // CR 506.1
+            (PhaseGroup::Combat, Phase::BeginCombat, Phase::EndCombat),
+            (
+                PhaseGroup::PostcombatMain,
+                Phase::PostCombatMain,
+                Phase::PostCombatMain,
+            ),
+            // CR 512.1
+            (PhaseGroup::Ending, Phase::End, Phase::Cleanup),
+        ];
+        for (group, first, last) in whole_phases {
+            let segment = TurnSegment::Phase(group);
+            assert_eq!(
+                (segment.first_step(), segment.final_step()),
+                (first, last),
+                "{segment:?}"
+            );
+        }
+        let steps = [
+            Phase::Untap,
+            Phase::Upkeep,
+            Phase::Draw,
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::End,
+            Phase::Cleanup,
+        ];
+        for step in steps {
+            for segment in [TurnSegment::CreatedPhase(step), TurnSegment::Step(step)] {
+                assert_eq!(
+                    (segment.first_step(), segment.final_step()),
+                    (step, step),
+                    "CR 500.9 / CR 500.10: {segment:?} is that one step"
+                );
+            }
+        }
     }
 
     #[test]

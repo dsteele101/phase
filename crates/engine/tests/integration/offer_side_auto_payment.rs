@@ -418,6 +418,7 @@ fn cost_static_with_filter(
         amount: ManaCost::generic(1),
         spell_filter: Some(spell_filter),
         dynamic_count: None,
+        reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
     })
     .affected(TargetFilter::Typed(
         TypedFilter::card().controller(caster_scope),
@@ -772,6 +773,8 @@ fn setup_face_of_boe(add_plain_red_source: bool) -> Option<(GameRunner, ObjectId
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
                 },
             )
             .cost(AbilityCost::Tap)
@@ -953,6 +956,8 @@ fn setup_free_hand_pick() -> (GameRunner, ObjectId, ObjectId) {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
                 },
             )
             .cost(AbilityCost::Tap)
@@ -1043,6 +1048,8 @@ fn setup_direct_graveyard_free_cast(optional: bool) -> (GameRunner, ObjectId, Ob
             duration: None,
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
         },
         vec![TargetRef::Object(spell)],
         source,
@@ -1263,7 +1270,7 @@ fn payable_morph_exact_cast_binds_face_down_three_and_completes() {
     let morph = scenario
         .add_creature_to_hand(P0, "Offer-Probe Morph", 4, 4)
         .with_mana_cost(ManaCost::NoCost)
-        .with_keyword(Keyword::Morph(ManaCost::generic(5)))
+        .with_keyword(Keyword::morph(ManaCost::generic(5)))
         .id();
     scenario.with_mana_pool(
         P0,
@@ -1312,8 +1319,9 @@ fn exile_alt_cost_permission(
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
+        cast_cost_modifier: None,
     }
 }
 

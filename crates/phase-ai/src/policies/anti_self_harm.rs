@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
@@ -152,6 +153,13 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         GameAction::CastSpell { .. } if cast_has_unpayable_self_etb_may_cost(ctx) => {
             Some(PolicyReason::new("anti_self_harm_unpayable_etb_may_cost"))
         }
+        GameAction::CastSpell { .. }
+            if beneficial_creature_spell_has_no_friendly_recipient(ctx) =>
+        {
+            Some(PolicyReason::new(
+                "anti_self_harm_beneficial_creature_spell_no_friendly_recipient",
+            ))
+        }
         GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
             if grants_extra_turn_then_self_loss(ctx) =>
         {
@@ -171,6 +179,40 @@ fn reject_reason(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
             .find_map(|target| target_reject_reason(ctx, target)),
         _ => None,
     }
+}
+
+/// Reject a pure creature-benefit spell when the AI has no creature that can
+/// receive any of its upside. A soft no-target penalty still lets softmax spend
+/// a card to enhance an opponent's creature, which is never a useful line when
+/// the spell supplies no separate damage, removal, or AI-directed resource.
+fn beneficial_creature_spell_has_no_friendly_recipient(ctx: &PolicyContext<'_>) -> bool {
+    let effects = ctx.effects();
+    let has_beneficial_creature_effect = effects.iter().any(|effect| {
+        matches!(effect_polarity(effect), EffectPolarity::Beneficial) && targets_creatures(effect)
+    });
+    if !has_beneficial_creature_effect {
+        return false;
+    }
+
+    let has_friendly_creature = ctx.state.battlefield.iter().any(|&id| {
+        ctx.state.objects.get(&id).is_some_and(|object| {
+            object.controller == ctx.ai_player
+                && object.card_types.core_types.contains(&CoreType::Creature)
+        })
+    });
+    if has_friendly_creature {
+        return false;
+    }
+
+    effects.iter().all(|effect| {
+        matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+            || matches!(
+                effect,
+                Effect::TargetOnly { .. } | Effect::ChooseOneOf { .. }
+            )
+    }) && !effects
+        .iter()
+        .any(|effect| untargeted_effect_confirms_ai_payoff(ctx, effect))
 }
 
 fn cast_has_unpayable_self_etb_may_cost(ctx: &PolicyContext<'_>) -> bool {
@@ -229,6 +271,7 @@ fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a Ability
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => ctx
             .state
             .objects
@@ -328,9 +371,34 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
 
     let effects = ctx.effects();
 
-    let mut has_beneficial_creature_target = effects.iter().any(|effect| {
-        matches!(effect_polarity(effect), EffectPolarity::Beneficial) && targets_creatures(effect)
-    });
+    // A `ChangeZone` onto the battlefield draws its target from the library,
+    // graveyard, hand or exile — never from our own battlefield — so the
+    // "beneficial creature-targeting spell with no creature of ours to target"
+    // whiff check below cannot apply to it. Without this exclusion its
+    // permissive `TargetFilter::Any` reads as "targets a creature" via
+    // `targets_creatures`, and every such put is charged the full
+    // `wasted_cast_penalty` whenever the AI happens to control no creature.
+    // That covers a whole class, not one card: every printed fetchland's
+    // search-and-put chain, and reanimation-shaped puts alike.
+    //
+    // CR 608.2c + CR 111.1: a created-token placement (`PutCounter { LastCreated }`
+    // whose nearest preceding publisher in the same chain is a `Token`) is the second member of that category.
+    // Its recipient is the token this same resolution creates, so it does not
+    // need a creature of ours; this check reads the walk without those
+    // placements. Every other check below keeps the full `effects`.
+    let mut has_beneficial_creature_target = ctx
+        .effects_without_created_token_placements()
+        .into_iter()
+        .any(|effect| {
+            !matches!(
+                effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ) && matches!(effect_polarity(effect), EffectPolarity::Beneficial)
+                && targets_creatures(effect)
+        });
     // For harmful spells, only penalise when targeting is creature-exclusive.
     // Burn spells with TargetFilter::Any can still go face — don't block those.
     let mut has_harmful_creature_only_target = effects.iter().any(|effect| {
@@ -1458,7 +1526,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     WardCost::PayLifeEqualToPower => {
                         (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                     }
-                    WardCost::DiscardCard => 1.5,
+                    WardCost::Discard { count, .. } => *count as f64 * 1.5,
                     WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                     WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                     // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
@@ -1507,7 +1575,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             WardCost::PayLifeEqualToPower => {
                                 (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                             }
-                            WardCost::DiscardCard => 1.5,
+                            WardCost::Discard { count, .. } => *count as f64 * 1.5,
                             WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                             WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                             WardCost::GetPlayerCounters {
@@ -1818,7 +1886,7 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
-    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::player::PlayerId;
     use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::StaticMode;
@@ -1949,6 +2017,7 @@ mod tests {
                     shards: vec![ManaCostShard::Green],
                     generic: 0,
                 },
+                reach: engine::types::statics::CostReductionReach::ColoredManaOnly,
             }));
 
         engine::game::apply_as_current(
@@ -3303,6 +3372,62 @@ mod tests {
             "X +1/+1 counters must go on our own creature: own={own_score}, \
              opponent={opponent_score}"
         );
+    }
+
+    #[test]
+    fn practiced_offense_rejected_without_a_friendly_creature_recipient() {
+        let mut state = make_state();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        add_creature(&mut state, PlayerId(1), "Opponent Creature", 2, 2);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_007),
+            PlayerId(0),
+            "Practiced Offense".to_string(),
+            Zone::Hand,
+        );
+        let spell = state.objects.get_mut(&spell_id).unwrap();
+        spell.card_types.core_types.push(CoreType::Sorcery);
+        spell.mana_cost = ManaCost::zero();
+        *Arc::make_mut(&mut spell.abilities) = parsed_abilities(
+            "Practiced Offense",
+            "Put a +1/+1 counter on each creature target player controls. Target creature gains \
+             your choice of double strike or lifelink until end of turn.",
+            &[],
+            &["Sorcery"],
+        );
+
+        let candidate = engine::ai_support::candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == spell_id)
+            })
+            .expect("the engine must offer the cast before the policy rejects it");
+        let verdicts = shared_registry_verdicts_for(&state, &candidate);
+        assert!(matches!(
+            verdicts
+                .iter()
+                .find(|(id, _)| *id == PolicyId::AntiSelfHarm)
+                .map(|(_, verdict)| verdict),
+            Some(PolicyVerdict::Reject { reason })
+                if reason.kind == "anti_self_harm_beneficial_creature_spell_no_friendly_recipient"
+        ));
+
+        add_creature(&mut state, PlayerId(0), "Friendly Creature", 2, 2);
+        let verdicts = shared_registry_verdicts_for(&state, &candidate);
+        assert!(matches!(
+            verdicts
+                .iter()
+                .find(|(id, _)| *id == PolicyId::AntiSelfHarm)
+                .map(|(_, verdict)| verdict),
+            Some(PolicyVerdict::Score { .. })
+        ));
     }
 
     #[test]
@@ -6146,8 +6271,13 @@ mod tests {
         ));
         let session = AiSession::arc_from_game(&state);
         let mut rng = SmallRng::seed_from_u64(42);
-        let selection =
-            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let selection = choose_action_with_session_diagnostic(
+            &state,
+            &config,
+            &mut rng,
+            &session,
+            &AiDecisionContract::issue(&state, PlayerId(0)),
+        );
         let receipt = selection
             .receipt
             .expect("the public chooser must retain its ranked target receipt");
@@ -7630,6 +7760,51 @@ mod tests {
         );
     }
 
+    /// A beneficial `ChangeZone` onto the battlefield draws its target from
+    /// another zone, so controlling no creature is not a whiff for it. Its
+    /// permissive `TargetFilter::Any` otherwise reads as "targets a creature"
+    /// and collects the full `wasted_cast_penalty` on an empty board — which is
+    /// what kept the AI from cracking a fetchland in the early game, and would
+    /// equally mis-score a reanimation-shaped put.
+    #[test]
+    fn pre_cast_does_not_whiff_a_put_onto_the_battlefield_without_own_creatures() {
+        let mut state = make_state();
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Put Onto Battlefield".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )]);
+
+        assert_eq!(
+            pre_cast_score_for_spell(&state, id),
+            0.0,
+            "a put onto the battlefield must not be charged the no-own-creature whiff penalty"
+        );
+    }
+
     /// Control: the same opponent creature with no protection IS a legal
     /// target, so no no-target penalty applies.
     #[test]
@@ -7903,6 +8078,35 @@ mod tests {
         engine::game::apply_as_current(&mut receipt_state, receipt_candidate.action)
             .expect("the generated Defiler decision must remain reducer-legal at lethal life");
         assert_eq!(receipt_state.players[0].life, 0);
+        // CR 704.3 + CR 601.2h: no one gets priority mid-cast, so the lethal
+        // Defiler payment leaves the cast in progress; the spell is cast, then
+        // the game ends at the next priority check.
+        assert!(
+            matches!(receipt_state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "a lethal Defiler payment must not end the game mid-cast, got {:?}",
+            receipt_state.waiting_for
+        );
+        let spell = receipt_state
+            .pending_cast
+            .as_ref()
+            .expect("the cast is still pending")
+            .object_id;
+        receipt_state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(90_099),
+            false,
+            Vec::new(),
+        ));
+        let result = engine::game::apply_as_current(&mut receipt_state, GameAction::PassPriority)
+            .expect("the remaining {G} is payable from the pool");
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                engine::types::events::GameEvent::SpellCast { object_id, .. } if *object_id == spell
+            )),
+            "the spell must become cast before the game ends: {:?}",
+            result.events
+        );
         assert!(
             matches!(
                 receipt_state.waiting_for,
@@ -7910,7 +8114,7 @@ mod tests {
                     winner: Some(PlayerId(1))
                 }
             ),
-            "public action reconciliation must end the game after a lethal Defiler payment, got {:?}",
+            "the game must end at the priority check after the cast, got {:?}",
             receipt_state.waiting_for
         );
     }
@@ -8054,6 +8258,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8111,6 +8316,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8134,6 +8340,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8157,6 +8364,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8191,6 +8399,7 @@ mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -8533,9 +8742,16 @@ mod tests {
     /// A `controller: You` filter can never match an opponent's permanent, so
     /// "no opponent matched" is vacuously true and the mode would be penalised
     /// unconditionally. Orzhov Charm's self-bounce mode IS aimed at our own
-    /// board by design (re-buy an ETB, dodge removal). REVERT-FAILING: without
-    /// the `filter_can_reach_an_opponent` guard this scores the wasted-cast
-    /// penalty even with an opposing creature sitting on the battlefield.
+    /// board by design (re-buy an ETB, dodge removal).
+    ///
+    /// The attached-set parse shape means this row now covers the shape (the
+    /// head announces the self-scoped filter) rather than the
+    /// `filter_can_reach_an_opponent` guard: `TargetOnly` is Contextual for the
+    /// mode scan, so the guard's pre-existing `Effect::Bounce` coverage is
+    /// pinned by `pre_cast_allows_explicit_self_bounce_patterns`. Teaching the
+    /// policy the attached-set shape is a follow-up, deliberately not part of
+    /// this PR after the review found that recognizing it here regressed
+    /// self-bounce activations.
     #[test]
     fn self_scoped_harmful_mode_is_not_penalised() {
         let mut state = make_state();
@@ -8544,8 +8760,15 @@ mod tests {
 
         let modes = parsed_abilities("Orzhov Charm", ORZHOV_CHARM_ORACLE, &[], &["Instant"]);
         assert_eq!(modes.len(), 3, "three printed modes: {modes:?}");
-        let Effect::Bounce { target, .. } = &*modes[0].effect else {
-            panic!("mode 1 must still parse as a Bounce: {:?}", modes[0].effect);
+        // The attached-set bounce family lowers as a `TargetOnly` head (the
+        // announced creature) plus a mass child returning the host and its
+        // attachments together. The head still carries the self-scoped filter
+        // this fixture is about.
+        let Effect::TargetOnly { target } = &*modes[0].effect else {
+            panic!(
+                "mode 1 must still announce its self-scoped target: {:?}",
+                modes[0].effect
+            );
         };
         assert!(
             matches!(
@@ -8621,5 +8844,242 @@ mod tests {
             0.0,
             "the battlefield scan must not run in lookahead"
         );
+    }
+
+    // ─── created-token placements (CR 608.2c + CR 111.1) ─────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, imperative_token_then_placement, last_created_placement, self_etb_trigger,
+        token_effect, x_quantity,
+    };
+    use engine::types::ability::{ConjureCard, ConjureSource};
+
+    fn object_in_hand(
+        state: &mut GameState,
+        name: &str,
+        core_type: CoreType,
+        abilities: Vec<AbilityDefinition>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(core_type);
+        obj.abilities = Arc::new(abilities);
+        id
+    }
+
+    fn p1p1_on_last_created() -> Effect {
+        last_created_placement(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })
+    }
+
+    fn conjure_walker() -> Effect {
+        Effect::Conjure {
+            cards: vec![ConjureCard {
+                source: ConjureSource::Named {
+                    name: "Hangarback Walker".to_string(),
+                },
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
+            destination: Zone::Battlefield,
+            tapped: false,
+            library_position: None,
+            library_players: None,
+        }
+    }
+
+    /// The counters go on the token the same resolution creates, so a cast
+    /// with no creature of ours is not a wasted beneficial-creature cast:
+    /// Fractal Summoning's spell shape, a creature card whose activated ability
+    /// is the created-token ability (Berta, cast), and Match the Odds's route
+    /// shape. Opponent creatures are present so the board is not empty.
+    #[test]
+    fn created_token_placement_needs_no_creature_of_ours() {
+        let shapes = [
+            (
+                CoreType::Sorcery,
+                imperative_token_then_placement(
+                    AbilityKind::Spell,
+                    SubAbilityLink::ContinuationStep,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            ),
+            (
+                CoreType::Creature,
+                imperative_token_then_placement(
+                    AbilityKind::Activated,
+                    SubAbilityLink::ContinuationStep,
+                    (0, 0),
+                    CounterType::Plus1Plus1,
+                    x_quantity(),
+                ),
+            ),
+            (
+                CoreType::Sorcery,
+                imperative_token_then_placement(
+                    AbilityKind::Spell,
+                    SubAbilityLink::SequentialSibling,
+                    (1, 1),
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::Opponent),
+                            ),
+                        },
+                    },
+                ),
+            ),
+        ];
+        for (core_type, ability) in shapes {
+            let mut state = make_state();
+            add_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+            let id = object_in_hand(&mut state, "Token Maker", core_type, vec![ability]);
+            assert_eq!(pre_cast_score_for_spell(&state, id), 0.0, "{core_type:?}");
+        }
+    }
+
+    /// Hostiles that do not pair keep the no-own-creature penalty: a `Token`
+    /// in one ability and the placement in another, a placement after a
+    /// Conjure, and a placement in the "otherwise" leg of a root `Token`.
+    #[test]
+    fn unpaired_last_created_placements_keep_the_penalty() {
+        let mut otherwise = AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![]));
+        otherwise.condition = Some(AbilityCondition::IsYourTurn);
+        otherwise.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            p1p1_on_last_created(),
+        )));
+        let hostiles = [
+            vec![
+                AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![])),
+                AbilityDefinition::new(AbilityKind::Spell, p1p1_on_last_created()),
+            ],
+            vec![effect_chain(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                vec![conjure_walker(), p1p1_on_last_created()],
+            )],
+            vec![otherwise],
+        ];
+        for abilities in hostiles {
+            let mut state = make_state();
+            let id = object_in_hand(&mut state, "Hostile", CoreType::Sorcery, abilities);
+            let score = pre_cast_score_for_spell(&state, id);
+            assert!(
+                score <= -8.0,
+                "expected the wasted-cast penalty, got {score}"
+            );
+        }
+    }
+
+    /// Reach guard: a +1/+1 placement on a creature we control is still a
+    /// beneficial creature-targeting spell with no recipient.
+    #[test]
+    fn placement_on_our_creature_with_none_is_still_penalised() {
+        let mut state = make_state();
+        let id = object_in_hand(
+            &mut state,
+            "Grow",
+            CoreType::Sorcery,
+            vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+            )],
+        );
+        let score = pre_cast_score_for_spell(&state, id);
+        assert!(
+            score <= -8.0,
+            "expected the wasted-cast penalty, got {score}"
+        );
+    }
+
+    fn etb_creature(state: &mut GameState, execute: AbilityDefinition) -> ObjectId {
+        let id = object_in_hand(state, "ETB Creature", CoreType::Creature, Vec::new());
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .trigger_definitions
+            .push(self_etb_trigger(execute));
+        id
+    }
+
+    /// CR 115.10a: an ETB that creates a token and puts counters on it targets
+    /// nothing, so an empty board is no ETB whiff (Manifestation Sage and The
+    /// Bus Runner shapes).
+    #[test]
+    fn created_token_etb_is_not_an_etb_whiff() {
+        let sage = imperative_token_then_placement(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            (0, 0),
+            CounterType::Plus1Plus1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: engine::types::ability::PlayerScope::Controller,
+                },
+            },
+        );
+        let bus_runner = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::SequentialSibling,
+            vec![
+                token_effect(4, 4, vec![]),
+                last_created_placement(
+                    CounterType::Generic("hour".to_string()),
+                    QuantityExpr::Fixed { value: 8 },
+                ),
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: Some(TargetFilter::LastCreated),
+                    end_cost: None,
+                },
+            ],
+        );
+        for execute in [sage, bus_runner] {
+            let mut state = make_state();
+            let id = etb_creature(&mut state, execute);
+            assert_eq!(pre_cast_score_for_spell(&state, id), 0.0);
+        }
+    }
+
+    /// Reach guards on the ETB whiff: a targeted +1/+1 ETB with no creature
+    /// whiffs, and a placement after a Conjure keeps today's whiff
+    /// (conservative default).
+    #[test]
+    fn targeted_and_conjure_etbs_keep_the_etb_whiff() {
+        let targeted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        let conjure = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![conjure_walker(), p1p1_on_last_created()],
+        );
+        for execute in [targeted, conjure] {
+            let mut state = make_state();
+            let id = etb_creature(&mut state, execute);
+            let score = pre_cast_score_for_spell(&state, id);
+            assert!(score <= -8.0, "expected the ETB whiff, got {score}");
+        }
     }
 }

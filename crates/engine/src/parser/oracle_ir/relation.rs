@@ -23,7 +23,7 @@
 
 use super::doc::OracleItemId;
 use crate::types::{
-    ability::{ChosenSubtypeKind, TargetFilter},
+    ability::{AbilityCondition, ChosenSubtypeKind, TargetFilter},
     card_type::CoreType,
 };
 
@@ -56,10 +56,10 @@ pub(crate) enum DocumentRelationIr {
     },
     /// CR 102.1 + CR 608.2c: A mass-`MustAttack` coerce clause over
     /// the active player (`coerce`, Siren's Call) pairs with a sibling delayed
-    /// punisher (`punisher`) whose "that player controls" anaphor defaulted to
-    /// `You`. Applying the relation rebinds the punisher's destroyed-set
-    /// controller to the active player (and folds the CR 302.6 / CR 508.1a
-    /// continuous-control exemption sibling into the set predicate).
+    /// punisher (`punisher`) whose "that player controls" anaphor the coerce
+    /// clause's document antecedent bound to `ActivePlayer` at parse time.
+    /// Applying the relation folds the CR 302.6 / CR 508.1a continuous-control
+    /// exemption sibling into the punisher's destroyed-set predicate.
     ActivePlayerPunisher {
         coerce: OracleItemId,
         punisher: OracleItemId,
@@ -76,6 +76,11 @@ pub(crate) enum DocumentRelationIr {
     SelfReplacementOverride {
         base: OracleItemId,
         override_item: OracleItemId,
+        /// CR 614.6 + CR 608.2c: the paragraph-level selector (ability word,
+        /// "instead if"), kept off the override body so a guard the body prints
+        /// stays on its own instruction. `None` when the body's root condition is
+        /// the selector.
+        selector: Option<AbilityCondition>,
     },
     /// CR 607.2d: A "choose a [value]" producer linked to an ability that reads
     /// "the chosen [value]" back. One parameterized relation; `LinkedChoiceKind`
@@ -138,9 +143,10 @@ pub(crate) enum LinkedChoiceKind {
     ChosenTypeStatic {
         /// The resolved subtype the linked consumers are realigned to.
         chosen: ChosenSubtypeKind,
-        /// CR 205.3 + CR 608.2c: items whose `IsChosenCardType` discriminator is
-        /// realigned to `IsChosenCreatureType` (a static's `ModifyCost` spell
-        /// filter, or an ability's/trigger's `Dig` filter). Non-empty only when
+        /// CR 205.3 + CR 608.2c: exact item IDs whose `IsChosenCardType`
+        /// discriminator is realigned to `IsChosenCreatureType`: a static's
+        /// `ModifyCost` spell filter, an ability's/trigger's `Dig` filter, or a
+        /// `SpellCast` trigger's `valid_card` filter. Non-empty only when
         /// `chosen` is a creature type — a card-type chooser (Umori) keeps
         /// `IsChosenCardType`.
         retarget: Vec<OracleItemId>,
