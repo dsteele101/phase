@@ -15389,7 +15389,6 @@ mod tests {
             Some(&limit)
         );
     }
-    }
 
     /// Test of Faith's Oracle text: its resolution installs one rider in the arena.
     const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to target \
