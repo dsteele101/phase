@@ -1,12 +1,12 @@
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::types::ability::{
-    is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    AdditionalCost, AttachmentReferent, BoardWideCostModifier, CardPlayMode, CardSelectionMode,
-    CardTypeSetSource, CastCostModifier, CastTimingPermission, CastingPermission, ChoiceType,
-    CombatRelationSubject, ContinuousModification, ControllerRef, CostObjectCount,
-    CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect, EffectKind,
-    FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
+    filter_references_target_player, is_variable_remove_counter_cost_count, AbilityBlockKind,
+    AbilityBlockReason, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationManaPaymentRestriction, AdditionalCost, AttachmentReferent, BoardWideCostModifier,
+    CardPlayMode, CardSelectionMode, CardTypeSetSource, CastCostModifier, CastTimingPermission,
+    CastingPermission, ChoiceType, CombatRelationSubject, ContinuousModification, ControllerRef,
+    CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect,
+    EffectKind, FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
     ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
     ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
     SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -57,9 +57,9 @@ use super::ability_utils::{
     auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
     build_resolved_from_def, build_target_assignments_for_ability_with_limit, build_target_slots,
     build_target_slots_for_announcement, compute_unavailable_modes, declared_targets_in_chain,
-    filter_references_target_player, has_legal_target_assignment_for_ability,
-    modal_choice_for_player, simple_legal_target_assignment_exists_for_ability,
-    target_constraints_from_modal, unresolved_x_target_construction_error, TargetSlotBuildOutcome,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
+    simple_legal_target_assignment_exists_for_ability, target_constraints_from_modal,
+    unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
@@ -512,13 +512,14 @@ fn runtime_granted_equip_abilities(
 }
 
 /// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
-/// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
-/// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
+/// abilities (Unearth, Encore, Scavenge, Embalm, Eternalize) for keywords granted
+/// to a graveyard card by a static or a continuous effect. The `AddKeyword` layer
+/// seam installs only the keyword + triggers, so a
 /// granted graveyard activated keyword carries no activatable ability without
 /// this on-the-fly synthesis. Mirrors `runtime_granted_cycling_abilities`: only
 /// keywords present in the *effective* (granted-inclusive) set but NOT printed on
-/// the card are synthesized, so a printed Encore/Scavenge ability (already in
-/// `obj.abilities`) is never double-counted.
+/// the card are synthesized, so a printed Unearth/Encore/Scavenge ability (already
+/// in `obj.abilities`) is never double-counted.
 fn runtime_granted_graveyard_activated_abilities(
     state: &GameState,
     source_id: ObjectId,
@@ -534,10 +535,19 @@ fn runtime_granted_graveyard_activated_abilities(
         .into_iter()
         .filter(|keyword| !obj.base_keywords.iter().any(|printed| printed == keyword))
         .filter_map(|keyword| {
-            // CR 702.128a / CR 702.129a / CR 702.141a: Embalm / Eternalize / Encore
-            // granted with a self-referential cost ("equal to its mana cost" or
-            // "where X is its mana value") carry `ManaCost::SelfManaCost` or
-            // `ManaCost::SelfManaValue`; concretize before synthesizing the
+            // CR 118.6: an unearth granted with a cost "equal to its mana cost" on a
+            // card with NO mana cost (Dryad Arbor) has an unpayable cost. Concretizing
+            // it would yield `ManaCost::NoCost`, which the payment path reads as free,
+            // so the ability is never offered instead.
+            if let Keyword::Unearth(cost) = &keyword {
+                if super::keywords::self_mana_cost_is_unpayable(state, source_id, cost) {
+                    return None;
+                }
+            }
+            // CR 702.84a / CR 702.128a / CR 702.129a / CR 702.141a: Unearth / Embalm /
+            // Eternalize / Encore granted with a self-referential cost ("equal to its
+            // mana cost" or "where X is its mana value") carry `ManaCost::SelfManaCost`
+            // or `ManaCost::SelfManaValue`; concretize before synthesizing the
             // activated ability (the activated-ability payment path would
             // otherwise treat those placeholders as free).
             let keyword = super::keywords::resolve_self_cost_graveyard_activated_keyword(
@@ -650,7 +660,7 @@ pub(crate) fn activation_ability_definition(
         let offset = ability_index.checked_sub(obj.abilities.len())?;
         // Must match the append order in `activated_ability_definitions`: printed
         // abilities first, then runtime-granted cycling, then runtime-granted
-        // graveyard activated (Encore/Scavenge), then runtime-granted
+        // graveyard activated (Unearth/Encore/Scavenge/Embalm), then runtime-granted
         // plot-from-library (Fblthp), then equip.
         // Identical order is REQUIRED for `ability_index` consistency.
         runtime_granted_cycling_abilities(state, source_id)
@@ -1364,6 +1374,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         source_id: *source,
                         source_controller,
                         ability: None,
+                        ability_targets: None,
                         // Restriction source is the current operation subject,
                         // not a deferred triggered-source read.
                         trigger_source: None,
@@ -4701,6 +4712,28 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
             graveyard_replacement,
             ..
         } => graveyard_replacement.clone(),
+        _ => None,
+    }
+}
+
+/// CR 603.2h + CR 601.2i: the CR 603.2h limit carried by the resolution cast elected
+/// for THIS cast (the selected permission's cleanup), read before the stack move drops
+/// it. Mirrors `selected_exile_alt_cost_permission_graveyard_replacement`, so a
+/// non-elected sibling permission's limit cannot be spent by this cast.
+pub(super) fn selected_resolution_cast_indicated_action(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<Box<crate::types::ability::IndicatedActionLimit>> {
+    let obj = state.objects.get(&object_id)?;
+    let permission =
+        selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)?;
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost {
+            resolution_cleanup: Some(cleanup),
+            ..
+        } => cleanup.indicated_action.clone(),
         _ => None,
     }
 }
@@ -24977,6 +25010,7 @@ fn apply_mana_spell_grants(
                 source_id: unit.source_id,
                 source_controller: Some(caster),
                 ability: None,
+                ability_targets: None,
                 // This reflexive cast check evaluates its current mana-source
                 // operation, not a delayed triggered source.
                 trigger_source: None,
@@ -28021,8 +28055,14 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
                         relative &= !filter_references_target_player(filter);
                     }
                     CardTypeSetSource::Zone { .. } => {}
+                    // A member filter narrows the set; it cannot make a
+                    // look-back population target-relative. CR 608.2c +
+                    // CR 115.1: `TargetedObjects` joins this arm — its
+                    // announcement-bound members are look-back by identity
+                    // (live read with LKI fallback), never board-relative.
                     CardTypeSetSource::ExiledBySource
                     | CardTypeSetSource::TrackedSet { .. }
+                    | CardTypeSetSource::TargetedObjects { .. }
                     | CardTypeSetSource::TurnJournal { .. }
                     | CardTypeSetSource::AnyOf { .. } => relative = false,
                 },
@@ -31949,9 +31989,18 @@ fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource, read: Ta
         CardTypeSetSource::AnyOf { sources } => sources
             .iter()
             .any(|x| card_type_set_source_reads_chosen_target(x, read)),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        // CR 608.2c + CR 115.1: a targeted-objects population reads the
+        // ability's chosen targets, so it reads a chosen target by
+        // definition — routed through the single `targeted_objects_filter`
+        // authority rather than answered as a constant.
+        CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_chosen_target(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            read,
+        ),
     }
 }
 
@@ -35230,6 +35279,7 @@ mod castable_zone_authority_tests {
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: Vec::new(),
+                indicated_action: None,
             });
         }
         assert!(

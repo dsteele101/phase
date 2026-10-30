@@ -1599,6 +1599,17 @@ pub struct ZoneChangeRecord {
     /// snapshot rather than current combat state.
     #[serde(default)]
     pub combat_status: ZoneChangeCombatStatus,
+    /// CR 509.1g + CR 506.4 + CR 608.2h: the block pairings this object was in
+    /// immediately before it left its zone, in both orientations, each side
+    /// pinned to its exact incarnation and sorted. Leaving the battlefield
+    /// removes the object from combat, pruning the live pairing maps, so a
+    /// current-pairing relation whose subject has departed ("creatures
+    /// blocking or blocked by it" on a dies trigger) reads its last known
+    /// pairings here. Captured from `combat::live_block_pairs_of` at the
+    /// zone-change authority; not part of `ZoneChangeCombatStatus`, which is a
+    /// `Copy` role snapshot projected into every trigger source context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_pairs: Vec<BlockHistoryPair>,
     /// CR 603.10a: ObjectIds that left the battlefield in the SAME simultaneous
     /// event as this object (every permanent destroyed by one board wipe, every
     /// creature destroyed together by a single state-based-action check, etc.),
@@ -1755,6 +1766,8 @@ struct ZoneChangeRecordWire {
     #[serde(default)]
     combat_status: ZoneChangeCombatStatus,
     #[serde(default)]
+    block_pairs: Vec<BlockHistoryPair>,
+    #[serde(default)]
     co_departed: Vec<ObjectId>,
     #[serde(default)]
     entered_incarnation: Option<u64>,
@@ -1800,6 +1813,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             linked_exile_snapshot,
             is_token,
             combat_status,
+            block_pairs,
             co_departed,
             entered_incarnation,
             attached_to,
@@ -1835,6 +1849,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             linked_exile_snapshot,
             is_token,
             combat_status,
+            block_pairs,
             co_departed,
             entered_incarnation,
             attached_to,
@@ -1990,6 +2005,27 @@ pub(crate) fn terminal_battlefield_departure_row(
         .skip(index + 1)
         .all(|later| later.object_id != object_id)
         .then(|| &state.zone_changes_this_turn[index])
+}
+
+/// CR 400.7 + CR 608.2h: the battlefield-departure row of exactly `identity` —
+/// the row whose record-owned source context names that incarnation leaving the
+/// battlefield. Exact identity, so a later incarnation at the same `ObjectId`
+/// (CR 400.7: a new object) never answers for it, and the row is found even
+/// after that object has since moved again. `None` when no such row was
+/// recorded this turn (`zone_changes_this_turn` is cleared at turn start),
+/// which every caller must treat as fail-closed.
+pub(crate) fn exact_battlefield_departure_row(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+) -> Option<&ZoneChangeRecord> {
+    state.zone_changes_this_turn.iter().rev().find(|row| {
+        row.object_id == identity.object_id
+            && row.from_zone == Some(Zone::Battlefield)
+            && row.trigger_source_context.as_ref().is_some_and(|context| {
+                context.identity.reference == identity
+                    && context.identity.expected_zone == Zone::Battlefield
+            })
+    })
 }
 
 impl GameState {
@@ -2185,6 +2221,7 @@ impl ZoneChangeRecord {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: ZoneChangeCombatStatus::default(),
+            block_pairs: Vec::new(),
             co_departed: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
@@ -8197,8 +8234,9 @@ impl GameState {
 
     /// CR 615.5 + CR 614.6: the `replacement_continuations` positions some
     /// `ReplacementDefinition::runtime_execute` in this state names. It reads the
-    /// serialized state with the walk the decode check runs, so every holder of a
-    /// definition is covered, a holder added later included.
+    /// serialized state with the walk the decode check runs, so every serialized holder of a
+    /// definition is covered, a holder added later included; a `#[serde(skip)]` holder is not
+    /// seen.
     pub(crate) fn referenced_replacement_continuations(
         &self,
     ) -> Result<BTreeSet<u64>, serde_json::Error> {
@@ -22189,6 +22227,17 @@ pub fn record_captured_onsets_json(json: &str) -> String {
     serde_json::to_string(&document).expect("a committed capture re-serializes")
 }
 
+/// CR 608.2h + CR 400.7: the producing transition a tracked-set member is
+/// bound to — the zone it departed and the pre-move incarnation that
+/// departure recorded under in `lki_by_incarnation`. Reads key on the
+/// incarnation; the zone documents the expected origin and selects the
+/// no-record fallback (live is authoritative for zones that record no LKI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackedMemberOrigin {
+    pub departed_from: Zone,
+    pub departure_incarnation: u64,
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -23028,6 +23077,23 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub tracked_set_member_causes: im::HashMap<TrackedSetId, im::HashMap<ObjectId, ThisWayCause>>,
 
+    /// CR 608.2h + CR 400.7: the producing transition each tracked-set member
+    /// was stamped with at publication — the zone it departed and the
+    /// pre-move incarnation that departure recorded under. Characteristic
+    /// and member-filter reads bind to THIS record (via
+    /// `lki_by_incarnation`), never to "the latest older departure by ID":
+    /// a storage id reused by a genuinely new hand/graveyard-origin object
+    /// must not inherit an earlier departure's characteristics (an old pump
+    /// on a discarded card). Origins whose zone records no LKI departure
+    /// (hand/library/graveyard) read live, which is authoritative there.
+    /// Stamped only for zone-transition producer actions, alongside the
+    /// cause stamp; selection sets and legacy saves carry no entry and keep
+    /// the live-or-cache read. Pruned with membership at the same sites.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub tracked_set_member_origins:
+        im::HashMap<TrackedSetId, im::HashMap<ObjectId, TrackedMemberOrigin>>,
+
     /// CR 701.24c-e + CR 608.2c: players explicitly designated by a tracked-set
     /// producer even when their subject population is empty. The object ledger
     /// alone cannot represent "shuffle your empty graveyard into your library";
@@ -23276,6 +23342,14 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_resources: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
 
+    /// CR 732.2a: per controller, the marked axes its loop drives up — always a subset of
+    /// `unbounded_resources[controller]`, written only by `mark_unbounded_loop` and restored to
+    /// that subset by `retain_marked_rising` in every clear authority; a missing entry means
+    /// not rising. INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `unbounded_resources`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unbounded_rising: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
+
     /// CR 104.4b / CR 732.2a: for each controller with a marked revocable-∞ capability
     /// (`unbounded_resources`), the set of battlefield permanents whose presence enables the
     /// loop (the stable recurring board: `battlefield_ids(prior) ∩ battlefield_ids(state)`).
@@ -23465,6 +23539,8 @@ declare_game_state! {
     pub sideboard_submitted: Vec<PlayerId>,
 
     // Trigger constraint tracking keyed by exact source incarnation + occurrence.
+    /// CR 603.2: once-each-turn limits spent by triggering
+    /// (`OncePerTurn { spent_by: Triggering }`).
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_turn: HashSet<TriggerDefinitionRef>,
@@ -23481,6 +23557,16 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_turn_per_opponent: HashSet<(TriggerDefinitionRef, PlayerId)>,
+    /// CR 603.2h: (trigger definition, player) pairs — that player, controlling that
+    /// ability, has taken its "Do this only once each turn" indicated action this turn.
+    /// Sole writer: `triggers::record_indicated_action`, on acceptance of a non-cast
+    /// instruction or when a CR 603.2h resolution cast becomes cast. Read at fire time and at resolution (incl. the
+    /// `upfront_optional_gate` authority). Cleared at turn start. Boxed: populated only
+    /// once a CR 603.2h ability's action is taken, so it keeps `GameState`'s inline size
+    /// inside the `game_state_size` stack budget.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub trigger_indicated_actions_this_turn: Box<HashSet<(TriggerDefinitionRef, PlayerId)>>,
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
@@ -26768,11 +26854,7 @@ pub struct TransientContinuousEffect {
     /// non-current sentinel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_subject: Option<ObjectIncarnationRef>,
-    /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent`
-    /// effect's event is matched against, captured when the effect is created
-    /// (as a `WhenNextEvent` delayed trigger carries one). `None` for every
-    /// other duration. Rides inside the journaled
-    /// `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
+    /// CR 611.2a + CR 400.7: the source context a `Duration::UntilEvent` effect's event is matched against, captured when the effect is created (as a `WhenNextEvent` delayed trigger carries one). Where the installer passes the creating ability — today only `effect.rs::install_transient`, the GenericEffect installer — it is captured from that ability's own source (`ResolvedAbility::effect_source_ref`): the live object while it is that incarnation, else its last known information, from its departure record this turn, else the source context the ability itself carries (CR 113.7a + CR 603.7d / CR 603.7e); a newer object at the same id never stands in, and it is `None` (the deadline never matches) only when none of these exists. Every other install passes no creating ability: the three public `add_transient_continuous_effect*` wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven effect handlers. For other installs it is captured from the live source, else its terminal battlefield departure record. `None` for every other duration. Rides inside the journaled `ResolvedContinuousEffectCommand`, so replay installs it verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_event_source: Option<Box<TriggerSourceContext>>,
     /// CR 116.2c: see [`EndEffectPermission`]. `None` for every effect with no
@@ -30111,24 +30193,16 @@ impl GameState {
         });
         let blocking =
             combat.is_some_and(|combat| combat.blocker_to_attacker.contains_key(&object_id));
-        let related_objects = attacker
+        // CR 509.1g: the subject's partner side of every current block pairing,
+        // from the single pairing authority.
+        let related_objects = crate::game::combat::live_block_pairs_of(self, object_id)
             .into_iter()
-            .flat_map(|attacker| {
-                combat
-                    .and_then(|combat| combat.blocker_assignments.get(&attacker.object_id))
-                    .into_iter()
-                    .flatten()
-            })
-            .chain(
-                combat
-                    .and_then(|combat| combat.blocker_to_attacker.get(&object_id))
-                    .into_iter()
-                    .flatten(),
-            )
-            .filter_map(|related_id| {
-                self.objects
-                    .get(related_id)
-                    .map(ObjectIncarnationRef::from_object)
+            .map(|pair| {
+                if pair.blocker.object_id == object_id {
+                    pair.attacker
+                } else {
+                    pair.blocker
+                }
             })
             .collect();
         let attachments = crate::game::zones::capture_attachment_snapshot(self, object)
@@ -30212,6 +30286,24 @@ impl GameState {
         })
     }
 
+    /// CR 400.7 + CR 113.7a + CR 608.2h: the zone change that took the exact
+    /// object `identity` out of the zone it was observed in this turn; its
+    /// source context is that object's last known information. An incarnation
+    /// departs at most once. `None` when it has not departed this turn (the
+    /// ledger is per-turn); callers fail closed and never substitute the
+    /// object now stored under the id.
+    pub(crate) fn incarnation_departure_record(
+        &self,
+        identity: ObjectIncarnationRef,
+    ) -> Option<&ZoneChangeRecord> {
+        self.zone_changes_this_turn.iter().find(|record| {
+            record.object_id == identity.object_id
+                && record
+                    .trigger_source_context()
+                    .is_some_and(|context| context.identity.reference == identity)
+        })
+    }
+
     /// CR 701.50b + CR 400.7: The conniver as it LAST EXISTED on the
     /// battlefield, for a connive whose performer left before the action ran
     /// (and may have returned as a new object at the same storage id).
@@ -30236,13 +30328,7 @@ impl GameState {
             .lki_by_incarnation
             .get(&object_id)
             .and_then(|history| history.get(&identity.incarnation))?;
-        let departure = self.zone_changes_this_turn.iter().find(|record| {
-            record.object_id == object_id
-                && record
-                    .trigger_source_context
-                    .as_ref()
-                    .is_some_and(|context| context.identity.reference == identity)
-        });
+        let departure = self.incarnation_departure_record(identity);
         let context = departure.and_then(|record| record.trigger_source_context.as_ref());
         let entered_this_turn = self.zone_changes_this_turn.iter().any(|record| {
             record.object_id == object_id
@@ -31871,6 +31957,7 @@ impl GameState {
             next_return_result_occurrence_id: default_next_return_result_occurrence_id(),
             resolving_modal_instruction: None,
             tracked_set_member_causes: im::HashMap::new(),
+            tracked_set_member_origins: im::HashMap::new(),
             tracked_set_participants: HashMap::new(),
             commander_cast_count: HashMap::new(),
             commander_cast_owners: HashMap::new(),
@@ -31913,6 +32000,7 @@ impl GameState {
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
             triggers_fired_this_turn_per_opponent: HashSet::new(),
+            trigger_indicated_actions_this_turn: Box::default(),
             triggers_fired_this_game: HashSet::new(),
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
@@ -32111,6 +32199,7 @@ impl GameState {
             debug_permitted: BTreeSet::new(),
             debug_infinite_mana: BTreeSet::new(),
             unbounded_resources: BTreeMap::new(),
+            unbounded_rising: BTreeMap::new(),
             unbounded_loop_enablers: BTreeMap::new(),
             unbounded_loop_pile: BTreeMap::new(),
             unbounded_counter_targets: BTreeMap::new(),
@@ -32663,6 +32752,7 @@ impl GameState {
             condition,
             None,
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
@@ -32688,6 +32778,7 @@ impl GameState {
             condition,
             None,
             bindings,
+            None,
         )
     }
 
@@ -32720,9 +32811,11 @@ impl GameState {
             condition,
             Some(end_permission),
             TransientContinuousEffectBindings::default(),
+            None,
         )
     }
 
+    /// CR 611.2a + CR 113.7a + CR 400.7: `creating_ability` is the ability whose resolution creates this effect; an `UntilEvent` deadline is matched against that ability's own source (see `TransientContinuousEffect::duration_event_source`). When `Some`, `source_id` is that ability's source. Only `effect.rs::install_transient`, the GenericEffect installer, passes it. Every other install passes `None`: the three public wrappers and `add_simultaneous_transient_continuous_effects`, and through them static, replacement, cost and rules-generated installs and the other ability-driven effect handlers. These latch the live source, else its terminal battlefield departure.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
@@ -32734,7 +32827,9 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
+        debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
                 self.install_started_transient_continuous_effect(
@@ -32746,6 +32841,7 @@ impl GameState {
                     condition,
                     end_permission,
                     bindings,
+                    creating_ability,
                 )
             })
     }
@@ -32776,6 +32872,7 @@ impl GameState {
                     None,
                     None,
                     bindings,
+                    None,
                 );
             }
         }
@@ -32816,6 +32913,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        creating_ability: Option<&ResolvedAbility>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
@@ -32855,9 +32953,32 @@ impl GameState {
         // never re-read from `objects`. CR 113.7a: an activated or triggered
         // ability resolves even when its source is gone; if the source has
         // ceased to exist (CR 704.5d / CR 704.5e), its terminal battlefield
-        // departure record is the authority for it (CR 608.2i).
-        let duration_event_source = match duration {
-            Duration::UntilEvent { .. } => self
+        // departure record is the authority for it (CR 608.2h).
+        //
+        // With a creating ability — passed only by `effect.rs::install_transient`, the GenericEffect installer — the deadline binds that ability's own source (`ResolvedAbility::effect_source_ref`): the exact object while it is live, else its last known information — its departure record this turn (CR 113.7a + CR 608.2h), else the source context the ability carries across turns (CR 603.7d / CR 603.7e) — and `None` when none exists: a newer object reusing the storage id never stands in for it (CR 400.7). Every other install (the public wrappers and `add_simultaneous_transient_continuous_effects`, and through them the other ability-driven handlers) passes none: the live object at the id, else its terminal battlefield departure.
+        let duration_event_source = match (&duration, creating_ability) {
+            (Duration::UntilEvent { .. }, Some(ability)) => ability
+                .effect_source_ref(self)
+                .and_then(|source| {
+                    self.objects
+                        .get(&source.object_id)
+                        .filter(|object| object.incarnation == source.incarnation)
+                        .map(|object| trigger_source_context_for_latch(self, object))
+                        .or_else(|| {
+                            self.incarnation_departure_record(source)
+                                .and_then(ZoneChangeRecord::trigger_source_context)
+                                .cloned()
+                        })
+                        .or_else(|| {
+                            ability
+                                .trigger_source
+                                .as_ref()
+                                .filter(|context| context.identity.reference == source)
+                                .cloned()
+                        })
+                })
+                .map(Box::new),
+            (Duration::UntilEvent { .. }, None) => self
                 .objects
                 .get(&source_id)
                 .map(|source| trigger_source_context_for_latch(self, source))
@@ -33555,6 +33676,36 @@ impl GameState {
         // CR 104.4b: the same traversal identity canonicalization uses.
         self.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
 
+        // CR 608.2c: the departure snapshots the frame's live tracked-set
+        // anaphor reads — the resolved set's origins (`chain_tracked_set_id`,
+        // else the latest non-empty set, mirroring
+        // `targeting::resolve_tracked_set_id`; inlined because types cannot
+        // depend on game) — are retained alongside carrier references, or
+        // normalization would degrade origin reads the unnormalized states
+        // agree on. Every other set is an append-only record whose superseded
+        // stamps are history, not position: each blink cycle appends a fresh
+        // set re-stamping the same member, so retaining every stamp would
+        // accumulate incarnations across periods and refuse artefactually.
+        // (Fresh sets' origins stay compared through the origins field,
+        // converged below the window by the cover arms.)
+        let resolved_set = self.chain_tracked_set_id.or_else(|| {
+            self.tracked_object_sets
+                .iter()
+                .filter(|(_, members)| !members.is_empty())
+                .max_by_key(|(id, _)| id.0)
+                .map(|(id, _)| *id)
+        });
+        if let Some(set) = resolved_set {
+            if let Some(members) = self.tracked_set_member_origins.get(&set) {
+                for (member, origin) in members.iter() {
+                    referenced_lki.insert(ObjectIncarnationRef::of(
+                        *member,
+                        origin.departure_incarnation,
+                    ));
+                }
+            }
+        }
+
         self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
             .into_iter()
             .filter_map(|(object_id, mut history)| {
@@ -33649,11 +33800,13 @@ impl GameState {
     }
 
     /// See `normalize_for_loop`. Per object, rank-based over the retained
-    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys and
+    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys,
     /// the incarnations trigger events name (`ZoneChanged` entries and stamped
-    /// `PermanentTapped` taps), so two positions minted at different times
-    /// compare equal while which incarnation each event names — and its
-    /// snapshot — is preserved.
+    /// `PermanentTapped` taps), and the incarnations the resolved set's member
+    /// origins name — so two positions minted at different times compare
+    /// equal while which incarnation each live reference names, and whether a
+    /// snapshot sits behind it, is preserved. Non-resolved origins name
+    /// append-only history and remap by union rank below the window.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
         fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
             match event {
@@ -33836,6 +33989,35 @@ impl GameState {
                 present.entry(object_id).or_default().push(*incarnation);
             }
         });
+        // CR 608.2c + CR 608.2h: only the RESOLVED set's origins join the
+        // identity pool (mirrors `retain_carrier_referenced_lki`:
+        // `chain_tracked_set_id`, else the latest non-empty set — inlined
+        // because types cannot depend on game). Reads through normalized
+        // origins go through the resolved set alone, so only its stamps need
+        // exact ranks: a missing departure there takes its own rank instead
+        // of aliasing a retained snapshot's rank, which would change what the
+        // normalized state reads. Every other set is append-only history
+        // whose superseded stamps converge structurally below the window via
+        // the union-rank path — pooling them would let a missing older-set
+        // stamp consume a dense rank and shift the surviving snapshot's rank,
+        // artefactually refusing cover across blink periods.
+        let resolved_set = self.chain_tracked_set_id.or_else(|| {
+            self.tracked_object_sets
+                .iter()
+                .filter(|(_, members)| !members.is_empty())
+                .max_by_key(|(id, _)| id.0)
+                .map(|(id, _)| *id)
+        });
+        if let Some(set) = resolved_set {
+            if let Some(members) = self.tracked_set_member_origins.get(&set) {
+                for (member, origin) in members.iter() {
+                    present
+                        .entry(*member)
+                        .or_default()
+                        .push(origin.departure_incarnation);
+                }
+            }
+        }
         for incarnations in present.values_mut() {
             incarnations.sort_unstable();
             incarnations.dedup();
@@ -33872,6 +34054,40 @@ impl GameState {
                 *incarnation = canonical(object_id, *incarnation);
             }
         });
+        // CR 608.2c: remap origin-named incarnations. A pooled incarnation
+        // (history, carrier, or resolved-set origin) takes its exact rank, so
+        // two positions minted at different times keep reading the same
+        // snapshots through structurally identical origins. A non-resolved
+        // origin names append-only history and remaps by union rank — the rank
+        // it WOULD have — so a superseded older-set stamp remaps exactly like
+        // the live stamp naming the same departure on the other side and the
+        // origins field converges below the window. Total on both paths: the
+        // `binary_search` hit is the exact rank, the miss its insertion point.
+        let remap_origin = |member: ObjectId, incarnation: u64| {
+            present
+                .get(&member)
+                .map(
+                    |incarnations| match incarnations.binary_search(&incarnation) {
+                        Ok(rank) => rank as u64 + 1,
+                        Err(would_be) => would_be as u64 + 1,
+                    },
+                )
+                .unwrap_or(1)
+        };
+        self.tracked_set_member_origins = std::mem::take(&mut self.tracked_set_member_origins)
+            .into_iter()
+            .map(|(set_id, members)| {
+                let members = members
+                    .into_iter()
+                    .map(|(member, mut origin)| {
+                        origin.departure_incarnation =
+                            remap_origin(member, origin.departure_incarnation);
+                        (member, origin)
+                    })
+                    .collect();
+                (set_id, members)
+            })
+            .collect();
     }
 
     /// The spell announcements named by `BecomesTarget` targeters on every
@@ -34328,20 +34544,46 @@ impl GameState {
 
     /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
     /// pumps `axes`. The single write authority for `unbounded_resources` —
-    /// every producer routes through here, never mutating the map inline. Two
-    /// producers exist: the infinite-mana debug toggle
-    /// (`DebugAction::SetInfiniteMana`, ungated) and the live combo-detector at the
-    /// reconcile seam (`game::engine::reconcile_terminal_result`), which persists a
-    /// confirmed loop's `delta.unbounded_axes_for(winner)` — the same axes
-    /// `detect_loop` names in `LoopCertificate.unbounded` — but ONLY when the
-    /// user-controllable `GameState::loop_detection` gate is `On`. Idempotent
+    /// every producer routes through here, never mutating the map inline. Idempotent
     /// set-union: storing exactly the axes it is given
     /// (so a mana toggle stores its six `Mana(_)` axes, a drain certificate stores
     /// its `Life`/`DamageDealt` axes) without clobbering axes a prior producer
     /// already recorded for the same controller.
-    pub fn mark_unbounded_loop(&mut self, controller: PlayerId, axes: &[ResourceAxis]) {
+    /// Records each given axis's direction: an axis in `rising` is stored in `unbounded_rising`,
+    /// any other given axis is removed from it.
+    pub fn mark_unbounded_loop(
+        &mut self,
+        controller: PlayerId,
+        axes: &[ResourceAxis],
+        rising: &[ResourceAxis],
+    ) {
         let entry = self.unbounded_resources.entry(controller).or_default();
         entry.extend(axes.iter().copied());
+        let marked_rising = self.unbounded_rising.entry(controller).or_default();
+        for axis in axes {
+            if rising.contains(axis) {
+                marked_rising.insert(*axis);
+            } else {
+                marked_rising.remove(axis);
+            }
+        }
+        if marked_rising.is_empty() {
+            self.unbounded_rising.remove(&controller);
+        }
+    }
+
+    /// Restores `unbounded_rising[controller] ⊆ unbounded_resources[controller]` after a clear.
+    fn retain_marked_rising(&mut self, controller: PlayerId) {
+        let Some(marked) = self.unbounded_resources.get(&controller) else {
+            self.unbounded_rising.remove(&controller);
+            return;
+        };
+        if let Some(rising) = self.unbounded_rising.get_mut(&controller) {
+            rising.retain(|axis| marked.contains(axis));
+            if rising.is_empty() {
+                self.unbounded_rising.remove(&controller);
+            }
+        }
     }
 
     /// Single write authority for `unbounded_loop_enablers` (an engine bookkeeping map; no CR
@@ -34597,6 +34839,7 @@ impl GameState {
         self.unbounded_counter_targets.remove(&controller); // display-only counter analog of the pile
         self.pending_unbounded_materialization.remove(&controller);
         self.pending_materialization_count.remove(&controller); // CR 732.2c bound, in lockstep
+        self.retain_marked_rising(controller);
     }
 
     /// CR 732.2a: end the ACTUALLY-collapsed persistent axes for `controller` after
@@ -34682,6 +34925,7 @@ impl GameState {
         }
         self.pending_unbounded_materialization.remove(&controller);
         self.pending_materialization_count.remove(&controller); // CR 732.2c bound, in lockstep
+        self.retain_marked_rising(controller);
     }
 
     /// CR 500.5 + CR 106.4: end a loop-backed ∞-mana capability at a step/phase boundary — an
@@ -34706,6 +34950,7 @@ impl GameState {
                 self.unbounded_loop_enablers.remove(&controller); // engine-state lockstep-iff-empty
             }
         }
+        self.retain_marked_rising(controller);
     }
 }
 
@@ -34998,6 +35243,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // resolution — the same reason that field is projected out here.
         resolving_modal_instruction: _,
         tracked_set_member_causes: _,
+        tracked_set_member_origins: _,
         tracked_set_participants: _,
         commander_cast_count: _,
         commander_cast_owners: _,
@@ -35030,6 +35276,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         debug_permitted: _,
         debug_infinite_mana: _,
         unbounded_resources: _,
+        unbounded_rising: _,
         unbounded_loop_enablers: _,
         unbounded_loop_pile: _,
         unbounded_counter_targets: _,
@@ -35051,6 +35298,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         triggers_fired_this_turn: _,
         trigger_fire_counts_this_turn: _,
         triggers_fired_this_turn_per_opponent: _,
+        trigger_indicated_actions_this_turn: _,
         triggers_fired_this_game: _,
         triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
@@ -35384,6 +35632,7 @@ impl PartialEq for GameState {
             && self.next_return_result_occurrence_id == other.next_return_result_occurrence_id
             && self.resolving_modal_instruction == other.resolving_modal_instruction
             && self.tracked_set_member_causes == other.tracked_set_member_causes
+            && self.tracked_set_member_origins == other.tracked_set_member_origins
             && self.tracked_set_participants == other.tracked_set_participants
             && self.commander_cast_count == other.commander_cast_count
             && self.commander_cast_owners == other.commander_cast_owners
@@ -35427,6 +35676,8 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
             && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
+            && self.trigger_indicated_actions_this_turn
+                == other.trigger_indicated_actions_this_turn
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.triggered_abilities_added_mana_this_turn
                 == other.triggered_abilities_added_mana_this_turn
@@ -35866,6 +36117,7 @@ mod forced_cascade_window_tests {
     fn certificate() -> crate::analysis::loop_check::LoopCertificate {
         crate::analysis::loop_check::LoopCertificate {
             unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
+            rising: Vec::new(),
             win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -36163,6 +36415,7 @@ mod forced_cascade_window_tests {
                         predicted_winner: Some(PlayerId(0)),
                         count: crate::analysis::decision_template::IterationCount::UntilLethal,
                         unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
+                        rising: Vec::new(),
                         win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
                         win_kind_at: None,
                         template: None,
@@ -37645,6 +37898,7 @@ mod tests {
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: vec![receipt.clone()],
+                    indicated_action: None,
                 },
             },
         };
@@ -37820,6 +38074,7 @@ mod tests {
             reject_action: ResolutionMvRejectAction::RemainExiled,
             success_action: ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         };
 
         // GraveyardPaidCast — an empty rider is skipped and a carried rider
@@ -40126,6 +40381,8 @@ mod tests {
                     source_id: ObjectId(9_801),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
+                    quantity_controller: None,
+                    scoped_player: None,
                     targets: vec![],
                     results_table: vec![],
                     modifier: None,
@@ -40138,6 +40395,12 @@ mod tests {
                     }),
                     continuation: crate::types::resolution::DieRollContinuation::Resolution,
                     chain_root_targets: vec![],
+                    illegal_target_slots: vec![],
+                    chain_root_target_pins: vec![],
+                    declared_capture: None,
+                    local_target_pins: vec![],
+                    keyed_target_incarnations: vec![],
+                    declared_player: None,
                 }));
                 let wire = serde_json::to_value(if trusted {
                     PersistedGameState::capture(state)
@@ -45803,6 +46066,8 @@ mod tests {
                     source_id: ObjectId(5),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
+                    quantity_controller: None,
+                    scoped_player: None,
                     targets: vec![],
                     results_table: vec![],
                     modifier: None,
@@ -45810,6 +46075,12 @@ mod tests {
                     trigger_context: Some(context),
                     continuation: crate::types::resolution::DieRollContinuation::Resolution,
                     chain_root_targets: vec![],
+                    illegal_target_slots: vec![],
+                    chain_root_target_pins: vec![],
+                    declared_capture: None,
+                    local_target_pins: vec![],
+                    keyed_target_incarnations: vec![],
+                    declared_player: None,
                 }));
             } else {
                 state.resolution_stack.push_inner(match kind {
@@ -45831,6 +46102,8 @@ mod tests {
                         source_id: ObjectId(5),
                         controller: PlayerId(0),
                         roller: PlayerId(0),
+                        quantity_controller: None,
+                        scoped_player: None,
                         targets: vec![],
                         sides: 6,
                         results: vec![1, 2],
@@ -45844,6 +46117,12 @@ mod tests {
                         forced_ignored: vec![],
                         chain_root_targets: vec![],
                         trigger_context: Some(context),
+                        illegal_target_slots: vec![],
+                        chain_root_target_pins: vec![],
+                        declared_capture: None,
+                        local_target_pins: vec![],
+                        keyed_target_incarnations: vec![],
+                        declared_player: None,
                     })),
                     _ => unreachable!(),
                 });
@@ -46595,12 +46874,15 @@ mod tests {
 
         let a = GameState::new_two_player(7);
         let mut b = a.clone();
-        b.mark_unbounded_loop(PlayerId(0), &INFINITE_MANA_AXES);
+        b.mark_unbounded_loop(PlayerId(0), &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
+        let life_p1 = crate::analysis::resource::ResourceAxis::Life(PlayerId(1));
+        b.mark_unbounded_loop(PlayerId(0), &[life_p1], &[life_p1]);
         // Sanity: the populated field really does differ between the two states.
         assert_ne!(
             a.unbounded_resources, b.unbounded_resources,
             "fixture must actually differ in unbounded_resources"
         );
+        assert_ne!(a.unbounded_rising, b.unbounded_rising);
 
         assert!(
             a == b,
@@ -46614,6 +46896,59 @@ mod tests {
             loop_states_equal_modulo_resources(&a, &b),
             "the PR-0/PR-2 modulo path must exclude unbounded_resources"
         );
+    }
+
+    /// CR 732.2a: the writer records each given axis's direction, and every clear authority keeps
+    /// `unbounded_rising` a subset of `unbounded_resources`.
+    #[test]
+    fn unbounded_rising_stays_a_subset_of_the_mark() {
+        use crate::analysis::resource::ResourceAxis;
+        use crate::game::mana_payment::INFINITE_MANA_AXES;
+
+        let p0 = PlayerId(0);
+        let [l0, l1, l2] = [0, 1, 2].map(|p| ResourceAxis::Life(PlayerId(p)));
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let rising = |state: &GameState| -> BTreeMap<PlayerId, BTreeSet<ResourceAxis>> {
+            assert!(
+                state.unbounded_rising.iter().all(|(c, r)| state
+                    .unbounded_resources
+                    .get(c)
+                    .is_some_and(|marked| r.is_subset(marked))),
+                "rising {:?} escaped the mark {:?}",
+                state.unbounded_rising,
+                state.unbounded_resources
+            );
+            state.unbounded_rising.clone()
+        };
+        let only_p0 =
+            |axes: &[ResourceAxis]| BTreeMap::from([(p0, axes.iter().copied().collect())]);
+
+        state.mark_unbounded_loop(p0, &[l0, l1], &[l0]);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+        state.mark_unbounded_loop(p0, &[l1], &[l1]);
+        assert_eq!(rising(&state), only_p0(&[l0, l1]));
+        state.mark_unbounded_loop(p0, &[l1], &[]);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+        state.mark_unbounded_loop(p0, &[l0], &[l0, l2]);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+
+        state.mark_unbounded_loop(p0, &[l1], &[l1]);
+        state.clear_collapsed_materializations(
+            p0,
+            &[PersistentAxisMaterialization::Life {
+                player: PlayerId(1),
+                per_cycle_delta: 1,
+            }],
+        );
+        assert_eq!(rising(&state), only_p0(&[l0]));
+        assert_eq!(state.unbounded_resources, only_p0(&[l0]));
+
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
+        state.clear_unbounded_mana_loop(p0);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+
+        state.clear_unbounded_loop(p0);
+        assert!(rising(&state).is_empty());
     }
 
     /// PR-7 Phase 4c (B5, R3): sibling of `unbounded_resources_excluded_from_loop_equality`
@@ -46876,6 +47211,7 @@ mod tests {
         state.mark_unbounded_loop(
             PlayerId(0),
             &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
+            &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
         );
         state.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
@@ -46994,6 +47330,10 @@ mod tests {
                 ResourceAxis::TokensCreated,
                 ResourceAxis::Mana(ManaType::Colorless),
             ],
+            &[
+                ResourceAxis::TokensCreated,
+                ResourceAxis::Mana(ManaType::Colorless),
+            ],
         );
         state.register_pending_materialization(
             PlayerId(0),
@@ -47038,7 +47378,11 @@ mod tests {
         use crate::analysis::resource::ResourceAxis;
 
         let mut state = GameState::new_two_player(7);
-        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
         state.register_pending_materialization(
             PlayerId(0),
             PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
@@ -47104,7 +47448,11 @@ mod tests {
 
         let plus1_axis = ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature);
         let generic_axis = ResourceAxis::Counter(CounterClass::Other, ObjectClass::Other);
-        state.mark_unbounded_loop(PlayerId(0), &[plus1_axis, generic_axis]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[plus1_axis, generic_axis],
+            &[plus1_axis, generic_axis],
+        );
         // The Generic loop's surviving display target (kept — NOT collapsed here).
         state.register_unbounded_counter_targets(
             PlayerId(0),
@@ -47177,6 +47525,10 @@ mod tests {
                 ResourceAxis::Mana(ManaType::Colorless),
                 ResourceAxis::TokensCreated,
             ],
+            &[
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::TokensCreated,
+            ],
         );
         state.register_pending_materialization(
             PlayerId(0),
@@ -47235,7 +47587,11 @@ mod tests {
         use crate::types::mana::ManaType;
 
         let mut state = GameState::new_two_player(7);
-        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::Mana(ManaType::Colorless)]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         assert!(
             state.unbounded_resources.contains_key(&PlayerId(0)),
             "fixture precondition: P0 flagged with a lone Mana axis"
@@ -47268,7 +47624,11 @@ mod tests {
         // Case (a): mana-only → clearing the Mana axis empties the set → axis AND
         // enablers both drop.
         let mut a = GameState::new_two_player(7);
-        a.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::Mana(ManaType::Colorless)]);
+        a.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         a.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(7)]));
         // Non-vacuity: the enabler entry really exists pre-clear.
         assert!(
@@ -47292,6 +47652,10 @@ mod tests {
         let mut b = GameState::new_two_player(7);
         b.mark_unbounded_loop(
             PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ],
             &[
                 ResourceAxis::Mana(ManaType::Colorless),
                 ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
