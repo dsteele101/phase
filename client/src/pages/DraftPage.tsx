@@ -767,7 +767,7 @@ export function DraftPage() {
             </div>
             {setupMode === "cube" ? (
               <div className="flex flex-col gap-6">
-                <BotDifficultySelector />
+                <BotDifficultySelector showPickEnhancements />
                 <CubeSetupPanel
                   onStart={async ({ cubeName, cubeListText, settings }) => {
                     const { difficulty, startCubeDraft } = useDraftStore.getState();
@@ -780,6 +780,7 @@ export function DraftPage() {
                 onStartDraft={handleStartDraft}
                 defaultPackCount={setupMode === "sealed" ? SEALED_PACK_COUNT : DRAFT_PACK_COUNT}
                 fixedPackCount={setupMode === "sealed"}
+                showPickEnhancements
                 startLabel={
                   setupMode === "sealed"
                     ? t("setSelector.startSealed")
