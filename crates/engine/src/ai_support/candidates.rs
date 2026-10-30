@@ -10453,6 +10453,7 @@ mod tests {
             })
             .collect();
         let runner = scenario.build();
+        let source = &runner.state().objects[&ObjectId(1)];
         let prompt = WaitingFor::PayCost {
             player: P0,
             kind: PayCostKind::Reveal {
@@ -10462,7 +10463,7 @@ mod tests {
             count: 15,
             min_count: 15,
             resume: CostResume::TurnFaceUp {
-                source: ObjectIncarnationRef::from_object(&runner.state().objects[&ObjectId(1)]),
+                source: ObjectIncarnationRef::of(source.id, source.incarnation),
                 cost_source: TurnUpCostSource::Morph,
                 remaining_cost: None,
             },
