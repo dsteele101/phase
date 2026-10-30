@@ -936,6 +936,102 @@ mod tests {
         }
     }
 
+    // ── The draft-guide enhancement, joined to the production pick ───────────
+
+    /// Skullclamp (a name the Mirrodin-block guide rates highest) beside an
+    /// unlisted removal spell, printed in `set_code`. Removal outranks a
+    /// colourless one-mana equipment on the base heuristic; the guide flips it.
+    fn guide_contest(set_code: &str) -> (CardDatabase, Vec<DraftCardInstance>) {
+        let skullclamp = CardFace {
+            mana_cost: ManaCost::generic(1),
+            card_type: CardType {
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Equipment".to_string()],
+                ..Default::default()
+            },
+            ..named_face("Skullclamp", vec![CoreType::Artifact])
+        };
+        let removal = CardFace {
+            mana_cost: ManaCost::generic(2),
+            abilities: vec![destroy_ability()],
+            ..named_face("Unlisted Removal", vec![CoreType::Instant])
+        };
+        let entries: serde_json::Map<String, serde_json::Value> = [skullclamp, removal]
+            .into_iter()
+            .map(|face| {
+                (
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).expect("a face serializes"),
+                )
+            })
+            .collect();
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
+            .expect("the fixture export loads");
+
+        let printed = |name: &str, id: &str, cmc: u8| DraftCardInstance {
+            instance_id: id.to_string(),
+            name: name.to_string(),
+            set_code: set_code.to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: Vec::new(),
+            cmc,
+            type_line: String::new(),
+            draft_effect: None,
+        };
+        (
+            db,
+            vec![
+                printed("Unlisted Removal", "removal", 2),
+                printed("Skullclamp", "clamp", 1),
+            ],
+        )
+    }
+
+    fn pick_name(
+        pack: &[DraftCardInstance],
+        db: &CardDatabase,
+        enhancement: PickEnhancement,
+    ) -> String {
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let index = bot_pick(
+            pack,
+            AiDifficulty::Medium,
+            &[],
+            Some(db),
+            enhancement,
+            &mut rng,
+        );
+        pack[index].name.clone()
+    }
+
+    #[test]
+    fn draft_guides_change_the_production_pick_in_a_guided_set() {
+        for set_code in ["MRD", "DST", "5DN"] {
+            let (db, pack) = guide_contest(set_code);
+            assert_eq!(
+                pick_name(&pack, &db, PickEnhancement::Off),
+                "Unlisted Removal",
+                "{set_code}: the base heuristic prefers the removal spell",
+            );
+            assert_eq!(
+                pick_name(&pack, &db, PickEnhancement::DraftGuides),
+                "Skullclamp",
+                "{set_code}: the guide's top-rated card wins when enabled",
+            );
+        }
+    }
+
+    #[test]
+    fn draft_guides_do_nothing_outside_the_sets_they_cover() {
+        // Cube cards are all printed as set "CUBE", which no guide covers.
+        let (db, pack) = guide_contest("CUBE");
+        assert_eq!(
+            pick_name(&pack, &db, PickEnhancement::DraftGuides),
+            pick_name(&pack, &db, PickEnhancement::Off),
+        );
+    }
+
     fn fixture_card(name: &str, id: &str) -> DraftCardInstance {
         fixture_instance(name, id.to_string())
     }

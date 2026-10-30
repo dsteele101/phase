@@ -27,16 +27,19 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use engine::types::ability::{AbilityKind, Effect};
+use engine::types::ability::{AbilityKind, PtValue};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
+
+use crate::features::mana_ramp::chain_has_mana_effect;
 
 /// A category of card a guide can price, derived from the card's parsed data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuideClass {
-    /// A land that is also an artifact (CR 205.2a: card types are independent).
+    /// A land that is also an artifact (CR 205.2b: an object with more than one
+    /// card type satisfies any effect that applies to any of them).
     ArtifactLand,
     /// A creature with an activated mana ability (Myr, mana dorks).
     ManaCreature,
@@ -49,7 +52,9 @@ pub enum GuideClass {
     Sunburst,
     /// Has the Modular keyword (CR 702.43).
     Modular,
-    /// Single-target removal in the effect chain.
+    /// Removal as `EffectProfile` classifies it. That predicate also matches
+    /// mass removal (`DestroyAll`, `DamageAll`), `Counter` and `DiscardCard`, so
+    /// this is "removal-shaped effect", not strictly single-target removal.
     Removal,
 }
 
@@ -196,10 +201,12 @@ pub fn classify(face: &CardFace) -> Vec<GuideClass> {
     let is_creature = core.contains(&CoreType::Creature);
     let is_land = core.contains(&CoreType::Land);
     let artifact = core.contains(&CoreType::Artifact);
+    // The whole chain, not just the top-level effect: a mana ability can sit
+    // behind a leading step (Rosheen's reveal, then Add {C}{C}).
     let taps_for_mana = face
         .abilities
         .iter()
-        .any(|a| a.kind == AbilityKind::Activated && matches!(&*a.effect, Effect::Mana { .. }));
+        .any(|a| a.kind == AbilityKind::Activated && chain_has_mana_effect(a));
 
     let mut classes = Vec::new();
     if is_land && artifact {
@@ -244,8 +251,9 @@ fn is_threat(face: &CardFace) -> bool {
         return false;
     }
     let power = match &face.power {
-        Some(engine::types::ability::PtValue::Fixed(v)) => *v,
-        _ => 0,
+        Some(PtValue::Fixed(v)) => *v,
+        // A variable or derived power is not a known threat size.
+        Some(PtValue::Variable(_) | PtValue::Quantity(_)) | None => 0,
     };
     power >= 3 || face.keywords.iter().any(|k| matches!(k, Keyword::Flying))
 }
@@ -296,7 +304,7 @@ mod tests {
         assert_eq!(top, "skullclamp");
     }
 
-    use engine::types::ability::{AbilityDefinition, ManaContribution, ManaProduction, PtValue};
+    use engine::types::ability::{AbilityDefinition, Effect, ManaContribution, ManaProduction};
     use engine::types::card_type::CardType;
     use engine::types::mana::{ManaColor, ManaCost};
 
@@ -362,6 +370,25 @@ mod tests {
         assert_eq!(classify(&sunburst), vec![GuideClass::Sunburst]);
 
         assert!(classify(&beater("Vanilla", 2)).is_empty());
+    }
+
+    #[test]
+    fn a_mana_ability_behind_a_leading_step_still_classifies_as_mana() {
+        // Rosheen shape: the activated ability opens with a non-mana effect and
+        // the mana arrives in the sub-ability.
+        let chained = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
+            .sub_ability(tap_for_mana());
+        let mut rosheen = beater("Chained Mana Dork", 4);
+        rosheen.abilities = vec![chained];
+
+        assert_eq!(classify(&rosheen), vec![GuideClass::ManaCreature]);
+
+        // A mana creature is not a win condition, however big.
+        let hungry = PoolProfile::default();
+        let guide = guide_for_set("5DN").unwrap();
+        let bonus = guide.bonus("5DN", &[], &rosheen, &hungry);
+        let class_only = guide.sets["5DN"].class_bonus[&GuideClass::ManaCreature];
+        assert_eq!(bonus, class_only, "no threat-need bonus on a mana creature");
     }
 
     #[test]
