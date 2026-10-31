@@ -13756,6 +13756,68 @@ card into your hand at the beginning of your next end step.";
         );
     }
 
+    /// CR 616.1 + CR 500.8: a declined replacement of a combat's beginning lets it
+    /// begin after the answer, with what its schedule entry carried. Nothing of the
+    /// step happens before then.
+    #[test]
+    fn phase_begin_choice_keeps_the_scheduled_entry_until_the_step_begins() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::ReplacementMode;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::EndCombat;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            attacker_restriction: Some(TargetFilter::Any),
+            attacker_restriction_source: Some(ObjectId(99)),
+            id: Default::default(),
+        });
+        let mut obj = GameObject::new(
+            ObjectId(200),
+            CardId(99),
+            PlayerId(1),
+            "MaySkipPhase".to_string(),
+            Zone::Battlefield,
+        );
+        obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::BeginPhase)
+                .mode(ReplacementMode::Optional { decline: None })]
+            .into();
+        state.objects.insert(ObjectId(200), obj);
+        state.battlefield.push_back(ObjectId(200));
+
+        let mut events = Vec::new();
+        assert!(matches!(
+            advance_phase_once(&mut state, &mut events),
+            AdvancePhaseOnce::Entry(entry)
+                if matches!(*entry, PhaseEntryOutcome::AwaitingBeginChoice)
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.phase, Phase::EndCombat);
+        assert!(state.current_combat_attacker_restriction.is_none());
+
+        let result = replacement::continue_replacement(&mut state, 1, &mut events);
+        assert!(matches!(result, ReplacementResult::Execute(_)));
+        resume_phase_begin_choice(&mut state, result, &mut events);
+
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_none());
+        assert_eq!(
+            state.current_combat_attacker_restriction,
+            Some(TargetFilter::Any)
+        );
+        assert_eq!(
+            state.current_combat_attacker_restriction_source,
+            Some(ObjectId(99))
+        );
+    }
+
     #[test]
     fn phase_pipeline_skip_is_one_transition_hop() {
         use crate::game::game_object::GameObject;
