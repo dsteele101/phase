@@ -1398,7 +1398,11 @@ pub(crate) fn parse_enchanted_is_type(
         //       [type]" replaces existing card types (Frogify, Lignify, etc.).
         // These are documented separately and combined into a single bool to avoid
         // emitting two SetCardTypes pushes.
-        let needs_set_card_types = loss_replaces_card_types || !is_additive;
+        // CR 205.1b: a "still a [type]" retention clause keeps ALL prior card
+        // types (an artifact land stays an artifact), so it forces additive
+        // AddType unless the clause explicitly says "loses all other card types".
+        let needs_set_card_types =
+            loss_replaces_card_types || (!is_additive && retained_core_type.is_none());
 
         // --- Assemble modifications in written (mod_index) order ---
         // 1. Core types: replacement (SetCardTypes) when CR 205.1a applies (no

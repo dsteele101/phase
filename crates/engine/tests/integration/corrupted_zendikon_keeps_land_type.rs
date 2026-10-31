@@ -59,3 +59,61 @@ fn corrupted_zendikon_stays_attached_and_land_remains_a_land() {
     let other = &state.objects[&other_land];
     assert!(!other.card_types.core_types.contains(&CoreType::Creature));
 }
+
+#[test]
+fn corrupted_zendikon_on_artifact_land_keeps_artifact_type() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::Green);
+    // A second land that must NOT be affected (presence guard for the filter).
+    let other_land = scenario.add_basic_land(P0, ManaColor::Red);
+    let aura = scenario
+        .add_spell_to_hand(P0, "Corrupted Zendikon", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Black],
+        })
+        .from_oracle_text_with_keywords(&["enchant"], CORRUPTED_ZENDIKON_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(9_990), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_991), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_992), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_993), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    // CR 205.1b: "still a land" retains every prior card type.
+    {
+        let obj = runner.state_mut().objects.get_mut(&land).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    runner.cast(aura).target_object(land).resolve();
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    assert_eq!(state.objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+
+    let enchanted = &state.objects[&land];
+    assert!(enchanted.card_types.core_types.contains(&CoreType::Land));
+    assert!(enchanted
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert!(enchanted
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert_eq!(enchanted.power, Some(3));
+    assert_eq!(enchanted.toughness, Some(3));
+
+    let other = &state.objects[&other_land];
+    assert!(!other.card_types.core_types.contains(&CoreType::Creature));
+}
