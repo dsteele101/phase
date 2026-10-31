@@ -41572,6 +41572,26 @@ fn trigger_becomes_blocked_pumps_only_creatures_blocking_it() {
     }
 }
 
+/// CR 509.1g + CR 603.10a: "a creature blocking this creature dies" watches the
+/// source's blockers (Baneclaw Marauder); the snapshot arm of `BlockingSource`
+/// answers it from the departure's recorded pairings.
+#[test]
+fn trigger_creature_blocking_source_dies_watches_blocking_source() {
+    let def = parse_trigger_line(
+        "Whenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        "Baneclaw Marauder",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::BlockingSource])
+        ))
+    );
+}
+
 /// CR 608.2c + CR 608.2k: an equipped creature's blockers are not the source's,
 /// and `BlockingSource` cannot express them, so Bob the Claymore fails closed
 /// instead of shrinking every creature.
