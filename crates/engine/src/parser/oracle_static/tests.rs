@@ -41542,6 +41542,13 @@ fn enchanted_land_creature_retention_clause_keeps_land_type() {
                 .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
             "{line}: {mods:?}"
         );
+        // CR 205.1b: prior subtypes are retained too.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "{line}: {mods:?}"
+        );
         for core_type in [CoreType::Creature, CoreType::Land] {
             assert!(
                 mods.contains(&ContinuousModification::AddType { core_type }),

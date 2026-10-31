@@ -1452,7 +1452,10 @@ pub(crate) fn parse_enchanted_is_type(
         // Auto-inject RemoveAllSubtypes{Creature} unless the trailing clause
         // already provides it (Darksteel Mutation explicitly says "loses all
         // other creature types" and its clause_mods contains the wipe).
+        // CR 205.1b: a "still a [type]" retention clause keeps all prior
+        // subtypes too, so no implicit creature-subtype wipe is emitted.
         if !is_additive
+            && retained_core_type.is_none()
             && (granted_core_types.contains(&CoreType::Creature) || subtype_only_creature_change)
             && !granted_subtypes.is_empty()
             && !modifications
