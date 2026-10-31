@@ -30,23 +30,32 @@ fn plague_wight_shrinks_only_its_blockers() {
         .add_creature(P0, "Plague Wight", 2, 2)
         .from_oracle_text(PLAGUE_WIGHT)
         .id();
+    let other_attacker = scenario.add_creature(P0, "Other Attacker", 2, 2).id();
     let ally = scenario.add_creature(P0, "Ally Bystander", 3, 3).id();
     let blocker_a = scenario.add_creature(P1, "Blocker A", 2, 4).id();
     let blocker_b = scenario.add_creature(P1, "Blocker B", 3, 5).id();
+    let other_blocker = scenario.add_creature(P1, "Other Blocker", 4, 6).id();
     let enemy_bystander = scenario.add_creature(P1, "Enemy Bystander", 4, 6).id();
     let mut runner = scenario.build();
 
     priority_to_declare(&mut runner, false);
     runner
         .act(GameAction::DeclareAttackers {
-            attacks: vec![(wight, AttackTarget::Player(P1))],
+            attacks: vec![
+                (wight, AttackTarget::Player(P1)),
+                (other_attacker, AttackTarget::Player(P1)),
+            ],
             bands: vec![],
         })
         .unwrap();
     priority_to_declare(&mut runner, true);
     runner
         .act(GameAction::DeclareBlockers {
-            assignments: vec![(blocker_a, wight), (blocker_b, wight)],
+            assignments: vec![
+                (blocker_a, wight),
+                (blocker_b, wight),
+                (other_blocker, other_attacker),
+            ],
         })
         .unwrap();
 
@@ -64,6 +73,7 @@ fn plague_wight_shrinks_only_its_blockers() {
     };
     assert_eq!(pt(blocker_a), (Some(1), Some(3)));
     assert_eq!(pt(blocker_b), (Some(2), Some(4)));
+    assert_eq!(pt(other_blocker), (Some(4), Some(6)));
     assert_eq!(pt(wight), (Some(2), Some(2)));
     assert_eq!(pt(ally), (Some(3), Some(3)));
     assert_eq!(pt(enemy_bystander), (Some(4), Some(6)));
