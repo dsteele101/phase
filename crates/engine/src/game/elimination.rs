@@ -1591,9 +1591,12 @@ fn do_eliminate(
     // (the SBA-gating slot) plus the parked replacement's own tightly-coupled
     // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
     // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
-    // slots on a normal answer (e.g. `pending_phase_transition_progress`,
-    // `pending_team_draw_step`, `pending_continuation`); those are intentionally
-    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
+    // slots on a normal answer (e.g. `pending_team_draw_step`,
+    // `pending_continuation`, and `pending_phase_transition_progress` outside
+    // `AwaitingBeginChoice`); those are intentionally NOT cleared here. Progress
+    // in `AwaitingBeginChoice` belongs to the parked choice itself, so
+    // `abandon_phase_begin_choice` below clears it and ignores every other state.
+    // Stranding the other slots is its own PRE-EXISTING soft-lock
     // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
     // drain) that predates this PR and is NOT the reported regression; repairing
     // them correctly requires resuming the interrupted APNAP queue for the
