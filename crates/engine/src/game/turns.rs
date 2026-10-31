@@ -13758,7 +13758,11 @@ card into your hand at the beginning of your next end step.";
 
     /// CR 616.1 + CR 500.8: a declined replacement of a combat's beginning lets it
     /// begin after the answer, with what its schedule entry carried. Nothing of the
-    /// step happens before then.
+    /// step happens before then. No printed card makes a phase's beginning optional
+    /// (the nearest is False Peace, which is mandatory: "Target player skips all
+    /// combat phases of their next turn."); `ReplacementMode::Optional` on a
+    /// BeginPhase definition is the shape the engine can express that reaches this
+    /// arm, so the object here is synthetic.
     #[test]
     fn phase_begin_choice_keeps_the_scheduled_entry_until_the_step_begins() {
         use crate::game::game_object::GameObject;
