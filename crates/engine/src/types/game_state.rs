@@ -497,6 +497,18 @@ pub enum AssistState {
     Paid { helper: PlayerId, generic: u32 },
 }
 
+/// CR 500.11 + CR 614.10a: One pending "[player] skips their next combat phase"
+/// (Revenant Patriarch, Stonehorn Dignitary, Blinding Angel, Moment of Silence).
+/// `turns.rs` uses it up as that player's combat phase would begin and skips the
+/// whole phase as one unit. CR 514.2: `duration` is the effect's own limit;
+/// Moment of Silence's "this turn" skip ends at cleanup if it found no combat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatPhaseSkip {
+    pub player: PlayerId,
+    #[serde(default)]
+    pub duration: Option<Duration>,
+}
+
 /// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip lifecycle for a single
 /// player. Backs `GameState::combat_phase_skip_next_turn` (False Peace / Empty
 /// City Ruse: "skips all combat phases of their next turn").
@@ -23314,6 +23326,11 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::vec_hash_map")]
     pub steps_to_skip: Vec<HashMap<Phase, u32>>,
 
+    /// CR 500.11 + CR 614.10a: Pending one-shot "skips their next combat phase"
+    /// effects, oldest first. Unlike `steps_to_skip`, each is a whole phase.
+    #[serde(default)]
+    pub pending_combat_phase_skips: Vec<PendingCombatPhaseSkip>,
+
     /// CR 614.10 + CR 614.10a: Per-player turn-scoped combat-phase skip state.
     /// Drives "skips all combat phases of their next turn" (False Peace / Empty
     /// City Ruse). Unlike `steps_to_skip` (a finite per-step counter), this is a
@@ -32250,6 +32267,7 @@ impl GameState {
             extra_turn_sequence_anchor: None,
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
+            pending_combat_phase_skips: Vec::new(),
             combat_phase_skip_next_turn: vec![
                 CombatPhaseSkipState::default();
                 player_count as usize
@@ -35584,6 +35602,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         extra_turn_sequence_anchor: _,
         turns_to_skip: _,
         steps_to_skip: _,
+        pending_combat_phase_skips: _,
         combat_phase_skip_next_turn: _,
         scheduled_turn_controls: _,
         extra_phases: _,
@@ -35977,6 +35996,7 @@ impl PartialEq for GameState {
             && self.extra_turn_sequence_anchor == other.extra_turn_sequence_anchor
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
+            && self.pending_combat_phase_skips == other.pending_combat_phase_skips
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
