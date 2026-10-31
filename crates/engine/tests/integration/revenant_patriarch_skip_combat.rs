@@ -420,53 +420,258 @@ fn two_skips_cover_the_next_two_combat_phases() {
     assert_combat_ran(&table, prompts, 1);
 }
 
-/// CR 616.1: the player chooses which of two skips applies; using the unlimited
-/// one first leaves the limited one to expire (CR 514.2). The limited skip is
-/// the older one so timestamp order would pick it.
-#[test]
-fn unlimited_skip_is_used_before_one_limited_to_this_turn() {
+/// A label of a skip offered at P1's CR 616.1 prompt.
+const NEXT_COMBAT: &str = "Skip your next combat phase";
+const NEXT_COMBAT_THIS_TURN: &str = "Skip your next combat phase this turn";
+const ALL_COMBATS_THIS_TURN: &str = "Skip all combat phases this turn";
+
+/// Pass priority until the combat P1 is due asks them which skip applies, and
+/// return the offered labels. The game stands before that combat: nothing of it
+/// has begun, and the prompt names no unrelated object as a source.
+fn pass_to_skip_choice(table: &mut Table) -> Vec<String> {
+    for _ in 0..40 {
+        let state = table.runner.state();
+        if let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        {
+            assert_eq!(*player, P1, "the affected player chooses");
+            assert!(candidates.iter().all(|c| c.source_name.is_empty()));
+            assert_eq!(
+                begin_combats_this_turn(table),
+                0,
+                "the combat has not begun"
+            );
+            return candidates.iter().map(|c| c.description.clone()).collect();
+        }
+        table.runner.act(GameAction::PassPriority).expect("pass");
+    }
+    panic!("P1 was never asked which skip applies");
+}
+
+/// Answer the prompt with the skip labelled `label`.
+fn choose_skip(table: &mut Table, offered: &[String], label: &str) {
+    let index = offered
+        .iter()
+        .position(|description| description == label)
+        .expect("the skip is offered");
+    table
+        .runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choice accepted");
+}
+
+/// P0 puts Revenant Patriarch's skip and then Moment of Silence on P1 in P1's
+/// precombat main phase. Patriarch's is the older, so it comes first at the prompt.
+fn both_skips_on_p1_in_their_main_phase() -> Table {
     let mut table = table();
     pass_to(&mut table, P1, Phase::PreCombatMain);
-    table.runner.state_mut().pending_combat_phase_skips = vec![
-        PendingCombatPhaseSkip {
-            player: P1,
-            duration: Some(Duration::UntilEndOfTurn),
-        },
-        PendingCombatPhaseSkip {
-            player: P1,
-            duration: None,
-        },
-    ];
+    table.runner.act(GameAction::PassPriority).expect("pass");
+    assert!(cast_patriarch(&mut table, 1, 4, P1));
+    table.runner.act(GameAction::PassPriority).expect("pass");
+    cast_moment(&mut table, P1);
+    assert_eq!(pending_skips(&table, P1), 2);
+    table
+}
 
-    let life = (P0_STARTING_LIFE, P1_STARTING_LIFE);
+fn remaining_skip_duration(table: &Table) -> Option<Duration> {
+    let skips = &table.runner.state().pending_combat_phase_skips;
+    assert_eq!(skips.len(), 1, "only the unchosen skip stays pending");
+    skips[0].duration.clone()
+}
+
+/// CR 616.1: applying Moment of Silence to this combat keeps Patriarch's skip for
+/// P1's next one. CR 614.10a: the unchosen effect waits for its own occurrence.
+#[test]
+fn choosing_the_limited_skip_keeps_the_unlimited_one_for_a_later_combat() {
+    let mut table = both_skips_on_p1_in_their_main_phase();
+    let life = (table.runner.life(P0), table.runner.life(P1));
+
+    let offered = pass_to_skip_choice(&mut table);
+    assert_eq!(offered, [NEXT_COMBAT, NEXT_COMBAT_THIS_TURN]);
+    choose_skip(&mut table, &offered, NEXT_COMBAT_THIS_TURN);
+
     let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
     assert_combat_skipped(&table, prompts, life);
-    assert_eq!(pending_skips(&table, P1), 1, "one skip used up");
+    assert_eq!(remaining_skip_duration(&table), None);
 
-    pass_to(&mut table, P0, Phase::Upkeep);
+    pass_to(&mut table, P0, Phase::End);
+    let prompts = play_p1_combat(&mut table);
+    assert_combat_skipped(&table, prompts, life);
+    assert_eq!(pending_skips(&table, P1), 0);
+
+    pass_to(&mut table, P0, Phase::End);
     let prompts = play_p1_combat(&mut table);
     assert_combat_ran(&table, prompts, 1);
 }
 
-/// CR 500.11: False Peace skips through the same transition authority, so
-/// normal priority passing doesn't run its skipped steps either. CR 616.1: with
-/// both on P1, P1 applies the one-shot to that combat; False Peace covers the
-/// turn regardless, so P1 loses one combat, not two.
+/// CR 616.1: applying Patriarch's skip to this combat leaves Moment of Silence
+/// pending until the turn ends (CR 514.2), so P1's next combat runs. The chosen
+/// skip is the older one so this isn't what first-listed order would pick.
 #[test]
-fn one_shot_is_used_up_on_a_turn_scoped_skip_turn() {
+fn choosing_the_unlimited_skip_leaves_the_limited_one_to_expire() {
+    let mut table = both_skips_on_p1_in_their_main_phase();
+    let life = (table.runner.life(P0), table.runner.life(P1));
+
+    let offered = pass_to_skip_choice(&mut table);
+    choose_skip(&mut table, &offered, NEXT_COMBAT);
+
+    let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
+    assert_combat_skipped(&table, prompts, life);
+    assert_eq!(
+        remaining_skip_duration(&table),
+        Some(Duration::UntilEndOfTurn)
+    );
+
+    pass_to(&mut table, P0, Phase::Upkeep);
+    assert_eq!(pending_skips(&table, P1), 0, "ended with the turn");
+
+    pass_to(&mut table, P0, Phase::End);
+    let prompts = play_p1_combat(&mut table);
+    assert_combat_ran(&table, prompts, 1);
+}
+
+/// P0 casts False Peace and Revenant Patriarch on P1, so P1's next turn starts
+/// with a turn-scoped skip and a one-shot skip competing.
+fn false_peace_and_patriarch_on_p1() -> Table {
     let mut table = table();
     add_mana(&mut table.runner, P0, ManaType::White, 1);
     assert!(cast_and_resolve(&mut table.runner, table.false_peace, P1));
     assert!(cast_patriarch(&mut table, 1, 4, P1));
+    pass_to(&mut table, P1, Phase::PreCombatMain);
+    table
+}
 
+/// CR 616.1 + CR 616.1e: False Peace may replace the combat, which keeps the
+/// one-shot for P1's next turn.
+#[test]
+fn choosing_false_peace_keeps_the_one_shot_for_a_later_turn() {
+    let mut table = false_peace_and_patriarch_on_p1();
     let life = (P0_STARTING_LIFE, P1_STARTING_LIFE);
+
+    let offered = pass_to_skip_choice(&mut table);
+    assert_eq!(offered, [ALL_COMBATS_THIS_TURN, NEXT_COMBAT]);
+    choose_skip(&mut table, &offered, ALL_COMBATS_THIS_TURN);
+
+    let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
+    assert_combat_skipped(&table, prompts, life);
+    assert_eq!(pending_skips(&table, P1), 1, "the one-shot was not used");
+
+    pass_to(&mut table, P0, Phase::End);
     let prompts = play_p1_combat(&mut table);
+    assert_combat_skipped(&table, prompts, life);
+    assert_eq!(pending_skips(&table, P1), 0);
+}
+
+/// CR 616.1 + CR 616.1e: the one-shot may replace the combat instead. It is used
+/// up, and False Peace, which covers that turn only, leaves P1's next turn alone.
+#[test]
+fn choosing_the_one_shot_uses_it_up_on_a_false_peace_turn() {
+    let mut table = false_peace_and_patriarch_on_p1();
+    let life = (P0_STARTING_LIFE, P1_STARTING_LIFE);
+
+    let offered = pass_to_skip_choice(&mut table);
+    choose_skip(&mut table, &offered, NEXT_COMBAT);
+
+    let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
     assert_combat_skipped(&table, prompts, life);
     assert_eq!(pending_skips(&table, P1), 0, "applied to that combat");
 
     pass_to(&mut table, P0, Phase::End);
     let prompts = play_p1_combat(&mut table);
     assert_combat_ran(&table, prompts, 1);
+}
+
+/// CR 500.8 + CR 616.1: each combat phase would begin on its own. An additional
+/// combat after a skipped one asks again, resuming through the same transition;
+/// False Peace also covers it, so P1 keeps the one-shot through both.
+#[test]
+fn an_additional_combat_is_a_fresh_choice_among_the_skips_left() {
+    let mut table = false_peace_and_patriarch_on_p1();
+    table.runner.state_mut().extra_phases.push(ExtraPhase {
+        anchor: Phase::EndCombat,
+        segment: TurnSegment::Phase(PhaseGroup::Combat),
+        attacker_restriction: None,
+        attacker_restriction_source: None,
+        id: ExtraPhaseId::default(),
+    });
+
+    for _ in 0..2 {
+        let offered = pass_to_skip_choice(&mut table);
+        choose_skip(&mut table, &offered, ALL_COMBATS_THIS_TURN);
+    }
+
+    let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
+    let life = (P0_STARTING_LIFE, P1_STARTING_LIFE);
+    assert_combat_skipped(&table, prompts, life);
+    assert!(table.runner.state().extra_phases.is_empty());
+    assert_eq!(pending_skips(&table, P1), 1);
+}
+
+/// CR 616.1: with the same effect twice there is nothing to choose between.
+#[test]
+fn identical_skips_are_not_a_choice() {
+    let mut table = table();
+    pass_to(&mut table, P1, Phase::PreCombatMain);
+    let skip = PendingCombatPhaseSkip {
+        player: P1,
+        duration: Some(Duration::UntilEndOfTurn),
+    };
+    table.runner.state_mut().pending_combat_phase_skips = vec![skip.clone(), skip];
+
+    let life = (P0_STARTING_LIFE, P1_STARTING_LIFE);
+    let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
+    assert_combat_skipped(&table, prompts, life);
+    assert_eq!(pending_skips(&table, P1), 1, "one skip used up");
+}
+
+/// CR 800.4a + CR 800.4j: P1 leaves with the choice unanswered. The prompt goes
+/// with them and the turn runs out for the player left in the game.
+#[test]
+fn the_affected_player_leaving_at_the_choice_ends_their_turn() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, PlayerId(2)] {
+        scenario.with_library_top(player, &["Island"; 12]);
+    }
+    scenario.add_vanilla(PlayerId(2), BEAR_POWER, 2);
+    let mut runner = scenario.build();
+    pass_team_turn_to(&mut runner, P1, Phase::PreCombatMain);
+    runner.state_mut().pending_combat_phase_skips = vec![
+        PendingCombatPhaseSkip {
+            player: P1,
+            duration: None,
+        },
+        PendingCombatPhaseSkip {
+            player: P1,
+            duration: Some(Duration::UntilEndOfTurn),
+        },
+    ];
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ),
+        "reach guard: P1 is asked, not {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("concede");
+    assert!(runner.state().pending_phase_transition_progress.is_none());
+
+    let prompts = pass_team_turn_to(&mut runner, PlayerId(2), Phase::PostCombatMain);
+    assert_eq!(prompts, 1, "the next player's combat runs");
 }
 
 /// CR 500.11: False Peace alone, through normal priority passing.
