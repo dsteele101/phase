@@ -1,7 +1,7 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, EffectResolutionResult, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef, ThisWayCause,
+    ResolvedAbility, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingPlayerScopeSacrificeCompletion, WaitingFor};
@@ -185,6 +185,29 @@ pub(crate) fn can_sacrifice_for_ability(
             object_id,
             "CantBeSacrificed",
         )
+}
+
+/// CR 701.21a: `filter` read as the pool of the ability's scoped player, for a
+/// described sacrifice someone other than its parsed scope performs. Every leg of
+/// an `Or` belongs to that player, and the scope leads an `And` so that
+/// `target_filter_controller_scope` finds it. An `And` or `Not` is wrapped rather
+/// than rewritten because a scope bound inside a `Not` would be negated. A filter
+/// naming a specific object already identifies its sacrificer.
+pub(crate) fn pool_of_scoped_player(filter: TargetFilter) -> TargetFilter {
+    let scoped = TypedFilter::default().controller(ControllerRef::ScopedPlayer);
+    match filter {
+        TargetFilter::Any => TargetFilter::Typed(scoped),
+        TargetFilter::Typed(typed) => {
+            TargetFilter::Typed(typed.controller(ControllerRef::ScopedPlayer))
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(pool_of_scoped_player).collect(),
+        },
+        filter @ (TargetFilter::And { .. } | TargetFilter::Not { .. }) => TargetFilter::And {
+            filters: vec![TargetFilter::Typed(scoped), filter],
+        },
+        named_object => named_object,
+    }
 }
 
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
@@ -710,7 +733,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityKind, AggregateFunction, Comparator, ControllerRef,
         CostPaidObjectSnapshot, Effect, FilterProp, ObjectProperty, PtStat, PtValue, PtValueScope,
-        QuantityRef, SubAbilityLink, TargetFilter, TypedFilter,
+        QuantityRef, SubAbilityLink, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -718,6 +741,49 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
     use crate::types::StaticDefinition;
+
+    /// CR 701.21a: every shape of a described pool reports the scoped player as
+    /// its sacrificer; a named object keeps its own shape.
+    #[test]
+    fn pool_of_scoped_player_binds_every_described_shape() {
+        let creature = || TargetFilter::Typed(TypedFilter::creature());
+        let opposing =
+            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        for filter in [
+            TargetFilter::Any,
+            creature(),
+            opposing(),
+            TargetFilter::Or {
+                filters: vec![creature(), TargetFilter::Any],
+            },
+            TargetFilter::And {
+                filters: vec![opposing(), creature()],
+            },
+            TargetFilter::Not {
+                filter: Box::new(creature()),
+            },
+        ] {
+            assert_eq!(
+                sacrifice_controller_scope(&pool_of_scoped_player(filter.clone())),
+                Some(ControllerRef::ScopedPlayer),
+                "{filter:?}"
+            );
+        }
+
+        let TargetFilter::Or { filters } = pool_of_scoped_player(TargetFilter::Or {
+            filters: vec![opposing(), creature()],
+        }) else {
+            panic!("an Or stays an Or");
+        };
+        assert!(filters
+            .iter()
+            .all(|leg| sacrifice_controller_scope(leg) == Some(ControllerRef::ScopedPlayer)));
+
+        assert_eq!(
+            pool_of_scoped_player(TargetFilter::SelfRef),
+            TargetFilter::SelfRef
+        );
+    }
 
     fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(

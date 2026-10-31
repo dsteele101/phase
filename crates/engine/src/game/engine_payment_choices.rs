@@ -1,7 +1,7 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
+    AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
     SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -433,12 +433,8 @@ fn handle_opponent_may_choice_inner(
             // instruction is performed by the accepting player. Bind the head's
             // pool to them: the parsed scope (`Opponent` for Desecration Demon,
             // none for Argothian Wurm) names the offer, not the sacrificer.
-            if let Effect::Sacrifice {
-                target: TargetFilter::Typed(typed),
-                ..
-            } = &mut ability.effect
-            {
-                typed.controller = Some(ControllerRef::ScopedPlayer);
+            if let Effect::Sacrifice { target, .. } = &mut ability.effect {
+                *target = effects::sacrifice::pool_of_scoped_player(target.clone());
             }
 
             let target_selection = match &ability.effect {
@@ -488,31 +484,41 @@ fn handle_opponent_may_choice_inner(
                         })
                         .map(|(id, _)| *id)
                         .collect();
-                    // CR 608.2d: the printed count is exact ("sacrifice two
+                    // CR 608.2d: a printed count is exact ("sacrifice two
                     // creatures"), so a smaller pool can't perform the option.
-                    let required = match &ability.effect {
-                        Effect::Sacrifice { count, .. } => {
-                            let (count, _) = count.peel_up_to();
-                            crate::game::quantity::resolve_quantity_with_targets(
+                    // CR 107.1c: "any number" reaches as high as the pool, and
+                    // its zero is the decline: accepting chooses at least one.
+                    let (min_targets, max_targets) = match &ability.effect {
+                        Effect::Sacrifice {
+                            count, min_count, ..
+                        } => {
+                            let (count, up_to) = count.peel_up_to();
+                            let printed = crate::game::quantity::resolve_quantity_with_targets(
                                 state, count, &ability,
                             )
-                            .max(1) as usize
+                            .max(0) as usize;
+                            if up_to {
+                                ((*min_count).max(1), printed.min(legal.len()))
+                            } else {
+                                (printed.max(1), printed)
+                            }
                         }
-                        _ => 1,
+                        _ => (1, 1),
                     };
                     Some((
-                        if legal.len() < required {
+                        if legal.len() < min_targets || max_targets < min_targets {
                             Vec::new()
                         } else {
                             legal
                         },
-                        required,
+                        min_targets,
+                        max_targets,
                     ))
                 }
                 _ => None,
             };
 
-            if let Some((legal, required)) = target_selection {
+            if let Some((legal, min_targets, max_targets)) = target_selection {
                 if !legal.is_empty() {
                     state
                         .take_active_optional_effect_frame()
@@ -543,8 +549,8 @@ fn handle_opponent_may_choice_inner(
                     state.waiting_for = WaitingFor::MultiTargetSelection {
                         player: promptee,
                         legal_targets: legal,
-                        min_targets: required,
-                        max_targets: required,
+                        min_targets,
+                        max_targets,
                         pending_ability: ability,
                     };
                     return Ok(state.waiting_for.clone());
