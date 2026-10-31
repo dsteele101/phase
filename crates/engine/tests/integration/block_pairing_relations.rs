@@ -27,8 +27,7 @@ const KJELDORAN_FROSTBEAST: &str =
     "At end of combat, destroy all creatures blocking or blocked by this creature.";
 const PLAGUE_WIGHT: &str =
     "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.";
-const BANECLAW_MARAUDER_DIES: &str =
-    "Whenever a creature blocking this creature dies, that creature's controller loses 1 life.";
+const BANECLAW_MARAUDER: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const CROMAT: &str = "{W}{B}: Destroy target creature blocking or blocked by Cromat.\n{U}{R}: Cromat gains flying until end of turn.\n{B}{G}: Regenerate Cromat.\n{R}{W}: Cromat gets +1/+1 until end of turn.\n{G}{U}: Put Cromat on top of its owner's library.";
 const ALMS_BEAST: &str = "Creatures blocking or blocked by this creature have lifelink.";
 const LABYRINTH_OF_SKOPHOS: &str =
@@ -973,6 +972,7 @@ fn plague_wight_blinked_in_response_still_shrinks_its_blockers() {
     let mut runner = scenario.build();
 
     attack_and_block(&mut runner, &[wight], &[(b1, wight)]);
+    let incarnation_before = runner.state().objects[&wight].incarnation;
     cast_at(&mut runner, cloudshift, wight, &[ManaType::White]);
     drain_stack(&mut runner, "Cloudshift, then the Wight's trigger");
 
@@ -989,6 +989,10 @@ fn plague_wight_blinked_in_response_still_shrinks_its_blockers() {
         .copied()
         .find(|id| runner.state().objects[id].name == "Plague Wight")
         .expect("reach guard: the Wight returned");
+    assert!(
+        runner.state().objects[&returned].incarnation > incarnation_before,
+        "CR 400.7: the returned Wight is a new object"
+    );
     assert!(
         !runner
             .state()
@@ -1040,10 +1044,10 @@ fn baneclaw_marauder_trigger_reads_only_its_own_blockers() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let marauder = scenario
-        .add_creature_from_oracle(P0, "Baneclaw Marauder", 4, 4, BANECLAW_MARAUDER_DIES)
+        .add_creature_from_oracle(P0, "Baneclaw Marauder", 4, 4, BANECLAW_MARAUDER)
         .id();
     let other = scenario.add_creature(P0, "Other Attacker", 4, 4).id();
-    let b = scenario.add_creature(P1, "Blocker B", 1, 1).id();
+    let b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
     let d = scenario.add_creature(P1, "Other Blocker", 1, 1).id();
     let mut runner = scenario.build();
 
@@ -1052,9 +1056,19 @@ fn baneclaw_marauder_trigger_reads_only_its_own_blockers() {
         &[marauder, other],
         &[(b, marauder), (d, other)],
     );
+    // The becomes-blocked trigger shrinks only the Marauder's blocker.
+    drain_stack(&mut runner, "resolve the becomes-blocked trigger");
+    assert_eq!(pt(&runner, b), (Some(1), Some(1)), "B blocks the Marauder");
+    assert_eq!(pt(&runner, d), (Some(1), Some(1)), "D blocks another");
+    assert_zone(&runner, &[b], Zone::Battlefield, "B survives the -1/-1");
     pass_until(&mut runner, "combat damage", |state| {
         state.objects[&b].zone == Zone::Graveyard
     });
+    assert_eq!(
+        runner.state().phase,
+        Phase::CombatDamage,
+        "B died to combat damage"
+    );
     assert_eq!(
         runner
             .state()
@@ -1082,18 +1096,20 @@ fn baneclaw_marauder_dying_with_its_blocker_still_triggers() {
         scenario.at_phase(Phase::PreCombatMain);
         let early = marauder_first.then(|| {
             scenario
-                .add_creature_from_oracle(P0, "Baneclaw Marauder", 2, 2, BANECLAW_MARAUDER_DIES)
+                .add_creature_from_oracle(P0, "Baneclaw Marauder", 2, 2, BANECLAW_MARAUDER)
                 .id()
         });
-        let b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
+        let b = scenario.add_creature(P1, "Blocker B", 3, 3).id();
         let marauder = early.unwrap_or_else(|| {
             scenario
-                .add_creature_from_oracle(P0, "Baneclaw Marauder", 2, 2, BANECLAW_MARAUDER_DIES)
+                .add_creature_from_oracle(P0, "Baneclaw Marauder", 2, 2, BANECLAW_MARAUDER)
                 .id()
         });
         let mut runner = scenario.build();
 
         attack_and_block(&mut runner, &[marauder], &[(b, marauder)]);
+        drain_stack(&mut runner, "resolve the becomes-blocked trigger");
+        assert_eq!(pt(&runner, b), (Some(2), Some(2)), "B is 2/2 after -1/-1");
         pass_until(&mut runner, "combat damage", |state| {
             state.objects[&b].zone == Zone::Graveyard
         });
@@ -1111,7 +1127,7 @@ fn baneclaw_marauder_ignores_a_former_blocker_dying() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let marauder = scenario
-        .add_creature_from_oracle(P0, "Baneclaw Marauder", 4, 4, BANECLAW_MARAUDER_DIES)
+        .add_creature_from_oracle(P0, "Baneclaw Marauder", 4, 4, BANECLAW_MARAUDER)
         .id();
     let land = labyrinth(&mut scenario);
     let murder = murder_in_hand(&mut scenario);
@@ -1119,6 +1135,8 @@ fn baneclaw_marauder_ignores_a_former_blocker_dying() {
     let mut runner = scenario.build();
 
     attack_and_block(&mut runner, &[marauder], &[(b, marauder)]);
+    drain_stack(&mut runner, "resolve the becomes-blocked trigger");
+    assert_eq!(pt(&runner, b), (Some(1), Some(1)), "B is 1/1 after -1/-1");
     remove_from_combat_with_labyrinth(&mut runner, land, b);
     drain_stack(&mut runner, "Labyrinth settled");
     cast_at(&mut runner, murder, b, &[ManaType::Black; 3]);
