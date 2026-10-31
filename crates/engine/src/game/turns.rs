@@ -337,7 +337,15 @@ pub(in crate::game) fn advance_phase_once(
         // CR 508.8: a combat step with nothing attacking is skipped before it
         // could begin, so it proposes no begin event.
         let proposed = ProposedEvent::begin_phase(state.active_player, next);
-        if combat_step_skipped(state, next)
+        // CR 614.10a + CR 500.11: a one-shot "skips their next combat phase"
+        // (Revenant Patriarch, Stonehorn Dignitary) arms a counter on each of the
+        // phase's five steps. Each combat step uses up its own counter as it
+        // would begin, evaluated before the other skip reasons so a step that is
+        // also skipped by CR 508.8 cannot leave a stale counter that would skip
+        // that step in a later combat phase.
+        let next_skip_used = next.is_combat() && consume_next_step_skip(state, next);
+        if next_skip_used
+            || combat_step_skipped(state, next)
             || matches!(
                 replacement::replace_event(state, proposed, events),
                 ReplacementResult::Prevented
