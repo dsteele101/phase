@@ -1136,6 +1136,19 @@ pub(crate) fn parse_enchanted_is_type(
 
     let is_rest_lower = is_rest_lower.trim_end_matches('.');
 
+    // CR 205.1a + CR 205.1b: a retention clause ("It's still a land." —
+    // Corrupted Zendikon, "…creature that's still a land") names a card type
+    // the replacement set must keep. Split it off the descriptor and re-add the
+    // retained type to the granted set below.
+    let (is_rest_lower, retained_core_type) =
+        match super::grammar::split_type_retention_clause(is_rest_lower) {
+            Some((descriptor, retained)) => (
+                descriptor.trim().trim_end_matches('.').trim_end(),
+                Some(retained),
+            ),
+            None => (is_rest_lower, None),
+        };
+
     // Check for "in addition to its other types" suffix.
     // CR 205.1b: "in addition to its other types" retains all prior card types
     // (additive). Its absence means CR 205.1a applies: the new card type(s)
@@ -1286,6 +1299,12 @@ pub(crate) fn parse_enchanted_is_type(
                 break;
             } else {
                 break;
+            }
+        }
+
+        if let Some(retained) = retained_core_type {
+            if !granted_core_types.contains(&retained) {
+                granted_core_types.push(retained);
             }
         }
 
