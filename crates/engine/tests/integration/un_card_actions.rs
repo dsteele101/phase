@@ -1307,7 +1307,11 @@ fn puca_exchange_told_during_prompt() -> (GameRunner, ObjectId, ObjectId) {
             generic: 3,
         });
     let offered = scenario
-        .add_enchantment_from_oracle(P0, "Pacifism", "Enchant creature")
+        .add_enchantment_from_oracle(
+            P0,
+            "Intangible Virtue",
+            "Creature tokens you control get +1/+1 and have vigilance.",
+        )
         .with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::White],
             generic: 1,
