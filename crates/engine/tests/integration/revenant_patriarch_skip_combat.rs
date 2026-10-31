@@ -4,10 +4,18 @@
 //! exercise the path players use (CR 500.11, CR 614.10, CR 614.10a).
 
 use engine::game::combat::AttackTarget;
+use engine::game::effects::skip_next_step;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Duration, TargetRef};
+use engine::game::turns::advance_phase;
+use engine::types::ability::{
+    Duration, Effect, QuantityExpr, ResolvedAbility, SkipScope, StepSkipTarget, TargetFilter,
+    TargetRef,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, ExtraPhase, PendingCombatPhaseSkip, WaitingFor};
+use engine::types::format::FormatConfig;
+use engine::types::game_state::{
+    CastPaymentMode, ExtraPhase, GameState, PendingCombatPhaseSkip, WaitingFor,
+};
 use engine::types::identifiers::{ExtraPhaseId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -19,8 +27,12 @@ const PATRIARCH_ORACLE: &str = "When this creature enters, if {W} was spent to c
 const MOMENT_OF_SILENCE_ORACLE: &str = "Target player skips their next combat phase this turn.";
 const VEDALKEN_ORRERY_ORACLE: &str = "You may cast spells as though they had flash.";
 const FALSE_PEACE_ORACLE: &str = "Target player skips all combat phases of their next turn.";
+const SINISTER_MONOLITH_ORACLE: &str = "At the beginning of combat on your turn, each opponent loses 1 life and you gain 1 life.\n{T}, Pay 2 life, Sacrifice this artifact: Draw two cards. Activate only as a sorcery.";
+const TRENCH_BEHEMOTH_ORACLE: &str = "Return a land you control to its owner's hand: Untap this creature. It gains hexproof until end of turn.\nLandfall — Whenever a land you control enters, target creature an opponent controls attacks during its controller's next combat phase if able.";
 
 const BEAR_POWER: i32 = 2;
+/// P0's life lost to one P1 combat: the bear plus Sinister Monolith's trigger.
+const ONE_COMBAT: i32 = BEAR_POWER + 1;
 const P0_STARTING_LIFE: i32 = 20;
 const P1_STARTING_LIFE: i32 = 20;
 
@@ -31,6 +43,7 @@ struct Table {
     patriarch: ObjectId,
     moment: ObjectId,
     false_peace: ObjectId,
+    forest: ObjectId,
     bear: ObjectId,
 }
 
@@ -66,23 +79,22 @@ fn table() -> Table {
         let mut builder =
             scenario.add_spell_to_hand_from_oracle(P0, "False Peace", false, FALSE_PEACE_ORACLE);
         builder.with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
+            shards: vec![ManaCostShard::White],
             generic: 0,
         });
         builder.id()
     };
     scenario.add_artifact_from_oracle(P0, "Vedalken Orrery", VEDALKEN_ORRERY_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Trench Behemoth", 7, 7, TRENCH_BEHEMOTH_ORACLE);
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
     let bear = scenario.add_vanilla(P1, BEAR_POWER, 2);
-    scenario.add_enchantment_from_oracle(
-        P1,
-        "Combat Watcher",
-        "At the beginning of combat on your turn, you gain 1 life.",
-    );
+    scenario.add_artifact_from_oracle(P1, "Sinister Monolith", SINISTER_MONOLITH_ORACLE);
     Table {
         runner: scenario.build(),
         patriarch,
         moment,
         false_peace,
+        forest,
         bear,
     }
 }
@@ -284,7 +296,7 @@ fn white_spent_makes_target_player_skip_next_combat() {
         play_p1_combat(&mut table)
     };
     assert_combat_ran(&table, prompts, 1);
-    assert_eq!(table.runner.life(P0), P0_STARTING_LIFE - BEAR_POWER);
+    assert_eq!(table.runner.life(P0), P0_STARTING_LIFE - ONE_COMBAT);
     assert_eq!(table.runner.life(P1), P1_STARTING_LIFE + 1);
 }
 
@@ -297,7 +309,7 @@ fn no_white_spent_does_not_skip_combat() {
 
     let prompts = play_p1_combat(&mut table);
     assert_combat_ran(&table, prompts, 1);
-    assert_eq!(table.runner.life(P0), P0_STARTING_LIFE - BEAR_POWER);
+    assert_eq!(table.runner.life(P0), P0_STARTING_LIFE - ONE_COMBAT);
 }
 
 /// The caster's own combat this turn is another player's: it neither uses up
@@ -326,7 +338,7 @@ fn skip_created_during_a_combat_leaves_that_combat_untouched() {
 
     let prompts = pass_to(&mut table, P1, Phase::PostCombatMain);
     assert_combat_ran(&table, prompts, 1);
-    assert_eq!(table.runner.life(P0), P0_STARTING_LIFE - BEAR_POWER);
+    assert_eq!(table.runner.life(P0), P0_STARTING_LIFE - ONE_COMBAT);
     assert_eq!(pending_skips(&table, P1), 1, "still waiting");
 
     let life = (table.runner.life(P0), table.runner.life(P1));
@@ -449,7 +461,7 @@ fn unlimited_skip_is_used_before_one_limited_to_this_turn() {
 #[test]
 fn turn_scoped_skip_comes_first_and_the_one_shot_waits_past_it() {
     let mut table = table();
-    add_mana(&mut table.runner, P0, ManaType::Red, 1);
+    add_mana(&mut table.runner, P0, ManaType::White, 1);
     assert!(cast_and_resolve(&mut table.runner, table.false_peace, P1));
     assert!(cast_patriarch(&mut table, 1, 4, P1));
 
@@ -466,4 +478,91 @@ fn turn_scoped_skip_comes_first_and_the_one_shot_waits_past_it() {
     pass_to(&mut table, P0, Phase::End);
     let prompts = play_p1_combat(&mut table);
     assert_combat_ran(&table, prompts, 1);
+}
+
+/// CR 614.10a: what is scheduled for a player's next combat phase waits past a
+/// skipped one. Trench Behemoth's requirement outlives P1's skipped combat, and
+/// CR 508.1d holds P1 to it in the first combat that happens.
+#[test]
+fn next_combat_requirement_waits_past_a_skipped_combat_phase() {
+    let mut table = table();
+    let forest = table.forest;
+    let card_id = table.runner.state().objects[&forest].card_id;
+    table
+        .runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id,
+        })
+        .expect("play land");
+    for _ in 0..10 {
+        match table.runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if table.runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                table.runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                table
+                    .runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(table.bear)),
+                    })
+                    .expect("target the bear");
+            }
+            other => panic!("unexpected waiting state: {other:?}"),
+        }
+    }
+    assert!(cast_patriarch(&mut table, 1, 4, P1));
+
+    let prompts = play_p1_combat(&mut table);
+    assert_combat_skipped(&table, prompts, (P0_STARTING_LIFE, P1_STARTING_LIFE));
+
+    pass_to(&mut table, P0, Phase::End);
+    pass_to(&mut table, P1, Phase::BeginCombat);
+    for _ in 0..4 {
+        if matches!(
+            table.runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            break;
+        }
+        table.runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert!(
+        table.runner.declare_attackers(&[]).is_err(),
+        "the bear must attack in the first combat that happens"
+    );
+    table
+        .runner
+        .declare_attackers(&[(table.bear, AttackTarget::Player(P0))])
+        .expect("the bear attacks");
+}
+
+/// CR 805.8: a skip aimed at either player of a team is the team's. The team's
+/// second seat is targeted so the active player, its representative, isn't.
+#[test]
+fn two_headed_giant_skip_on_the_second_seat_skips_the_teams_combat() {
+    let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+    let second_seat = PlayerId(3);
+    state.active_player = PlayerId(2);
+    state.phase = Phase::PreCombatMain;
+
+    let ability = ResolvedAbility::new(
+        Effect::SkipNextStep {
+            target: TargetFilter::Player,
+            step: StepSkipTarget::CombatPhase,
+            count: QuantityExpr::Fixed { value: 1 },
+            scope: SkipScope::NextOccurrence,
+        },
+        vec![TargetRef::Player(second_seat)],
+        ObjectId(999),
+        P0,
+    );
+    let mut events = Vec::new();
+    skip_next_step::resolve(&mut state, &ability, &mut events).expect("skip resolves");
+    assert_eq!(state.pending_combat_phase_skips.len(), 1, "reach guard");
+
+    advance_phase(&mut state, &mut events);
+    assert_eq!(state.phase, Phase::PostCombatMain);
+    assert!(state.pending_combat_phase_skips.is_empty());
 }

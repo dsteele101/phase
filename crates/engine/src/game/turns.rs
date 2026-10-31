@@ -328,8 +328,10 @@ fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> Phas
     let (removed, next) = take_scheduled_successor(state, successor);
 
     // CR 511.3: End Combat teardown happens when the step ends, after its
-    // priority window, not when the step begins.
-    if leaving == Phase::EndCombat {
+    // priority window, not when the step begins. CR 614.10a: a skipped combat
+    // phase never began, so what waits for the end of a combat (Trench Behemoth's
+    // "next combat phase") waits past it.
+    if leaving == Phase::EndCombat && state.combat.is_some() {
         complete_end_combat_teardown(state);
     }
 
@@ -2101,10 +2103,8 @@ pub fn begin_untap_or_subset_prompt(
         }));
     }
     execute_untap_with_choices(state, events, &chosen_not_to_untap);
-    // CR 500.5: Untap completion owns one phase-entry hop. The production
-    // `auto_advance` loop remains responsible for repeating through any
-    // skipped successor, so a bounded prospective unit cannot inherit that
-    // loop authority through this helper.
+    // CR 500.5: Untap completion owns one committed phase entry;
+    // `advance_phase_once` proceeds past any skipped successor.
     match advance_phase_once(state, events) {
         AdvancePhaseOnce::Deferred => UntapCompletion::LeaveDeferred,
         AdvancePhaseOnce::Entry(_) => UntapCompletion::Advanced,
@@ -3746,8 +3746,7 @@ fn skip_eliminated_active_turn(
     // follow this cleanup step instead of the next turn.
     discard_scheduled_units(state);
     // CR 800.4 + CR 500.5: leaving the cleanup step is one transition unit
-    // (`advance_phase_once`); any subsequently skipped step remains work for
-    // the outer interpreter.
+    // (`advance_phase_once`).
     match advance_phase_once(state, events) {
         AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
         AdvancePhaseOnce::Entry(_) => AutoAdvanceStep::Continue,
