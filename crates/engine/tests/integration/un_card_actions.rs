@@ -1292,6 +1292,154 @@ fn a_queued_gotcha_offer_opens_when_its_source_is_not_blinked() {
     assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
 }
 
+const PUCAS_MISCHIEF: &str = "At the beginning of your upkeep, you may exchange control of target nonland permanent you control and target nonland permanent an opponent controls with equal or lesser mana value.";
+
+/// P0 controls Puca's Mischief and a {1}{W} enchantment to offer in exchange; P1 controls Name Dropping ({1}{G}) with Lightning Bolt in their
+/// graveyard. At P0's upkeep the exchange trigger reaches its "you may" prompt,
+/// and P0 says "bolt" there, queueing P1's Gotcha offer.
+fn puca_exchange_told_during_prompt() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    scenario
+        .add_enchantment_from_oracle(P0, "Puca's Mischief", PUCAS_MISCHIEF)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        });
+    let offered = scenario
+        .add_enchantment_from_oracle(P0, "Pacifism", "Enchant creature")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .id();
+    let name_dropping = scenario
+        .add_enchantment_from_oracle(P1, "Name Dropping", NAME_DROPPING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    let bolt = scenario
+        .add_spell_to_graveyard(P1, "Lightning Bolt", true)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().turn_number = 2;
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    runner.advance_to_upkeep();
+    for _ in 0..12 {
+        match &runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                let target = if runner.state().objects[&offered].controller == P0
+                    && !matches!(
+                        &runner.state().waiting_for,
+                        WaitingFor::TriggerTargetSelection { selection, .. }
+                            if selection.current_legal_targets.contains(&TargetRef::Object(name_dropping))
+                    ) {
+                    offered
+                } else {
+                    name_dropping
+                };
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("legal exchange target");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes");
+            }
+            other => panic!("unexpected decision before the exchange prompt: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "reach guard: Puca's Mischief's \"you may\" is pending, got {:?}",
+        runner.state().waiting_for
+    );
+    tell(
+        &mut runner,
+        P0,
+        UnTell::Said {
+            text: "bolt".to_string(),
+        },
+    );
+    assert_eq!(
+        runner.state().un_actions.pending_offers.len(),
+        1,
+        "reach guard: the tell queued P1's offer while the prompt is open"
+    );
+    (runner, name_dropping, bolt)
+}
+
+#[test]
+fn a_queued_gotcha_offer_does_not_survive_its_source_changing_controller() {
+    // CR 109.5: once P0 controls Name Dropping, "you" on it is P0, so P1 (who
+    // was the controller when the tell matched) can no longer say its Gotcha.
+    let (mut runner, name_dropping, bolt) = puca_exchange_told_during_prompt();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the exchange is accepted");
+    assert_eq!(
+        runner.state().objects[&name_dropping].controller,
+        P0,
+        "reach guard: the exchange gave P0 control of Name Dropping"
+    );
+    assert!(
+        runner.state().un_actions.pending_offers.is_empty()
+            && runner.state().un_actions.gotcha_offers.is_empty(),
+        "P1's offer is gone once they no longer control the source"
+    );
+    let result = apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::SayGotcha {
+                source_id: name_dropping,
+                returns: bolt,
+            },
+        },
+    );
+    assert!(result.is_err(), "P1 cannot say Gotcha for P0's permanent");
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Graveyard);
+}
+
+#[test]
+fn a_queued_gotcha_offer_opens_when_its_source_keeps_its_controller() {
+    // Paired control: declining the exchange leaves P1 in control, so the
+    // queued offer opens and the return works.
+    let (mut runner, name_dropping, bolt) = puca_exchange_told_during_prompt();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the exchange is accepted");
+    assert_eq!(runner.state().objects[&name_dropping].controller, P1);
+    assert_eq!(
+        runner.state().un_actions.gotcha_offers.len(),
+        1,
+        "the queued offer opened"
+    );
+    un_action(
+        &mut runner,
+        P1,
+        UnAction::SayGotcha {
+            source_id: name_dropping,
+            returns: bolt,
+        },
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
+}
+
 #[test]
 fn a_tell_by_another_player_leaves_a_pending_decision_answerable() {
     let (mut runner, _name_dropping, _bolt) = name_dropping_during_unless_prompt(Zone::Graveyard);
@@ -1393,13 +1541,18 @@ fn name_droppings_return_leaves_a_card_reanimated_in_response_alone() {
     let reanimate = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Reanimation Spell",
+            "Miraculous Recovery",
             true,
-            "Return target creature card from your graveyard to the battlefield.",
+            "Return target creature card from your graveyard to the battlefield. Put a +1/+1 counter on it.",
         )
-        .with_mana_cost(engine::types::mana::ManaCost::generic(1))
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        })
         .id();
-    scenario.with_mana_pool(P0, generic_mana(1));
+    let mut mana = generic_mana(4);
+    mana.push(ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]));
+    scenario.with_mana_pool(P0, mana);
     let mut runner = scenario.build();
     un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
     un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });

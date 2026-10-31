@@ -1,7 +1,0 @@
-{
-  "surfaces": [
-    "full",
-    "wire"
-  ],
-  "reason": "GameAction::UnAction wire change for Un-card actions"
-}

@@ -288,6 +288,9 @@ fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
         // CR 400.7: a source that changed zones (even one blinked straight back) is a
         // new object with no relation to the one the tell matched.
         && offer.source.is_current(state)
+        // CR 109.5: "you" on the source is its controller (or owner off the battlefield);
+        // an offer is only the current holder's to accept, so a control change closes it.
+        && holder_of(state, offer.source.reference.object_id) == Some(offer.player)
         // CR 113.6m: the source must still carry a functioning Gotcha ability in its
         // current zone (gotcha_definitions applies both checks).
         && gotcha_definitions(state, offer.source.reference.object_id)

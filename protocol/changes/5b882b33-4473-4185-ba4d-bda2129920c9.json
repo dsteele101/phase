@@ -1,7 +1,0 @@
-{
-  "surfaces": [
-    "full",
-    "wire"
-  ],
-  "reason": "Add GameAction::UnAction wire format for Un-card actions"
-}

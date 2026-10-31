@@ -1,6 +1,0 @@
-{
-  "surfaces": [
-    "full"
-  ],
-  "reason": "Add GameAction::UnAction for Un-card actions"
-}
