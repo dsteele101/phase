@@ -4439,6 +4439,8 @@ mod tests {
     fn empty_attacker_completion_clears_the_combat_restriction() {
         let mut state = setup();
         state.phase = Phase::DeclareAttackers;
+        // CR 507.1: this combat began; a skipped one runs no teardown.
+        state.combat = Some(crate::game::combat::CombatState::default());
         state.current_combat_attacker_restriction = Some(TargetFilter::Any);
         state.current_combat_attacker_restriction_source = Some(ObjectId(99));
         let mut events = Vec::new();
