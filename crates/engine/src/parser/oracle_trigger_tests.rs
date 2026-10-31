@@ -41572,6 +41572,43 @@ fn trigger_becomes_blocked_pumps_only_creatures_blocking_it() {
     }
 }
 
+/// CR 608.2c + CR 608.2k: an equipped creature's blockers are not the source's,
+/// and `BlockingSource` cannot express them, so Bob the Claymore fails closed
+/// instead of shrinking every creature.
+#[test]
+fn trigger_becomes_blocked_blockers_of_equipped_creature_stay_unbound() {
+    let def = parse_trigger_line(
+        "Whenever equipped creature becomes blocked, each creature blocking it gets -5/-5 until end of turn.",
+        "Bob the Claymore",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let execute = def.execute.as_ref().expect("trigger should have effect");
+    match execute.effect.as_ref() {
+        Effect::Unimplemented { name, .. } => assert_eq!(name, "unbound_subject"),
+        other => panic!("expected the unbound-subject gap, got {other:?}"),
+    }
+}
+
+/// CR 608.2k: a referent an earlier clause selected outranks the source, so
+/// "it" must not bind the source's blockers even under a `SelfRef` trigger.
+#[test]
+fn trigger_blocking_it_keeps_nearer_chain_referent() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes blocked, tap target creature. Each creature blocking it gets -1/-1 until end of turn.",
+        "Test Creature",
+    );
+    let execute = def.execute.as_ref().expect("trigger should have effect");
+    assert!(!matches!(
+        execute.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+    let sub = execute.sub_ability.as_ref().expect("second sentence");
+    match sub.effect.as_ref() {
+        Effect::Unimplemented { name, .. } => assert_eq!(name, "unbound_subject"),
+        other => panic!("expected the unbound-subject gap, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CR 603.2h cast indicated actions: the lowering guard admits only a single-card
 // cast made during this resolution (CR 601.2i + CR 608.2g), the one shape whose

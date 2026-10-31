@@ -6583,7 +6583,7 @@ pub(crate) fn parse_source_blocked_history_clause(
 /// (`TriggeringSource`, `ParentTarget`, …) has no sound `CombatRelationSubject`
 /// — `ParentTarget` there denotes a target announced by the same instruction —
 /// so the clause stays unconsumed and the swallow audit reports it.
-fn bare_pronoun_names_ability_source(ctx: &ParseContext) -> bool {
+pub(crate) fn bare_pronoun_names_ability_source(ctx: &ParseContext) -> bool {
     match &ctx.object_pronoun_ref {
         Some(pin) => matches!(pin, TargetFilter::SelfRef),
         None => matches!(ctx.subject, Some(TargetFilter::SelfRef)),
