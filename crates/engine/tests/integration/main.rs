@@ -1363,6 +1363,7 @@ mod phyrexian_fleshgorger_ward;
 mod phyrexian_processor_entry_payment;
 mod physical_contest;
 mod pitfall_trap_attacking_count_alt_cost;
+mod plague_wight_blockers;
 mod plaguecrafter_etb_class;
 mod play_card_during_resolution;
 mod play_trace;

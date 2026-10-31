@@ -3207,8 +3207,17 @@ fn parse_subject_application_for(
         }
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
-        let (filter, rest) = ctx
-            .with_player_antecedents(|scoped| parse_type_phrase_folding_with_ctx(phrase, scoped));
+        // CR 509.1g + CR 608.2k: the sub-parse drops object anaphors, but an
+        // explicit `SelfRef` trigger subject is evidence, not a default, so a
+        // postnominal "blocking it" (Plague Wight) can still bind the source.
+        let source_subject = ctx
+            .subject
+            .clone()
+            .filter(|subject| matches!(subject, TargetFilter::SelfRef));
+        let (filter, rest) = ctx.with_player_antecedents(|scoped| {
+            scoped.subject = source_subject;
+            parse_type_phrase_folding_with_ctx(phrase, scoped)
+        });
         let filter = merge_partial_type_phrase_filter(filter, rest.trim());
         return subject_filter_application(filter, false);
     }

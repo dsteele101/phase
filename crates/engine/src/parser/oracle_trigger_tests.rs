@@ -41389,3 +41389,25 @@ fn untyped_event_window_declines_the_head() {
     assert_eq!(plain.mode, TriggerMode::ChangesZone);
     assert_eq!(plain.condition, None);
 }
+
+/// CR 509.1g: "each creature blocking it" scopes the pump to the creatures
+/// blocking the source (Plague Wight), not every creature.
+#[test]
+fn trigger_becomes_blocked_pumps_only_creatures_blocking_it() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
+        "Plague Wight",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let execute = def.execute.as_ref().expect("trigger should have effect");
+    assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+    match execute.effect.as_ref() {
+        Effect::PumpAll { target, .. } => assert_eq!(
+            target,
+            &TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::BlockingSource])
+            )
+        ),
+        other => panic!("expected PumpAll, got {other:?}"),
+    }
+}
