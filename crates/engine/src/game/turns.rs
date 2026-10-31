@@ -357,19 +357,21 @@ fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> Phas
         // CR 508.8: a combat step with nothing attacking is skipped before it
         // could begin, so it proposes no begin event.
         let proposed = ProposedEvent::begin_phase(state.active_player, next);
-        let step_skipped = combat_step_skipped(state, next)
+        // CR 614.10 + CR 614.10a: a combat phase that would begin uses up one
+        // pending "skips their next combat phase". Decided only here, so a
+        // combat already in progress can't be skipped. CR 616.1: this comes
+        // before the pipeline because the affected player applies it ahead of a
+        // turn-scoped skip (False Peace), which covers that turn either way.
+        let skipped_through = if next == Phase::BeginCombat && consume_next_combat_phase_skip(state)
+        {
+            Some(final_step_of_skipped_phase(state, next))
+        } else if combat_step_skipped(state, next)
             || matches!(
                 replacement::replace_event(state, proposed, events),
                 ReplacementResult::Prevented
-            );
-        // CR 614.10 + CR 614.10a: a combat phase that would begin uses up one
-        // pending "skips their next combat phase". Decided only here, so a
-        // combat already in progress can't be skipped, and after the pipeline
-        // above, so a skip waits past an occurrence something else skipped.
-        let skipped_through = if step_skipped {
+            )
+        {
             Some(next)
-        } else if next == Phase::BeginCombat && consume_next_combat_phase_skip(state) {
-            Some(final_step_of_skipped_phase(state, next))
         } else {
             None
         };
@@ -3473,19 +3475,24 @@ fn consume_next_step_skip(state: &mut GameState, step: Phase) -> bool {
     true
 }
 
-/// CR 614.10a: Use up one of the active player's pending "skips their next
-/// combat phase" as a combat phase would begin. Two skips cover the next two
-/// combat phases, one each. CR 616.1: which applies first is the affected
-/// player's choice, and using a skip with no time limit first is never worse for
-/// them, because one limited to this turn may expire unused (CR 514.2).
+/// CR 614.10a: Use up one pending "skips their next combat phase" of the active
+/// player's team (CR 805.8) as a combat phase would begin. Two skips cover the
+/// next two combat phases, one each. CR 616.1: which applies first is the
+/// affected player's choice; with no prompt for it, a skip with no time limit
+/// goes first, since one limited to this turn may then expire unused (CR 514.2).
 fn consume_next_combat_phase_skip(state: &mut GameState) -> bool {
-    let active = state.active_player;
-    let skips = &mut state.pending_combat_phase_skips;
+    let active = super::topology::normalize_shared_turn_recipient(state, state.active_player);
+    let on_active_team = |skip: &crate::types::game_state::PendingCombatPhaseSkip| {
+        super::topology::normalize_shared_turn_recipient(state, skip.player) == active
+    };
+    let skips = &state.pending_combat_phase_skips;
     let index = skips
         .iter()
-        .position(|skip| skip.player == active && skip.duration.is_none())
-        .or_else(|| skips.iter().position(|skip| skip.player == active));
-    index.map(|index| skips.remove(index)).is_some()
+        .position(|skip| on_active_team(skip) && skip.duration.is_none())
+        .or_else(|| skips.iter().position(on_active_team));
+    index
+        .map(|index| state.pending_combat_phase_skips.remove(index))
+        .is_some()
 }
 
 /// CR 500.11 + CR 614.10: why the untap, upkeep or draw step about to begin
@@ -4392,7 +4399,7 @@ mod tests {
     }
 
     #[test]
-    fn production_phase_handoffs_do_not_reenter_the_looping_advance_helper() {
+    fn production_phase_handoffs_use_advance_phase_once() {
         for (name, source, test_marker) in [
             (
                 "turns",
@@ -4415,7 +4422,7 @@ mod tests {
                 .expect("production source precedes its tests");
             assert!(
                 !source[..production_end].contains("advance_phase(state, events)"),
-                "{name} must use advance_phase_once before auto_advance; the outer interpreter owns repetition"
+                "{name} must use advance_phase_once before auto_advance so a deferred transition is reported"
             );
         }
     }

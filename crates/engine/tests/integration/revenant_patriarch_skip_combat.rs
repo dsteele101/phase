@@ -5,6 +5,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::effects::skip_next_step;
+use engine::game::elimination::eliminate_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::turns::advance_phase;
 use engine::types::ability::{
@@ -456,10 +457,11 @@ fn unlimited_skip_is_used_before_one_limited_to_this_turn() {
 }
 
 /// CR 500.11: False Peace skips through the same transition authority, so
-/// normal priority passing doesn't run its skipped steps either. CR 614.10a: a
-/// one-shot skip then waits for the first combat that isn't skipped.
+/// normal priority passing doesn't run its skipped steps either. CR 616.1: with
+/// both on P1, P1 applies the one-shot to that combat; False Peace covers the
+/// turn regardless, so P1 loses one combat, not two.
 #[test]
-fn turn_scoped_skip_comes_first_and_the_one_shot_waits_past_it() {
+fn one_shot_is_used_up_on_a_turn_scoped_skip_turn() {
     let mut table = table();
     add_mana(&mut table.runner, P0, ManaType::White, 1);
     assert!(cast_and_resolve(&mut table.runner, table.false_peace, P1));
@@ -468,16 +470,22 @@ fn turn_scoped_skip_comes_first_and_the_one_shot_waits_past_it() {
     let life = (P0_STARTING_LIFE, P1_STARTING_LIFE);
     let prompts = play_p1_combat(&mut table);
     assert_combat_skipped(&table, prompts, life);
-    assert_eq!(pending_skips(&table, P1), 1, "waits past False Peace");
-
-    pass_to(&mut table, P0, Phase::End);
-    let prompts = play_p1_combat(&mut table);
-    assert_combat_skipped(&table, prompts, life);
-    assert_eq!(pending_skips(&table, P1), 0);
+    assert_eq!(pending_skips(&table, P1), 0, "applied to that combat");
 
     pass_to(&mut table, P0, Phase::End);
     let prompts = play_p1_combat(&mut table);
     assert_combat_ran(&table, prompts, 1);
+}
+
+/// CR 500.11: False Peace alone, through normal priority passing.
+#[test]
+fn turn_scoped_skip_runs_no_skipped_step() {
+    let mut table = table();
+    add_mana(&mut table.runner, P0, ManaType::White, 1);
+    assert!(cast_and_resolve(&mut table.runner, table.false_peace, P1));
+
+    let prompts = play_p1_combat(&mut table);
+    assert_combat_skipped(&table, prompts, (P0_STARTING_LIFE, P1_STARTING_LIFE));
 }
 
 /// CR 614.10a: what is scheduled for a player's next combat phase waits past a
@@ -538,15 +546,82 @@ fn next_combat_requirement_waits_past_a_skipped_combat_phase() {
         .expect("the bear attacks");
 }
 
-/// CR 805.8: a skip aimed at either player of a team is the team's. The team's
-/// second seat is targeted so the active player, its representative, isn't.
+/// Pass priority until `active`'s turn reaches `phase` with an empty stack,
+/// declaring no attackers. Returns how many times `active` was asked to attack.
+fn pass_team_turn_to(runner: &mut GameRunner, active: PlayerId, phase: Phase) -> u32 {
+    let mut attack_prompts = 0;
+    for _ in 0..400 {
+        let state = runner.state();
+        let waiting = state.waiting_for.clone();
+        if state.active_player == active
+            && state.phase == phase
+            && state.stack.is_empty()
+            && matches!(waiting, WaitingFor::Priority { .. })
+        {
+            return attack_prompts;
+        }
+        match waiting {
+            WaitingFor::DeclareAttackers { player, .. } => {
+                attack_prompts += u32::from(player == active);
+                runner.declare_attackers(&[]).expect("no attackers");
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected waiting state: {other:?}"),
+        }
+    }
+    panic!("never reached {phase:?} on {active:?}'s turn");
+}
+
+/// CR 805.8: a skip aimed at either player of a team is the team's. P3 is
+/// targeted so the skip isn't on P2, the active player of the team's turns.
 #[test]
 fn two_headed_giant_skip_on_the_second_seat_skips_the_teams_combat() {
-    let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-    let second_seat = PlayerId(3);
-    state.active_player = PlayerId(2);
-    state.phase = Phase::PreCombatMain;
+    let (p2, p3) = (PlayerId(2), PlayerId(3));
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, p2, p3] {
+        scenario.with_library_top(player, &["Island"; 12]);
+    }
+    let patriarch = {
+        let mut builder = scenario.add_creature_to_hand(P0, "Revenant Patriarch", 4, 3);
+        builder.from_oracle_text(PATRIARCH_ORACLE);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        });
+        builder.id()
+    };
+    scenario.add_vanilla(p2, BEAR_POWER, 2);
+    let mut runner = scenario.build();
+    add_mana(&mut runner, P0, ManaType::White, 1);
+    add_mana(&mut runner, P0, ManaType::Black, 4);
+    assert!(cast_and_resolve(&mut runner, patriarch, p3));
+    assert_eq!(runner.state().pending_combat_phase_skips.len(), 1);
 
+    let prompts = pass_team_turn_to(&mut runner, p2, Phase::PostCombatMain);
+    assert_eq!(prompts, 0, "the team is not asked to attack");
+    assert_eq!(
+        runner
+            .state()
+            .steps_started_this_turn
+            .count(Phase::BeginCombat),
+        0
+    );
+    assert!(runner.state().pending_combat_phase_skips.is_empty());
+
+    pass_team_turn_to(&mut runner, P0, Phase::End);
+    let prompts = pass_team_turn_to(&mut runner, p2, Phase::PostCombatMain);
+    assert_eq!(prompts, 1, "the team's following combat runs");
+}
+
+/// CR 805.8: the skip stays the team's after the seat that represented the team
+/// leaves the game. Archenemy's heroes share turns and leave one by one.
+#[test]
+fn archenemy_skip_survives_the_team_representative_leaving() {
+    let (p2, p3) = (PlayerId(2), PlayerId(3));
+    let mut state = GameState::new(FormatConfig::archenemy(), 4, 42);
     let ability = ResolvedAbility::new(
         Effect::SkipNextStep {
             target: TargetFilter::Player,
@@ -554,13 +629,18 @@ fn two_headed_giant_skip_on_the_second_seat_skips_the_teams_combat() {
             count: QuantityExpr::Fixed { value: 1 },
             scope: SkipScope::NextOccurrence,
         },
-        vec![TargetRef::Player(second_seat)],
+        vec![TargetRef::Player(P1)],
         ObjectId(999),
         P0,
     );
     let mut events = Vec::new();
     skip_next_step::resolve(&mut state, &ability, &mut events).expect("skip resolves");
     assert_eq!(state.pending_combat_phase_skips.len(), 1, "reach guard");
+
+    eliminate_player(&mut state, P1, &mut events);
+    assert!(!state.eliminated_players.contains(&p2) && !state.eliminated_players.contains(&p3));
+    state.active_player = p2;
+    state.phase = Phase::PreCombatMain;
 
     advance_phase(&mut state, &mut events);
     assert_eq!(state.phase, Phase::PostCombatMain);

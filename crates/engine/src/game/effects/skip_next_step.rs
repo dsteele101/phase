@@ -30,9 +30,6 @@ pub fn resolve(
         return Ok(());
     };
 
-    // CR 805.8: with shared team turns, a player's skip is their team's, so it is
-    // held on the team's seat-order representative, the active player of its turns.
-    let player = crate::game::topology::normalize_shared_turn_recipient(state, player);
     let idx = player.0 as usize;
     match scope {
         // CR 614.10 + CR 614.10a: turn-scoped skip (False Peace / Empty City
