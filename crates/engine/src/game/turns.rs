@@ -2962,11 +2962,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
-    // CR 514.2: a "skips their next combat phase this turn" that found no further
-    // combat phase ends with the turn.
-    state
-        .pending_combat_phase_skips
-        .retain(|skip| skip.duration != Some(crate::types::ability::Duration::UntilEndOfTurn));
+    end_turn_limited_combat_phase_skips(state);
     // CR 514.2: EndOfTurn mana retention survives the End → Cleanup phase
     // boundary and expires as part of this cleanup action. The units remain in
     // the pool until the ordinary CR 500.5 / CR 703.4q cleanup-exit drain.
@@ -3495,6 +3491,14 @@ fn consume_next_combat_phase_skip(state: &mut GameState) -> bool {
         .is_some()
 }
 
+/// CR 514.2: a "skips their next combat phase this turn" that found no further
+/// combat phase ends with the turn.
+fn end_turn_limited_combat_phase_skips(state: &mut GameState) {
+    state
+        .pending_combat_phase_skips
+        .retain(|skip| skip.duration != Some(crate::types::ability::Duration::UntilEndOfTurn));
+}
+
 /// CR 500.11 + CR 614.10: why the untap, upkeep or draw step about to begin
 /// is skipped instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3748,6 +3752,10 @@ fn skip_eliminated_active_turn(
     events: &mut Vec<GameEvent>,
 ) -> AutoAdvanceStep {
     state.phase = Phase::Cleanup;
+    // CR 800.4j + CR 514.2: the turn still ends without an active player, and
+    // `execute_cleanup` isn't reached from here, so a skip limited to this turn
+    // can't carry into the target's next turn.
+    end_turn_limited_combat_phase_skips(state);
     // CR 500.8 + CR 800.4: the phases added to the turn are part of the
     // remainder skipped here; a unit still scheduled or open would otherwise
     // follow this cleanup step instead of the next turn.
