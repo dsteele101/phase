@@ -1011,6 +1011,15 @@ fn gotcha_triggers_are_not_doubled_by_trigger_doublers() {
         .add_spell_to_graveyard(P0, "Touch and Go", false)
         .from_oracle_text(TOUCH_AND_GO)
         .id();
+    // Synthetic fixture rationale: no printed card has an unconditional blanket
+    // trigger-doubling ability (`TriggerCause::Any`) that would double arbitrary
+    // triggers or Gotcha triggers specifically. Printed trigger doublers (such as
+    // Panharmonicon, Elesh Norn, Mother of Machines, Teysa Karlov, or Roaming Throne)
+    // only double specific trigger causes (such as ETB or dies triggers of permanents),
+    // none of which match Gotcha triggers. We use a synthetic 2/2 with
+    // `StaticMode::DoubleTriggers { cause: TriggerCause::Any }` to isolate and verify
+    // the engine building block that reflexive Gotcha triggers (CR 603.2d) are exempt
+    // from trigger doubling regardless of broad doubler effects.
     scenario
         .add_creature(P0, "Trigger Doubler", 2, 2)
         .with_static_definition(StaticDefinition::new(StaticMode::DoubleTriggers {

@@ -3589,6 +3589,17 @@ mod tests {
 
     /// Un-card: an activation whose cost is a spoken phrase is unpayable for a
     /// player who has not opted in, and the dry run emits no event.
+    ///
+    /// Synthetic fixture rationale: this unit test directly exercises the
+    /// `PaymentScope::Activation` branch of `can_pay` for the bare
+    /// `AbilityCost::SayPhrase` cost variant. The closest printed cards with
+    /// spoken activation costs are Impounding Lot-Bot (which requires `{T}` plus
+    /// speech) and Infernius Spawnington III, Esq. (which reveals from hand);
+    /// both combine speech with other cost components or card-specific conditions.
+    /// Using a synthetic source isolates the opt-in gate on `can_pay` without
+    /// coupling to tap eligibility, summoning sickness, or full activation AST
+    /// resolution. The printed cards are tested end-to-end using their verbatim
+    /// Oracle text in `crates/engine/tests/integration/un_card_actions.rs`.
     #[test]
     fn say_phrase_activation_requires_un_actions_opt_in() {
         let mut scenario = GameScenario::new();
