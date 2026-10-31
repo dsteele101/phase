@@ -83,7 +83,7 @@ export function GotchaButton() {
                   action: {
                     type: "SayGotcha",
                     data: {
-                      source_id: offer.source_id,
+                      source_id: offer.source.reference.object_id,
                       returns: offer.returns.reference.object_id,
                     },
                   },

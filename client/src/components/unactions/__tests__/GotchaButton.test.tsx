@@ -39,7 +39,7 @@ vi.mock("../../../hooks/useGameDispatch", () => ({
   useGameDispatch: () => dispatch,
 }));
 
-function returnsBinding(object_id: number) {
+function objectBinding(object_id: number) {
   return {
     reference: { object_id, incarnation: 0 },
     expected_zone: "Graveyard" as Zone,
@@ -47,14 +47,14 @@ function returnsBinding(object_id: number) {
 }
 
 function offerGotcha(player: number, id = 1) {
-  offerGotchas([{ id, player, source_id: 9, returns: returnsBinding(9) }]);
+  offerGotchas([{ id, player, source: objectBinding(9), returns: objectBinding(9) }]);
 }
 
 function offerGotchas(
   offers: {
     id: number;
     player: number;
-    source_id: number;
+    source: { reference: { object_id: number; incarnation: number }; expected_zone: Zone };
     returns: { reference: { object_id: number; incarnation: number }; expected_zone: Zone };
   }[],
 ) {
@@ -144,8 +144,8 @@ describe("GotchaButton", () => {
   });
 
   it("keeps an expired offer hidden when an unrelated offer arrives, and times each offer separately", () => {
-    const a = { id: 1, player: 0, source_id: 9, returns: returnsBinding(9) };
-    const b = { id: 2, player: 0, source_id: 10, returns: returnsBinding(10) };
+    const a = { id: 1, player: 0, source: objectBinding(9), returns: objectBinding(9) };
+    const b = { id: 2, player: 0, source: objectBinding(10), returns: objectBinding(10) };
     offerGotchas([a]);
     render(<GotchaButton />);
 
@@ -162,7 +162,7 @@ describe("GotchaButton", () => {
     act(() => {
       vi.advanceTimersByTime(1500);
     });
-    const c = { id: 3, player: 0, source_id: 11, returns: returnsBinding(11) };
+    const c = { id: 3, player: 0, source: objectBinding(11), returns: objectBinding(11) };
     offerGotchas([a, b, c]);
     act(() => {
       // B's fuse (2000ms from t=2000) runs out; let its exit animation finish.

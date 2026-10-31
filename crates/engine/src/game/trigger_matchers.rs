@@ -2706,7 +2706,7 @@ pub(super) fn match_gotcha_said(
     source_context: &TriggerSourceContext,
     _state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::GotchaSaid { source_id, .. } if *source_id == source_event_subject_id(source_context))
+    matches!(event, GameEvent::GotchaSaid { source, .. } if source.reference == source_context.identity.reference)
 }
 
 pub(super) fn match_counter_removed(

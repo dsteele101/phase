@@ -15,11 +15,11 @@
 //!   return ..." clause (CR 603.12 reflexive trigger shape) puts the return on
 //!   the stack through the ordinary trigger pipeline.
 
-use crate::game::game_object::{ObjectIdentityBindingExt, ObjectIncarnationRefExt};
+use crate::game::game_object::ObjectIdentityBindingExt;
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
-use crate::types::identifiers::{ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
 use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::un_actions::{
@@ -118,13 +118,14 @@ fn graveyard_cards_named_in(state: &GameState, player: PlayerId, tell: &UnTell) 
         .collect()
 }
 
-/// Bind `object_id` to its current incarnation and zone so a Gotcha offer can
-/// survive a zone change (CR 400.7). Returns `None` if the object is gone.
-fn returns_binding(state: &GameState, object_id: ObjectId) -> Option<ObjectIdentityBinding> {
+/// Bind `object_id` to its current incarnation and zone so a Gotcha offer goes
+/// stale when that object changes zones (CR 400.7). Returns `None` if the object
+/// is gone.
+fn current_binding(state: &GameState, object_id: ObjectId) -> Option<ObjectIdentityBinding> {
     state
         .objects
         .get(&object_id)
-        .map(|obj| ObjectIdentityBinding::new(ObjectIncarnationRef::from_object(obj), obj.zone))
+        .map(ObjectIdentityBinding::from_object)
 }
 
 /// The Gotcha windows `tell` opens: one per opted-in opponent of the performer
@@ -152,6 +153,9 @@ pub fn open_gotcha_offers(
         {
             continue;
         }
+        let Some(source) = current_binding(state, source_id) else {
+            continue;
+        };
         for def in gotcha_definitions(state, source_id) {
             let Some(condition) = def.gotcha_condition.as_ref() else {
                 continue;
@@ -162,31 +166,34 @@ pub fn open_gotcha_offers(
                         graveyard_cards_named_in(state, holder, tell)
                             .into_iter()
                             .filter_map(|returns| {
-                                returns_binding(state, returns).map(|returns| GotchaOffer {
+                                current_binding(state, returns).map(|returns| GotchaOffer {
                                     id: 0,
                                     player: holder,
-                                    source_id,
+                                    source,
                                     returns,
                                 })
                             }),
                     );
                 }
                 other if other.matches_without_zone_context(tell) => {
-                    let Some(returns) = returns_binding(state, source_id) else {
-                        continue;
-                    };
                     offers.push(GotchaOffer {
                         id: 0,
                         player: holder,
-                        source_id,
-                        returns,
+                        source,
+                        returns: source,
                     });
                 }
                 _ => {}
             }
         }
     }
-    offers.sort_by_key(|o| (o.player, o.source_id.0, o.returns.reference.object_id.0));
+    offers.sort_by_key(|o| {
+        (
+            o.player,
+            o.source.reference.object_id.0,
+            o.returns.reference.object_id.0,
+        )
+    });
     offers.dedup();
     offers
 }
@@ -199,16 +206,14 @@ fn append_gotcha_offers(state: &mut GameState, new_offers: Vec<GotchaOffer>) {
     for mut offer in new_offers {
         offer.id = state.un_actions.mint_offer_id();
         state.un_actions.gotcha_offers.retain(|o| {
-            !(o.player == offer.player
-                && o.source_id == offer.source_id
-                && o.returns == offer.returns)
+            !(o.player == offer.player && o.source == offer.source && o.returns == offer.returns)
         });
         state.un_actions.gotcha_offers.push(offer);
     }
     state.un_actions.gotcha_offers.sort_by_key(|o| {
         (
             o.player,
-            o.source_id.0,
+            o.source.reference.object_id.0,
             o.returns.reference.object_id.0,
             o.id,
         )
@@ -240,7 +245,7 @@ pub fn record_tell(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
     }
     for offer in offers {
         let already_pending = state.un_actions.pending_offers.iter().any(|o| {
-            o.player == offer.player && o.source_id == offer.source_id && o.returns == offer.returns
+            o.player == offer.player && o.source == offer.source && o.returns == offer.returns
         });
         if !already_pending {
             state.un_actions.pending_offers.push(offer);
@@ -250,8 +255,8 @@ pub fn record_tell(state: &mut GameState, performer: PlayerId, tell: &UnTell) {
 
 /// Open the Gotcha offers matched while a decision was pending, once priority is
 /// next settled. Re-validates each queued offer against the live board before
-/// announcing it: a source that left play, a player that opted out, or a returned
-/// card that moved zones no longer gets a window.
+/// announcing it: a source or returned card that changed zones, or a player that
+/// opted out, no longer gets a window.
 pub fn announce_pending_tells(state: &mut GameState) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
@@ -266,23 +271,28 @@ pub fn announce_pending_tells(state: &mut GameState) {
 
 /// Whether a queued Gotcha offer still matches the live game state. The offer was
 /// matched when the tell was made; between then and the next priority boundary the
-/// source may have left play, its controller may have opted out, or the returned
+/// source may have changed zones, its controller may have opted out, or the returned
 /// card may have moved zones — each of which invalidates the window.
 ///
 /// CR 113.6m + CR 400.7: validates that a Gotcha offer's source and returned card
-/// remain intact on the live state. The source ability must continue to function in
-/// its current zone (CR 113.6: abilities function only in the zones they specify;
-/// Gotcha abilities on graveyard cards function from the graveyard per CR 113.6m),
-/// the recipient must remain in the game (CR 102.1, CR 800.4) and opted in to Un-card
-/// actions (an engine opt-in preference with no CR entry), and the returned card must
-/// be the same incarnation still in its expected zone rather than a new object that
-/// changed zones (CR 400.7).
+/// remain intact on the live state. The source must be the same incarnation still in
+/// its expected zone with its ability still functioning there (CR 113.6: abilities
+/// function only in the zones they specify; Gotcha abilities on graveyard cards
+/// function from the graveyard per CR 113.6m), the recipient must remain in the game
+/// (CR 102.1, CR 800.4) and opted in to Un-card actions (an engine opt-in preference
+/// with no CR entry), and the returned card must be the same incarnation still in its
+/// expected zone rather than a new object that changed zones (CR 400.7).
 fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
     // CR 102.1, CR 800.4: recipient must still be in the game.
     super::players::is_alive(state, offer.player)
-        // CR 113.6m: the source must still exist and still carry a functioning Gotcha
-        // ability in its current zone (gotcha_definitions applies both checks).
-        && gotcha_definitions(state, offer.source_id).next().is_some()
+        // CR 400.7: a source that changed zones (even one blinked straight back) is a
+        // new object with no relation to the one the tell matched.
+        && offer.source.is_current(state)
+        // CR 113.6m: the source must still carry a functioning Gotcha ability in its
+        // current zone (gotcha_definitions applies both checks).
+        && gotcha_definitions(state, offer.source.reference.object_id)
+            .next()
+            .is_some()
         // The recipient must still be opted in to Un-card actions.
         && player_can_say_phrases(state, offer.player)
         // CR 400.7: the returned card must be the same incarnation still in its expected
@@ -366,7 +376,7 @@ pub fn apply_un_action(
             }
             let Some(position) = state.un_actions.gotcha_offers.iter().position(|o| {
                 o.player == actor
-                    && o.source_id == source_id
+                    && o.source.reference.object_id == source_id
                     && o.returns.reference.object_id == returns
             }) else {
                 return Err(EngineError::InvalidAction(
@@ -374,19 +384,19 @@ pub fn apply_un_action(
                 ));
             };
             let offer = state.un_actions.gotcha_offers[position].clone();
-            // CR 400.7: re-validate the returned card is still the same incarnation
-            // in its expected zone before firing the reflexive trigger — the card
-            // may have moved zones while the window was open.
+            // CR 400.7: re-validate the source and returned card are still the same
+            // incarnations in their expected zones before firing the reflexive
+            // trigger — either may have moved zones while the window was open.
             if !offer_is_still_valid(state, &offer) {
                 return Err(EngineError::InvalidAction(
-                    "That Gotcha window has closed (the returned card moved or left play)"
+                    "That Gotcha window has closed (its source or returned card moved or left play)"
                         .to_string(),
                 ));
             }
             state.un_actions.gotcha_offers.remove(position);
             let mut events = vec![GameEvent::GotchaSaid {
                 player: actor,
-                source_id,
+                source: offer.source,
                 returns: offer.returns,
             }];
             let waiting_for = state.waiting_for.clone();

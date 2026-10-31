@@ -6,7 +6,7 @@
 //! CR 118.12a unless-payment whose cost is a spoken phrase, and "you may say
 //! \"Gotcha!\" When you do, return ..." is a CR 603.12 reflexive trigger.
 
-use engine::game::engine::apply;
+use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityCost, Effect, StaticDefinition, TargetRef, TriggerDefinition};
@@ -14,7 +14,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::{StaticMode, TriggerCause};
 use engine::types::triggers::TriggerMode;
@@ -23,6 +23,8 @@ use engine::types::zones::Zone;
 
 const ROD: &str = "{2}, {T}: This artifact deals 1 damage to target player. Then untap this artifact unless that player says \"Thank you, sir. May I have another?\"";
 const TOUCH_AND_GO: &str = "Destroy target land.\nGotcha — If an opponent touches their face, you may say \"Gotcha!\" When you do, return this card from your graveyard to your hand.";
+const NAME_DROPPING: &str = "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.";
+const FELIDAR_GUARDIAN: &str = "When this creature enters, you may exile another target permanent you control, then return that card to the battlefield under its owner's control.";
 
 fn generic_mana(n: usize) -> Vec<ManaUnit> {
     (0..n)
@@ -343,7 +345,10 @@ fn touch_and_go_returns_to_hand_when_gotcha_is_called_after_the_opponent_touches
     tell(&mut runner, P1, UnTell::Physical(PhysicalTell::TouchFace));
     let offers = runner.state().un_actions.gotcha_offers.clone();
     assert_eq!(offers.len(), 1, "the gesture opens one Gotcha window");
-    assert_eq!((offers[0].player, offers[0].source_id), (P0, card));
+    assert_eq!(
+        (offers[0].player, offers[0].source.reference.object_id),
+        (P0, card)
+    );
 
     un_action(
         &mut runner,
@@ -501,8 +506,8 @@ fn eliminated_player_cannot_perform_tells_or_open_gotcha_offers_in_multiplayer()
         },
     );
     assert!(
-        tell_result.is_err(),
-        "eliminated player cannot perform tells"
+        matches!(&tell_result, Err(EngineError::InvalidAction(message)) if message == "Player has left the game"),
+        "eliminated player cannot perform tells, got {tell_result:?}"
     );
     assert!(
         runner.state().un_actions.gotcha_offers.is_empty(),
@@ -521,8 +526,8 @@ fn eliminated_player_cannot_perform_tells_or_open_gotcha_offers_in_multiplayer()
         },
     );
     assert!(
-        gotcha_result.is_err(),
-        "eliminated player cannot say Gotcha"
+        matches!(&gotcha_result, Err(EngineError::InvalidAction(message)) if message == "Player has left the game"),
+        "eliminated player cannot say Gotcha, got {gotcha_result:?}"
     );
 
     // Paired control: living opponent P2 performs the tell and opens P0's Touch and Go offer.
@@ -534,7 +539,7 @@ fn eliminated_player_cannot_perform_tells_or_open_gotcha_offers_in_multiplayer()
         "living opponent's tell opens one Gotcha window"
     );
     assert_eq!(
-        (offers[0].player, offers[0].source_id),
+        (offers[0].player, offers[0].source.reference.object_id),
         (P0, card),
         "the offer is for P0's Touch and Go"
     );
@@ -588,6 +593,15 @@ fn spoken_gotchas_match_whole_words_and_numbers() {
         },
     );
     assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);
+    // A digit run wider than `u32` is still a number.
+    tell(
+        &mut runner,
+        P1,
+        UnTell::Said {
+            text: "99999999999999999999".to_string(),
+        },
+    );
+    assert_eq!(runner.state().un_actions.gotcha_offers.len(), 1);
     un_action(
         &mut runner,
         P0,
@@ -635,7 +649,10 @@ fn name_dropping_returns_the_graveyard_card_whose_name_the_opponent_said() {
         "only the Bolt's name contains a spoken word"
     );
     assert_eq!(
-        (offers[0].source_id, offers[0].returns.reference.object_id),
+        (
+            offers[0].source.reference.object_id,
+            offers[0].returns.reference.object_id
+        ),
         (name_dropping, bolt),
         "the offer returns the card whose name was spoken"
     );
@@ -704,7 +721,10 @@ fn a_spoken_unless_payment_opens_a_verbal_gotcha_for_the_opponent() {
         .expect("saying the phrase is accepted");
     let offers = &runner_setup.state().un_actions.gotcha_offers;
     assert_eq!(offers.len(), 1, "P1 saying the phrase opens P0's Gotcha");
-    assert_eq!((offers[0].player, offers[0].source_id), (P0, card));
+    assert_eq!(
+        (offers[0].player, offers[0].source.reference.object_id),
+        (P0, card)
+    );
 }
 
 const INFERNIUS: &str = "When this creature enters, you may say \"I'm here.\" If you do, it deals 3 damage to target player.";
@@ -1030,11 +1050,7 @@ fn name_dropping_during_unless_prompt(bolt_zone: Zone) -> (GameRunner, ObjectId,
         .add_artifact_from_oracle(P0, "Rod of Spanking", ROD)
         .id();
     let name_dropping = scenario
-        .add_enchantment_from_oracle(
-            P0,
-            "Name Dropping",
-            "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.",
-        )
+        .add_enchantment_from_oracle(P0, "Name Dropping", NAME_DROPPING)
         .id();
     let bolt = match bolt_zone {
         Zone::Graveyard => scenario
@@ -1113,11 +1129,167 @@ fn a_tell_made_during_a_decision_is_announced_once_priority_settles() {
     let offers = &runner.state().un_actions.gotcha_offers;
     assert_eq!(offers.len(), 1);
     assert_eq!(
-        (offers[0].source_id, offers[0].returns.reference.object_id),
+        (
+            offers[0].source.reference.object_id,
+            offers[0].returns.reference.object_id
+        ),
         (name_dropping, bolt)
     );
     assert_eq!(offers[0].returns.expected_zone, Zone::Graveyard);
     assert!(runner.state().un_actions.pending_offers.is_empty());
+}
+
+/// P0 controls Name Dropping with Lightning Bolt in the graveyard and has cast
+/// Felidar Guardian, whose enters trigger targeting Name Dropping is at its
+/// "you may" prompt. P1 says "bolt" during that prompt, so the offer is queued.
+fn name_dropping_told_during_felidar_guardian_prompt() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let name_dropping = scenario
+        .add_enchantment_from_oracle(P0, "Name Dropping", NAME_DROPPING)
+        .id();
+    let bolt = scenario
+        .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .id();
+    let guardian = scenario
+        .add_creature_to_hand_from_oracle(P0, "Felidar Guardian", 1, 4, FELIDAR_GUARDIAN)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 3,
+        })
+        .id();
+    let mut mana = generic_mana(3);
+    mana.push(ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]));
+    scenario.with_mana_pool(P0, mana);
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    runner.cast(guardian).commit();
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "Felidar Guardian's {{3}}{{W}} was paid"
+    );
+    for _ in 0..12 {
+        match &runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes");
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(name_dropping)),
+                    })
+                    .expect("Name Dropping is a legal target");
+            }
+            other => panic!("unexpected decision before the blink prompt: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "reach guard: Felidar Guardian's \"you may\" is pending, got {:?}",
+        runner.state().waiting_for
+    );
+    tell(
+        &mut runner,
+        P1,
+        UnTell::Said {
+            text: "bolt".to_string(),
+        },
+    );
+    assert_eq!(
+        runner.state().un_actions.pending_offers.len(),
+        1,
+        "reach guard: the tell queued an offer while the prompt is open"
+    );
+    (runner, name_dropping, bolt)
+}
+
+#[test]
+fn a_queued_gotcha_offer_does_not_survive_its_source_being_blinked() {
+    // CR 400.7: the Name Dropping that returns is a new object, not the one the
+    // tell matched, so the queued offer is dropped.
+    let (mut runner, name_dropping, bolt) = name_dropping_told_during_felidar_guardian_prompt();
+    let matched_incarnation = runner.state().objects[&name_dropping].incarnation;
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the blink is accepted");
+    assert_settled(&runner, "after the blink");
+    let returned = &runner.state().objects[&name_dropping];
+    assert_eq!(returned.zone, Zone::Battlefield, "Name Dropping came back");
+    assert_ne!(
+        returned.incarnation, matched_incarnation,
+        "reach guard: Name Dropping really changed zones"
+    );
+    assert!(
+        runner.state().un_actions.pending_offers.is_empty()
+            && runner.state().un_actions.gotcha_offers.is_empty(),
+        "the offer matched against the old object is gone"
+    );
+
+    // The returned Name Dropping functions: a fresh tell opens a window bound to
+    // it, so the empty list above is the stale binding and nothing else.
+    tell(
+        &mut runner,
+        P1,
+        UnTell::Said {
+            text: "bolt".to_string(),
+        },
+    );
+    let offers = &runner.state().un_actions.gotcha_offers;
+    assert_eq!(offers.len(), 1);
+    assert_ne!(offers[0].source.reference.incarnation, matched_incarnation);
+    un_action(
+        &mut runner,
+        P0,
+        UnAction::SayGotcha {
+            source_id: name_dropping,
+            returns: bolt,
+        },
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
+}
+
+#[test]
+fn a_queued_gotcha_offer_opens_when_its_source_is_not_blinked() {
+    // Paired control: declining Felidar Guardian leaves the same Name Dropping in
+    // play, so the queued offer opens and works.
+    let (mut runner, name_dropping, bolt) = name_dropping_told_during_felidar_guardian_prompt();
+    let matched_incarnation = runner.state().objects[&name_dropping].incarnation;
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the blink is accepted");
+    assert_settled(&runner, "after declining the blink");
+    assert_eq!(
+        runner.state().objects[&name_dropping].incarnation,
+        matched_incarnation
+    );
+    let offers = &runner.state().un_actions.gotcha_offers;
+    assert_eq!(offers.len(), 1, "the queued offer opened");
+    assert_eq!(offers[0].source.reference.object_id, name_dropping);
+    assert_eq!(offers[0].source.reference.incarnation, matched_incarnation);
+    assert_eq!(offers[0].source.expected_zone, Zone::Battlefield);
+    assert_eq!(offers[0].returns.reference.object_id, bolt);
+    un_action(
+        &mut runner,
+        P0,
+        UnAction::SayGotcha {
+            source_id: name_dropping,
+            returns: bolt,
+        },
+    );
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
 }
 
 #[test]
@@ -1145,8 +1317,6 @@ fn a_tell_by_another_player_leaves_a_pending_decision_answerable() {
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("P1's payment answer is still accepted after P0's gesture");
 }
-
-const NAME_DROPPING: &str = "Gotcha — If an opponent says a word that's in the name of a card in your graveyard, you may say \"Gotcha!\" When you do, return that card to your hand.";
 
 #[test]
 fn name_dropping_matches_real_plurals_of_name_words_and_rejects_invented_ones() {

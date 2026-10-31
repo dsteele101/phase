@@ -21,6 +21,9 @@
 //! player who has not enabled Un-card actions is never prompted to say anything
 //! (the "unless" branch simply happens) and never receives a Gotcha offer.
 
+use nom::character::complete::digit1;
+use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::{ObjectId, ObjectIdentityBinding};
@@ -98,20 +101,20 @@ fn is_zero_u64(n: &u64) -> bool {
 }
 
 /// A live opportunity for `player` to call "Gotcha!" for the Gotcha ability on
-/// `source_id`, returning `returns` to hand when the reflexive trigger resolves.
+/// `source`, returning `returns` to hand when the reflexive trigger resolves.
 ///
-/// `returns` is bound to the card's occurrence (object id + incarnation) and the
-/// zone it was in when the window opened. CR 400.7: an object that changes zones
-/// becomes a new object and bumps its incarnation, so a bare ObjectId goes stale —
-/// the binding lets `offer_is_still_valid` reject a window whose returned card has
-/// moved or been replaced.
+/// `source` and `returns` are each bound to the object's occurrence (object id +
+/// incarnation) and the zone it was in when the window opened. CR 400.7: an object
+/// that changes zones becomes a new object and bumps its incarnation, so a bare
+/// ObjectId goes stale — the bindings let `offer_is_still_valid` reject a window
+/// whose source or returned card has moved or been replaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GotchaOffer {
     pub id: u64,
     pub player: PlayerId,
     /// The object carrying the Gotcha ability.
-    pub source_id: ObjectId,
-    /// The card the ability returns ("this card" → `source_id`; "that card" → the
+    pub source: ObjectIdentityBinding,
+    /// The card the ability returns ("this card" → `source`; "that card" → the
     /// graveyard card whose name contained the spoken word).
     pub returns: ObjectIdentityBinding,
 }
@@ -283,17 +286,25 @@ pub fn word_matches(watched: &str, spoken: &str) -> bool {
     s.strip_prefix(w.as_str()).is_some_and(|tail| tail == "s")
 }
 
-/// Whether a single spoken word names a number. Delegates to the shared number
-/// grammar (digits, "seven", hyphenated "twenty-one"), rejecting the articles
-/// "a"/"an" it also reads as one.
+/// Whether a single spoken word names a number. A digit run of any length counts
+/// (a spoken number has no `u32` bound); otherwise delegates to the shared number
+/// grammar ("seven", hyphenated "twenty-one"), rejecting the articles "a"/"an" it
+/// also reads as one.
 fn is_number_word(word: &str) -> bool {
-    if EXTRA_NUMBER_WORDS.contains(&word) {
+    if EXTRA_NUMBER_WORDS.contains(&word) || is_digit_run(word) {
         return true;
     }
     if matches!(word, "a" | "an") {
         return false;
     }
     crate::types::text_grammar::parse_number(word).is_ok_and(|(rest, _)| rest.is_empty())
+}
+
+/// Whether `word` is nothing but ASCII digits.
+fn is_digit_run(word: &str) -> bool {
+    all_consuming(digit1::<_, nom::error::Error<&str>>)
+        .parse(word)
+        .is_ok()
 }
 
 impl GotchaCondition {
@@ -375,6 +386,10 @@ mod tests {
     fn says_number_accepts_digits_and_number_words() {
         let cond = GotchaCondition::SaysNumber;
         assert!(cond.matches_without_zone_context(&said("42")));
+        // A digit run wider than `u32` is still a number.
+        assert!(cond.matches_without_zone_context(&said("4294967296")));
+        assert!(cond.matches_without_zone_context(&said("99999999999999999999999")));
+        assert!(!cond.matches_without_zone_context(&said("99999999999a")));
         assert!(cond.matches_without_zone_context(&said("I have Seven cats")));
         assert!(!cond.matches_without_zone_context(&said("none of them")));
         assert!(cond.matches_without_zone_context(&said("twenty-one")));

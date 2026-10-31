@@ -1499,12 +1499,12 @@ pub enum GameEvent {
         phrase: String,
     },
     /// Un-card Gotcha (no CR entry): `player` called "Gotcha!" for the Gotcha
-    /// ability on `source_id`, naming `returns` (exact card occurrence) as the
-    /// card to return. Consumed by `TriggerMode::GotchaSaid` — the "When you do"
-    /// reflexive trigger.
+    /// ability on `source` (exact occurrence), naming `returns` (exact card
+    /// occurrence) as the card to return. Consumed by `TriggerMode::GotchaSaid` —
+    /// the "When you do" reflexive trigger.
     GotchaSaid {
         player: PlayerId,
-        source_id: ObjectId,
+        source: ObjectIdentityBinding,
         returns: ObjectIdentityBinding,
     },
     CounterRemoved {

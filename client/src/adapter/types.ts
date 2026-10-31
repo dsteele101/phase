@@ -1196,10 +1196,11 @@ export type UnAction =
 export interface GotchaOffer {
   id: number;
   player: PlayerId;
-  source_id: ObjectId;
-  /// The card the ability returns, bound to its occurrence (object id +
-  /// incarnation) and the zone it was in when the window opened (CR 400.7:
-  /// a zone change makes a new object, so a bare ObjectId goes stale).
+  /// The object carrying the Gotcha ability and the card it returns, each bound
+  /// to its occurrence (object id + incarnation) and the zone it was in when the
+  /// window opened (CR 400.7: a zone change makes a new object, so a bare
+  /// ObjectId goes stale).
+  source: ObjectIdentityBinding;
   returns: ObjectIdentityBinding;
 }
 
@@ -3735,7 +3736,7 @@ export type GameEvent =
   // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
   | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
   | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
-  | { type: "GotchaSaid"; data: { player: PlayerId; source_id: ObjectId; returns: ObjectIdentityBinding } }
+  | { type: "GotchaSaid"; data: { player: PlayerId; source: ObjectIdentityBinding; returns: ObjectIdentityBinding } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.

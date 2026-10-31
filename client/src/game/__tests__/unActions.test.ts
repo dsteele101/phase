@@ -40,7 +40,10 @@ describe("flashUnActionEvents", () => {
         type: "GotchaSaid",
         data: {
           player: 0,
-          source_id: 4,
+          source: {
+            reference: { object_id: 4, incarnation: 0 },
+            expected_zone: "Graveyard",
+          },
           returns: {
             reference: { object_id: 4, incarnation: 0 },
             expected_zone: "Graveyard",

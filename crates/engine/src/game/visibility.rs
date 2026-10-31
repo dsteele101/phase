@@ -15257,13 +15257,13 @@ mod tests {
             crate::types::un_actions::GotchaOffer {
                 id: 1,
                 player: PlayerId(0),
-                source_id: ObjectId(10),
+                source: binding,
                 returns: binding,
             },
             crate::types::un_actions::GotchaOffer {
                 id: 2,
                 player: PlayerId(1),
-                source_id: ObjectId(20),
+                source: binding,
                 returns: binding,
             },
         ];
