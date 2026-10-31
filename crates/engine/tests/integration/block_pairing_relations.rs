@@ -38,6 +38,8 @@ const ROLLING_STONES: &str = "Wall creatures can attack as though they didn't ha
 const SHOCK: &str = "Shock deals 2 damage to any target.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
 const MURDER: &str = "Destroy target creature.";
+const CLOUDSHIFT: &str =
+    "Exile target creature you control, then return that card to the battlefield under your control.";
 const REGENERATE: &str = "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)";
 
 // ── Drivers ─────────────────────────────────────────────────────────────
@@ -945,6 +947,58 @@ fn plague_wight_removed_in_response_still_shrinks_its_blockers() {
         assert_eq!(pt(&runner, d), (Some(4), Some(6)), "{name}: blocks another");
         assert_eq!(pt(&runner, h), (Some(4), Some(6)), "{name}: not blocking");
     }
+}
+
+/// P1b: Plague Wight is blinked in response, so its source is back on the
+/// battlefield as a new object (CR 400.7) that nothing is blocking. Ruling
+/// (2019-01-25) + CR 608.2h: the trigger still answers from the pairings the
+/// departed incarnation had, not the live Wight's empty ones.
+#[test]
+fn plague_wight_blinked_in_response_still_shrinks_its_blockers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wight = scenario
+        .add_creature_from_oracle(P0, "Plague Wight", 2, 2, PLAGUE_WIGHT)
+        .id();
+    let cloudshift = {
+        let mut spell = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT);
+        spell.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        spell.id()
+    };
+    let b1 = scenario.add_creature(P1, "Blocker B1", 2, 4).id();
+    let h = scenario.add_creature(P1, "Bystander H", 4, 6).id();
+    let mut runner = scenario.build();
+
+    attack_and_block(&mut runner, &[wight], &[(b1, wight)]);
+    cast_at(&mut runner, cloudshift, wight, &[ManaType::White]);
+    drain_stack(&mut runner, "Cloudshift, then the Wight's trigger");
+
+    assert_zone(
+        &runner,
+        &[cloudshift],
+        Zone::Graveyard,
+        "reach guard: Cloudshift resolved",
+    );
+    let returned = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Plague Wight")
+        .expect("reach guard: the Wight returned");
+    assert!(
+        !runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == returned)),
+        "reach guard: the new object is not attacking"
+    );
+    assert_eq!(pt(&runner, b1), (Some(1), Some(3)), "B1 blocked it");
+    assert_eq!(pt(&runner, h), (Some(4), Some(6)), "not blocking");
 }
 
 /// P2: B1 is removed from combat and then the Wight is destroyed, both in
