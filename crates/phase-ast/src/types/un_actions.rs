@@ -26,7 +26,6 @@ use nom::combinator::all_consuming;
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
-
 /// A physical gesture a player can perform from the Un-actions menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PhysicalTell {
