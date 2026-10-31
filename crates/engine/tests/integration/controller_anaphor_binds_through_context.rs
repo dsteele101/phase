@@ -171,6 +171,90 @@ fn reservoir_kraken_accepting_opponent_taps_their_own_creature() {
     );
 }
 
+/// CR 608.2c + CR 608.2d: Desecration Demon's accepting opponent sacrifices a
+/// creature of their own choice, and "if a player does" then taps the Demon and
+/// puts a +1/+1 counter on it. Declining sacrifices nothing and changes nothing.
+fn desecration_demon_run(accept: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, bool) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let p0_bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    let mut prompted = false;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OpponentMayChoice { player, .. } => {
+                assert_eq!(player, P1);
+                prompted = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("decide");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(cards.contains(&p1_bear) && !cards.contains(&p0_bear));
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![p1_bear],
+                    })
+                    .expect("sacrifice P1's creature");
+            }
+            WaitingFor::MultiTargetSelection { legal_targets, .. } => {
+                assert_eq!(legal_targets, vec![p1_bear]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![p1_bear],
+                    })
+                    .expect("sacrifice P1's creature");
+            }
+            WaitingFor::Priority { .. } if runner.state().phase == Phase::BeginCombat => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => break,
+        }
+    }
+    (runner, demon, p0_bear, p1_bear, prompted)
+}
+
+#[test]
+fn desecration_demon_accepted_sacrifice_taps_and_grows_the_demon() {
+    let (runner, demon, p0_bear, p1_bear, prompted) = desecration_demon_run(true);
+    assert!(prompted, "P1 must be offered the choice");
+    let state = runner.state();
+    assert!(
+        !state.battlefield.contains(&p1_bear),
+        "P1's creature was sacrificed"
+    );
+    assert!(state.battlefield.contains(&p0_bear));
+    assert!(state.objects[&demon].tapped, "the Demon is tapped");
+    assert_eq!(
+        state.objects[&demon]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the Demon gets a +1/+1 counter"
+    );
+}
+
+#[test]
+fn desecration_demon_declined_sacrifice_changes_nothing() {
+    let (runner, demon, _p0_bear, p1_bear, prompted) = desecration_demon_run(false);
+    assert!(prompted, "P1 must be offered the choice");
+    let state = runner.state();
+    assert!(state.battlefield.contains(&p1_bear));
+    assert!(!state.objects[&demon].tapped);
+    assert!(state.objects[&demon].counters.is_empty());
+}
+
 /// CR 608.2c: in Temporal Distortion's "at the beginning of each player's
 /// upkeep, remove all hourglass counters from permanents that player
 /// controls", "that player" is the upkeep player, so the source controller's

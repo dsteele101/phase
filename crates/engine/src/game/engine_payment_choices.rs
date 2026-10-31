@@ -446,6 +446,21 @@ fn handle_opponent_may_choice_inner(
                             ..
                         }
                     );
+                    // CR 701.21a: the accepting player sacrifices a permanent
+                    // they control, so the sacrifice pool is read in the
+                    // ability's own frame, exactly as the Sacrifice resolver
+                    // reads it: "a creature" parsed with an `Opponent` scope
+                    // (Desecration Demon) means the accepting opponent's
+                    // creatures relative to the Demon's controller, not
+                    // relative to the acceptor. Tap keeps the acceptor's frame.
+                    let filter_ctx = if require_untapped {
+                        filter::FilterContext::from_source_with_controller(
+                            ability.source_id,
+                            promptee,
+                        )
+                    } else {
+                        filter::FilterContext::from_ability(&ability)
+                    };
                     let legal: Vec<ObjectId> = state
                         .objects
                         .iter()
@@ -453,15 +468,7 @@ fn handle_opponent_may_choice_inner(
                             obj.zone == Zone::Battlefield
                                 && obj.controller == promptee
                                 && (!require_untapped || !obj.tapped)
-                                && filter::matches_target_filter(
-                                    state,
-                                    obj.id,
-                                    target,
-                                    &filter::FilterContext::from_source_with_controller(
-                                        ability.source_id,
-                                        promptee,
-                                    ),
-                                )
+                                && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
                         })
                         .map(|(id, _)| *id)
                         .collect();
