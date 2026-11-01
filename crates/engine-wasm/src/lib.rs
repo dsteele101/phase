@@ -3761,6 +3761,127 @@ mod restored_card_db_requirements_tests {
 
         clear_game_state();
     }
+
+    #[test]
+    fn llm_decision_flow_records_pass_returns_standing_pass_and_clears_on_restore() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(17);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        // Add a land to hand so there is at least one non-pass option (PlayLand)
+        // alongside PassPriority, ensuring build_game_decision_prompt does not reject
+        // the decision as an unsupported forced move.
+        let next_id = state.next_object_id;
+        let land_id = engine::game::zones::create_object(
+            &mut state,
+            engine::types::identifiers::CardId(next_id),
+            player,
+            "Forest".to_string(),
+            engine::types::zones::Zone::Hand,
+        );
+        let land = state.objects.get_mut(&land_id).unwrap();
+        land.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Land);
+
+        let endpoint = phase_llm::LlmEndpointConfig {
+            provider: phase_llm::LlmProvider::OpenAi,
+            base_url: None,
+            api_key: "sk-test".into(),
+            model: "gpt-4o".into(),
+            max_output_tokens: None,
+            temperature: None,
+        };
+
+        // 1. Initial decision: builds prompt and request, no standing pass proposal yet.
+        let first_request = build_llm_decision_request_inner(
+            &mut state,
+            AiDifficulty::Medium,
+            player.0,
+            &endpoint,
+            &[],
+        )
+        .expect("must build LLM decision request");
+        assert!(first_request.get("request").is_some());
+        assert!(first_request.get("proposal").is_none());
+        let fingerprint = first_request["fingerprint"].as_str().expect("fingerprint");
+
+        // Find candidate index for PassPriority:
+        let contract = AiDecisionContract::issue(&state, player);
+        let pass_index = contract
+            .candidates
+            .iter()
+            .position(|c| matches!(c.action, GameAction::PassPriority))
+            .expect("contract must contain PassPriority");
+
+        // 2. Provider responds choosing PassPriority:
+        let mock_response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": format!("{{\"choice\": {pass_index}, \"reason\": \"standing pass test\"}}")
+                }
+            }]
+        })
+        .to_string();
+
+        let proposal_result = get_ai_action_proposal_from_llm_response_inner(
+            &mut state,
+            player.0,
+            fingerprint,
+            "OpenAi",
+            200,
+            &mock_response,
+        );
+        assert_eq!(
+            proposal_result["proposal"]["action"]["type"],
+            "PassPriority"
+        );
+        assert_eq!(proposal_result["reasoning"], "standing pass test");
+
+        // 3. Priority returns with no new information: build_llm_decision_request returns standing pass.
+        let standing_request = build_llm_decision_request_inner(
+            &mut state,
+            AiDifficulty::Medium,
+            player.0,
+            &endpoint,
+            &[],
+        )
+        .expect("must return standing pass request");
+        assert!(standing_request.get("request").is_none());
+        assert_eq!(
+            standing_request["proposal"]["action"]["type"],
+            "PassPriority"
+        );
+        assert_eq!(
+            standing_request["reasoning"],
+            "Standing pass: no new information since previous pass decision"
+        );
+
+        // 4. Game state is restored (e.g. undo):
+        let json = serde_json::to_string(&state).unwrap();
+        restore_game_state_inner(&json).expect("restore must succeed");
+
+        // 5. Standing pass is invalidated: build_llm_decision_request generates a fresh prompt again.
+        let after_restore_request = build_llm_decision_request_inner(
+            &mut state,
+            AiDifficulty::Medium,
+            player.0,
+            &endpoint,
+            &[],
+        )
+        .expect("must build fresh decision request after restore");
+        assert!(after_restore_request.get("request").is_some());
+        assert!(after_restore_request.get("proposal").is_none());
+
+        clear_game_state();
+    }
 }
 
 #[cfg(test)]
@@ -4890,6 +5011,74 @@ pub fn validate_llm_probe_response(
     }
 }
 
+fn build_llm_decision_request_inner(
+    state: &mut GameState,
+    ai_difficulty: AiDifficulty,
+    player_id: u8,
+    endpoint: &phase_llm::LlmEndpointConfig,
+    history: &[engine::types::log::GameLogEntry],
+) -> Option<serde_json::Value> {
+    engine::game::layers::flush_layers(state);
+    let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+    let contract = AiDecisionContract::issue(state, semantic_owner);
+    if contract.candidates.is_empty() {
+        return None;
+    }
+    let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {
+        cell.borrow()
+            .standing_pass_available(semantic_owner, state, &contract)
+    });
+    if is_standing_pass {
+        let actor = contract.authorized_actor;
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        return Some(serde_json::json!({
+            "proposal": {
+                "token": token,
+                "semanticOwner": semantic_owner.0,
+                "actor": actor.0,
+                "action": GameAction::PassPriority,
+            },
+            "reasoning": "Standing pass: no new information since previous pass decision",
+        }));
+    }
+    let request = CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        phase_llm::build_game_decision_prompt(
+            state,
+            &contract,
+            ai_difficulty,
+            db.as_deref(),
+            history,
+        )
+    });
+    let request = match request {
+        Ok(request) => request,
+        // The kind rides along so a forced move (one legal option, which is
+        // never put to a provider) reads as `unsupportedDecision` — the
+        // heuristic plays it — rather than as a failure charged to the seat.
+        Err(error) => {
+            return Some(serde_json::json!({ "error": error.to_string(), "errorKind": error }));
+        }
+    };
+    let http = match phase_llm::build_chat_request(endpoint, &request.prompt) {
+        Ok(http) => http,
+        // The kind rides along so the caller can tell "this provider cannot
+        // be asked this decision" (a forced move put to Jev) from a
+        // misconfigured endpoint, and only count the latter against the seat.
+        Err(error) => {
+            return Some(serde_json::json!({ "error": error.to_string(), "errorKind": error }));
+        }
+    };
+    Some(serde_json::json!({
+        "fingerprint": request.fingerprint,
+        "optionCount": request.option_count,
+        // Prompt size, so the effect of history compaction can be measured
+        // for every provider, including those that report no token counts.
+        "promptChars": request.prompt.char_count(),
+        "request": http,
+    }))
+}
+
 /// Build the HTTP request for one LLM-driven AI decision.
 ///
 /// `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
@@ -4913,71 +5102,71 @@ pub fn build_llm_decision_request(
         serde_json::from_str(history_json).unwrap_or_default();
     let ai_difficulty = AiDifficulty::from_label(difficulty);
 
-    with_state_mut(|state| {
-        engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
-        let contract = AiDecisionContract::issue(state, semantic_owner);
-        if contract.candidates.is_empty() {
-            return Ok(JsValue::NULL);
-        }
-        let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {
-            cell.borrow()
-                .standing_pass_available(semantic_owner, state, &contract)
-        });
-        if is_standing_pass {
-            let actor = contract.authorized_actor;
-            let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
-            return Ok(to_js(&serde_json::json!({
-                "proposal": {
-                    "token": token,
-                    "semanticOwner": semantic_owner.0,
-                    "actor": actor.0,
-                    "action": GameAction::PassPriority,
-                },
-                "reasoning": "Standing pass: no new information since previous pass decision",
-            })));
-        }
-        let request = CARD_DB.with(|cell| {
-            let db = cell.borrow();
-            phase_llm::build_game_decision_prompt(
-                state,
-                &contract,
-                ai_difficulty,
-                db.as_deref(),
-                &history,
-            )
-        });
-        let request = match request {
-            Ok(request) => request,
-            // The kind rides along so a forced move (one legal option, which is
-            // never put to a provider) reads as `unsupportedDecision` — the
-            // heuristic plays it — rather than as a failure charged to the seat.
-            Err(error) => {
-                return Ok(to_js(
-                    &serde_json::json!({ "error": error.to_string(), "errorKind": error }),
-                ))
-            }
-        };
-        let http = match phase_llm::build_chat_request(&endpoint, &request.prompt) {
-            Ok(http) => http,
-            // The kind rides along so the caller can tell "this provider cannot
-            // be asked this decision" (a forced move put to Jev) from a
-            // misconfigured endpoint, and only count the latter against the seat.
-            Err(error) => {
-                return Ok(to_js(
-                    &serde_json::json!({ "error": error.to_string(), "errorKind": error }),
-                ))
-            }
-        };
-        Ok(to_js(&serde_json::json!({
-            "fingerprint": request.fingerprint,
-            "optionCount": request.option_count,
-            // Prompt size, so the effect of history compaction can be measured
-            // for every provider, including those that report no token counts.
-            "promptChars": request.prompt.char_count(),
-            "request": http,
-        })))
-    })?
+    let result = with_state_mut(|state| {
+        build_llm_decision_request_inner(state, ai_difficulty, player_id, &endpoint, &history)
+    })?;
+    match result {
+        Some(val) => Ok(to_js(&val)),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+fn get_ai_action_proposal_from_llm_response_inner(
+    state: &mut GameState,
+    player_id: u8,
+    fingerprint: &str,
+    provider_label: &str,
+    status: u16,
+    response_body: &str,
+) -> serde_json::Value {
+    let provider = phase_llm::LlmProvider::from_label(provider_label);
+    // What the provider reports having spent, whether or not the reply is
+    // usable: a refused reply still consumed the prompt. Diagnostic only.
+    let usage = phase_llm::token_usage(provider, response_body);
+    engine::game::layers::flush_layers(state);
+    let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+    let contract = AiDecisionContract::issue(state, semantic_owner);
+
+    // Status-aware: a non-2xx response is refused however its body parses,
+    // so a gateway or proxy error cannot masquerade as a decision. The reply
+    // is read against the options THIS contract issues, never against
+    // whatever the provider claims it was offered.
+    let selection = match phase_llm::select_action_from_response(
+        state,
+        &contract,
+        fingerprint,
+        phase_llm::LlmReply {
+            provider,
+            status,
+            body: response_body,
+        },
+    ) {
+        Ok(selection) => selection,
+        Err(error) => return llm_failure_value(&error, usage),
+    };
+    // Same admission check `mint_ai_action_proposal` performs, inlined so the
+    // reasoning can ride alongside the proposal in one payload.
+    if !contract.contains_action(state, &selection.action) {
+        return llm_failure_value(&phase_llm::LlmError::StaleDecision, usage);
+    }
+    LLM_DECISION_MEMORY.with(|cell| {
+        cell.borrow_mut()
+            .record_decision(semantic_owner, &selection.action, state, &contract);
+    });
+    let actor = contract.authorized_actor;
+    let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+    // The reasoning is local diagnostic data bound to the same opaque token.
+    // The engine never reads it back.
+    serde_json::json!({
+        "proposal": {
+            "token": token,
+            "semanticOwner": semantic_owner.0,
+            "actor": actor.0,
+            "action": selection.action,
+        },
+        "reasoning": selection.reasoning,
+        "usage": usage,
+    })
 }
 
 /// Convert an LLM completion into an authority-bound proposal.
@@ -4995,67 +5184,29 @@ pub fn get_ai_action_proposal_from_llm_response(
     status: u16,
     response_body: &str,
 ) -> Result<JsValue, JsValue> {
-    let provider = phase_llm::LlmProvider::from_label(provider_label);
-    // What the provider reports having spent, whether or not the reply is
-    // usable: a refused reply still consumed the prompt. Diagnostic only.
-    let usage = phase_llm::token_usage(provider, response_body);
-    with_state_mut(|state| {
-        engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
-        let contract = AiDecisionContract::issue(state, semantic_owner);
-
-        // Status-aware: a non-2xx response is refused however its body parses,
-        // so a gateway or proxy error cannot masquerade as a decision. The reply
-        // is read against the options THIS contract issues, never against
-        // whatever the provider claims it was offered.
-        let selection = match phase_llm::select_action_from_response(
+    let result = with_state_mut(|state| {
+        get_ai_action_proposal_from_llm_response_inner(
             state,
-            &contract,
+            player_id,
             fingerprint,
-            phase_llm::LlmReply {
-                provider,
-                status,
-                body: response_body,
-            },
-        ) {
-            Ok(selection) => selection,
-            Err(error) => return Ok(llm_failure(&error, usage)),
-        };
-        // Same admission check `mint_ai_action_proposal` performs, inlined so the
-        // reasoning can ride alongside the proposal in one payload.
-        if !contract.contains_action(state, &selection.action) {
-            return Ok(llm_failure(&phase_llm::LlmError::StaleDecision, usage));
-        }
-        LLM_DECISION_MEMORY.with(|cell| {
-            cell.borrow_mut()
-                .record_decision(semantic_owner, &selection.action, state, &contract);
-        });
-        let actor = contract.authorized_actor;
-        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
-        // The reasoning is local diagnostic data bound to the same opaque token.
-        // The engine never reads it back.
-        Ok(to_js(&serde_json::json!({
-            "proposal": {
-                "token": token,
-                "semanticOwner": semantic_owner.0,
-                "actor": actor.0,
-                "action": selection.action,
-            },
-            "reasoning": selection.reasoning,
-            "usage": usage,
-        })))
-    })?
+            provider_label,
+            status,
+            response_body,
+        )
+    })?;
+    Ok(to_js(&result))
 }
 
-/// The tagged failure an LLM decision returns so the caller can both fall back
-/// and tell the player why.
-fn llm_failure(error: &phase_llm::LlmError, usage: Option<phase_llm::TokenUsage>) -> JsValue {
-    to_js(&serde_json::json!({
+fn llm_failure_value(
+    error: &phase_llm::LlmError,
+    usage: Option<phase_llm::TokenUsage>,
+) -> serde_json::Value {
+    serde_json::json!({
         "proposal": serde_json::Value::Null,
         "error": error.to_string(),
         "errorKind": error,
         "usage": usage,
-    }))
+    })
 }
 
 /// Submit an action selected from an engine-issued AI proposal.

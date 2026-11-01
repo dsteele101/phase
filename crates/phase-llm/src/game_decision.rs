@@ -108,7 +108,7 @@ pub fn decision_fingerprint(state: &GameState, contract: &AiDecisionContract) ->
 ///
 /// Captures the meaningful game state visible to the viewer:
 /// - The viewer's identity and exact hand
-/// - Other players' life totals, poison, energy, unspent mana, and hand sizes
+/// - Other players' life totals, poison, energy, unspent mana (total and colored units), and hand sizes
 /// - Battlefield permanents: id, card, controller, tapped, attacking, blocking, damage, P/T, counters, attachments
 /// - Stack entries: id, source, controller
 /// - Combat state: attacking/blocking assignments
@@ -128,8 +128,22 @@ pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract)
     parts.push(format!("phase:{:?}", visible.phase));
 
     for p in &visible.players {
+        let mut mana_types: Vec<engine::types::mana::ManaType> =
+            p.mana_pool.units().map(|unit| unit.color).collect();
+        mana_types.sort();
+        let mana_symbols: String = mana_types
+            .iter()
+            .map(|mana| match mana {
+                engine::types::mana::ManaType::White => "{W}",
+                engine::types::mana::ManaType::Blue => "{U}",
+                engine::types::mana::ManaType::Black => "{B}",
+                engine::types::mana::ManaType::Red => "{R}",
+                engine::types::mana::ManaType::Green => "{G}",
+                engine::types::mana::ManaType::Colorless => "{C}",
+            })
+            .collect();
         parts.push(format!(
-            "p{}:life={}:poison={}:energy={}:mana={}:hand_len={}",
+            "p{}:life={}:poison={}:energy={}:mana={}:{mana_symbols}:hand_len={}",
             p.id.0,
             p.life,
             p.poison_counters,
@@ -1546,6 +1560,31 @@ mod tests {
         let mut hand_changed = state.clone();
         hand_changed.players[1].hand.push_back(ObjectId(99));
         assert_ne!(base_fp, information_fingerprint(&hand_changed, &c));
+
+        // Mana pool change with identical total mana but different colors:
+        let mut mana_red = state.clone();
+        mana_red.players[0]
+            .mana_pool
+            .add(engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Red,
+                ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        let mut mana_blue = state.clone();
+        mana_blue.players[0]
+            .mana_pool
+            .add(engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Blue,
+                ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        assert_ne!(base_fp, information_fingerprint(&mana_red, &c));
+        assert_ne!(
+            information_fingerprint(&mana_red, &c),
+            information_fingerprint(&mana_blue, &c)
+        );
 
         // Stack change:
         let mut stack_changed = state.clone();
