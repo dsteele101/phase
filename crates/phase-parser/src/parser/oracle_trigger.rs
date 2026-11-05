@@ -25206,6 +25206,46 @@ mod grenzo_bullet_modal_tests {
             }
         )));
     }
+
+    /// Sphinx Ambassador: a second printed player-naming combat-damage trigger with a
+    /// distinct SearchLibrary clause ("search that player's library for a card")
+    /// exercising ControllerRef::TriggeringPlayer.
+    #[test]
+    fn sphinx_ambassador_searches_damaged_players_library() {
+        let parsed = parse_oracle_text(
+            "Flying\nWhenever Sphinx Ambassador deals combat damage to a player, search that player's library for a card, then that player chooses a card name. If you searched for a creature card that doesn't have that name, you may put it onto the battlefield under your control. Then that player shuffles.",
+            "Sphinx Ambassador",
+            &[],
+            &["Creature".into()],
+            &["Sphinx".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+        let target_player = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::SearchLibrary { target_player, .. } => Some(target_player.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("must contain SearchLibrary, got {effects:?}"));
+        let Some(TargetFilter::Typed(tf)) = target_player else {
+            panic!(
+                "SearchLibrary must name the triggering player's library, got {target_player:?}"
+            );
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::TriggeringPlayer));
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Shuffle {
+                target: TargetFilter::TriggeringPlayer
+            }
+        )));
+    }
 }
 
 #[cfg(test)]
