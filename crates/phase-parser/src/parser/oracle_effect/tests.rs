@@ -12658,14 +12658,6 @@ fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
     ));
 }
 
-/// CR 406.6 + CR 607.1/607.2a (#5577): Watcher for Tomorrow's Hideaway
-/// leaves-the-battlefield trigger — "put the exiled card into its owner's hand"
-/// — references the card THIS source exiled in a SEPARATE, earlier resolution
-/// (its ETB Hideaway). The LTB chain has no exile producer, so the singular "the
-/// exiled card" anaphor in the `ChangeZoneAll` "put" clause must bind durably to
-/// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
-/// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
-/// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
 /// CR 603.7 + CR 608.2c: the plural-recall rebind is itself the act of making
 /// the delayed payload read the chain's published set, so it must also mark the
 /// wrapper as a tracked-set consumer. The generic "those cards" / battlefield
@@ -12726,6 +12718,94 @@ fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
     );
 }
 
+/// CR 608.2c: an intervening NON-publishing clause (gain life; Disorder in the
+/// Court's Investigate) does not shadow the sole publisher a plural recall names.
+/// The delayed payload still binds the chain set that exile published.
+#[test]
+fn plural_recall_binds_the_sole_producer_across_an_intervening_clause() {
+    let def = parse_effect_chain(
+        "Exile target creature. You gain 1 life. Return them to the battlefield tapped under their owner's control at the beginning of the next end step.",
+        AbilityKind::Spell,
+    );
+    fn find_delayed(def: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(&*def.effect, Effect::CreateDelayedTrigger { .. }) {
+            return Some(def.effect.as_ref());
+        }
+        def.sub_ability.as_deref().and_then(find_delayed)
+    }
+    let delayed = find_delayed(&def).expect("the end-step delayed return must be installed");
+    let Effect::CreateDelayedTrigger {
+        effect: payload,
+        uses_tracked_set,
+        ..
+    } = delayed
+    else {
+        unreachable!("find_delayed only yields the delayed wrapper");
+    };
+    assert!(
+        *uses_tracked_set,
+        "the payload reads the set the exile published"
+    );
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { id },
+                ..
+            } if *id == crate::types::identifiers::TrackedSetId(0)
+        ),
+        "the recall must bind the exile's tracked set: {:?}",
+        payload.effect
+    );
+}
+
+/// CR 608.2c: with TWO publishing instructions in the chain, the runtime chain
+/// set is the UNION of both populations, so "them" — which names only its
+/// immediate antecedent — cannot be bound faithfully. Fail closed rather than
+/// returning objects the recall never named.
+#[test]
+fn plural_recall_after_two_producers_fails_closed() {
+    let def = parse_effect_chain(
+        "Exile target creature. Exile target artifact. Return them to the battlefield tapped under their owner's control.",
+        AbilityKind::Spell,
+    );
+    let mut node = Some(&def);
+    let mut exile_producers = 0;
+    let mut gap = None;
+    while let Some(current) = node {
+        if matches!(
+            &*current.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            exile_producers += 1;
+        }
+        if let Some(description) = current.effect.unimplemented_description() {
+            gap = Some(description.to_string());
+        }
+        node = current.sub_ability.as_deref();
+    }
+    assert_eq!(
+        exile_producers, 2,
+        "reach: two exile producers precede the recall"
+    );
+    let gap = gap.expect("the ambiguous recall must be an honest gap");
+    assert!(
+        gap.contains("Return them"),
+        "the gap must be the ambiguous recall clause: {gap}"
+    );
+}
+
+/// CR 406.6 + CR 607.1/607.2a (#5577): Watcher for Tomorrow's Hideaway
+/// leaves-the-battlefield trigger — "put the exiled card into its owner's hand"
+/// — references the card THIS source exiled in a SEPARATE, earlier resolution
+/// (its ETB Hideaway). The LTB chain has no exile producer, so the singular "the
+/// exiled card" anaphor in the `ChangeZoneAll` "put" clause must bind durably to
+/// `ExiledBySource` (resolved at runtime via `exile_links`), not the chain-local
+/// `TrackedSet(0)` sentinel that is empty at LTB time. Third emission site of the
+/// #5571 cross-resolution fix (after the Copy verb and `try_parse_cast_effect`).
 #[test]
 fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
     let parsed = parse_oracle_text(

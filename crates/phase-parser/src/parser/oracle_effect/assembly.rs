@@ -72,10 +72,10 @@ use super::lower::{
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
-    append_to_deepest_sub_ability, apply_player_scope_rewrites,
-    attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_mana_spend_permission_to_prior_cast_grant, attach_perpetual_keyword_grants,
-    attach_repeat_process_keywords, attach_same_is_true_keywords,
+    ability_definition_uses_tracked_set, append_to_deepest_sub_ability,
+    apply_player_scope_rewrites, attach_alt_cost_to_prior_cast_from_zone,
+    attach_mana_retention_to_prior_mana, attach_mana_spend_permission_to_prior_cast_grant,
+    attach_perpetual_keyword_grants, attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
@@ -2195,6 +2195,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // subject anaphor binds against the previous clause's defs only.
     let mut previous_clause_start = 0usize;
     let mut this_clause_start = 0usize;
+    // CR 608.2c: how many PRIOR clauses already published a tracked population.
+    // Counted per clause, not per def: one instruction with several target slots
+    // ("exile up to one target artifact and up to one target creature") publishes
+    // one population, so its slots must not read as two producers.
+    let mut prior_publishing_clause_count = 0usize;
     for clause_ir in &ir.clauses {
         let _clause = tracing::debug_span!(target: "engine::parser::binding", "clause", clause_id = ?clause_ir.id, fragment = ?clause_ir.source.fragment(), source_span = ?clause_ir.source.span()).entered();
         if defs.len() > this_clause_start {
@@ -3874,13 +3879,43 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             let any_prior_publishes = defs
                 .iter()
                 .any(|d| publishes_tracked_set_from_resolution(&d.effect));
+            // CR 608.2c: a producer whose own population IS the chain set ("Exile
+            // them" re-publishing what an earlier instruction exiled) continues
+            // that population instead of introducing a second one, so its presence
+            // does not make a following recall's antecedent ambiguous.
+            let nearest_producer_continues_chain_set = defs
+                .iter()
+                .rev()
+                .find(|d| publishes_tracked_set_from_resolution(&d.effect))
+                .is_some_and(|d| {
+                    d.effect.target_filter().is_some_and(|filter| {
+                        matches!(
+                            filter,
+                            TargetFilter::ParentTarget
+                                | TargetFilter::TrackedSet { .. }
+                                | TargetFilter::TrackedSetFiltered { .. }
+                        )
+                    })
+                });
+            let starts_with_plural_recall = starts_with_plural_recall_anaphor(&source_text_lower);
             // CR 608.2c + CR 603.7c: a clause whose own head is the PLURAL recall
-            // anaphor ("Return them …", Golden Argosy) names the set this chain
-            // published. Applied AFTER the origin stamp below, so the CR 400.7 zone
-            // guard that stamp establishes rides along with the set binding;
-            // changing the referent must not drop the zone the referent is in.
+            // anaphor ("Return them …", Golden Argosy) names the population of its
+            // IMMEDIATE antecedent publishing instruction. Applied AFTER the origin
+            // stamp below, so the CR 400.7 zone guard that stamp establishes rides
+            // along with the set binding; changing the referent must not drop the
+            // zone the referent is in.
+            //
+            // The runtime chain set is a UNION of every producer in the chain, so
+            // that antecedent is expressible only while the chain has a single
+            // producing clause. Intervening non-publishing clauses do not change
+            // that (the count stays one); a second, independent producing clause
+            // does, because binding would then move a population the recall never
+            // named. That case fails closed below rather than binding the union.
+            let ambiguous_plural_recall = starts_with_plural_recall
+                && prior_publishing_clause_count > 1
+                && !nearest_producer_continues_chain_set;
             let plural_recall_delayed_payload =
-                any_prior_publishes && starts_with_plural_recall_anaphor(&source_text_lower);
+                any_prior_publishes && starts_with_plural_recall && !ambiguous_plural_recall;
             if any_prior_publishes {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
@@ -4097,13 +4132,37 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 for current in &mut current_defs {
                     rebind_plural_recall_delayed_payload_to_tracked_set(&mut current.effect);
                 }
+            } else if ambiguous_plural_recall {
+                // CR 608.2c: "them" names only the immediate antecedent's
+                // population, and with two or more producers the chain set is the
+                // union of unrelated populations — no faithful lowering exists.
+                // Fail closed instead of returning objects this instruction never
+                // named.
+                let fragment = clause_ir.source.fragment().unwrap_or_default();
+                for current in &mut current_defs {
+                    let names_the_set = ability_definition_uses_tracked_set(current)
+                        || matches!(&*current.effect, Effect::CreateDelayedTrigger { .. });
+                    if names_the_set {
+                        *current.effect =
+                            Effect::unimplemented("plural_recall_ambiguous_antecedent", fragment);
+                        current.sub_ability = None;
+                    }
+                }
             }
         }
 
         // CR 608.2c: this clause's definitions begin here. A nested delayed
         // payload relocation records exactly this range for the post-loop pass.
         let nest_base = defs.len();
+        // CR 608.2c: advance the producing-clause census for the next clause.
+        // Computed before the extend because `current_defs` is moved into `defs`.
+        let clause_publishes_tracked_set = current_defs
+            .iter()
+            .any(|d| publishes_tracked_set_from_resolution(&d.effect));
         defs.extend(current_defs);
+        if clause_publishes_tracked_set {
+            prior_publishing_clause_count += 1;
+        }
         env.observe(&defs, Some(clause_ir.id), NodeRole::Primary);
 
         // Apply intrinsic continuation after extending defs with current clause's

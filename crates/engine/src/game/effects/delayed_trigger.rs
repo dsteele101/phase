@@ -72,6 +72,73 @@ fn payload_names_tracked_set(effect: &Effect) -> bool {
         .is_some_and(super::filter_references_tracked_set)
 }
 
+/// CR 608.2c: Remove a NAMED tracked-set reference when the creating resolution
+/// published nothing.
+///
+/// A payload that names the set has no referent without a publication — the
+/// latest set some other instruction published is a different population, not
+/// this instruction's antecedent. Left as the `TrackedSetId(0)` sentinel, the
+/// delayed trigger would bind itself through
+/// `resolve_tracked_set_sentinel`'s latest-nonempty rung when it fires and move
+/// objects this instruction never touched. Rewriting the sentinel to
+/// `TargetFilter::None` keeps the payload installed (its other legs still
+/// resolve) while the named population matches nothing.
+///
+/// Only the sentinel is rewritten: a filter already bound to a concrete id names
+/// a different referent and is left alone. The traversal mirrors
+/// [`bind_tracked_set_to_ability_definition`] so every place a creation-time bind
+/// would have reached is also a place this fail-closed rewrite reaches.
+fn fail_closed_named_tracked_set(effect: &mut Effect) {
+    fn neuter_sentinel(filter: &mut TargetFilter) {
+        match filter {
+            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }
+                if *id == TrackedSetId(0) =>
+            {
+                *filter = TargetFilter::None;
+            }
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                for filter in filters {
+                    neuter_sentinel(filter);
+                }
+            }
+            TargetFilter::Not { filter } => neuter_sentinel(filter),
+            _ => {}
+        }
+    }
+    if let Some(target) = effect.target_filter_mut() {
+        neuter_sentinel(target);
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = effect {
+        fail_closed_named_tracked_set(&mut effect.effect);
+    }
+}
+
+fn fail_closed_named_tracked_set_definition(ability: &mut AbilityDefinition) {
+    fail_closed_named_tracked_set(&mut ability.effect);
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        fail_closed_named_tracked_set_definition(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        fail_closed_named_tracked_set_definition(else_ability);
+    }
+    for mode in &mut ability.mode_abilities {
+        fail_closed_named_tracked_set_definition(mode);
+    }
+}
+
+fn fail_closed_named_tracked_set_ability(ability: &mut ResolvedAbility) {
+    fail_closed_named_tracked_set(&mut ability.effect);
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        fail_closed_named_tracked_set_ability(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        fail_closed_named_tracked_set_ability(else_ability);
+    }
+    for mode in &mut ability.mode_abilities {
+        fail_closed_named_tracked_set_definition(mode);
+    }
+}
+
 /// CR 603.7: Create a delayed triggered ability during resolution.
 pub fn resolve(
     state: &mut GameState,
@@ -163,13 +230,13 @@ pub fn resolve(
             // CR 400.7j: a payload naming the source finds only what this ability's own move moved, so it binds that publication as is, empty included.
             state.chain_tracked_set_id
         } else if payload_names_tracked_set(&effect_def.effect) {
-            // CR 608.2c: the set is named, so a chain publication IS the
-            // referent — empty included. With no chain publication at all
-            // (a manually built ability, or a publisher that ran in an earlier
-            // resolution) keep the established latest-nonempty fallback.
-            state
-                .chain_tracked_set_id
-                .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
+            // CR 608.2c: the set is named, so ONLY this resolution's own
+            // publication is the referent — empty included. There is no
+            // fallback to the latest nonempty set: a foreign set is a different
+            // population, and binding it would move objects this instruction
+            // never touched. An absent publication fails the named reference
+            // closed below instead.
+            state.chain_tracked_set_id
         } else {
             state
                 .chain_tracked_set_id
@@ -475,6 +542,12 @@ pub fn resolve(
         // `latest_tracked_set_id` proves a plural referent, so no rewrite is
         // applied here.
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
+    } else if uses_tracked_set && payload_names_tracked_set(&effect_def.effect) {
+        // CR 608.2c: the payload names the set, but the creating resolution
+        // published nothing, so the name has no referent. Fail it closed rather
+        // than let it resolve against whatever set happens to be latest when the
+        // trigger fires.
+        fail_closed_named_tracked_set_ability(&mut delayed_ability);
     }
 
     // CR 603.7c: A delayed trigger whose inner effect names an object from its
@@ -4312,6 +4385,10 @@ mod tests {
             .tracked_object_sets
             .insert(TrackedSetId(1), vec![ObjectId(10)]);
         state.next_tracked_set_id = 2;
+        // CR 608.2c: the creating resolution's own publication is the referent.
+        // A payload that names the set never falls back to the latest set (see
+        // `plural_tracked_set_payload_without_a_publication_affects_nothing`).
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
 
         // The ChangeZone upgrade must preserve the tracked-set filter and bind
         // its sentinel, rather than dropping it to an unfiltered tracked set.
@@ -5961,6 +6038,8 @@ mod tests {
             .tracked_object_sets
             .insert(TrackedSetId(1), vec![ObjectId(10)]);
         state.next_tracked_set_id = 2;
+        // CR 608.2c: bind the creating resolution's own publication.
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
 
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -7013,6 +7092,81 @@ mod attached_set_delayed_tests {
             state.objects[&unrelated].zone,
             Zone::Exile,
             "an empty publication returns nothing, so the unrelated exiled card stays put"
+        );
+    }
+
+    /// CR 608.2c: when the creating resolution published NOTHING, a delayed
+    /// payload that NAMES the set has no referent, and it must not fall back to
+    /// the latest nonempty set — that population belongs to an unrelated
+    /// instruction.
+    ///
+    /// Revert probe: restore `or_else(latest_tracked_set_id)` in `resolve` and the
+    /// installed trigger binds `foreign_set`, returning the unrelated exiled card
+    /// at the end step.
+    #[test]
+    fn plural_tracked_set_payload_without_a_publication_affects_nothing() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Golden Argosy attacks, exile each creature that crewed it this turn. Return them to the battlefield tapped under their owner's control at the beginning of the next end step.\nCrew 1",
+            "Golden Argosy",
+            &[],
+            &["Artifact".to_string()],
+            &["Vehicle".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Golden Argosy's attack trigger");
+        let delayed_def = execute
+            .sub_ability
+            .as_deref()
+            .expect("the end-step delayed return follows the exile");
+
+        let mut state = GameState::new_two_player(42);
+        let unrelated = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state
+            .tracked_object_sets
+            .insert(foreign_set, vec![unrelated]);
+        state.next_tracked_set_id = 2;
+        // No instruction in this resolution published a tracked set.
+        state.chain_tracked_set_id = None;
+        // Reach guard: the removed fallback would have picked this set.
+        assert_eq!(
+            crate::game::targeting::latest_tracked_set_id(&state),
+            Some(foreign_set)
+        );
+
+        let ability = ResolvedAbility::new(
+            (*delayed_def.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZone { target, .. } = &delayed.effect else {
+            panic!("expected the payload's return, got {:?}", delayed.effect);
+        };
+        assert!(
+            matches!(target, TargetFilter::None),
+            "an unbound named set matches nothing: {target:?}"
+        );
+
+        let mut later_events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &delayed, &mut later_events, 0)
+            .expect("the delayed return resolves");
+        assert_eq!(
+            state.objects[&unrelated].zone,
+            Zone::Exile,
+            "no publication means the named population is empty"
         );
     }
 }
