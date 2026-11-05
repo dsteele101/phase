@@ -31128,6 +31128,7 @@ impl Effect {
                                 ControllerRef::ParentTargetOwner
                                     | ControllerRef::ParentTargetController
                                     | ControllerRef::EventTargetController
+                                    | ControllerRef::TriggeringPlayer
                             )
                         ) =>
                 {
@@ -31536,6 +31537,7 @@ impl Effect {
                                 ControllerRef::ParentTargetOwner
                                     | ControllerRef::ParentTargetController
                                     | ControllerRef::EventTargetController
+                                    | ControllerRef::TriggeringPlayer
                             )
                         ) =>
                 {
